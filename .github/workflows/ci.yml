@@ -1,0 +1,220 @@
+name: CI
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened, edited, ready_for_review]
+  merge_group:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.event.merge_group.head_sha || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  repository-quality:
+    name: Repository quality
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.97.0
+          components: rustfmt
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+      - run: npm ci
+      - run: make fmt-check
+      - run: make types-check
+      - run: RUSTDOCFLAGS='-D warnings' cargo doc --workspace --exclude latte-work-desktop --no-deps --locked
+      - name: ShellCheck
+        run: docker run --rm -v "${PWD}:/repo" -w /repo koalaman/shellcheck:v0.11.0 scripts/*.sh
+      - name: actionlint
+        uses: docker://rhysd/actionlint:1.7.12
+
+  host-check:
+    name: Host check and Clippy (${{ matrix.label }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            label: Linux
+          - os: macos-latest
+            label: macOS
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.97.0
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo check --workspace --exclude latte-work-desktop --all-targets --locked
+      - run: cargo clippy --workspace --exclude latte-work-desktop --all-targets --locked -- -D warnings
+
+  unit-tests:
+    name: UT host (${{ matrix.label }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            label: Linux
+          - os: macos-latest
+            label: macOS
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.97.0
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --workspace --exclude latte-work-desktop --lib --bins --locked
+
+  e2e-host:
+    name: E2E final server (${{ matrix.label }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            label: Linux
+          - os: macos-latest
+            label: macOS
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.97.0
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test -p latte-work-server --test e2e --locked -- --test-threads=1
+
+  portable-windows:
+    name: Portable Rust (Windows)
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.97.0
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo check -p latte-work-protocol -p latte-work-client --all-targets --locked
+      - run: cargo clippy -p latte-work-protocol -p latte-work-client --all-targets --locked -- -D warnings
+      - run: cargo test -p latte-work-protocol -p latte-work-client --lib --bins --locked
+
+  frontend:
+    name: Frontend UT and build (${{ matrix.label }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            label: Linux
+          - os: macos-latest
+            label: macOS
+          - os: windows-latest
+            label: Windows
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+      - run: npm ci
+      - run: npm test
+      - run: npm run web-build
+
+  release-server:
+    name: Release server (${{ matrix.label }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            label: Linux
+          - os: macos-latest
+            label: macOS
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.97.0
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release -p latte-work-server --locked
+      - uses: actions/upload-artifact@v4
+        with:
+          name: latte-work-server-${{ matrix.label }}-${{ runner.arch }}
+          path: target/release/latte-work-server
+          if-no-files-found: error
+
+  desktop-native:
+    name: macOS native desktop
+    runs-on: macos-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.97.0
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+      - run: npm ci
+      - run: make build
+
+  pr-gate:
+    name: PR Gate
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    needs:
+      - repository-quality
+      - host-check
+      - unit-tests
+      - e2e-host
+      - portable-windows
+      - frontend
+      - release-server
+      - desktop-native
+    steps:
+      - name: Require every CI layer to pass
+        shell: bash
+        env:
+          QUALITY: ${{ needs.repository-quality.result }}
+          HOST_CHECK: ${{ needs.host-check.result }}
+          UNIT: ${{ needs.unit-tests.result }}
+          E2E: ${{ needs.e2e-host.result }}
+          PORTABLE_WINDOWS: ${{ needs.portable-windows.result }}
+          FRONTEND: ${{ needs.frontend.result }}
+          RELEASE_SERVER: ${{ needs.release-server.result }}
+          DESKTOP_NATIVE: ${{ needs.desktop-native.result }}
+        run: |
+          failed=0
+          for name in QUALITY HOST_CHECK UNIT E2E PORTABLE_WINDOWS FRONTEND RELEASE_SERVER DESKTOP_NATIVE; do
+            result="${!name}"
+            if [[ "$result" != success ]]; then
+              echo "::error::$name was $result; every PR Gate dependency must succeed"
+              failed=1
+            fi
+          done
+          exit "$failed"

@@ -1,0 +1,35 @@
+[workspace]
+resolver = "2"
+members = ["crates/latte-work-protocol", "crates/latte-work-client", "crates/latte-work-server", "apps/desktop/src-tauri"]
+default-members = ["crates/latte-work-protocol", "crates/latte-work-client", "crates/latte-work-server"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.97"
+
+[workspace.dependencies]
+latte-work-protocol = { path = "crates/latte-work-protocol" }
+latte-work-client = { path = "crates/latte-work-client" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "process", "io-util", "io-std", "sync", "time", "signal", "fs"] }
+tokio-util = { version = "0.7", features = ["codec"] }
+futures-util = { version = "0.3", features = ["sink"] }
+uuid = { version = "1", features = ["v4"] }
+ts-rs = { version = "11", features = ["serde-json-impl"] }
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+[workspace.lints.clippy]
+all = "warn"
+
+[profile.dev]
+debug = 1
+[profile.test]
+debug = 1
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "symbols"

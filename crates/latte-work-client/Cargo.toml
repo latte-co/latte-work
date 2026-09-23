@@ -1,0 +1,14 @@
+[package]
+name = "latte-work-client"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+[dependencies]
+latte-work-protocol.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+futures-util.workspace = true
+[lints]
+workspace = true
