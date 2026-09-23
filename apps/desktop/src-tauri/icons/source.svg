@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <!-- Keep the tile within an 80% safe area so it matches other macOS Dock icons. -->
+  <rect x="102" y="102" width="820" height="820" rx="184" fill="#1b272a"/>
+  <g transform="translate(102 102) scale(6.40625)">
+    <path d="M34 28H49V83H96V98H34Z" fill="#d9b384"/>
+    <path d="M66 29H81V65H66ZM89 29H101V65H89Z" fill="#a3c2af"/>
+  </g>
+</svg>

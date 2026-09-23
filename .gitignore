@@ -1,0 +1,15 @@
+/target/
+/node_modules/
+/apps/desktop/dist/
+/apps/desktop/node_modules/
+/apps/desktop/src-tauri/binaries/
+/apps/desktop/src-tauri/gen/
+/.oh-my-code/
+/.local/
+/log/
+/coverage/
+.DS_Store
+*.log
+.env
+.env.*
+*.tsbuildinfo

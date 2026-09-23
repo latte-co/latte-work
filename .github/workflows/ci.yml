@@ -1,0 +1,63 @@
+name: CI
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+jobs:
+  server:
+    name: Host server (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.97.0
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: host-${{ matrix.os }}
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy -p latte-work-protocol -p latte-work-client -p latte-work-server --all-targets --locked -- -D warnings
+      - run: cargo test --locked
+      - run: cargo build --release -p latte-work-server --locked
+  desktop:
+    name: macOS desktop
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.97.0
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: desktop-macos
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+      - run: brew install actionlint shellcheck
+      - run: make setup
+      - run: make ci
+      - run: make build
+  gate:
+    name: PR Gate
+    if: always()
+    needs: [server, desktop]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Fail closed on failed, skipped or cancelled jobs
+        env:
+          SERVER: ${{ needs.server.result }}
+          DESKTOP: ${{ needs.desktop.result }}
+        run: test "$SERVER" = success && test "$DESKTOP" = success

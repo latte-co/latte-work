@@ -1,0 +1,74 @@
+/* Latte Work UI foundations. See docs/design-system.md before adding tokens. */
+:root {
+  --font-ui:
+    -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", sans-serif;
+  --text-xs: 11px;
+  --text-sm: 12px;
+  --text-md: 13px;
+  --text-lg: 14px;
+  --text-body: 15px;
+  --text-subheading: 16px;
+  --text-heading: 20px;
+  --text-page-title: 24px;
+  --leading-ui: 1.5;
+
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+  --space-8: 32px;
+  --radius-sm: 6px;
+  --radius-control: 8px;
+  --radius-panel: 12px;
+  --radius-dialog: 16px;
+  --radius-pill: 999px;
+
+  --color-canvas: #1c282d;
+  --color-sidebar: #182226;
+  --color-surface: #233137;
+  --color-elevated: #2b383e;
+  --color-input: #1d2b31;
+  --color-composer: #2c3a40;
+  --color-text: #e2e8e8;
+  --color-text-secondary: #b8c5c8;
+  --color-text-muted: #91a2a8;
+  --color-placeholder: #82969d;
+  --color-border-subtle: #ffffff0c;
+  --color-border: #ffffff1a;
+  --color-border-strong: #ffffff2b;
+  --color-hover: #ffffff08;
+  --color-selected: #ffffff10;
+  --color-focus-background: #8ca1aa26;
+  --color-primary: #e4eaea;
+  --color-primary-hover: #f5f8f8;
+  --color-on-primary: #1c282d;
+  --color-disabled-bg: #ffffff0a;
+  --color-disabled-text: #7e9096;
+  --color-brand: #d5b48e;
+  --color-success: #99bda9;
+  --color-warning: #d5b48e;
+  --color-danger: #dba99d;
+  --color-unread: #85aaff;
+  --color-backdrop: #081318a6;
+  --color-selection: #9bb8c43d;
+  --shadow-dialog: 0 24px 72px #0005;
+  --shadow-popover: 0 12px 36px #0006;
+  --duration-fast: 150ms;
+
+  --control-height: 40px;
+  --button-height: 36px;
+  --menu-item-height: 36px;
+  --icon-hit-size: 28px;
+  /* Native macOS controls and all top bars share this center line. */
+  --titlebar-height: 44px;
+
+  /* Existing layout and transcript components use these semantic aliases. */
+  --bg: var(--color-canvas);
+  --surface: var(--color-surface);
+  --line: var(--color-border-subtle);
+  --muted: var(--color-text-muted);
+  --accent: var(--color-brand);
+  --green: var(--color-success);
+}

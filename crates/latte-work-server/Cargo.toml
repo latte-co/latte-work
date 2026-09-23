@@ -1,0 +1,21 @@
+[package]
+name = "latte-work-server"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+[dependencies]
+latte-work-protocol.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+futures-util.workspace = true
+uuid.workspace = true
+rusqlite = { version = "0.38", features = ["bundled"] }
+nix = { version = "0.30", features = ["signal", "process"] }
+url = "2"
+tempfile = "3"
+latte-work-client.workspace = true
+[lints]
+workspace = true
