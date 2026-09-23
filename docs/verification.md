@@ -59,9 +59,9 @@ This validates Chinese paste; a manual Chinese IME composition test is separate.
 
 SSH transport is implemented, including argument validation and the same server
 connect bridge. No real remote host was used in this validation pass. Linux
-server and macOS desktop jobs are defined in GitHub Actions; no remote CI has
-run because this repository has not been published. Branch protection has not
-been configured. There is no coverage percentage claim.
+server and macOS desktop had not yet run in remote CI at the time of this
+2026-09-22 snapshot. The later CI and repository rules are described below.
+There is no coverage percentage claim.
 
 The app is not Developer ID signed or notarized. V0.1 does not implement remote
 binary deployment, integrated terminals, other agents, or Windows. Host daemon
@@ -558,3 +558,16 @@ Section management and chat archiving are outside this four-action iteration.
   not quit or replaced, so native visual verification of this update is pending.
   New bundle: .local/artifacts/Latte Work.app; previous artifact retained under
   .local/before-focus-style/. The running .local/manual-test/ bundle is unchanged.
+
+## CI and repository rules (2026-09-23)
+
+- Replaced 265 internal npm tarball URLs with public npm registry URLs without
+  changing versions or integrity hashes. `make setup` passed from the lockfile.
+- `make ci` passed locally after separating Rust UT, final-binary E2E, frontend
+  UT, and Rust doc tests. `make build` produced and ad-hoc signed the macOS app.
+- GitHub CI now runs the host on Linux/macOS, the frontend on all three desktop
+  platforms, portable Rust protocol/client checks on Windows, and a native
+  desktop build on macOS. Windows host execution remains unsupported.
+- The active `main` ruleset requires a PR, signed commits, one approving review,
+  resolved review threads, and the fail-closed `PR Gate` check. Live remote job
+  results belong to [PR #1](https://github.com/latte-co/latte-work/pull/1).
