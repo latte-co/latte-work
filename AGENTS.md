@@ -15,8 +15,9 @@ DEVELOPMENT.md before changing build or runtime contracts.
 
 ## Verification commands
 - `make setup`: install locked frontend dependencies (npm ci once lock exists).
-- `make fmt`, `make fmt-check`, `make lint`, `make test`, `make web-build`.
-- `make ci`: formatting, Clippy, Rust unit/final-binary integration tests,
+- `make fmt`, `make fmt-check`, `make lint`, `make test-unit`,
+  `make test-e2e`, `make test-doc`, `make test`, `make web-build`.
+- `make ci`: formatting, Clippy, Rust unit/final-binary E2E tests,
   frontend typecheck/tests/build, and Rust documentation.
 - `make build`: server and native desktop debug build.
 - `make dev`: launch the real Tauri app with the bundled local server.

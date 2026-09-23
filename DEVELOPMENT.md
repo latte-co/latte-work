@@ -9,6 +9,24 @@ gate; `make package` builds an app without Developer ID signing and standalone r
 Use `make build` for a debug native app bundle. On macOS, both build modes
 finish with project-owned ad-hoc signing and strict bundle verification. The CLI fixture never calls a model.
 
+## CI and merge checks
+
+`make test-unit` runs Rust crate-local and frontend reducer tests.
+`make test-e2e` runs the final server binary through its real socket bridge with
+a deterministic Claude CLI fixture. `make test-doc` runs Rust documentation
+tests. `make test` runs all three layers; `make ci` also checks formatting,
+generated protocol types, Clippy, workflow/shell scripts, the frontend build,
+and Rustdoc. `make setup` uses public npm registry URLs recorded in the lockfile.
+
+GitHub Actions runs host check/Clippy, UT, final-binary E2E, and release builds
+on Linux and macOS. Frontend UT/build runs on Linux, macOS, and Windows;
+Windows also checks, lints, and tests the portable Rust protocol and client.
+The server uses Unix sockets and process groups, so Windows CI does not claim
+server or native desktop support. A separate macOS job builds the native app.
+`PR Gate` fails when any dependent job fails, is cancelled, or is skipped.
+The repository ruleset must require `PR Gate` on `main` for this to block a
+merge; a workflow file alone does not activate that remote rule.
+
 Like Latte Code, dependencies and lint policy live in the Cargo workspace,
 Make is the stable command surface, and Cargo/npm lockfiles are checked in.
 Debug information is reduced; release builds use thin LTO. If sccache is on PATH,

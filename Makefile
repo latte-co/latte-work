@@ -7,7 +7,7 @@ SCCACHE := $(shell command -v sccache 2>/dev/null)
 ifneq ($(SCCACHE),)
 export RUSTC_WRAPPER ?= $(SCCACHE)
 endif
-.PHONY: help setup fmt fmt-check lint test web-build types ci build dev package server clean cache-info
+.PHONY: help setup fmt fmt-check lint test test-unit test-e2e test-doc web-build types ci build dev package server clean cache-info
 help: ## Show developer commands
 	@awk 'BEGIN {FS = ":.*## "} /^[a-zA-Z0-9_-]+:.*## / {printf "  %-16s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
 setup: ## Install frontend dependencies, respecting lockfile
@@ -25,9 +25,14 @@ fmt-check: ## Check Rust and frontend formatting
 	npm run format:check
 lint: prepare ## Check all Rust crates, denying warnings
 	cargo clippy --workspace --all-targets --locked -- -D warnings
-test: ## Rust tests including real server binary and fake CLI; UI reducers
-	cargo test --workspace --exclude latte-work-desktop --locked
+test-unit: ## Rust crate-local unit tests and frontend reducers
+	cargo test --workspace --exclude latte-work-desktop --lib --bins --locked
 	npm test
+test-e2e: ## Final server binary, socket bridge, and deterministic Claude fixture
+	cargo test -p latte-work-server --test e2e --locked -- --test-threads=1
+test-doc: ## Rust documentation tests
+	cargo test --workspace --exclude latte-work-desktop --doc --locked
+test: test-unit test-e2e test-doc ## Run every test layer
 web-build: ## Typecheck and bundle React
 	npm run web-build
 ci: fmt-check types-check lint-ci lint test web-build ## Full local gate
