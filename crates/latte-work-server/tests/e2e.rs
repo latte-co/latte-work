@@ -830,6 +830,36 @@ async fn models_select_per_turn_validate_and_persist_without_changing_provider()
         ask(&mut c, send_model("selected", Some("second"), "provider")).await,
         Response::Accepted { duplicate: true }
     ));
+    ask(
+        &mut c,
+        Request::BindAgentProvider {
+            agent: "claude".into(),
+            provider_id: None,
+            target: None,
+        },
+    )
+    .await;
+    assert!(matches!(
+        ask(&mut c, send_model("selected", Some("second"), "provider")).await,
+        Response::Accepted { duplicate: true }
+    ));
+    assert!(matches!(
+        ask(&mut c, send_model("selected", Some("third"), "provider")).await,
+        Response::Error { message, .. } if message.contains("请求 ID 已被其他任务使用")
+    ));
+    assert!(matches!(
+        ask(&mut c, send_model("new", Some("second"), "provider")).await,
+        Response::Error { .. }
+    ));
+    ask(
+        &mut c,
+        Request::BindAgentProvider {
+            agent: "claude".into(),
+            provider_id: Some(providers[0].id.clone()),
+            target: None,
+        },
+    )
+    .await;
     assert!(matches!(
         ask(&mut c, send_model("selected", Some("third"), "provider")).await,
         Response::Error { .. }

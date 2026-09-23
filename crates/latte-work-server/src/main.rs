@@ -390,6 +390,11 @@ async fn dispatch(s: &Service, request: Request) -> Result<Response> {
             model,
             effort,
         } => {
+            if db(&s.database, |d| {
+                d.already_accepted(&session_id, &request_id, &text, model.as_deref(), effort)
+            })? {
+                return Ok(Response::Accepted { duplicate: true });
+            }
             if !s.agent.available {
                 bail!("Claude Code CLI 不可用；请在此 Host 安装并登录后重启 Server");
             }

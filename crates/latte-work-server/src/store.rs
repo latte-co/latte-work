@@ -1,7 +1,7 @@
 //! SQLite is the source of truth for sessions and replayable presentation events.
 use anyhow::{Context, Result, bail};
 use latte_work_protocol::{Effort, Event, EventKind, Project, Session, Status};
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, OptionalExtension, params};
 use std::{
     path::Path,
     time::{SystemTime, UNIX_EPOCH},
@@ -289,9 +289,9 @@ impl Store {
         tx.commit()?;
         Ok(())
     }
-    /// Returns false for an exact already-accepted request; conflicting reuse fails.
-    pub fn begin(
-        &mut self,
+    /// Checks durable request identity before current launch configuration is consulted.
+    pub fn already_accepted(
+        &self,
         id: &str,
         request_id: &str,
         text: &str,
@@ -305,19 +305,22 @@ impl Store {
         {
             bail!("任务内容或请求 ID 无效（输入上限 128 KiB）");
         }
-        let existing = self.db.query_row(
-            "SELECT session_id,text,model,effort FROM requests WHERE id=?1",
-            [request_id],
-            |r| {
-                Ok((
-                    r.get::<_, String>(0)?,
-                    r.get::<_, String>(1)?,
-                    r.get::<_, Option<String>>(2)?,
-                    r.get::<_, Option<String>>(3)?,
-                ))
-            },
-        );
-        if let Ok((session, previous, previous_model, previous_effort)) = existing {
+        let existing = self
+            .db
+            .query_row(
+                "SELECT session_id,text,model,effort FROM requests WHERE id=?1",
+                [request_id],
+                |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, Option<String>>(2)?,
+                        r.get::<_, Option<String>>(3)?,
+                    ))
+                },
+            )
+            .optional()?;
+        if let Some((session, previous, previous_model, previous_effort)) = existing {
             if session != id
                 || previous != text
                 || previous_model.as_deref() != model
@@ -325,6 +328,20 @@ impl Store {
             {
                 bail!("请求 ID 已被其他任务使用");
             }
+            return Ok(true);
+        }
+        Ok(false)
+    }
+    /// Returns false for an exact already-accepted request; conflicting reuse fails.
+    pub fn begin(
+        &mut self,
+        id: &str,
+        request_id: &str,
+        text: &str,
+        model: Option<&str>,
+        effort: Option<Effort>,
+    ) -> Result<bool> {
+        if self.already_accepted(id, request_id, text, model, effort)? {
             return Ok(false);
         }
         let mut session = self.session(id)?;
