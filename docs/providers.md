@@ -15,7 +15,7 @@ Anthropic Messages；两种 OpenAI 配置可保存，当前没有能使用它们
 
 1. 在「设置 → Provider」添加模型服务。
 2. 在「连接与 Agent」Tab 选择主机，再选择 Provider。
-3. 本机点击「保存关联」；远程点击「同步并关联」。下次启动或继续任务生效，
+3. 点击「保存关联」。本机和远程都在下次发送消息时使用最新配置，
    已在执行的进程持有旧快照，不会被修改。
 
 Anthropic Base URL 通常为 `https://api.example.com`；Claude CLI 追加 `/v1/messages`。
@@ -23,23 +23,25 @@ OpenAI 配置按服务提供的 API base 填写，常见为 `https://api.example
 模型 ID 原样传入 CLI。Bearer Token 使用 `Authorization: Bearer …`；API Key 使用
 `x-api-key`，标准 OpenAI 的 key 应使用 Bearer Token。
 
-## 本机目录与远程同步
+## 本机目录与每轮配置
 
-本机 `latte-work-server` 管理完整 Provider 目录。远程关联时，本机 server 经现有
-OpenSSH 配置连接目标 server，只发送选中 Provider 的版本快照与 Agent ID；
-不将明文凭据回传给 Desktop UI，不同步全部 Provider，不使用额外的模型转换进程。
+本机 `latte-work-server` 管理完整 Provider 目录，以及每个远程主机、Agent 的关联。
+保存关联只更新本机。每次发送消息时，桌面 Rust 层读取最新快照，通过已经认证的
+SSH 通道附在本轮请求中，远程 Agent 直接连接模型服务。系统 SSH 配置、身份文件、
+密码认证和自定义端口使用同一条路径；没有手动同步或后台推送。
 
-远程 server 在一次原子保存中安装快照并建立关联，响应成功后 UI 才显示成功。
-失败不会把 UI 标为已同步；通信超时可能已经在远端执行，重新打开设置可核对状态。
-同步本身不调用模型，也不启动 Agent。相同快照可重复同步。
+本机编辑后，下一轮自动使用新配置；已运行的任务保持原快照。SSH 断开不停止已接受
+的任务，本机不需要在线转发每次模型请求。开始下一轮需要本机可用。
+模型菜单向远端发送当前 Provider 元数据，不发送凭据，由远端 Agent 能力确定档位。
 
-每次本机编辑产生新的 revision；Code Agent 页面比较 revision，提示远端「待同步」。
-点击「同步并关联」更新。远端保留上次同步的配置，可独立执行任务；不需要每次启动
-都连接本机，也不会因本机离线而丢失配置。当前采用显式同步，不做后台自动推送。
+远程 server 在启动前验证快照、模型和思考档位，不把本轮 Provider 写入长期目录。
+请求 ID 同时绑定配置摘要：完全相同的重试只返回已接受；配置变化后重用请求 ID 会报错，
+不会再次执行。超时仍可能已经接受请求，需要重连核对状态，不自动重发。
 
-本机删除 Provider 不会自动清除离线远端；Code Agent 页面会提示旧副本仍存在，
-可选择其他 Provider 或恢复 CLI 配置。解除远端关联时，会清理不再被任何 Agent
-关联的同步副本。本机仍有关联的 Provider 不能删除，也不能改为不兼容的协议。
+有关联的 Provider 不能删除，也不能改为不兼容协议。删除已保存的 SSH 主机时，
+一并解除其本机关联。解除关联后，下一轮显式沿用远程 Agent CLI 配置；不会回退使用
+早期保存在远端的 Provider 副本。旧副本保留；本机尚未选择而远端仍有旧关联时，
+会阻止发送并提示重新选择 Provider，或明确保存「沿用 Agent CLI 配置」，不会静默切换服务。
 
 ## 模块
 
@@ -47,24 +49,28 @@ OpenSSH 配置连接目标 server，只发送选中 Provider 的版本快照与 
 - `agents/mod.rs`：Adapter 注册信息与支持的 Provider 协议。
 - `agents/claude.rs`：将 Anthropic 配置转换成 `--model` 和临时 `--settings`。
   模型别名和子代理模型也指向所选 ID。保留 CLI 的权限流程与组织 managed policy。
-- `main.rs`：本机管理请求和经 SSH 发出的远端同步请求；同一 server 程序用于本机与远端。
+- `main.rs`：本机管理请求、原生快照导出及每轮启动校验；同一 server 程序用于本机与远端。
+- `latte-work-client` / 桌面 Rust 层：复用已认证连接转发选中快照，禁止凭据响应进入 WebView。
 - `SettingsPage`：独立设置页和并列 Tab；`ProviderSettings` / `AgentSettings` 管理配置与关联；`Select` 提供深色、支持键盘的选项菜单。
 
 ## 凭据与迁移
 
 每个 server 的状态目录默认为 `~/.local/share/latte-work`，权限 700。
-Provider 配置及接收的副本保存在 `providers.json`，权限 600；内容未加密，
+本机 Provider 配置和主机关联保存在 `providers.json`，权限 600；内容未加密，
 主机用户可读。列表响应只返回凭据是否存在，编辑时留空保留原值。
 改变地址或认证方式要求重新填写凭据。凭据不会作为 CLI 参数明文出现。
-正常执行结束后删除临时 settings 文件；server 被强制杀死可能遗留私有临时文件。
+本轮凭据只经过原生层和已认证 SSH，不进入 WebView、事件或请求账本。远程 CLI
+运行时仍能读取凭据。正常结束后删除临时 settings 文件；server 被强制杀死可能遗留私有临时文件。
 
-wire protocol 为 v6，旧版 server 会在握手时拒绝。升级应先等任务结束，再重启 daemon。
+当前 wire protocol 统一为 v1，功能增加不自动递增协议版本。
+本机与远程 server 应使用同一源码版本构建，确保都支持本轮配置；协议版本不一致时拒绝握手。
+更新已有部署时，先等任务结束，再重启 daemon。
 早期 schema 1 的 Provider 配置会保留；旧的全局选择只有协议兼容时才转成 Claude 关联，
 不兼容的选择不建立关联。下一次保存写入 schema 2。
 
 ## 验证
 
-`make ci` 包含目录与关联分离、协议拒绝、revision、迁移、私有文件、同步失败、
+`make ci` 包含本机关联持久化、协议拒绝、每轮配置校验、请求摘要、迁移、私有文件、
 模拟 SSH 字节桥、实际 server 进程与 Agent fixture 续聊测试。模拟 SSH 不是实际
 远程部署证据。可用真实 Claude CLI 和仅在 localhost 运行的模拟 Anthropic 服务验证：
 
@@ -81,8 +87,8 @@ CLI 参数依据 [Claude 网关配置](https://code.claude.com/docs/en/llm-gatew
 ## 会话模型选择
 
 在 Provider 中填写默认模型 ID，以及可选模型 ID（每行一个，最多 64 个）。默认模型自动包含在列表中。
-输入框底部的模型菜单读取项目主机上当前 Agent 关联的 Provider，不混用其他 Provider 的模型。
-远端使用已同步的模型列表；本机修改后，需要在 Agent 设置中重新同步。
+输入框底部的模型菜单读取本机为该项目主机、Agent 选择的 Provider，不混用其他 Provider 的模型。
+关闭设置后重新读取最新列表；发送时仍由远端根据本轮快照校验。
 
 模型随下一条消息提交，服务端在启动前校验列表，并只覆盖本轮启动快照；不修改 Provider 默认值或其他会话。
 选择记录保存在会话中，重连可恢复；重复请求 ID 也校验模型，避免换模型后错误复用已接受请求。

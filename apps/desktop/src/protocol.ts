@@ -96,6 +96,8 @@ export type AgentProviderBinding = {
   provider_revision: string;
 };
 export type ProviderSnapshot = { provider: Provider; credential: string };
+export type TurnProvider =
+  { kind: "cli" } | { kind: "snapshot"; snapshot: ProviderSnapshot };
 export type Request =
   | { method: "hello"; version: number }
   | { method: "projects" }
@@ -131,6 +133,23 @@ export type Request =
       provider_id: string | null;
       target: ProviderTarget | null;
     }
+  | { method: "providers_for_host"; host_id: string }
+  | { method: "forget_host_providers"; host_id: string }
+  | {
+      method: "bind_host_agent_provider";
+      host_id: string;
+      agent: string;
+      provider_id: string | null;
+    }
+  | { method: "export_host_agent_provider"; host_id: string; agent: string }
+  | {
+      method: "models_for_provider";
+      agent: string;
+      model: string | null;
+      project_id: string | null;
+      provider: Provider | null;
+    }
+  | { method: "session"; session_id: string }
   | {
       method: "sync_agent_provider";
       agent: string;
@@ -149,6 +168,7 @@ export type Request =
   | { method: "create_session"; project_id: string; agent: string }
   | {
       method: "send";
+      provider?: TurnProvider;
       session_id: string;
       request_id: string;
       text: string;
@@ -187,6 +207,11 @@ export type Response =
        * Display metadata only; keys remain the original selectable model IDs.
        */
       model_labels: { [key in string]?: string };
+    }
+  | {
+      kind: "provider_snapshot";
+      snapshot: ProviderSnapshot | null;
+      configured: boolean;
     }
   | {
       kind: "providers";

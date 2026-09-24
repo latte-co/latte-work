@@ -1,45 +1,21 @@
 //! Protocol adapters translate native agent messages; they do not own storage or UI.
-pub mod claude;
+mod adapter;
+mod claude;
 mod claude_models;
-use crate::providers::LaunchConfig;
-use anyhow::Result;
-use latte_work_protocol::EventKind;
-use serde_json::Value;
-use tokio::process::Command;
+pub use adapter::{Action, AgentAdapter, AgentCommand, Input};
+use anyhow::{Result, bail};
 
-pub struct AgentCommand {
-    pub command: Command,
-    /// Keep private launch files alive until the agent exits, including spawn errors.
-    pub _settings: Option<tempfile::NamedTempFile>,
+/// Concrete adapters are constructed only here; unsupported IDs never fall back.
+pub fn create(agent: &str) -> Result<Box<dyn AgentAdapter>> {
+    match agent {
+        "claude" => Ok(Box::<claude::Claude>::default()),
+        _ => bail!("此 Agent 尚未实现：{agent}"),
+    }
 }
 
-pub enum Output {
-    Event(EventKind),
-    NativeSession(String),
-    Initialized,
-    Approval {
-        id: String,
-        tool: String,
-        input: Value,
-    },
-    Reply(Value),
-    Finished {
-        failed: bool,
-        message: Option<String>,
-    },
-}
-pub trait AgentAdapter: Send {
-    fn command(
-        &self,
-        binary: &str,
-        cwd: &str,
-        resume: Option<&str>,
-        config: &LaunchConfig,
-    ) -> Result<AgentCommand>;
-    fn initialize(&self) -> Value;
-    fn prompt(&self, text: &str) -> Value;
-    fn approval(&self, id: &str, input: Value, allow: bool) -> Value;
-    fn decode(&mut self, message: Value) -> Result<Vec<Output>>;
+/// The registry currently contains one implementation. Discovery stays implementation-owned.
+pub async fn discover() -> (String, latte_work_protocol::AgentInfo) {
+    claude::discover().await
 }
 
 /// Protocol compatibility belongs to the adapter registry, never to presentation code.
@@ -82,6 +58,7 @@ mod tests {
     #[test]
     fn unimplemented_agents_do_not_inherit_claude_effort() {
         for agent in ["codex", "opencode", "unknown", ""] {
+            assert!(super::create(agent).is_err());
             assert!(super::effort_levels(agent, Some("opus")).is_empty());
             assert!(super::effort_levels(agent, None).is_empty());
         }

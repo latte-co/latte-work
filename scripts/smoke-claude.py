@@ -40,7 +40,7 @@ with tempfile.TemporaryDirectory(prefix='lw-live-', dir='/tmp') as state, tempfi
             if result.get('kind') == 'error':
                 raise RuntimeError(result['message'])
             return result
-        hello = rpc({'method': 'hello', 'version': 8})
+        hello = rpc({'method': 'hello', 'version': 1})
         project_id = rpc({'method': 'add_project', 'path': project})['project']['id']
         session_id = rpc({'method': 'create_session', 'project_id': project_id, 'agent': 'claude'})['session']['id']
         prompt = f'Application integration test: use Write to create exactly {target} containing LATTE_APPROVAL_OK. Do not use other tools. Then reply done.' if args.approval else 'Only reply LATTE_WORK_SMOKE_OK. Do not read files or call tools.'

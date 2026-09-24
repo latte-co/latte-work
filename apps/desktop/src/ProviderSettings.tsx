@@ -105,7 +105,7 @@ export function ProviderSettings({
       <h2>Provider</h2>
       <p>统一管理模型服务，在 Code Agent 设置中关联使用。</p>
       <p className="form-note">
-        配置保存在本机。远程 Agent 关联时，通过 SSH 同步所需配置。
+        配置保存在本机。远程 Agent 每轮执行时，通过 SSH 接收最新配置。
       </p>
       {error && (
         <div className="form-error" role="alert">
@@ -295,8 +295,7 @@ export function ProviderSettings({
                   />
                 </label>
                 <p className="form-note">
-                  更改地址或认证方式时，请重新填写凭据。修改后可在 Code Agent
-                  设置中重新同步到远端。
+                  更改地址或认证方式时，请重新填写凭据。修改后的配置会在下一次发送消息时生效。
                 </p>
                 <div className="modal-actions">
                   <button

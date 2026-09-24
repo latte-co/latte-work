@@ -5,6 +5,7 @@ mod providers;
 mod runtime;
 mod store;
 mod terminal;
+mod upgrade;
 use anyhow::{Context, Result, bail};
 use futures_util::StreamExt;
 use latte_work_protocol::{AgentInfo, MAX_FRAME, Request, Response, VERSION};
@@ -27,10 +28,11 @@ use tokio_util::codec::{FramedRead, LinesCodec};
 
 #[derive(Clone)]
 struct Service {
+    lifecycle: Arc<upgrade::Lifecycle>,
     terminals: terminal::SharedTerminals,
     database: Database,
     runs: Runs,
-    claude: String,
+    agent_binary: String,
     agent: AgentInfo,
     server_id: String,
     providers: Arc<Mutex<providers::ProviderStore>>,
@@ -46,7 +48,7 @@ async fn entry() -> Result<()> {
     let args: Vec<_> = std::env::args().skip(1).collect();
     if args.is_empty() || args[0] == "--help" {
         println!(
-            "latte-work-server 0.1.0\nUsage: latte-work-server <serve|connect> [--state-dir PATH]\nOne daemon per host user; connect starts it if absent.\nLATTE_WORK_CLAUDE: absolute CLI path override (default auto-detected claude)."
+            "latte-work-server 0.1.0\nUsage: latte-work-server <serve|connect|connect-local> [--state-dir PATH]\nOne daemon per host user; connect starts it if absent.\nLATTE_WORK_CLAUDE: absolute CLI path override (default auto-detected claude)."
         );
         return Ok(());
     }
@@ -62,6 +64,19 @@ async fn entry() -> Result<()> {
     match args[0].as_str() {
         "serve" => serve(&dir).await,
         "connect" => bridge(&dir).await,
+        "connect-local" => match upgrade::connect_local(&dir).await {
+            Ok(stream) => forward(stream).await,
+            Err(error) => {
+                let response = Response::Error {
+                    code: "local_upgrade_required".into(),
+                    message: error.to_string(),
+                };
+                let mut bytes = serde_json::to_vec(&response)?;
+                bytes.push(b'\n');
+                tokio::io::stdout().write_all(&bytes).await?;
+                Ok(())
+            }
+        },
         _ => bail!("未知命令"),
     }
 }
@@ -84,6 +99,9 @@ fn lock(dir: &Path) -> Result<File> {
     Ok(file)
 }
 async fn bridge(dir: &Path) -> Result<()> {
+    forward(connect_socket(dir).await?).await
+}
+async fn connect_socket(dir: &Path) -> Result<UnixStream> {
     let socket = dir.join("control.sock");
     let stream = match UnixStream::connect(&socket).await {
         Ok(s) => s,
@@ -113,23 +131,14 @@ async fn bridge(dir: &Path) -> Result<()> {
             }
         }
     };
+    Ok(stream)
+}
+async fn forward(stream: UnixStream) -> Result<()> {
     let (mut reader, mut writer) = stream.into_split();
     let mut input = tokio::io::stdin();
     let mut output = tokio::io::stdout();
     tokio::select! {result=tokio::io::copy(&mut input,&mut writer)=>{result?;},result=tokio::io::copy(&mut reader,&mut output)=>{result?;}}
     Ok(())
-}
-fn claude_binary() -> String {
-    if let Ok(value) = std::env::var("LATTE_WORK_CLAUDE") {
-        return value;
-    }
-    if let Some(home) = std::env::var_os("HOME") {
-        let path = PathBuf::from(home).join(".local/bin/claude");
-        if path.is_file() {
-            return path.to_string_lossy().into_owned();
-        }
-    }
-    "claude".into()
 }
 async fn serve(dir: &Path) -> Result<()> {
     let _lock = lock(dir)?;
@@ -141,39 +150,15 @@ async fn serve(dir: &Path) -> Result<()> {
         std::fs::remove_file(&socket)?;
     }
     let database = Arc::new(Mutex::new(store::Store::open(&dir.join("state.sqlite"))?));
-    let claude = claude_binary();
-    let probe = tokio::time::timeout(
-        Duration::from_secs(5),
-        tokio::process::Command::new(&claude)
-            .arg("--version")
-            .stdin(Stdio::null())
-            .kill_on_drop(true)
-            .output(),
-    )
-    .await;
-    let (available, detail) = match probe {
-        Ok(Ok(result)) if result.status.success() => (
-            true,
-            String::from_utf8_lossy(&result.stdout).trim().to_owned(),
-        ),
-        _ => (
-            false,
-            "未找到 Claude Code；在此 Host 安装并登录后重启 Server。".into(),
-        ),
-    };
+    let (agent_binary, agent) = agents::discover().await;
     let service = Service {
+        lifecycle: Arc::new(upgrade::Lifecycle::new()?),
         terminals: Arc::new(Mutex::new(terminal::Terminals::default())),
         providers: Arc::new(Mutex::new(providers::ProviderStore::open(dir)?)),
         database,
         runs: Arc::new(Mutex::new(HashMap::new())),
-        claude,
-        agent: AgentInfo {
-            id: "claude".into(),
-            name: "Claude Code".into(),
-            available,
-            provider_protocols: agents::provider_protocols("claude").unwrap().to_vec(),
-            detail,
-        },
+        agent_binary,
+        agent,
         server_id: uuid::Uuid::new_v4().to_string(),
     };
     let listener = UnixListener::bind(&socket)?;
@@ -189,6 +174,7 @@ async fn serve(dir: &Path) -> Result<()> {
             result=listener.accept()=>{let (stream,_)=result?;let service=service.clone();tokio::spawn(async move {if let Err(e)=connection(stream,service).await {eprintln!("client disconnected: {e}");}});},
             _=tokio::signal::ctrl_c()=>break,
         _=terminate.recv()=>break,
+        _=service.lifecycle.shutdown.notified()=>break,
         }
     }
     service
@@ -216,37 +202,58 @@ async fn connection(stream: UnixStream, service: Service) -> Result<()> {
     let mut ready = false;
     while let Some(line) = lines.next().await {
         let line = line?;
-        let response = match serde_json::from_str::<Request>(&line) {
-            Ok(Request::Hello { version }) => {
-                if version == VERSION {
-                    ready = true;
-                    Response::Hello {
-                        version: VERSION,
-                        server_id: service.server_id.clone(),
-                        agents: vec![service.agent.clone()],
-                    }
-                } else {
-                    Response::Error {
-                        code: "version_mismatch".into(),
-                        message: format!("Server 协议为 {VERSION}，客户端为 {version}"),
+        if let Ok(request) = serde_json::from_str::<upgrade::Request>(&line) {
+            let response = upgrade::handle(&service, request).await;
+            let mut bytes = serde_json::to_vec(&response)?;
+            bytes.push(b'\n');
+            let written =
+                tokio::time::timeout(Duration::from_secs(15), writer.write_all(&bytes)).await;
+            if matches!(response, upgrade::Response::UpgradeReady) {
+                service.lifecycle.shutdown.notify_one();
+            }
+            written??;
+            continue;
+        }
+        // Hold admission through dispatch so a Send/CreateTerminal cannot race an idle check.
+        let draining = service.lifecycle.draining.read().await;
+        let response = if *draining {
+            Response::Error {
+                code: "server_upgrading".into(),
+                message: "本机后台正在更新，请重新连接；任务不会自动重发".into(),
+            }
+        } else {
+            match serde_json::from_str::<Request>(&line) {
+                Ok(Request::Hello { version }) => {
+                    if version == VERSION {
+                        ready = true;
+                        Response::Hello {
+                            version: VERSION,
+                            server_id: service.server_id.clone(),
+                            agents: vec![service.agent.clone()],
+                        }
+                    } else {
+                        Response::Error {
+                            code: "version_mismatch".into(),
+                            message: format!("Server 协议为 {VERSION}，客户端为 {version}"),
+                        }
                     }
                 }
-            }
-            Ok(request) if ready => match dispatch(&service, request).await {
-                Ok(response) => response,
+                Ok(request) if ready => match dispatch(&service, request).await {
+                    Ok(response) => response,
+                    Err(error) => Response::Error {
+                        code: "request_failed".into(),
+                        message: error.to_string(),
+                    },
+                },
+                Ok(_) => Response::Error {
+                    code: "handshake_required".into(),
+                    message: "请先发送 hello".into(),
+                },
                 Err(error) => Response::Error {
-                    code: "request_failed".into(),
+                    code: "invalid_request".into(),
                     message: error.to_string(),
                 },
-            },
-            Ok(_) => Response::Error {
-                code: "handshake_required".into(),
-                message: "请先发送 hello".into(),
-            },
-            Err(error) => Response::Error {
-                code: "invalid_request".into(),
-                message: error.to_string(),
-            },
+            }
         };
         let mut bytes = serde_json::to_vec(&response)?;
         if bytes.len() > MAX_FRAME {
@@ -336,6 +343,62 @@ async fn dispatch(s: &Service, request: Request) -> Result<Response> {
                     .bind(&agent, provider_id)?
             }
         }
+        Request::ProvidersForHost { host_id } => s
+            .providers
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Provider 配置锁异常"))?
+            .list_for_host(&host_id)?,
+        Request::BindHostAgentProvider {
+            host_id,
+            agent,
+            provider_id,
+        } => s
+            .providers
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Provider 配置锁异常"))?
+            .bind_host(&host_id, &agent, provider_id)?,
+        Request::ForgetHostProviders { host_id } => s
+            .providers
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Provider 配置锁异常"))?
+            .forget_host(&host_id)?,
+        Request::ExportHostAgentProvider { host_id, agent } => {
+            let store = s
+                .providers
+                .lock()
+                .map_err(|_| anyhow::anyhow!("Provider 配置锁异常"))?;
+            Response::ProviderSnapshot {
+                snapshot: store.snapshot_for_host(&host_id, &agent)?,
+                configured: store.host_configured(&host_id),
+            }
+        }
+        Request::ModelsForProvider {
+            agent,
+            model,
+            project_id,
+            provider,
+        } => {
+            let project = project_id
+                .map(|id| db(&s.database, |d| d.project(&id)))
+                .transpose()?;
+            let mut response =
+                providers::ProviderStore::models_for_provider(&agent, model.as_deref(), provider)?;
+            if let Response::Models {
+                provider: None,
+                model_labels,
+                ..
+            } = &mut response
+            {
+                *model_labels = agents::model_labels(
+                    &agent,
+                    project.as_ref().map(|p| std::path::Path::new(&p.path)),
+                );
+            }
+            response
+        }
+        Request::Session { session_id } => Response::Session {
+            session: db(&s.database, |d| d.session(&session_id))?,
+        },
         Request::SyncAgentProvider { agent, snapshot } => s
             .providers
             .lock()
@@ -435,7 +498,7 @@ async fn dispatch(s: &Service, request: Request) -> Result<Response> {
             session: db(&s.database, |d| d.archive_session(&session_id, archived))?,
         },
         Request::CreateSession { project_id, agent } => {
-            if agent != "claude" {
+            if agent != s.agent.id {
                 bail!("此 Agent 尚未实现");
             }
             Response::Session {
@@ -443,26 +506,41 @@ async fn dispatch(s: &Service, request: Request) -> Result<Response> {
             }
         }
         Request::Send {
+            provider,
             session_id,
             request_id,
             text,
             model,
             effort,
         } => {
+            let fingerprint = providers::turn_fingerprint(provider.as_ref())?;
             if db(&s.database, |d| {
-                d.already_accepted(&session_id, &request_id, &text, model.as_deref(), effort)
+                d.already_accepted(
+                    &session_id,
+                    &request_id,
+                    &text,
+                    model.as_deref(),
+                    effort,
+                    fingerprint.as_deref(),
+                )
             })? {
                 return Ok(Response::Accepted { duplicate: true });
             }
             if !s.agent.available {
-                bail!("Claude Code CLI 不可用；请在此 Host 安装并登录后重启 Server");
+                bail!(
+                    "{} CLI 不可用；请在此 Host 安装并登录后重启 Server",
+                    s.agent.name
+                );
             }
             let agent_id = db(&s.database, |d| Ok(d.session(&session_id)?.agent))?;
+            if agent_id != s.agent.id {
+                bail!("此 Agent 尚未实现：{agent_id}");
+            }
             let mut launch_config = s
                 .providers
                 .lock()
                 .map_err(|_| anyhow::anyhow!("Provider 配置锁异常"))?
-                .selected_config(&agent_id, model.as_deref())?;
+                .turn_config(&agent_id, model.as_deref(), provider)?;
             let selected_model = launch_config.model.as_deref().or_else(|| {
                 launch_config
                     .provider
@@ -478,14 +556,21 @@ async fn dispatch(s: &Service, request: Request) -> Result<Response> {
             let (new, session, path) = db(&s.database, |d| {
                 let session = d.session(&session_id)?;
                 let path = d.project(&session.project_id)?.path;
-                let new = d.begin(&session_id, &request_id, &text, model.as_deref(), effort)?;
+                let new = d.begin(
+                    &session_id,
+                    &request_id,
+                    &text,
+                    model.as_deref(),
+                    effort,
+                    fingerprint.as_deref(),
+                )?;
                 Ok((new, session, path))
             })?;
             if new {
                 runtime::launch(
                     s.database.clone(),
                     s.runs.clone(),
-                    s.claude.clone(),
+                    s.agent_binary.clone(),
                     session,
                     path,
                     text,

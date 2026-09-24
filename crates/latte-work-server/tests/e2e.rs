@@ -26,7 +26,6 @@ impl Host {
             .arg("--state-dir")
             .arg(directory.path())
             .env("LATTE_WORK_CLAUDE", fixture)
-            .env("SHELL", "/bin/sh")
             .env("CLAUDE_CONFIG_DIR", directory.path().join("claude-config"))
             .stdin(Stdio::null())
             .stdout(Stdio::null())
@@ -200,6 +199,7 @@ async fn send(c: &mut Client, id: &str, request: &str, text: &str) -> Response {
     ask(
         c,
         Request::Send {
+            provider: None,
             session_id: id.into(),
             request_id: request.into(),
             text: text.into(),
@@ -759,6 +759,7 @@ async fn models_select_per_turn_validate_and_persist_without_changing_provider()
         matches!(aliases, Response::Models { models, provider: None, .. } if models.contains(&"sonnet".into()))
     );
     let send_model = |request: &str, model: Option<&str>, text: &str| Request::Send {
+        provider: None,
         session_id: sid.clone(),
         request_id: request.into(),
         text: text.into(),
@@ -965,6 +966,7 @@ async fn effort_is_applied_on_launch_resume_and_reset() {
         ask(
             &mut client,
             Request::Send {
+                provider: None,
                 session_id: id.clone(),
                 request_id: "unsupported".into(),
                 text: "effort".into(),
@@ -981,6 +983,7 @@ async fn effort_is_applied_on_launch_resume_and_reset() {
         ("effort-auto", None, "resumed:auto"),
     ] {
         let send = Request::Send {
+            provider: None,
             session_id: id.clone(),
             request_id: request_id.into(),
             text: "effort".into(),
@@ -1102,6 +1105,296 @@ async fn native_model_names_are_host_project_scoped_and_do_not_override_provider
     .await;
     assert!(matches!(ask(&mut c, models(Some(registered.id))).await,
         Response::Models { model_labels, provider: Some(_), .. } if model_labels.is_empty()));
+}
+
+#[tokio::test]
+async fn remote_turns_use_latest_local_provider_without_persisting_snapshots() {
+    use latte_work_client::request_with_provider;
+    use latte_work_protocol::{ProviderAuth, ProviderDraft, ProviderProtocol, TurnProvider};
+    use tokio::sync::Mutex;
+    let local_host = Host::start().await;
+    let remote_host = Host::start().await;
+    let local = Mutex::new(local_host.client().await);
+    let remote = Mutex::new(remote_host.client().await);
+    let mut draft = ProviderDraft {
+        id: None,
+        name: "Per turn".into(),
+        protocol: ProviderProtocol::AnthropicMessages,
+        base_url: "https://example.test".into(),
+        model: "first".into(),
+        models: vec!["alternate".into()],
+        auth: ProviderAuth::ApiKey,
+        credential: Some("fixture-private-key".into()),
+    };
+    let saved = local
+        .lock()
+        .await
+        .request(Request::SaveProvider {
+            provider: draft.clone(),
+        })
+        .await
+        .unwrap();
+    let id = match saved {
+        Response::Providers { providers, .. } => providers[0].id.clone(),
+        other => panic!("{other:?}"),
+    };
+    let bind = |provider_id| Request::BindHostAgentProvider {
+        host_id: "remote-fixture".into(),
+        agent: "claude".into(),
+        provider_id,
+    };
+    assert!(
+        matches!(local.lock().await.request(bind(Some(id.clone()))).await.unwrap(), Response::Providers { bindings, .. } if bindings[0].provider_id == id)
+    );
+    // Binding is local: no contact with or configuration file on the remote host.
+    assert!(!remote_host.directory.path().join("providers.json").exists());
+    let models = || Request::Models {
+        agent: "claude".into(),
+        model: None,
+        project_id: None,
+    };
+    let result = request_with_provider(&local, &remote, "remote-fixture".into(), models())
+        .await
+        .unwrap();
+    assert!(matches!(result, Response::Models { models, .. } if models == ["first", "alternate"]));
+    let mut observer = remote_host.client().await;
+    let project = tempfile::tempdir().unwrap();
+    let sid = session(&mut observer, project.path()).await;
+    let send = |request_id: &str, text: &str| Request::Send {
+        provider: None,
+        session_id: sid.clone(),
+        request_id: request_id.into(),
+        text: text.into(),
+        model: None,
+        effort: None,
+    };
+    let snapshot = match local
+        .lock()
+        .await
+        .request(Request::ExportHostAgentProvider {
+            host_id: "remote-fixture".into(),
+            agent: "claude".into(),
+        })
+        .await
+        .unwrap()
+    {
+        Response::ProviderSnapshot {
+            snapshot: Some(snapshot),
+            ..
+        } => snapshot,
+        other => panic!("{other:?}"),
+    };
+    let result = request_with_provider(
+        &local,
+        &remote,
+        "remote-fixture".into(),
+        send("first-turn", "provider"),
+    )
+    .await
+    .unwrap();
+    assert!(matches!(result, Response::Accepted { duplicate: false }));
+    // Losing the initiating transport does not kill the server-owned turn.
+    drop(remote);
+    let events = wait(&mut observer, &sid, Status::Completed).await;
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(&e.event, EventKind::Text { text } if text == "fresh:first:api_key"))
+    );
+    assert!(
+        !serde_json::to_string(&events)
+            .unwrap()
+            .contains("fixture-private-key")
+    );
+    let remote = Mutex::new(remote_host.client().await);
+    assert!(matches!(
+        request_with_provider(
+            &local,
+            &remote,
+            "remote-fixture".into(),
+            send("first-turn", "provider")
+        )
+        .await
+        .unwrap(),
+        Response::Accepted { duplicate: true }
+    ));
+
+    draft.id = Some(id.clone());
+    draft.model = "second".into();
+    draft.credential = None;
+    local
+        .lock()
+        .await
+        .request(Request::SaveProvider { provider: draft })
+        .await
+        .unwrap();
+    // A reused request ID cannot silently acquire the updated provider snapshot.
+    assert!(matches!(
+        request_with_provider(
+            &local,
+            &remote,
+            "remote-fixture".into(),
+            send("first-turn", "provider")
+        )
+        .await
+        .unwrap(),
+        Response::Error { .. }
+    ));
+    let original = Request::Send {
+        provider: Some(TurnProvider::Snapshot(snapshot.clone())),
+        session_id: sid.clone(),
+        request_id: "first-turn".into(),
+        text: "provider".into(),
+        model: None,
+        effort: None,
+    };
+    assert!(matches!(
+        remote.lock().await.request(original).await.unwrap(),
+        Response::Accepted { duplicate: true }
+    ));
+    let mut changed = snapshot;
+    changed.credential = "different-secret-same-revision".into();
+    assert!(matches!(
+        remote
+            .lock()
+            .await
+            .request(Request::Send {
+                provider: Some(TurnProvider::Snapshot(changed)),
+                session_id: sid.clone(),
+                request_id: "first-turn".into(),
+                text: "provider".into(),
+                model: None,
+                effort: None
+            })
+            .await
+            .unwrap(),
+        Response::Error { .. }
+    ));
+    assert!(
+        matches!(request_with_provider(&local, &remote, "remote-fixture".into(), models()).await.unwrap(), Response::Models { default_model: Some(model), .. } if model == "second")
+    );
+    assert!(matches!(
+        request_with_provider(
+            &local,
+            &remote,
+            "remote-fixture".into(),
+            send("second-turn", "provider")
+        )
+        .await
+        .unwrap(),
+        Response::Accepted { duplicate: false }
+    ));
+    assert!(
+        wait(&mut observer, &sid, Status::Completed)
+            .await
+            .iter()
+            .any(
+                |e| matches!(&e.event, EventKind::Text { text } if text == "resumed:second:api_key")
+            )
+    );
+
+    assert!(
+        matches!(local.lock().await.request(bind(None)).await.unwrap(), Response::Providers { bindings, .. } if bindings.is_empty())
+    );
+    assert!(matches!(
+        request_with_provider(&local, &remote, "remote-fixture".into(), models())
+            .await
+            .unwrap(),
+        Response::Models { provider: None, .. }
+    ));
+    assert!(matches!(
+        request_with_provider(
+            &local,
+            &remote,
+            "remote-fixture".into(),
+            send("cli-turn", "model")
+        )
+        .await
+        .unwrap(),
+        Response::Accepted { duplicate: false }
+    ));
+    assert!(
+        wait(&mut observer, &sid, Status::Completed)
+            .await
+            .iter()
+            .any(|e| matches!(&e.event, EventKind::Text { text } if text == "resumed:default"))
+    );
+    assert!(
+        matches!(remote.lock().await.request(Request::Providers).await.unwrap(), Response::Providers { providers, bindings } if providers.is_empty() && bindings.is_empty())
+    );
+    assert!(!remote_host.directory.path().join("providers.json").exists());
+    for entry in std::fs::read_dir(remote_host.directory.path()).unwrap() {
+        let path = entry.unwrap().path();
+        if path.is_file() {
+            let bytes = std::fs::read(path).unwrap();
+            assert!(
+                !bytes
+                    .windows(b"fixture-private-key".len())
+                    .any(|w| w == b"fixture-private-key")
+            );
+        }
+    }
+    // An old remote binding must not silently become CLI defaults on upgrade.
+    let legacy = remote
+        .lock()
+        .await
+        .request(Request::SaveProvider {
+            provider: ProviderDraft {
+                id: None,
+                name: "Legacy remote".into(),
+                protocol: ProviderProtocol::AnthropicMessages,
+                base_url: "https://example.test".into(),
+                model: "legacy".into(),
+                models: vec![],
+                auth: ProviderAuth::ApiKey,
+                credential: Some("legacy-secret".into()),
+            },
+        })
+        .await
+        .unwrap();
+    let legacy_id = match legacy {
+        Response::Providers { providers, .. } => providers[0].id.clone(),
+        other => panic!("{other:?}"),
+    };
+    remote
+        .lock()
+        .await
+        .request(Request::BindAgentProvider {
+            agent: "claude".into(),
+            provider_id: Some(legacy_id),
+            target: None,
+        })
+        .await
+        .unwrap();
+    local
+        .lock()
+        .await
+        .request(Request::ForgetHostProviders {
+            host_id: "remote-fixture".into(),
+        })
+        .await
+        .unwrap();
+    let error = request_with_provider(&local, &remote, "remote-fixture".into(), models())
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("旧 Provider 关联"));
+    assert!(
+        request_with_provider(
+            &local,
+            &remote,
+            "remote-fixture".into(),
+            send("blocked-upgrade", "model")
+        )
+        .await
+        .is_err()
+    );
+    local.lock().await.request(bind(None)).await.unwrap();
+    assert!(matches!(
+        request_with_provider(&local, &remote, "remote-fixture".into(), models())
+            .await
+            .unwrap(),
+        Response::Models { provider: None, .. }
+    ));
 }
 
 async fn terminal_project(client: &mut Client, path: &Path) -> String {
@@ -1500,4 +1793,264 @@ async fn completed_turn_is_unread_until_acknowledged_across_clients() {
         ask(&mut other, Request::Poll { session_id: id, after: 0.0 }).await,
         Response::Events { session, .. } if !session.unread
     ));
+}
+
+async fn lifecycle(path: &Path, request: serde_json::Value) -> serde_json::Value {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    tokio::time::timeout(Duration::from_secs(5), async {
+        let mut stream = tokio::net::UnixStream::connect(path.join("control.sock"))
+            .await
+            .unwrap();
+        stream
+            .write_all(format!("{request}\n").as_bytes())
+            .await
+            .unwrap();
+        let mut line = String::new();
+        BufReader::new(stream).read_line(&mut line).await.unwrap();
+        serde_json::from_str(&line).unwrap()
+    })
+    .await
+    .unwrap()
+}
+
+#[tokio::test]
+async fn upgrade_refuses_tasks_and_terminals_then_drains_existing_clients() {
+    use serde_json::json;
+    let mut host = Host::start().await;
+    let mut client = host.client().await;
+    let dir = host.directory.path();
+    let status = lifecycle(dir, json!({"method":"server_status"})).await;
+    assert_eq!(status["build_id"].as_str().unwrap().len(), 64);
+    let prepare = json!({"method":"prepare_upgrade", "server_id":status["server_id"]});
+    let stale = lifecycle(dir, json!({"method":"prepare_upgrade","server_id":"stale"})).await;
+    assert_eq!(stale["kind"], "error");
+    let project = tempfile::tempdir().unwrap();
+    let id = session(&mut client, project.path()).await;
+    send(&mut client, &id, "upgrade-approval", "approve").await;
+    wait(&mut client, &id, Status::Waiting).await;
+    assert_eq!(
+        lifecycle(dir, prepare.clone()).await["code"],
+        "upgrade_blocked"
+    );
+    assert_eq!(
+        lifecycle(dir, json!({"method":"server_status"})).await["draining"],
+        false
+    );
+    assert!(host.process.try_wait().unwrap().is_none());
+    ask(
+        &mut client,
+        Request::Cancel {
+            session_id: id.clone(),
+        },
+    )
+    .await;
+    wait(&mut client, &id, Status::Stopped).await;
+    let project_id = terminal_project(&mut client, project.path()).await;
+    let terminal_id = uuid::Uuid::new_v4().to_string();
+    assert!(matches!(
+        ask(
+            &mut client,
+            Request::CreateTerminal {
+                project_id,
+                terminal_id: terminal_id.clone(),
+                cols: 80,
+                rows: 24
+            }
+        )
+        .await,
+        Response::Terminal { .. }
+    ));
+    assert_eq!(
+        lifecycle(dir, prepare.clone()).await["code"],
+        "upgrade_blocked"
+    );
+    // Refused upgrades must leave the real shell usable.
+    terminal_write(&mut client, &terminal_id, b"printf 'upgrade:%s\\n' alive\n").await;
+    terminal_until(&mut client, &terminal_id, &mut 0.0, "upgrade:alive").await;
+    ask(&mut client, Request::CloseTerminal { terminal_id }).await;
+    assert_eq!(lifecycle(dir, prepare).await["kind"], "upgrade_ready");
+    assert!(
+        matches!(send(&mut client, &id, "must-not-start", "hello").await, Response::Error { code, .. } if code == "server_upgrading")
+    );
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while host.process.try_wait().unwrap().is_none() {
+        assert!(Instant::now() < deadline);
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+#[tokio::test]
+async fn upgrade_local_coordinator_replaces_idle_build_once_for_concurrent_clients() {
+    use serde_json::json;
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    let directory = tempfile::Builder::new()
+        .prefix("lw-upgrade-")
+        .tempdir_in("/tmp")
+        .unwrap();
+    let dir = directory.path().to_path_buf();
+    // A deterministic old-daemon fixture holds the same real singleton lock.
+    let guard = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(dir.join("server.lock"))
+        .unwrap();
+    guard.try_lock().unwrap();
+    let listener = tokio::net::UnixListener::bind(dir.join("control.sock")).unwrap();
+    let old_dir = dir.clone();
+    let old = tokio::spawn(async move {
+        for expected in ["server_status", "prepare_upgrade"] {
+            let (stream, _) = listener.accept().await.unwrap();
+            let (reader, mut writer) = stream.into_split();
+            let mut line = String::new();
+            BufReader::new(reader).read_line(&mut line).await.unwrap();
+            let request: serde_json::Value = serde_json::from_str(&line).unwrap();
+            assert_eq!(request["method"], expected);
+            let response = if expected == "server_status" {
+                json!({"kind":"server_status","server_id":"old-instance","build_id":"old-build","draining":false})
+            } else {
+                assert_eq!(request["server_id"], "old-instance");
+                json!({"kind":"upgrade_ready"})
+            };
+            writer
+                .write_all(format!("{response}\n").as_bytes())
+                .await
+                .unwrap();
+        }
+        drop(listener);
+        std::fs::remove_file(old_dir.join("control.sock")).unwrap();
+        drop(guard);
+    });
+    // Spawn bridges with a fixture CLI even on machines with a real Claude installation.
+    async fn connect(dir: &Path) -> (tokio::process::Child, serde_json::Value) {
+        let mut child = tokio::process::Command::new(env!("CARGO_BIN_EXE_latte-work-server"))
+            .args(["connect-local", "--state-dir"])
+            .arg(dir)
+            .env(
+                "LATTE_WORK_CLAUDE",
+                PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/claude.py"),
+            )
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .as_mut()
+            .unwrap()
+            .write_all(format!("{{\"method\":\"hello\",\"version\":{VERSION}}}\n").as_bytes())
+            .await
+            .unwrap();
+        let mut line = String::new();
+        tokio::time::timeout(
+            Duration::from_secs(22),
+            BufReader::new(child.stdout.take().unwrap()).read_line(&mut line),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        (child, serde_json::from_str(&line).unwrap())
+    }
+    let ((a, hello_a), (b, hello_b)) = tokio::join!(connect(&dir), connect(&dir));
+    old.await.unwrap();
+    let status = lifecycle(&dir, json!({"method":"server_status"})).await;
+    // Stop the disposable daemon before assertions, including on a failed comparison.
+    let stop = lifecycle(
+        &dir,
+        json!({"method":"prepare_upgrade","server_id":status["server_id"]}),
+    )
+    .await;
+    drop((a, b));
+    assert_eq!(stop["kind"], "upgrade_ready");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while dir.join("control.sock").exists() {
+        assert!(Instant::now() < deadline);
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(hello_a["kind"], "hello", "{hello_a}");
+    assert_eq!(hello_a["server_id"], hello_b["server_id"]);
+    assert_eq!(hello_a["version"], 1);
+    assert_ne!(status["build_id"], "old-build");
+}
+
+#[tokio::test]
+async fn upgrade_legacy_daemon_returns_actionable_error_without_stopping_it() {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    let directory = tempfile::Builder::new()
+        .prefix("lw-legacy-")
+        .tempdir_in("/tmp")
+        .unwrap();
+    let listener = tokio::net::UnixListener::bind(directory.path().join("control.sock")).unwrap();
+    let old = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let (reader, mut writer) = stream.into_split();
+        let mut line = String::new();
+        BufReader::new(reader).read_line(&mut line).await.unwrap();
+        assert!(line.contains("server_status"));
+        writer
+            .write_all(
+                b"{\"kind\":\"error\",\"code\":\"invalid_request\",\"message\":\"old server\"}\n",
+            )
+            .await
+            .unwrap();
+        listener
+    });
+    let result = Client::local(
+        Path::new(env!("CARGO_BIN_EXE_latte-work-server")),
+        Some(directory.path()),
+    )
+    .await;
+    let error = match result {
+        Ok(_) => panic!("must reject legacy daemon"),
+        Err(error) => error.to_string(),
+    };
+    assert!(error.contains("旧版本机后台"), "{error}");
+    assert!(error.contains("仅重启桌面应用不会停止后台"));
+    let listener = old.await.unwrap();
+    assert!(directory.path().join("control.sock").exists());
+    assert!(
+        tokio::net::UnixStream::connect(directory.path().join("control.sock"))
+            .await
+            .is_ok()
+    );
+    drop(listener);
+}
+
+#[tokio::test]
+async fn upgrade_racing_send_either_preserves_task_or_rejects_before_launch() {
+    use serde_json::json;
+    let host = Host::start().await;
+    let mut client = host.client().await;
+    let project = tempfile::tempdir().unwrap();
+    let id = session(&mut client, project.path()).await;
+    let status = lifecycle(host.directory.path(), json!({"method":"server_status"})).await;
+    let (upgrade, sent) = tokio::join!(
+        lifecycle(
+            host.directory.path(),
+            json!({"method":"prepare_upgrade", "server_id":status["server_id"]})
+        ),
+        send(&mut client, &id, "race-upgrade", "approve")
+    );
+    match sent {
+        Response::Accepted { duplicate: false } => {
+            assert_eq!(upgrade["code"], "upgrade_blocked");
+            wait(&mut client, &id, Status::Waiting).await;
+            ask(
+                &mut client,
+                Request::Cancel {
+                    session_id: id.clone(),
+                },
+            )
+            .await;
+            wait(&mut client, &id, Status::Stopped).await;
+        }
+        Response::Error { code, .. } => {
+            assert_eq!(code, "server_upgrading");
+            assert_eq!(upgrade["kind"], "upgrade_ready");
+        }
+        other => panic!("{other:?}"),
+    }
 }

@@ -103,7 +103,7 @@ with tempfile.TemporaryDirectory(prefix='lw-p-', dir='/tmp') as directory:
                 raise RuntimeError(result['message'])
             return result
 
-        rpc({'method': 'hello', 'version': 8})
+        rpc({'method': 'hello', 'version': 1})
         draft = {'id': None, 'name': 'Fixture', 'protocol': 'anthropic_messages', 'base_url': f'http://127.0.0.1:{httpd.server_port}', 'model': expected_model, 'models': ['claude-opus-4-7'], 'auth': 'bearer', 'credential': KEY}
         saved = rpc({'method': 'save_provider', 'provider': draft})
         assert not saved['bindings']
