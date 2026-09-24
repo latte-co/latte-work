@@ -571,3 +571,104 @@ Section management and chat archiving are outside this four-action iteration.
 - The active `main` ruleset requires a PR, signed commits, one approving review,
   resolved review threads, and the fail-closed `PR Gate` check. Live remote job
   results belong to [PR #1](https://github.com/latte-co/latte-work/pull/1).
+
+## Sidebar terminal tabs (2026-09-24)
+
+- Added closeable file/diff/terminal tabs, a keyboard-accessible add menu and
+  expand/restore controls. Existing titlebar drag regions remain on the header.
+  Tab switches, panel visibility, settings and project switches retain emulators.
+- Protocol v9 adds real host-owned PTYs for local and SSH transports. Tests cover
+  TTY/cwd, UTF-8, resize, Ctrl-C, create deduplication, project isolation, bounded
+  input/output, close of foreground jobs, reconnect, shell exit and daemon restart
+  without command replay. No real agent/API request was made for terminal tests.
+- `make ci` passed. Subsequently added daemon restart coverage passed the focused
+  3-test terminal final-binary suite; the final frontend passed all 28 tests and
+  production typecheck/build. Formatting, denied-warning server Clippy and native
+  debug bundle/ad-hoc signature checks passed.
+- Browser UI connected through a temporary local test bridge to the real daemon:
+  command input/output, project cwd, two independent terminals, file/terminal
+  switching, shell exit/close, rediscovery after page reload, default narrow panel,
+  add menu and expansion passed. `stty size` changed from 43x80 to 43x128 when
+  expanded. Fixed the xterm viewport background revealed by visual inspection.
+- Native UI smoke was blocked by the locked Mac. Native dragging, IME/copy-paste
+  and live SSH remain unverified. Tests use an isolated state directory; the
+  installed app and the user's daemon/database were not replaced. A uniquely
+  identified debug preview and launcher are in this worktree's ignored `.local/`
+  and `target/debug/bundle/macos/` directories.
+
+## Conversation sidebar state and empty launcher (2026-09-24)
+
+- Sidebar state is keyed only by conversation ID. Tabs, selection, file location,
+  visibility, expansion and width persist locally; host/project changes do not
+  change the conversation's state. Each tab retains its original resource binding.
+  Draft state transfers on first send, and earlier preview storage is migrated.
+- First opening and closing the final tab show the same empty launcher with
+  working change, terminal and file entries. Terminal restoration reconciles only
+  IDs owned by that conversation, without importing another conversation's PTYs.
+- All 36 frontend tests and production typecheck/build passed. The updated native
+  debug preview was built and ad-hoc signed.
+- Native smoke on the unlocked Mac verified the empty launcher, opening/closing
+  its final file tab, independent A/B conversation visibility and tabs, and two
+  existing terminal tabs restored after restarting the preview. The preview uses
+  isolated test state; no agent prompt was sent. Native dragging, IME/copy-paste
+  and live SSH remain outside this follow-up's validation.
+
+## Sidebar project and conversation indicators (2026-09-24)
+
+- Removed the project row's selected background; hover/keyboard feedback and the
+  selected conversation background remain. Expanded projects use an open-folder
+  icon. Running conversations use animated horizontal dots, waiting conversations
+  use a pause icon, and inactive unread conversations use a blue dot. Collapsed
+  projects aggregate running/waiting state; background project lists refresh
+  serially every five seconds, including collapsed projects.
+- Host transitions from active to completed/failed/stopped persist unread state.
+  The client acknowledges it after fully replaying the selected conversation in
+  a visible, focused window. Background windows and incomplete replay retain it.
+- All 40 frontend tests passed, including collapsed project refresh during
+  frequent parent rerenders and focused/background read acknowledgement. Focused
+  Rust persistence and final-binary cross-client unread tests passed, as did
+  denied-warning server Clippy, formatting, production frontend/native build and
+  strict ad-hoc signature verification.
+- Native preview screenshot confirmed the open-folder icon, project background
+  removal, retained conversation selection and restored existing terminal tabs.
+  Animation and completion states were covered by automated tests, not by a real
+  native agent run. The preview UI was restarted, but its existing daemon was
+  preserved to keep user terminal processes alive. Automatic completion-unread
+  changes take effect when that Host next starts the updated server binary.
+
+## Fixed trailing status slot (2026-09-24)
+
+- Conversation and project status now occupy a fixed 18px slot at the far right.
+  Hover/focus action buttons appear to its left; title padding accommodates them.
+  The status position is shared across running, waiting and unread indicators.
+- All 40 frontend tests and the native/production build passed. In-browser layout
+  inspection of the actual Sidebar component confirmed visible action bounds
+  (right 245px) remain left of the fixed status slot (248–266px). Both conversation
+  rows and collapsed projects were checked, with running and unread sample data.
+- Read-only inspection confirmed the existing preview daemon was still the old
+  process started at 12:11, and completed test conversation A had unread=false.
+  Replacing that daemon needs approval because it owns three live terminals.
+- Repaired the specific missed unread flag reported for completed test conversation
+  A through the existing mark-unread protocol action. Native screenshot/AX then
+  confirmed its blue unread dot while conversation B remained selected. This is
+  a one-time data repair, not evidence that the old daemon now marks completion
+  automatically. Updated UI was relaunched without stopping its three PTYs.
+
+## Context menus without duplicate ellipses (2026-09-24)
+
+- Removed project/conversation overflow buttons and their unused hover spacing.
+  Right-click and keyboard context-menu handlers remain; project new-task actions
+  remain left of the fixed status slot. Running dots now have no competing
+  ellipsis button on the same row.
+- Production/native build, formatting and strict ad-hoc signing passed. Native
+  right-click checks opened both conversation and project menus. A screenshot of
+  the actual running conversation confirmed one status indicator while hovered.
+  Only the UI restarted; the active task and Host terminal processes continued.
+
+## Sidebar terminal PR submission gate (2026-09-24)
+
+- Final `make ci` passed on the complete change: 24 Rust unit tests, 15
+  final-binary E2E tests, 40 frontend tests, formatting, generated protocol
+  consistency, workflow/shell lint, denied-warning Clippy, production frontend
+  build and Rust documentation. Native build/signature and UI checks are recorded
+  above. GitHub CI is a separate gate and must be checked on the submitted head.

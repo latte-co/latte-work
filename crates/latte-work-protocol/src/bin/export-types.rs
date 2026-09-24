@@ -5,6 +5,7 @@ fn main() {
     for declaration in [
         serde_json::Value::decl(),
         Project::decl(),
+        TerminalInfo::decl(),
         Status::decl(),
         Effort::decl(),
         Session::decl(),

@@ -8,6 +8,13 @@ export type JsonValue =
   | { [key in string]?: JsonValue }
   | null;
 export type Project = { id: string; name: string; path: string };
+export type TerminalInfo = {
+  id: string;
+  project_id: string;
+  title: string;
+  exited: boolean;
+  exit_code: number | null;
+};
 export type Status =
   | "ready"
   | "running"
@@ -92,6 +99,23 @@ export type ProviderSnapshot = { provider: Provider; credential: string };
 export type Request =
   | { method: "hello"; version: number }
   | { method: "projects" }
+  | { method: "terminals"; project_id: string }
+  | {
+      method: "create_terminal";
+      project_id: string;
+      terminal_id: string;
+      cols: number;
+      rows: number;
+    }
+  | { method: "read_terminal"; terminal_id: string; after: number }
+  | { method: "write_terminal"; terminal_id: string; data: Array<number> }
+  | {
+      method: "resize_terminal";
+      terminal_id: string;
+      cols: number;
+      rows: number;
+    }
+  | { method: "close_terminal"; terminal_id: string }
   | { method: "providers" }
   | {
       method: "models";
@@ -143,6 +167,16 @@ export type Request =
   | { method: "read_file"; project_id: string; path: string }
   | { method: "diff"; project_id: string };
 export type Response =
+  | { kind: "terminals"; terminals: Array<TerminalInfo> }
+  | { kind: "terminal"; terminal: TerminalInfo }
+  | {
+      kind: "terminal_output";
+      terminal: TerminalInfo;
+      data: Array<number>;
+      next: number;
+      has_more: boolean;
+      truncated: boolean;
+    }
   | {
       kind: "models";
       models: Array<string>;

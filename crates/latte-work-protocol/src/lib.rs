@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use ts_rs::TS;
 
-pub const VERSION: u32 = 8;
+pub const VERSION: u32 = 9;
 pub const MAX_FRAME: usize = 2 * 1024 * 1024;
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
@@ -11,6 +11,15 @@ pub struct Project {
     pub id: String,
     pub name: String,
     pub path: String,
+}
+/// Ephemeral PTY owned by the host daemon; never restored after daemon restart.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+pub struct TerminalInfo {
+    pub id: String,
+    pub project_id: String,
+    pub title: String,
+    pub exited: bool,
+    pub exit_code: Option<u32>,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "snake_case")]
@@ -208,6 +217,31 @@ pub enum Request {
         version: u32,
     },
     Projects,
+    Terminals {
+        project_id: String,
+    },
+    CreateTerminal {
+        project_id: String,
+        terminal_id: String,
+        cols: u16,
+        rows: u16,
+    },
+    ReadTerminal {
+        terminal_id: String,
+        after: f64,
+    },
+    WriteTerminal {
+        terminal_id: String,
+        data: Vec<u8>,
+    },
+    ResizeTerminal {
+        terminal_id: String,
+        cols: u16,
+        rows: u16,
+    },
+    CloseTerminal {
+        terminal_id: String,
+    },
     Providers,
     Models {
         agent: String,
@@ -306,6 +340,19 @@ pub enum Request {
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Response {
+    Terminals {
+        terminals: Vec<TerminalInfo>,
+    },
+    Terminal {
+        terminal: TerminalInfo,
+    },
+    TerminalOutput {
+        terminal: TerminalInfo,
+        data: Vec<u8>,
+        next: f64,
+        has_more: bool,
+        truncated: bool,
+    },
     Models {
         models: Vec<String>,
         provider: Option<String>,

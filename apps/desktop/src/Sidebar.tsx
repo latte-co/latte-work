@@ -2,12 +2,13 @@ import { useEffect, useState } from "react";
 import {
   Plus,
   Folder,
+  FolderOpen,
+  CirclePause,
   ChevronDown,
   ChevronRight,
   Settings2,
   Pin,
   Archive,
-  Ellipsis,
   MessageCirclePlus,
   PanelLeft,
   SquarePen,
@@ -105,6 +106,40 @@ export function Sidebar({ state }: { state: Workbench }) {
     const key = `${hostId}:${projectId}`;
     setSessionCache((old) => ({ ...old, [key]: sessions }));
   }, [hostId, projectId, connected, sessions]);
+  const backgroundProjects = JSON.stringify(
+    projects
+      .filter((p) => p.hostId !== hostId || p.id !== projectId)
+      .map((p) => ({ hostId: p.hostId, id: p.id })),
+  );
+  useEffect(() => {
+    let disposed = false;
+    let timer: ReturnType<typeof setTimeout>;
+    const refresh = async () => {
+      const targets: { hostId: string; id: string }[] =
+        JSON.parse(backgroundProjects);
+      for (const project of targets) {
+        if (disposed) return;
+        const key = `${project.hostId}:${project.id}`;
+        try {
+          const result = await request(project.hostId, {
+            method: "sessions",
+            project_id: project.id,
+          });
+          if (!disposed && result.kind === "sessions") {
+            setSessionCache((old) => ({ ...old, [key]: result.sessions }));
+          }
+        } catch {
+          // Keep the last known state; reconnect remains an explicit host action.
+        }
+      }
+      if (!disposed) timer = setTimeout(() => void refresh(), 5000);
+    };
+    void refresh();
+    return () => {
+      disposed = true;
+      clearTimeout(timer);
+    };
+  }, [backgroundProjects, connected]);
   async function loadProjectSessions(project: HostedProject) {
     const key = `${project.hostId}:${project.id}`;
     setLoadingProjects((old) => ({ ...old, [key]: true }));
@@ -175,27 +210,42 @@ export function Sidebar({ state }: { state: Workbench }) {
             </small>
           )}
         </span>
-        {["running", "waiting"].includes(s.status) && (
-          <span className={`session-dot ${s.status}`} />
-        )}
-        {s.unread && <span className="unread-dot" aria-label="未读" />}
+        <span className="row-status">
+          {s.status === "running" ? (
+            <span
+              className="session-progress"
+              role="img"
+              aria-label="执行中"
+              title="执行中"
+            >
+              <i />
+              <i />
+              <i />
+            </span>
+          ) : s.status === "waiting" ? (
+            <CirclePause
+              className="session-waiting"
+              size={14}
+              role="img"
+              aria-label="等待确认"
+            >
+              <title>等待确认</title>
+            </CirclePause>
+          ) : s.unread ? (
+            <span
+              className="unread-dot"
+              role="img"
+              aria-label="未读"
+              title="未读"
+            />
+          ) : null}
+        </span>
       </button>
     );
     if (shortcut) return <div key={`${s.hostId}:${s.id}`}>{row}</div>;
     return (
       <div className="session-item" key={`${s.hostId}:${s.id}`}>
         {row}
-        <button
-          className="session-more icon-button"
-          aria-label={`${s.title} 的更多操作`}
-          title="更多操作"
-          onClick={(event) => {
-            const rect = event.currentTarget.getBoundingClientRect();
-            showMenu({ x: rect.right, y: rect.bottom });
-          }}
-        >
-          <Ellipsis size={15} />
-        </button>
       </div>
     );
   };
@@ -269,9 +319,8 @@ export function Sidebar({ state }: { state: Workbench }) {
           const showArchived = selected
             ? state.showArchived
             : (archivedProjects[key] ?? false);
-          const hasActivity = projectSessions.some((s) =>
-            ["running", "waiting"].includes(s.status),
-          );
+          const running = projectSessions.some((s) => s.status === "running");
+          const waiting = projectSessions.some((s) => s.status === "waiting");
           const toggle = () => {
             setExpandedProjects((old) => ({ ...old, [key]: !expanded }));
             if (!expanded && !selected) void loadProjectSessions(p);
@@ -314,7 +363,7 @@ export function Sidebar({ state }: { state: Workbench }) {
                   title={`${p.path} · ${hosts.find((h) => h.id === p.hostId)?.name ?? ""}`}
                 >
                   <span className="project-folder">
-                    <Folder size={15} />
+                    {expanded ? <FolderOpen size={15} /> : <Folder size={15} />}
                     {p.hostId !== "local" && (
                       <span className="project-remote-mark" />
                     )}
@@ -325,20 +374,28 @@ export function Sidebar({ state }: { state: Workbench }) {
                       {hosts.find((h) => h.id === p.hostId)?.name}
                     </small>
                   )}
-                  {hasActivity && (
-                    <span className="project-activity" title="有运行中的任务" />
-                  )}
-                </button>
-                <button
-                  className="project-more icon-button"
-                  aria-label={`${p.name} 的更多操作`}
-                  title="更多操作"
-                  onClick={(event) => {
-                    const rect = event.currentTarget.getBoundingClientRect();
-                    showProjectMenu({ x: rect.right, y: rect.bottom });
-                  }}
-                >
-                  <Ellipsis size={15} />
+                  <span className="row-status">
+                    {!expanded &&
+                      (running ? (
+                        <span
+                          className="session-progress project-activity"
+                          role="img"
+                          aria-label="项目中有对话执行中"
+                          title="有对话执行中"
+                        >
+                          <i />
+                          <i />
+                          <i />
+                        </span>
+                      ) : waiting ? (
+                        <CirclePause
+                          className="session-waiting project-activity"
+                          size={14}
+                          role="img"
+                          aria-label="项目中有对话等待确认"
+                        />
+                      ) : null)}
+                  </span>
                 </button>
                 <button
                   className="project-new-task icon-button"

@@ -56,3 +56,15 @@ Provider protocol smoke tests can use a real installed Claude CLI with disposabl
 localhost upstream fixtures: `python3 scripts/smoke-providers.py --binary /path/to/latte-work-server --claude /path/to/claude`. This optional native check
 uses no paid model API; the automated `make ci` suite uses deterministic fixtures.
 See docs/providers.md for module boundaries, persistence and compatibility limits.
+
+## Sidebar terminal development
+
+The terminal requires protocol v9 on both the desktop and host. For isolated
+native tests, a debug desktop accepts `LATTE_WORK_SERVER` pointing at a wrapper
+that invokes the checkout's server with `--state-dir` in a temporary directory.
+Do not replace a user's running daemon to perform smoke tests.
+
+Focused checks: `cargo test -p latte-work-server --test e2e terminal_ --locked`
+and `npm test` (frontend includes PTY output-cursor and no-input-replay
+regressions). Native checks should cover Tab switching, panel hide/restore,
+multiple shells, resizing, shell exit, and keyboard copy/paste.

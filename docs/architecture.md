@@ -90,7 +90,7 @@ server state can mark a task completed.
 
 ## Protocol evolution
 
-Each connection must first send `hello { version: 8 }`. Version mismatches fail
+Each connection must first send `hello { version: 9 }`. Version mismatches fail
 before commands. A line is one JSON request or response; requests on a connection
 are serialized, while separate hosts/connections run independently. Application
 errors are typed response envelopes, distinct from broken transport errors.
@@ -100,7 +100,7 @@ project catalogs and caches them for offline display; server state remains autho
 Local folder selection uses the native Tauri dialog. Remote selection uses the v2
 `browse_directories` request (directory metadata only, absolute paths, bounded output).
 Project file previews still enforce the registered project root. Upgrade both desktop
-and host server for protocol v8; an old server fails the handshake explicitly.
+and host server for protocol v9; an old server fails the handshake explicitly.
 An unsaved task draft selects a host-scoped project before its first send. The
 desktop connects to that project's host and sends `create_session` and `send` to
 the same host with the selected project ID. A disconnected host disables send;
@@ -151,7 +151,7 @@ ledger with a nullable effort column; duplicate request identity includes effort
 Legacy session JSON and request rows retain null. `models` accepts an optional
 selected model and returns adapter effort levels. Known unsupported models are
 rejected before accepting a turn; unknown custom model IDs defer to the CLI.
-Both desktop and remote servers must use protocol v8 to avoid silently dropping
+Both desktop and remote servers must use the same protocol version to avoid dropping
 this option. The desktop never launches or controls the CLI directly.
 
 The v8 model catalog also accepts an optional registered `project_id` and returns
@@ -159,3 +159,50 @@ optional/default-empty `model_labels`. These are additive display metadata:
 older requests and responses remain valid, older Hosts fall back to raw model IDs,
 and selection/send semantics are unchanged. Native labels are resolved on the
 execution Host only when no Provider is bound; the UI does not read host settings.
+
+## Interactive terminals
+
+Protocol v9 adds host-owned PTYs (`terminals`, `create_terminal`, `read_terminal`,
+`write_terminal`, `resize_terminal`, `close_terminal`). Local and SSH use the same
+requests. The server starts the host user's default login shell in a registered
+project directory; the desktop only renders UTF-8 bytes with xterm.js. A terminal
+is a full user shell, not the read-only file preview or an agent approval channel.
+
+Creation uses a client UUID, is idempotent for that live terminal, and rejects
+reuse in another project. On a lost creation response, the UI lists terminals
+instead of spawning another shell. Input is serialized, bounded, and never
+replayed on transport failure. Unknown/partially delivered input is shown explicitly.
+The output cursor counts bytes; xterm's streaming decoder handles split Unicode.
+
+Each host permits 16 open terminals (including exited tabs), each with a 1 MiB
+output ring and 64 KiB read batches. Overrun is explicit. Input frames are at most
+16 KiB, with bounded UI/server queues and a 2-second write deadline. Nonblocking
+PTY I/O threads are cancellable. Dimensions are limited to 2–500 columns and
+1–300 rows. Close hangs up the shell and kills its foreground job, with a bounded
+shell kill fallback. Deliberately detached processes have ordinary shell semantics.
+
+Sidebar state belongs only to the conversation ID. Local storage retains its
+ordered tabs, selection, file location, visibility, expansion and width. First
+open and closing the last tab both show the empty launcher. Draft conversations
+have independent IDs; the first send copies their sidebar state to the persisted
+conversation. Tabs retain their original host/project resource bindings when the
+draft's target changes. Host/project are not part of the sidebar persistence key.
+
+Tabs/emulators survive hiding and conversation switches. Host PTYs survive
+client/SSH bridge disconnection. Reopening restores only that conversation's
+saved terminal IDs; listing a project never imports other conversations' terminals.
+They are ephemeral: output is not stored in SQLite, and a daemon restart never
+recreates shells or replays commands. Closing a tab explicitly stops its PTY;
+normal daemon shutdown closes all terminals. Remote hosts need a matching v9
+server; version mismatch remains an explicit connection failure.
+
+### Sidebar activity and unread state
+
+The Host marks a session unread atomically with its transition from active to
+completed, failed or stopped. Read acknowledgement is explicit and durable.
+The desktop acknowledges the selected conversation only after polling all of its
+available events while the window is visible and focused. Background completions
+remain unread. The sidebar distinguishes running, waiting for approval and unread
+states; collapsed projects aggregate running/waiting state. Other project lists
+are refreshed serially every five seconds without launching agents or reconnect
+prompts, so collapsing a project does not stop its status updates.
