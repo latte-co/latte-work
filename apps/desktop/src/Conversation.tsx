@@ -9,7 +9,10 @@ import {
   LoaderCircle,
 } from "lucide-react";
 import type { Effort, Event, Session } from "./protocol";
+import type { Host } from "./api";
+import type { HostedProject } from "./projectCatalog";
 import { ModelPicker } from "./ModelPicker";
+import { TaskProjectPicker } from "./TaskProjectPicker";
 import { activityTranscript } from "./activity";
 import { ToolGroup, ToolRow } from "./ToolActivity";
 export const statusNames = {
@@ -30,6 +33,11 @@ interface Props {
   available: boolean;
   projectName?: string;
   projectId?: string;
+  project?: HostedProject;
+  projects: HostedProject[];
+  hosts: Host[];
+  selectTaskProject: (project: HostedProject) => void;
+  openProject: () => void;
   send: (
     text: string,
     model: string | null,
@@ -47,6 +55,11 @@ export function Conversation({
   available,
   projectName,
   projectId,
+  project,
+  projects,
+  hosts,
+  selectTaskProject,
+  openProject,
   send,
   cancel,
   approve,
@@ -67,7 +80,16 @@ export function Conversation({
   const scroller = useRef<HTMLDivElement>(null);
   const follow = useRef(true);
   const composing = useRef(false);
+  const target = useRef(`${hostId}:${projectId}`);
   const active = session && ["running", "waiting"].includes(session.status);
+  useEffect(() => {
+    const next = `${hostId}:${projectId}`;
+    if (target.current !== next) {
+      setModel(null);
+      setEffort(null);
+      target.current = next;
+    }
+  }, [hostId, projectId]);
   useEffect(() => {
     if (follow.current)
       scroller.current?.scrollTo({ top: scroller.current.scrollHeight });
@@ -75,7 +97,7 @@ export function Conversation({
   useEffect(() => {
     if (!sending) setText("");
     follow.current = true;
-  }, [session?.id, projectName]);
+  }, [session?.id]);
   async function submit() {
     if (
       !text.trim() ||
@@ -230,6 +252,16 @@ export function Conversation({
         )}
       </div>
       <div className="composer-wrap">
+        {!session && (
+          <TaskProjectPicker
+            project={project}
+            projects={projects}
+            hosts={hosts}
+            disabled={sending}
+            onSelect={selectTaskProject}
+            onAddProject={openProject}
+          />
+        )}
         <div className={`composer ${!connected ? "disabled" : ""}`}>
           <textarea
             aria-label="任务输入"

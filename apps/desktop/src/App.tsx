@@ -16,6 +16,7 @@ import { Workspace } from "./Workspace";
 import { Sidebar } from "./Sidebar";
 import { SettingsPage } from "./SettingsPage";
 import { HostDialogs } from "./HostDialogs";
+import { SshPasswordDialog } from "./SshPasswordDialog";
 import { useWorkbench } from "./useWorkbench";
 
 export default function App() {
@@ -81,7 +82,6 @@ export default function App() {
                     className="panel-toggle icon-button"
                     title="新对话 (⌘ N)"
                     aria-label="新对话"
-                    disabled={!project || !connected}
                     onClick={() =>
                       void workbench
                         .createSession()
@@ -141,7 +141,11 @@ export default function App() {
             </div>
           )}
           <Conversation
-            key={`${hostId}:${projectId}:${workbench.viewRevision}`}
+            key={
+              session
+                ? `${hostId}:${projectId}:${session.id}:${workbench.viewRevision}`
+                : `draft:${workbench.viewRevision}`
+            }
             session={session}
             hostId={hostId}
             settingsOpen={workbench.modal === "settings"}
@@ -150,6 +154,17 @@ export default function App() {
             available={agent?.available ?? false}
             projectName={project?.name}
             projectId={project?.id}
+            project={project}
+            projects={workbench.projects}
+            hosts={workbench.hosts}
+            selectTaskProject={(target) => {
+              try {
+                workbench.selectTaskProject(target);
+              } catch (cause) {
+                setError(message(cause));
+              }
+            }}
+            openProject={workbench.openProject}
             send={send}
             cancel={() => {
               if (session)
@@ -192,6 +207,14 @@ export default function App() {
         <HostDialogs state={workbench} />
       </div>
       {workbench.modal === "settings" && <SettingsPage state={workbench} />}
+      {workbench.passwordPrompt && (
+        <SshPasswordDialog
+          key={workbench.passwordPrompt.id}
+          host={workbench.passwordPrompt}
+          submit={workbench.submitPassword}
+          cancel={workbench.cancelPasswordPrompt}
+        />
+      )}
     </>
   );
 }

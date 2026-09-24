@@ -26,7 +26,9 @@ export function AgentSettings({
   const [retry, setRetry] = useState(0);
   const [serverId, setServerId] = useState("");
   const generation = useRef(0);
-  const host = state.hosts.find((h) => h.id === hostId)!;
+  const host = state.hosts.find((h) => h.id === hostId) ?? localHost;
+  const unsupportedSync =
+    !!host.ssh && ((host.auth ?? "none") !== "none" || !!host.port);
   useEffect(() => {
     if (!active) {
       setBusy(false);
@@ -87,7 +89,7 @@ export function AgentSettings({
         agent,
         provider_id: choices[agent] || null,
         target: host.ssh
-          ? { ssh: host.ssh, server_path: host.server_path! }
+          ? { ssh: host.ssh, server_path: host.server_path ?? "" }
           : null,
       });
       if (result.kind !== "providers") throw new Error("关联响应不匹配");
@@ -114,7 +116,7 @@ export function AgentSettings({
         运行主机
         <Select
           label="运行主机"
-          value={hostId}
+          value={host.id}
           options={state.hosts.map((h) => ({ value: h.id, label: h.name }))}
           disabled={busy}
           onChange={setHostId}
@@ -213,10 +215,17 @@ export function AgentSettings({
                     : "此 Provider 已从本机删除，远端仍保留旧副本；请重新关联或恢复 CLI 配置。"}
                 </p>
               )}
+              {unsupportedSync && (
+                <p className="agent-sync-note">
+                  此主机使用单独的 SSH 认证或端口；远程 Provider
+                  同步目前仅支持系统 SSH 配置。
+                </p>
+              )}
               <button
                 className="primary wide"
                 disabled={
                   busy ||
+                  unsupportedSync ||
                   (!!choices[agent.id] &&
                     !compatible.some((p) => p.id === choices[agent.id]))
                 }

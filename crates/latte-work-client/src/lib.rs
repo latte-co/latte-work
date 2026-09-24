@@ -15,6 +15,13 @@ pub struct Client {
     output: FramedRead<ChildStdout, LinesCodec>,
     broken: bool,
 }
+
+pub enum SshAuthentication<'a> {
+    OpenSsh,
+    IdentityFile(&'a Path),
+    Password { askpass: &'a Path, socket: &'a Path },
+}
+
 impl Client {
     pub async fn local(binary: &Path, state: Option<&Path>) -> Result<Self> {
         let mut command = Command::new(binary);
@@ -25,28 +32,18 @@ impl Client {
         Self::spawn(command).await
     }
     pub async fn ssh(host: &str, binary: &str) -> Result<Self> {
-        validate_host(host)?;
-        if !binary.starts_with('/') || binary.contains(['\n', '\r', '\0']) {
-            bail!("远程 Server 必须是绝对路径");
-        }
-        let mut command = Command::new("ssh");
-        command.args([
-            "-T",
-            "-o",
-            "BatchMode=yes",
-            "-o",
-            "ConnectTimeout=10",
-            "-o",
-            "ServerAliveInterval=15",
-            "-o",
-            "ServerAliveCountMax=3",
-            "--",
-            host,
-        ]);
-        command.arg(format!("exec {} connect", shell_quote(binary)));
+        Self::ssh_with_auth(host, binary, None, SshAuthentication::OpenSsh).await
+    }
+    pub async fn ssh_with_auth(
+        host: &str,
+        binary: &str,
+        port: Option<u16>,
+        auth: SshAuthentication<'_>,
+    ) -> Result<Self> {
+        let command = ssh_command(host, binary, port, auth)?;
         Self::spawn(command)
             .await
-            .context("SSH 连接失败；请先在终端完成该 Host 的首次连接，并确认远程 Server 已安装")
+            .context("SSH 连接失败；请确认主机指纹已在终端验证，并检查认证方式和远程 Server")
     }
     async fn spawn(mut command: Command) -> Result<Self> {
         let mut child = command
@@ -71,6 +68,7 @@ impl Client {
             Response::Hello {
                 version: VERSION, ..
             } => Ok(client),
+            Response::Error { message, .. } => bail!("{message}"),
             other => bail!("不兼容的 Server: {other:?}"),
         }
     }
@@ -103,6 +101,96 @@ impl Client {
         }
     }
 }
+
+fn ssh_command(
+    host: &str,
+    binary: &str,
+    port: Option<u16>,
+    auth: SshAuthentication<'_>,
+) -> Result<Command> {
+    validate_host(host)?;
+    if (!binary.is_empty() && !binary.starts_with('/')) || binary.contains(['\n', '\r', '\0']) {
+        bail!("远程 Server 必须是绝对路径");
+    }
+    let mut command = Command::new("ssh");
+    command.arg("-T");
+    if let Some(port) = port {
+        if port == 0 {
+            bail!("SSH 端口必须是 1–65535");
+        }
+        command.arg("-p").arg(port.to_string());
+    }
+    match auth {
+        SshAuthentication::OpenSsh => {
+            command.args(["-o", "BatchMode=yes"]);
+        }
+        SshAuthentication::IdentityFile(path) => {
+            validate_identity_file(path)?;
+            command.args(["-o", "BatchMode=yes", "-o", "IdentitiesOnly=yes"]);
+            command.arg("-i").arg(path);
+        }
+        SshAuthentication::Password { askpass, socket } => {
+            if !askpass.is_absolute() || !socket.is_absolute() {
+                bail!("SSH 密码交互程序不可用");
+            }
+            command.args([
+                "-o",
+                "BatchMode=no",
+                "-o",
+                "PreferredAuthentications=password,keyboard-interactive",
+                "-o",
+                "PasswordAuthentication=yes",
+                "-o",
+                "KbdInteractiveAuthentication=yes",
+                "-o",
+                "PubkeyAuthentication=no",
+                "-o",
+                "NumberOfPasswordPrompts=1",
+                "-o",
+                "StrictHostKeyChecking=yes",
+                "-o",
+                "SendEnv=-LATTE_WORK_SSH_*",
+            ]);
+            command.env("SSH_ASKPASS", askpass);
+            command.env("SSH_ASKPASS_REQUIRE", "force");
+            command.env("DISPLAY", "latte-work");
+            command.env("LATTE_WORK_SSH_ASKPASS", "1");
+            command.env("LATTE_WORK_SSH_ASKPASS_SOCKET", socket);
+        }
+    }
+    command.args([
+        "-o",
+        "ConnectTimeout=10",
+        "-o",
+        "ServerAliveInterval=15",
+        "-o",
+        "ServerAliveCountMax=3",
+        "--",
+        host,
+    ]);
+    let remote_command = if binary.is_empty() {
+        // Noninteractive SSH often omits ~/.local/bin from PATH.
+        let discover = r#"if [ -x "$HOME/.local/bin/latte-work-server" ]; then
+  exec "$HOME/.local/bin/latte-work-server" connect
+fi
+candidate=$(command -v latte-work-server 2>/dev/null || true)
+if [ -n "$candidate" ] && [ -x "$candidate" ]; then
+  exec "$candidate" connect
+fi
+printf '%s\n' '{"kind":"error","code":"server_not_found","message":"远程未找到 latte-work-server；请先安装或填写绝对路径"}'"#;
+        format!("exec /bin/sh -c {}", shell_quote(discover))
+    } else {
+        format!("exec {} connect", shell_quote(binary))
+    };
+    command.arg(remote_command);
+    Ok(command)
+}
+pub fn validate_identity_file(path: &Path) -> Result<()> {
+    if !path.is_absolute() || !path.is_file() {
+        bail!("身份文件必须是本机现有文件的绝对路径");
+    }
+    Ok(())
+}
 pub fn validate_host(host: &str) -> Result<()> {
     if host.is_empty()
         || host.len() > 255
@@ -128,5 +216,127 @@ mod tests {
         }
         assert!(validate_host("user@devbox").is_ok());
         assert_eq!(shell_quote("/a'b/server"), "'/a'\\''b/server'");
+    }
+    #[test]
+    fn ssh_auth_modes_keep_password_out_of_arguments() {
+        let key = std::env::current_exe().unwrap();
+        let args = |command: Command| {
+            command
+                .as_std()
+                .get_args()
+                .map(|arg| arg.to_string_lossy().into_owned())
+                .collect::<Vec<_>>()
+        };
+        let normal =
+            args(ssh_command("user@devbox", "/server", None, SshAuthentication::OpenSsh).unwrap());
+        assert!(normal.contains(&"BatchMode=yes".to_owned()));
+        let identity = args(
+            ssh_command(
+                "devbox",
+                "/server",
+                Some(2222),
+                SshAuthentication::IdentityFile(&key),
+            )
+            .unwrap(),
+        );
+        assert!(identity.windows(2).any(|pair| pair == ["-p", "2222"]));
+        assert!(
+            identity
+                .windows(2)
+                .any(|pair| pair == ["-i", key.to_str().unwrap()])
+        );
+        assert!(identity.contains(&"IdentitiesOnly=yes".to_owned()));
+        let command = ssh_command(
+            "devbox",
+            "/server",
+            None,
+            SshAuthentication::Password {
+                askpass: &key,
+                socket: &key,
+            },
+        )
+        .unwrap();
+        let env = command
+            .as_std()
+            .get_envs()
+            .map(|(name, _)| name.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        assert!(env.contains(&"LATTE_WORK_SSH_ASKPASS_SOCKET".to_owned()));
+        assert!(!env.contains(&"LATTE_WORK_SSH_PASSWORD".to_owned()));
+        let password_args = args(command);
+        assert!(password_args.contains(&"StrictHostKeyChecking=yes".to_owned()));
+        assert!(password_args.contains(&"NumberOfPasswordPrompts=1".to_owned()));
+        assert!(password_args.contains(&"SendEnv=-LATTE_WORK_SSH_*".to_owned()));
+        assert!(!password_args.iter().any(|arg| arg.contains("secret-value")));
+        assert!(ssh_command("devbox", "/server", Some(0), SshAuthentication::OpenSsh).is_err());
+        assert!(
+            ssh_command(
+                "devbox",
+                "/server",
+                None,
+                SshAuthentication::IdentityFile(Path::new("relative"))
+            )
+            .is_err()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn empty_server_path_discovers_standard_remote_locations() {
+        use std::os::unix::fs::PermissionsExt;
+        use std::process::Command as StdCommand;
+
+        let command = ssh_command("devbox", "", None, SshAuthentication::OpenSsh).unwrap();
+        let remote = command.as_std().get_args().last().unwrap();
+        let root = std::env::temp_dir().join(format!(
+            "latte-work-ssh-discovery-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let local_bin = root.join(".local/bin");
+        let path_bin = root.join("path-bin");
+        std::fs::create_dir_all(&local_bin).unwrap();
+        std::fs::create_dir(&path_bin).unwrap();
+        let run = || {
+            StdCommand::new("/bin/sh")
+                .arg("-c")
+                .arg(remote)
+                .env("HOME", &root)
+                .env("PATH", format!("{}:/usr/bin:/bin", path_bin.display()))
+                .output()
+                .unwrap()
+        };
+        let make_binary = |path: &Path, label: &str| {
+            std::fs::write(
+                path,
+                format!("#!/bin/sh\nprintf '%s:%s\\n' '{label}' \"$1\"\n"),
+            )
+            .unwrap();
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).unwrap();
+        };
+        let local = local_bin.join("latte-work-server");
+        let fallback = path_bin.join("latte-work-server");
+        make_binary(&local, "local");
+        make_binary(&fallback, "path");
+        assert_eq!(run().stdout, b"local:connect\n");
+        std::fs::remove_file(&local).unwrap();
+        assert_eq!(run().stdout, b"path:connect\n");
+        std::fs::remove_file(&fallback).unwrap();
+        let missing = run();
+        let response: serde_json::Value = serde_json::from_slice(&missing.stdout).unwrap();
+        assert_eq!(response["code"], "server_not_found");
+        std::fs::remove_dir_all(root).unwrap();
+        assert!(
+            ssh_command(
+                "devbox",
+                "relative/server",
+                None,
+                SshAuthentication::OpenSsh
+            )
+            .is_err()
+        );
     }
 }

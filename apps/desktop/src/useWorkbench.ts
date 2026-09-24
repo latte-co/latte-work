@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import {
   connect,
+  disconnect,
   loadHosts,
   saveHosts,
   request,
@@ -16,16 +17,29 @@ import type {
   Project,
   Session,
   Request,
+  Response,
 } from "./protocol";
 import { appendEvents } from "./transcript";
 import { sessionAfterRefresh } from "./sessionSelection";
-import { hostedProjects, readCatalog, writeCatalog } from "./projectCatalog";
+import {
+  hostedProjects,
+  readCatalog,
+  writeCatalog,
+  type HostedProject,
+} from "./projectCatalog";
 
 import {
   pinnedSessions,
   readPinnedCache,
   type HostedSession,
 } from "./sessionNavigation";
+
+type PasswordChallenge = {
+  host: Host;
+  promise: Promise<Response>;
+  resolve: (response: Response) => void;
+  reject: (error: Error) => void;
+};
 
 function readSidebarPreference(): { open: boolean; width: number } {
   try {
@@ -47,6 +61,52 @@ function readSidebarPreference(): { open: boolean; width: number } {
 /** Coordinates host transport and durable projections; UI components render this state. */
 export function useWorkbench() {
   const [hosts, setHosts] = useState<Host[]>([localHost]);
+  const [passwordPrompt, setPasswordPrompt] = useState<Host | null>(null);
+  const passwordChallenges = useRef<PasswordChallenge[]>([]);
+  function requestPassword(target: Host): Promise<Response> {
+    const existing = passwordChallenges.current.find(
+      (challenge) => challenge.host.id === target.id,
+    );
+    if (existing) return existing.promise;
+    let resolve!: (response: Response) => void;
+    let reject!: (error: Error) => void;
+    const promise = new Promise<Response>((yes, no) => {
+      resolve = yes;
+      reject = no;
+    });
+    passwordChallenges.current.push({ host: target, promise, resolve, reject });
+    if (passwordChallenges.current.length === 1) setPasswordPrompt(target);
+    return promise;
+  }
+  function finishPasswordPrompt() {
+    passwordChallenges.current.shift();
+    setPasswordPrompt(passwordChallenges.current[0]?.host ?? null);
+  }
+  async function submitPassword(password: string) {
+    const challenge = passwordChallenges.current[0];
+    if (!challenge) return;
+    const result = await connect(challenge.host, password);
+    if (result.kind !== "hello")
+      throw new Error(result.kind === "error" ? result.message : "连接失败");
+    finishPasswordPrompt();
+    challenge.resolve(result);
+  }
+  function cancelPasswordPrompt() {
+    const challenge = passwordChallenges.current[0];
+    if (!challenge) return;
+    finishPasswordPrompt();
+    challenge.reject(new Error("已取消 SSH 密码输入"));
+  }
+  async function connectWithPrompt(target: Host): Promise<Response> {
+    try {
+      return await connect(target);
+    } catch (error) {
+      const raw = error instanceof Error ? error.message : String(error);
+      if (target.auth === "password" && raw === "SSH_PASSWORD_REQUIRED")
+        return requestPassword(target);
+      throw error;
+    }
+  }
   const [hostId, setHostId] = useState("local");
   const [retry, setRetry] = useState(0);
   const [connected, setConnected] = useState(false);
@@ -121,15 +181,15 @@ export function useWorkbench() {
   }, [hosts]);
   const [events, setEvents] = useState<Event[]>([]);
   const [error, setError] = useState("");
-  const [modal, setModal] = useState<"project" | "host" | "settings" | null>(
-    null,
-  );
+  const [modal, setModal] = useState<"project" | "settings" | null>(null);
+  const [settingsTab, setSettingsTab] = useState<
+    "agents" | "providers" | "ssh"
+  >("agents");
+  const [settingsReturnToProject, setSettingsReturnToProject] = useState(false);
   const [busy, setBusy] = useState(false);
   const [projectPath, setProjectPath] = useState("");
   const [projectName, setProjectName] = useState("");
   const [projectHostId, setProjectHostId] = useState("local");
-  const [ssh, setSsh] = useState("");
-  const [serverPath, setServerPath] = useState("");
   const [panel, setPanel] = useState(true);
   const [sidebarOpen, setSidebarOpen] = useState(
     () => readSidebarPreference().open,
@@ -185,7 +245,7 @@ export function useWorkbench() {
   }
   async function refreshHost(target: Host) {
     try {
-      const hello = await connect(target);
+      const hello = await connectWithPrompt(target);
       if (hello.kind !== "hello")
         throw new Error(hello.kind === "error" ? hello.message : "连接失败");
       const result = await request(target.id, { method: "projects" });
@@ -202,7 +262,7 @@ export function useWorkbench() {
     if (!native) return;
     let disposed = false;
     for (const target of hosts) {
-      void connect(target)
+      void connectWithPrompt(target)
         .then(async (hello) => {
           if (hello.kind !== "hello")
             throw new Error(
@@ -231,7 +291,7 @@ export function useWorkbench() {
     let disposed = false;
     setConnecting(true);
     setConnected(false);
-    void connect(host)
+    void connectWithPrompt(host)
       .then(async (r) => {
         if (disposed) return;
         if (r.kind !== "hello")
@@ -240,17 +300,26 @@ export function useWorkbench() {
         setAgent(r.agents.find((a) => a.id === "claude"));
         const result = await request(host.id, { method: "projects" });
         if (disposed) return;
+        let missingProject = false;
         if (result.kind === "projects") {
           updateProjects(host.id, result.projects);
+          missingProject =
+            selection.current.hostId === host.id &&
+            !!selection.current.projectId &&
+            !result.projects.some((p) => p.id === selection.current.projectId);
           setProjectId((id) =>
-            result.projects.some((p) => p.id === id)
-              ? id
+            id
+              ? result.projects.some((p) => p.id === id)
+                ? id
+                : ""
               : (result.projects[0]?.id ?? ""),
           );
         }
         setConnected(true);
         setHostErrors((old) => ({ ...old, [host.id]: "" }));
-        setError("");
+        setError(
+          missingProject ? "所选项目已不在该主机上，请重新选择项目" : "",
+        );
       })
       .catch((e) => {
         if (!disposed) setError(message(e));
@@ -422,8 +491,9 @@ export function useWorkbench() {
       disposed = true;
     };
   }, [hostId, sessionId, connected]);
-  async function createSession(): Promise<void> {
-    if (!project || !connected) return;
+  async function createSession(target?: HostedProject): Promise<void> {
+    if (target && !hosts.some((h) => h.id === target.hostId))
+      throw new Error("项目所在主机已移除");
     pendingSession.current = null;
     draft.current = true;
     selectedSessionId.current = "";
@@ -431,7 +501,39 @@ export function useWorkbench() {
     setEvents([]);
     setShowArchived(false);
     setError("");
+    if (target && (target.hostId !== hostId || target.id !== projectId)) {
+      setSessions([]);
+      if (target.hostId !== hostId) {
+        setConnected(false);
+        setAgent(undefined);
+        setServerId("");
+        setHostId(target.hostId);
+      }
+      setProjectId(target.id);
+    }
     resetConversationView();
+  }
+  function selectTaskProject(target: HostedProject) {
+    const targetHostId = target.hostId;
+    const id = target.id;
+    if (!hosts.some((h) => h.id === targetHostId))
+      throw new Error("项目所在主机已移除");
+    if (targetHostId === hostId && id === projectId) return;
+    pendingSession.current = null;
+    draft.current = true;
+    selectedSessionId.current = "";
+    setSessionId("");
+    setSessions([]);
+    setEvents([]);
+    setShowArchived(false);
+    setError("");
+    if (targetHostId !== hostId) {
+      setConnected(false);
+      setAgent(undefined);
+      setServerId("");
+      setHostId(targetHostId);
+    }
+    setProjectId(id);
   }
   async function persistSession(
     revision: number,
@@ -467,9 +569,7 @@ export function useWorkbench() {
       if (
         (event.metaKey || event.ctrlKey) &&
         event.key.toLowerCase() === "n" &&
-        !modal &&
-        connected &&
-        projectId
+        !modal
       ) {
         event.preventDefault();
         void createSession().catch((e) => setError(message(e)));
@@ -479,7 +579,7 @@ export function useWorkbench() {
     };
     window.addEventListener("keydown", key);
     return () => window.removeEventListener("keydown", key);
-  }, [projectId, hostId, connected, modal, busy]);
+  }, [modal, busy]);
   async function send(
     text: string,
     model: string | null,
@@ -542,7 +642,7 @@ export function useWorkbench() {
     try {
       const target = hosts.find((h) => h.id === projectHostId);
       if (!target) throw new Error("请选择项目所在主机");
-      const hello = await connect(target);
+      const hello = await connectWithPrompt(target);
       if (hello.kind !== "hello")
         throw new Error(hello.kind === "error" ? hello.message : "连接失败");
       const r = await request(target.id, {
@@ -558,7 +658,9 @@ export function useWorkbench() {
             r.project,
           ],
         }));
-        selectProject(target.id, r.project.id);
+        if (draft.current)
+          selectTaskProject({ ...r.project, hostId: target.id });
+        else selectProject(target.id, r.project.id);
         if (target.id === hostId && !connected) setRetry((v) => v + 1);
         setModal(null);
         setProjectPath("");
@@ -570,31 +672,33 @@ export function useWorkbench() {
       setBusy(false);
     }
   }
-  async function addHost(e: React.FormEvent) {
-    e.preventDefault();
-    setBusy(true);
-    try {
-      const value: Host = {
-        id: crypto.randomUUID(),
-        name: ssh.trim(),
-        ssh: ssh.trim(),
-        server_path: serverPath.trim(),
-      };
-      const result = await connect(value);
-      if (result.kind !== "hello") throw new Error("远程 Server 握手失败");
-      const updated = [...hosts, value];
-      await saveHosts(updated);
-      setHosts(updated);
-      setProjectHostId(value.id);
-      setProjectPath("");
-      setModal("project");
-      setSsh("");
-      setServerPath("");
-      setError("");
-    } catch (e) {
-      setError(message(e));
-    } finally {
-      setBusy(false);
+  async function saveSshHost(value: Host, password?: string) {
+    const result = await connect(value, password);
+    if (result.kind !== "hello") throw new Error("远程 Server 握手失败");
+    const updated = hosts.some((host) => host.id === value.id)
+      ? hosts.map((host) => (host.id === value.id ? value : host))
+      : [...hosts, value];
+    await saveHosts(updated);
+    setHosts(updated);
+    setHostErrors((old) => ({ ...old, [value.id]: "" }));
+    setProjectHostId(value.id);
+    if (value.id === hostId) setRetry((count) => count + 1);
+  }
+  async function removeSshHost(id: string) {
+    const updated = hosts.filter((host) => host.id !== id);
+    await saveHosts(updated);
+    await disconnect(id);
+    setHosts(updated);
+    setHostErrors((old) => {
+      const next = { ...old };
+      delete next[id];
+      return next;
+    });
+    if (projectHostId === id) setProjectHostId("local");
+    if (hostId === id) {
+      setHostId("local");
+      setProjectId("");
+      setRetry((count) => count + 1);
     }
   }
   function selectProject(targetHostId: string, id: string) {
@@ -687,6 +791,9 @@ export function useWorkbench() {
   }
   return {
     hosts,
+    passwordPrompt,
+    submitPassword,
+    cancelPasswordPrompt,
     hostId,
     setHostId,
     connected,
@@ -711,6 +818,10 @@ export function useWorkbench() {
     setError,
     modal,
     setModal,
+    settingsTab,
+    setSettingsTab,
+    settingsReturnToProject,
+    setSettingsReturnToProject,
     busy,
     projectPath,
     setProjectPath,
@@ -722,10 +833,8 @@ export function useWorkbench() {
     renameProject,
     removeProject,
     refreshHost,
-    ssh,
-    setSsh,
-    serverPath,
-    setServerPath,
+    saveSshHost,
+    removeSshHost,
     panel,
     setPanel,
     sidebarOpen,
@@ -736,9 +845,9 @@ export function useWorkbench() {
     project,
     session,
     createSession,
+    selectTaskProject,
     send,
     addProject,
-    addHost,
     selectProject,
     resize,
     setRetry,
