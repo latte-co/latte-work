@@ -64,7 +64,7 @@ export default function App() {
           onPointerDown={(e) => resize(e, "left")}
         />
         <main className="main">
-          <header className="topbar" data-tauri-drag-region>
+          <header className="topbar" data-tauri-drag-region="deep">
             <div className="topbar-project">
               {!sidebarOpen && (
                 <div className="topbar-controls">

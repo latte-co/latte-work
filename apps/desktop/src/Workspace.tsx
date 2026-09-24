@@ -65,7 +65,7 @@ export function Workspace({
   }, [hostId, project?.id, path, file, tab, revision]);
   return (
     <aside id="project-workspace" className="workspace">
-      <header>
+      <header data-tauri-drag-region="deep">
         <div className="workspace-tabs">
           <button
             className={tab === "files" ? "active" : ""}
