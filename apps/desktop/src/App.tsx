@@ -188,22 +188,22 @@ export default function App() {
             }}
           />
         </main>
-        {panel && (
-          <>
-            <div
-              className="resize-handle"
-              role="separator"
-              aria-label="调整工作区宽度"
-              onPointerDown={(e) => resize(e, "right")}
-            />
-            <Workspace
-              key={`${hostId}:${projectId}`}
-              hostId={hostId}
-              project={project}
-              close={() => setPanel(false)}
-            />
-          </>
-        )}
+        <div
+          className="resize-handle"
+          hidden={!panel}
+          role="separator"
+          aria-label="调整工作区宽度"
+          onPointerDown={(e) => resize(e, "right")}
+        />
+        <Workspace
+          workspaceId={workbench.workspaceId}
+          hostId={hostId}
+          hostName={host.name}
+          project={project}
+          visible={panel && workbench.modal !== "settings"}
+          connected={connected}
+          close={() => setPanel(false)}
+        />
         <HostDialogs state={workbench} />
       </div>
       {workbench.modal === "settings" && <SettingsPage state={workbench} />}

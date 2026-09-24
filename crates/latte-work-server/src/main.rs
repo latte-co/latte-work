@@ -4,6 +4,7 @@ mod files;
 mod providers;
 mod runtime;
 mod store;
+mod terminal;
 use anyhow::{Context, Result, bail};
 use futures_util::StreamExt;
 use latte_work_protocol::{AgentInfo, MAX_FRAME, Request, Response, VERSION};
@@ -26,6 +27,7 @@ use tokio_util::codec::{FramedRead, LinesCodec};
 
 #[derive(Clone)]
 struct Service {
+    terminals: terminal::SharedTerminals,
     database: Database,
     runs: Runs,
     claude: String,
@@ -160,6 +162,7 @@ async fn serve(dir: &Path) -> Result<()> {
         ),
     };
     let service = Service {
+        terminals: Arc::new(Mutex::new(terminal::Terminals::default())),
         providers: Arc::new(Mutex::new(providers::ProviderStore::open(dir)?)),
         database,
         runs: Arc::new(Mutex::new(HashMap::new())),
@@ -188,6 +191,11 @@ async fn serve(dir: &Path) -> Result<()> {
         _=terminate.recv()=>break,
         }
     }
+    service
+        .terminals
+        .lock()
+        .map_err(|_| anyhow::anyhow!("终端锁异常"))?
+        .close_all();
     let controls: Vec<_> = service
         .runs
         .lock()
@@ -333,6 +341,57 @@ async fn dispatch(s: &Service, request: Request) -> Result<Response> {
             .lock()
             .map_err(|_| anyhow::anyhow!("Provider 配置锁异常"))?
             .sync(&agent, snapshot)?,
+        Request::WriteTerminal { terminal_id, data } => {
+            terminal::write(&s.terminals, &terminal_id, data).await?
+        }
+        Request::CreateTerminal {
+            project_id,
+            terminal_id,
+            cols,
+            rows,
+        } => {
+            let project = db(&s.database, |d| d.project(&project_id))?;
+            let terminals = s.terminals.clone();
+            tokio::task::spawn_blocking(move || {
+                terminals
+                    .lock()
+                    .map_err(|_| anyhow::anyhow!("终端锁异常"))?
+                    .create(
+                        project_id,
+                        Path::new(&project.path),
+                        terminal_id,
+                        cols,
+                        rows,
+                    )
+            })
+            .await??
+        }
+        Request::Terminals { project_id } => {
+            db(&s.database, |d| d.project(&project_id))?;
+            s.terminals
+                .lock()
+                .map_err(|_| anyhow::anyhow!("终端锁异常"))?
+                .list(&project_id)?
+        }
+        Request::ReadTerminal { terminal_id, after } => s
+            .terminals
+            .lock()
+            .map_err(|_| anyhow::anyhow!("终端锁异常"))?
+            .read(&terminal_id, after)?,
+        Request::ResizeTerminal {
+            terminal_id,
+            cols,
+            rows,
+        } => s
+            .terminals
+            .lock()
+            .map_err(|_| anyhow::anyhow!("终端锁异常"))?
+            .resize(&terminal_id, cols, rows)?,
+        Request::CloseTerminal { terminal_id } => s
+            .terminals
+            .lock()
+            .map_err(|_| anyhow::anyhow!("终端锁异常"))?
+            .close(&terminal_id),
         Request::Projects => Response::Projects {
             projects: db(&s.database, |d| d.projects())?,
         },

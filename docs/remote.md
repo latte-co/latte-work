@@ -48,7 +48,7 @@ saved host in the project form. Use **添加** to browse its folders, or enter a
 absolute path, then create the project. Local and remote projects share the
 sidebar; selecting a project routes files, Git and Claude to its host.
 
-This build uses protocol v8 (including model selection, Provider configuration and directory browsing). Upgrade
+This build uses protocol v9 (including sidebar PTY terminals, model selection and directory browsing). Upgrade
 the remote server from the same source before connecting; older daemons fail
 the handshake explicitly. Stop an old daemon only after finishing its tasks.
 

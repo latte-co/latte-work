@@ -272,6 +272,11 @@ impl Store {
     }
     pub fn state(&mut self, id: &str, status: Status, message: Option<String>) -> Result<()> {
         let mut session = self.session(id)?;
+        if session.status.active()
+            && matches!(status, Status::Completed | Status::Failed | Status::Stopped)
+        {
+            session.unread = true;
+        }
         session.status = status.clone();
         let tx = self.db.transaction()?;
         tx.execute(
@@ -444,6 +449,41 @@ mod tests {
         store.pin_session(&s.id, true).unwrap();
         store.remove_project(&p.id).unwrap();
         assert!(store.pinned_sessions().unwrap().is_empty());
+    }
+    #[test]
+    fn turn_completion_persists_unread_until_acknowledged() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("state.db");
+        let mut store = Store::open(&path).unwrap();
+        let project = store.add_project(tmp.path()).unwrap();
+        let session = store.create_session(project.id, "claude".into()).unwrap();
+        for (index, final_status) in [Status::Completed, Status::Failed, Status::Stopped]
+            .into_iter()
+            .enumerate()
+        {
+            store
+                .begin(
+                    &session.id,
+                    &format!("request-{index}"),
+                    "hello",
+                    None,
+                    None,
+                )
+                .unwrap();
+            assert!(!store.session(&session.id).unwrap().unread);
+            store.state(&session.id, Status::Waiting, None).unwrap();
+            assert!(!store.session(&session.id).unwrap().unread);
+            store
+                .state(&session.id, final_status.clone(), None)
+                .unwrap();
+            assert!(store.session(&session.id).unwrap().unread);
+            drop(store);
+            store = Store::open(&path).unwrap();
+            assert!(store.session(&session.id).unwrap().unread);
+            store.mark_session_unread(&session.id, false).unwrap();
+            store.state(&session.id, final_status, None).unwrap();
+            assert!(!store.session(&session.id).unwrap().unread);
+        }
     }
     #[test]
     fn legacy_sessions_default_to_unarchived_and_unpinned() {

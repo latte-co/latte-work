@@ -26,6 +26,7 @@ impl Host {
             .arg("--state-dir")
             .arg(directory.path())
             .env("LATTE_WORK_CLAUDE", fixture)
+            .env("SHELL", "/bin/sh")
             .env("CLAUDE_CONFIG_DIR", directory.path().join("claude-config"))
             .stdin(Stdio::null())
             .stdout(Stdio::null())
@@ -1101,4 +1102,402 @@ async fn native_model_names_are_host_project_scoped_and_do_not_override_provider
     .await;
     assert!(matches!(ask(&mut c, models(Some(registered.id))).await,
         Response::Models { model_labels, provider: Some(_), .. } if model_labels.is_empty()));
+}
+
+async fn terminal_project(client: &mut Client, path: &Path) -> String {
+    match ask(
+        client,
+        Request::AddProject {
+            path: path.to_string_lossy().into_owned(),
+            name: None,
+        },
+    )
+    .await
+    {
+        Response::Project { project } => project.id,
+        r => panic!("{r:?}"),
+    }
+}
+async fn terminal_write(client: &mut Client, id: &str, data: &[u8]) {
+    assert!(matches!(
+        ask(
+            client,
+            Request::WriteTerminal {
+                terminal_id: id.into(),
+                data: data.to_vec()
+            }
+        )
+        .await,
+        Response::Ok
+    ));
+}
+async fn terminal_until(client: &mut Client, id: &str, cursor: &mut f64, needle: &str) -> String {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut bytes = Vec::new();
+    loop {
+        match ask(
+            client,
+            Request::ReadTerminal {
+                terminal_id: id.into(),
+                after: *cursor,
+            },
+        )
+        .await
+        {
+            Response::TerminalOutput {
+                data,
+                next,
+                truncated,
+                ..
+            } => {
+                assert!(!truncated);
+                *cursor = next;
+                bytes.extend(data);
+                let output = String::from_utf8_lossy(&bytes);
+                if output.contains(needle) {
+                    return output.into_owned();
+                }
+            }
+            r => panic!("{r:?}"),
+        }
+        assert!(
+            Instant::now() < deadline,
+            "missing {needle:?}, output: {:?}",
+            String::from_utf8_lossy(&bytes)
+        );
+        tokio::time::sleep(Duration::from_millis(30)).await;
+    }
+}
+#[tokio::test]
+async fn terminal_pty_cwd_resize_unicode_reconnect_interrupt_and_exit() {
+    let host = Host::start().await;
+    let mut client = host.client().await;
+    let project = tempfile::tempdir().unwrap();
+    let project_id = terminal_project(&mut client, project.path()).await;
+    let id = uuid::Uuid::new_v4().to_string();
+    for _ in 0..2 {
+        assert!(matches!(
+            ask(
+                &mut client,
+                Request::CreateTerminal {
+                    project_id: project_id.clone(),
+                    terminal_id: id.clone(),
+                    cols: 80,
+                    rows: 24
+                }
+            )
+            .await,
+            Response::Terminal { .. }
+        ));
+    }
+    assert!(
+        matches!(ask(&mut client, Request::Terminals {project_id:project_id.clone()}).await, Response::Terminals {terminals} if terminals.len()==1)
+    );
+    let mut cursor = 0.0;
+    terminal_write(
+        &mut client,
+        &id,
+        b"stty -echo; printf '\\nREADY:%s\\n' yes\n",
+    )
+    .await;
+    terminal_until(&mut client, &id, &mut cursor, "READY:yes\r\n").await;
+    terminal_write(
+        &mut client,
+        &id,
+        "test -t 0 && test -t 1 && printf 'TTY:%s\\n' yes; pwd; printf '中文🙂\\n'\n".as_bytes(),
+    )
+    .await;
+    let output = terminal_until(&mut client, &id, &mut cursor, "中文🙂\r\n").await;
+    assert!(output.contains("TTY:yes\r\n"));
+    assert!(output.contains(project.path().canonicalize().unwrap().to_str().unwrap()));
+    assert!(matches!(
+        ask(
+            &mut client,
+            Request::ResizeTerminal {
+                terminal_id: id.clone(),
+                cols: 103,
+                rows: 37
+            }
+        )
+        .await,
+        Response::Ok
+    ));
+    terminal_write(&mut client, &id, b"stty size\n").await;
+    terminal_until(&mut client, &id, &mut cursor, "37 103\r\n").await;
+    drop(client);
+    let mut client = host.client().await;
+    terminal_write(&mut client, &id, b"printf 'RECOVER:%s\\n' yes\n").await;
+    terminal_until(&mut client, &id, &mut cursor, "RECOVER:yes\r\n").await;
+    terminal_write(&mut client, &id, b"sleep 30\n").await;
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    terminal_write(&mut client, &id, b"\x03").await;
+    terminal_write(&mut client, &id, b"printf 'INTERRUPTED:%s\\n' yes\n").await;
+    terminal_until(&mut client, &id, &mut cursor, "INTERRUPTED:yes\r\n").await;
+    terminal_write(&mut client, &id, b"exit 7\n").await;
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let response = ask(
+            &mut client,
+            Request::ReadTerminal {
+                terminal_id: id.clone(),
+                after: cursor,
+            },
+        )
+        .await;
+        match response {
+            Response::TerminalOutput { terminal, next, .. } => {
+                cursor = next;
+                if terminal.exited {
+                    assert_eq!(terminal.exit_code, Some(7));
+                    break;
+                }
+            }
+            r => panic!("{r:?}"),
+        }
+        assert!(Instant::now() < deadline);
+        tokio::time::sleep(Duration::from_millis(30)).await;
+    }
+    for _ in 0..2 {
+        assert!(matches!(
+            ask(
+                &mut client,
+                Request::CloseTerminal {
+                    terminal_id: id.clone()
+                }
+            )
+            .await,
+            Response::Ok
+        ));
+    }
+    assert!(matches!(
+        ask(
+            &mut client,
+            Request::ReadTerminal {
+                terminal_id: id,
+                after: cursor
+            }
+        )
+        .await,
+        Response::Error { .. }
+    ));
+}
+#[tokio::test]
+async fn terminal_limits_project_isolation_and_close_foreground_process() {
+    let host = Host::start().await;
+    let mut client = host.client().await;
+    let project = tempfile::tempdir().unwrap();
+    let other = tempfile::tempdir().unwrap();
+    let project_id = terminal_project(&mut client, project.path()).await;
+    let other_id = terminal_project(&mut client, other.path()).await;
+    let id = uuid::Uuid::new_v4().to_string();
+    for (project, cols) in [("missing".to_owned(), 80), (project_id.clone(), 0)] {
+        assert!(matches!(
+            ask(
+                &mut client,
+                Request::CreateTerminal {
+                    project_id: project,
+                    terminal_id: id.clone(),
+                    cols,
+                    rows: 24
+                }
+            )
+            .await,
+            Response::Error { .. }
+        ));
+    }
+    assert!(matches!(
+        ask(
+            &mut client,
+            Request::CreateTerminal {
+                project_id: project_id.clone(),
+                terminal_id: id.clone(),
+                cols: 80,
+                rows: 24
+            }
+        )
+        .await,
+        Response::Terminal { .. }
+    ));
+    assert!(matches!(
+        ask(
+            &mut client,
+            Request::CreateTerminal {
+                project_id: other_id.clone(),
+                terminal_id: id.clone(),
+                cols: 80,
+                rows: 24
+            }
+        )
+        .await,
+        Response::Error { .. }
+    ));
+    assert!(
+        matches!(ask(&mut client,Request::Terminals {project_id:other_id}).await,Response::Terminals {terminals} if terminals.is_empty())
+    );
+    assert!(matches!(
+        ask(
+            &mut client,
+            Request::WriteTerminal {
+                terminal_id: id.clone(),
+                data: vec![0; 16385]
+            }
+        )
+        .await,
+        Response::Error { .. }
+    ));
+    let pid_file = project.path().join("foreground.pid");
+    // Exec keeps the foreground job PID, making close observable outside the PTY.
+    terminal_write(
+        &mut client,
+        &id,
+        b"sh -c 'echo $$ > foreground.pid; exec sleep 60'\n",
+    )
+    .await;
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !pid_file.exists() {
+        assert!(Instant::now() < deadline);
+        tokio::time::sleep(Duration::from_millis(30)).await;
+    }
+    let pid = Pid::from_raw(
+        std::fs::read_to_string(pid_file)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap(),
+    );
+    assert!(kill(pid, None).is_ok());
+    ask(&mut client, Request::CloseTerminal { terminal_id: id }).await;
+    while kill(pid, None).is_ok() {
+        assert!(
+            Instant::now() < deadline,
+            "foreground process survived close"
+        );
+        tokio::time::sleep(Duration::from_millis(30)).await;
+    }
+    // A second PTY is independent and usable after the first has been terminated.
+    let id = uuid::Uuid::new_v4().to_string();
+    ask(
+        &mut client,
+        Request::CreateTerminal {
+            project_id,
+            terminal_id: id.clone(),
+            cols: 80,
+            rows: 24,
+        },
+    )
+    .await;
+    terminal_write(&mut client, &id, b"printf '\\nSECOND:%s\\n' yes\n").await;
+    terminal_until(&mut client, &id, &mut 0.0, "SECOND:yes\r\n").await;
+    ask(&mut client, Request::CloseTerminal { terminal_id: id }).await;
+}
+
+#[tokio::test]
+async fn terminal_daemon_shutdown_cleans_up_and_restart_never_replays() {
+    let mut host = Host::start().await;
+    let mut client = host.client().await;
+    let project = tempfile::tempdir().unwrap();
+    let project_id = terminal_project(&mut client, project.path()).await;
+    let id = uuid::Uuid::new_v4().to_string();
+    ask(
+        &mut client,
+        Request::CreateTerminal {
+            project_id: project_id.clone(),
+            terminal_id: id.clone(),
+            cols: 80,
+            rows: 24,
+        },
+    )
+    .await;
+    terminal_write(
+        &mut client,
+        &id,
+        b"echo $$ > shell.pid; printf '\\nLIVE:%s\\n' yes\n",
+    )
+    .await;
+    terminal_until(&mut client, &id, &mut 0.0, "LIVE:yes\r\n").await;
+    let pid = Pid::from_raw(
+        std::fs::read_to_string(project.path().join("shell.pid"))
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap(),
+    );
+    kill(Pid::from_raw(host.process.id() as i32), Signal::SIGTERM).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(6);
+    while host.process.try_wait().unwrap().is_none() {
+        assert!(Instant::now() < deadline, "daemon shutdown timed out");
+        tokio::time::sleep(Duration::from_millis(30)).await;
+    }
+    assert!(
+        kill(pid, None).is_err(),
+        "PTY shell survived daemon shutdown"
+    );
+    drop(client);
+    host.process = Command::new(env!("CARGO_BIN_EXE_latte-work-server"))
+        .arg("serve")
+        .arg("--state-dir")
+        .arg(host.directory.path())
+        .env("LATTE_WORK_CLAUDE", "/missing-test-claude")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !host.directory.path().join("control.sock").exists() {
+        assert!(Instant::now() < deadline);
+        tokio::time::sleep(Duration::from_millis(30)).await;
+    }
+    let mut client = host.client().await;
+    assert!(
+        matches!(ask(&mut client,Request::Terminals {project_id}).await,Response::Terminals {terminals} if terminals.is_empty())
+    );
+    assert!(matches!(
+        ask(
+            &mut client,
+            Request::ReadTerminal {
+                terminal_id: id.clone(),
+                after: 0.0
+            }
+        )
+        .await,
+        Response::Error { .. }
+    ));
+    assert!(matches!(
+        ask(
+            &mut client,
+            Request::WriteTerminal {
+                terminal_id: id,
+                data: b"touch replayed\n".to_vec()
+            }
+        )
+        .await,
+        Response::Error { .. }
+    ));
+    assert!(!project.path().join("replayed").exists());
+}
+
+#[tokio::test]
+async fn completed_turn_is_unread_until_acknowledged_across_clients() {
+    let host = Host::start().await;
+    let mut client = host.client().await;
+    let project = tempfile::tempdir().unwrap();
+    let id = session(&mut client, project.path()).await;
+    send(&mut client, &id, "unread-turn", "hello").await;
+    wait(&mut client, &id, Status::Completed).await;
+    drop(client);
+    let mut client = host.client().await;
+    assert!(matches!(
+        ask(&mut client, Request::Poll { session_id: id.clone(), after: 0.0 }).await,
+        Response::Events { session, .. } if session.unread && session.status == Status::Completed
+    ));
+    assert!(matches!(
+        ask(&mut client, Request::MarkSessionUnread { session_id: id.clone(), unread: false }).await,
+        Response::Session { session } if !session.unread
+    ));
+    let mut other = host.client().await;
+    assert!(matches!(
+        ask(&mut other, Request::Poll { session_id: id, after: 0.0 }).await,
+        Response::Events { session, .. } if !session.unread
+    ));
 }

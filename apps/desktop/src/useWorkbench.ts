@@ -1,3 +1,8 @@
+import {
+  copyWorkspace,
+  useWorkspaceState,
+  workspaceKey,
+} from "./workspaceState";
 import { useEffect, useRef, useState } from "react";
 import {
   connect,
@@ -122,6 +127,11 @@ export function useWorkbench() {
   const [projectId, setProjectId] = useState("");
   const [sessions, setSessions] = useState<Session[]>([]);
   const [sessionId, setSessionId] = useState("");
+  const [draftWorkspaceId, setDraftWorkspaceId] = useState(() =>
+    crypto.randomUUID(),
+  );
+  const workspaceId = workspaceKey(sessionId || `draft:${draftWorkspaceId}`);
+  const [workspace, setWorkspace] = useWorkspaceState(workspaceId);
   const draft = useRef(false);
   const navigationRevision = useRef(0);
   const [viewRevision, setViewRevision] = useState(0);
@@ -190,7 +200,11 @@ export function useWorkbench() {
   const [projectPath, setProjectPath] = useState("");
   const [projectName, setProjectName] = useState("");
   const [projectHostId, setProjectHostId] = useState("local");
-  const [panel, setPanel] = useState(true);
+  const panel = workspace.visible;
+  const setPanel = (value: boolean | ((current: boolean) => boolean)) =>
+    setWorkspace((state) => ({
+      visible: typeof value === "function" ? value(state.visible) : value,
+    }));
   const [sidebarOpen, setSidebarOpen] = useState(
     () => readSidebarPreference().open,
   );
@@ -214,7 +228,11 @@ export function useWorkbench() {
       );
     setSidebarOpen((open) => !open);
   }
-  const [rightWidth, setRightWidth] = useState(350);
+  const rightWidth = workspace.width;
+  const setRightWidth = (value: number | ((current: number) => number)) =>
+    setWorkspace((state) => ({
+      width: typeof value === "function" ? value(state.width) : value,
+    }));
   const host = hosts.find((h) => h.id === hostId) ?? localHost;
   const project = projects.find(
     (p) => p.id === projectId && p.hostId === hostId,
@@ -407,6 +425,26 @@ export function useWorkbench() {
         if (r.kind === "events") {
           cursor = r.events.at(-1)?.seq ?? cursor;
           setEvents((previous) => appendEvents(previous, r.events));
+          if (
+            r.session.unread &&
+            !r.has_more &&
+            !["running", "waiting"].includes(r.session.status) &&
+            document.visibilityState === "visible" &&
+            document.hasFocus()
+          ) {
+            try {
+              const read = await request(hostId, {
+                method: "mark_session_unread",
+                session_id: sessionId,
+                unread: false,
+              });
+              if (disposed) return;
+              if (read.kind === "session") r.session = read.session;
+            } catch {
+              // Retry on the next poll; a read acknowledgement must not disconnect.
+            }
+          }
+          if (disposed) return;
           setSessions((previous) =>
             previous.map((s) => (s.id === r.session.id ? r.session : s)),
           );
@@ -473,29 +511,12 @@ export function useWorkbench() {
         unread: false,
       }).catch((e) => setError(message(e)));
   }
-  useEffect(() => {
-    if (!connected || !sessionId) return;
-    let disposed = false;
-    void request(hostId, {
-      method: "mark_session_unread",
-      session_id: sessionId,
-      unread: false,
-    })
-      .then((r) => {
-        if (!disposed && r.kind === "session") updateSession(hostId, r.session);
-      })
-      .catch((e) => {
-        if (!disposed) setError(message(e));
-      });
-    return () => {
-      disposed = true;
-    };
-  }, [hostId, sessionId, connected]);
   async function createSession(target?: HostedProject): Promise<void> {
     if (target && !hosts.some((h) => h.id === target.hostId))
       throw new Error("项目所在主机已移除");
     pendingSession.current = null;
     draft.current = true;
+    setDraftWorkspaceId(crypto.randomUUID());
     selectedSessionId.current = "";
     setSessionId("");
     setEvents([]);
@@ -554,6 +575,7 @@ export function useWorkbench() {
           ...old.filter((s) => s.id !== r.session.id),
         ]);
         if (navigationRevision.current === revision) {
+          copyWorkspace(workspaceId, workspaceKey(r.session.id));
           draft.current = false;
           selectedSessionId.current = r.session.id;
           setShowArchived(false);
@@ -566,6 +588,8 @@ export function useWorkbench() {
   }
   useEffect(() => {
     const key = (event: KeyboardEvent) => {
+      if (event.target instanceof Element && event.target.closest(".xterm"))
+        return;
       if (
         (event.metaKey || event.ctrlKey) &&
         event.key.toLowerCase() === "n" &&
@@ -810,6 +834,7 @@ export function useWorkbench() {
     showArchived,
     setShowArchived,
     sessionId,
+    workspaceId,
     viewRevision,
     setSessionId,
     events,
