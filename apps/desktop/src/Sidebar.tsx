@@ -200,7 +200,12 @@ export function Sidebar({ state }: { state: Workbench }) {
     );
   };
   return (
-    <aside id="project-sidebar" className="sidebar" hidden={!state.sidebarOpen}>
+    <aside
+      id="project-sidebar"
+      className="sidebar"
+      hidden={!state.sidebarOpen}
+      data-tauri-drag-region="deep"
+    >
       <div className="window-drag" data-tauri-drag-region>
         <button
           className="panel-toggle icon-button"
