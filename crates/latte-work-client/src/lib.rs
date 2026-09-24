@@ -25,7 +25,7 @@ pub enum SshAuthentication<'a> {
 impl Client {
     pub async fn local(binary: &Path, state: Option<&Path>) -> Result<Self> {
         let mut command = Command::new(binary);
-        command.arg("connect");
+        command.arg("connect-local");
         if let Some(state) = state {
             command.arg("--state-dir").arg(state);
         }
@@ -68,6 +68,9 @@ impl Client {
             Response::Hello {
                 version: VERSION, ..
             } => Ok(client),
+            Response::Error { code, message } if code == "version_mismatch" => bail!(
+                "远程 Server 与客户端不兼容，请等待远程任务结束并关闭终端后，更新并重启远程 Server：{message}"
+            ),
             Response::Error { message, .. } => bail!("{message}"),
             other => bail!("不兼容的 Server: {other:?}"),
         }
@@ -99,6 +102,102 @@ impl Client {
                 }
             }
         }
+    }
+}
+
+/// Prepare a remote turn or model catalog from the latest host association on the local server.
+/// Secrets remain in native memory and travel only on the authenticated transport.
+pub async fn request_with_provider(
+    local: &tokio::sync::Mutex<Client>,
+    target: &tokio::sync::Mutex<Client>,
+    host_id: String,
+    request: Request,
+) -> Result<Response> {
+    let is_send = matches!(&request, Request::Send { .. });
+    let agent = match &request {
+        Request::Models { agent, .. } => agent.clone(),
+        Request::Send { session_id, .. } => {
+            match target
+                .lock()
+                .await
+                .request(Request::Session {
+                    session_id: session_id.clone(),
+                })
+                .await?
+            {
+                Response::Session { session } => session.agent,
+                Response::Error { message, .. } => bail!("{message}"),
+                _ => bail!("远程会话响应格式不匹配"),
+            }
+        }
+        _ => bail!("此请求不接受本轮 Provider 配置"),
+    };
+    let (snapshot, configured) = match local
+        .lock()
+        .await
+        .request(Request::ExportHostAgentProvider {
+            host_id,
+            agent: agent.clone(),
+        })
+        .await?
+    {
+        Response::ProviderSnapshot {
+            snapshot,
+            configured,
+        } => (snapshot, configured),
+        Response::Error { message, .. } => bail!("{message}"),
+        _ => bail!("本机 Provider 响应格式不匹配"),
+    };
+    if snapshot.is_none() && !configured {
+        match target.lock().await.request(Request::Providers).await? {
+            Response::Providers { bindings, .. } if bindings.iter().any(|b| b.agent == agent) => {
+                bail!(
+                    "此主机仍有旧 Provider 关联，请在「连接与 Agent」中选择 Provider 或明确选择沿用 CLI 配置，再保存关联"
+                );
+            }
+            Response::Providers { .. } => {}
+            Response::Error { message, .. } => bail!("{message}"),
+            _ => bail!("远程 Provider 响应格式不匹配"),
+        }
+    }
+    let request = match request {
+        Request::Models {
+            agent,
+            model,
+            project_id,
+        } => Request::ModelsForProvider {
+            agent,
+            model,
+            project_id,
+            provider: snapshot.map(|s| s.provider),
+        },
+        Request::Send {
+            session_id,
+            request_id,
+            text,
+            model,
+            effort,
+            ..
+        } => Request::Send {
+            session_id,
+            request_id,
+            text,
+            model,
+            effort,
+            provider: Some(
+                snapshot
+                    .map(latte_work_protocol::TurnProvider::Snapshot)
+                    .unwrap_or(latte_work_protocol::TurnProvider::Cli),
+            ),
+        },
+        _ => unreachable!(),
+    };
+    let response = target.lock().await.request(request).await?;
+    match response {
+        Response::Models { .. } if !is_send => Ok(response),
+        Response::Accepted { .. } if is_send => Ok(response),
+        Response::Error { .. } => Ok(response),
+        _ => bail!("远程执行响应格式不匹配"),
     }
 }
 

@@ -1,6 +1,12 @@
 import { useEffect, useRef, useState } from "react";
 import { Check, RefreshCw, Monitor } from "lucide-react";
-import { connect, localHost, message, request } from "./api";
+import {
+  agentProviders,
+  bindAgentProvider,
+  connect,
+  localHost,
+  message,
+} from "./api";
 import { Select } from "./Select";
 import { protocols } from "./ProviderSettings";
 import type { AgentInfo, Response } from "./protocol";
@@ -17,8 +23,7 @@ export function AgentSettings({
 }) {
   const [hostId, setHostId] = useState(state.host.id);
   const [agents, setAgents] = useState<AgentInfo[]>([]);
-  const [local, setLocal] = useState<Catalog>();
-  const [remote, setRemote] = useState<Catalog>();
+  const [catalog, setCatalog] = useState<Catalog>();
   const [choices, setChoices] = useState<Record<string, string>>({});
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
@@ -27,8 +32,6 @@ export function AgentSettings({
   const [serverId, setServerId] = useState("");
   const generation = useRef(0);
   const host = state.hosts.find((h) => h.id === hostId) ?? localHost;
-  const unsupportedSync =
-    !!host.ssh && ((host.auth ?? "none") !== "none" || !!host.port);
   useEffect(() => {
     if (!active) {
       setBusy(false);
@@ -39,8 +42,7 @@ export function AgentSettings({
     setBusy(true);
     setError("");
     setNotice("");
-    setLocal(undefined);
-    setRemote(undefined);
+    setCatalog(undefined);
     setAgents([]);
     void (async () => {
       const [hello, home] = await Promise.all([
@@ -51,16 +53,11 @@ export function AgentSettings({
         throw new Error("无法读取 Agent，请检查主机连接和 Server 版本");
       if (current !== generation.current) return;
       setServerId(hello.server_id);
-      const [catalog, target] = await Promise.all([
-        request("local", { method: "providers" }),
-        request(host.id, { method: "providers" }),
-      ]);
-      if (catalog.kind !== "providers" || target.kind !== "providers")
-        throw new Error("Provider 响应不匹配");
+      const target = await agentProviders(host.id);
+      if (target.kind !== "providers") throw new Error("Provider 响应不匹配");
       if (current !== generation.current) return;
       setAgents(hello.agents);
-      setLocal(catalog);
-      setRemote(target);
+      setCatalog(target);
       setChoices(
         Object.fromEntries(
           target.bindings.map((b) => [b.agent, b.provider_id]),
@@ -84,22 +81,15 @@ export function AgentSettings({
     setError("");
     setNotice("");
     try {
-      const result = await request("local", {
-        method: "bind_agent_provider",
+      const result = await bindAgentProvider(
+        host.id,
         agent,
-        provider_id: choices[agent] || null,
-        target: host.ssh
-          ? { ssh: host.ssh, server_path: host.server_path ?? "" }
-          : null,
-      });
+        choices[agent] || null,
+      );
       if (result.kind !== "providers") throw new Error("关联响应不匹配");
       if (current === generation.current) {
-        setRemote(result);
-        setNotice(
-          host.ssh
-            ? "已同步并关联；下次执行生效。"
-            : "关联已保存；下次执行生效。",
-        );
+        setCatalog(result);
+        setNotice("关联已保存；下次发送消息时使用最新配置。");
       }
     } catch (e) {
       if (current === generation.current) setError(message(e));
@@ -154,26 +144,12 @@ export function AgentSettings({
           {notice}
         </p>
       )}
-      {busy && !local && <p>正在加载…</p>}
-      {local &&
-        remote &&
+      {busy && !catalog && <p>正在加载…</p>}
+      {catalog &&
         agents.map((agent) => {
-          const binding = remote.bindings.find((b) => b.agent === agent.id);
-          const original = local.providers.find(
-            (p) => p.id === binding?.provider_id,
-          );
-          const currentCopy = remote.providers.find(
-            (p) => p.id === binding?.provider_id,
-          );
-          const compatible = local.providers.filter((p) =>
+          const compatible = catalog.providers.filter((p) =>
             agent.provider_protocols.includes(p.protocol),
           );
-          const stale =
-            !!host.ssh &&
-            !!binding &&
-            original?.revision !== binding.provider_revision;
-          const missing =
-            !!binding && !compatible.some((p) => p.id === binding.provider_id);
           const options = [
             { value: "", label: "沿用 Agent CLI 配置" },
             ...compatible.map((p) => ({
@@ -182,11 +158,6 @@ export function AgentSettings({
               description: p.model,
             })),
           ];
-          if (missing)
-            options.push({
-              value: binding.provider_id,
-              label: `${currentCopy?.name ?? "旧 Provider"}（需重新关联）`,
-            });
           return (
             <div className="agent-card" key={agent.id}>
               <h3>{agent.name}</h3>
@@ -205,33 +176,19 @@ export function AgentSettings({
                 支持{" "}
                 {agent.provider_protocols.map((p) => protocols[p]).join("、")}。
                 {host.ssh
-                  ? "关联时将地址、模型和凭据通过 SSH 同步到此主机。"
+                  ? "每次发送消息时，通过 SSH 传递本轮配置；远程 Agent 直接连接模型服务。"
                   : "使用本机统一管理的 Provider。"}
               </p>
-              {stale && (
-                <p className="agent-sync-note">
-                  {original
-                    ? "本机配置已更新，远端待同步。"
-                    : "此 Provider 已从本机删除，远端仍保留旧副本；请重新关联或恢复 CLI 配置。"}
-                </p>
-              )}
-              {unsupportedSync && (
-                <p className="agent-sync-note">
-                  此主机使用单独的 SSH 认证或端口；远程 Provider
-                  同步目前仅支持系统 SSH 配置。
-                </p>
-              )}
               <button
                 className="primary wide"
                 disabled={
                   busy ||
-                  unsupportedSync ||
                   (!!choices[agent.id] &&
                     !compatible.some((p) => p.id === choices[agent.id]))
                 }
                 onClick={() => void bind(agent.id)}
               >
-                {busy ? "正在保存…" : host.ssh ? "同步并关联" : "保存关联"}
+                {busy ? "正在保存…" : "保存关联"}
               </button>
             </div>
           );

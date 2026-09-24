@@ -1,5 +1,9 @@
 # Verification — 2026-09-22
 
+Historical verification log: version labels below describe the builds tested at that
+time. The current protocol baseline is v1; see `docs/architecture.md`. These old labels
+are retained as evidence, not as the current protocol or a release sequence.
+
 ## Automated local gate
 
 `make ci` on macOS arm64 / Rust 1.97 / Node 24:
@@ -672,3 +676,53 @@ Section management and chat archiving are outside this four-action iteration.
   consistency, workflow/shell lint, denied-warning Clippy, production frontend
   build and Rust documentation. Native build/signature and UI checks are recorded
   above. GitHub CI is a separate gate and must be checked on the submitted head.
+
+## Provider worktree rebase and local daemon upgrades (2026-09-24)
+
+- Rebased `fix/remote-provider` onto local `main` at `6312afd`, preserving the
+  sidebar terminal implementation and local Provider association changes. The
+  wire contract remains v1; executable SHA-256 identifies daemon builds separately.
+- `make ci` passed: 27 Rust unit tests, 20 final-binary E2E tests, 40 frontend
+  tests, generated types, formatting, workflow/shell lint, Clippy with denied
+  warnings, frontend production build and Rustdoc. After moving lifecycle wire
+  types into the protocol crate and refining an error message, formatting/type
+  checks, workspace Clippy and all four upgrade E2E cases passed again.
+- Upgrade tests cover legacy refusal without stopping the daemon, concurrent local
+  connectors replacing an idle build once, waiting-task/open-terminal protection,
+  continued shell usability after refusal, stale instance rejection, and a racing
+  Send either remaining active or being rejected before launch.
+- All four native desktop unit tests passed, including the Provider snapshot
+  WebView boundary. `make build` produced a debug arm64 app with successful
+  ad-hoc signing and strict verification. Its packaged server passed a v1 Hello,
+  exact executable-fingerprint check and idle shutdown in a disposable state
+  directory using the deterministic Claude fixture.
+- The user's running daemon and terminals were not replaced. Legacy v8 migration
+  still requires one manual restart after tasks finish and terminals close.
+  Release builds share the upgrade code path, but this pass did not produce a
+  release package, exercise a real SSH host/model API, or perform native UI smoke.
+  No feature commit, push or release publication was performed.
+
+## Agent interface and Claude implementation separation (2026-09-24)
+
+- Added an internal adapter contract in `agents/adapter.rs` and made the Claude
+  implementation private to the agent module. The registry selects by session
+  Agent ID and explicitly rejects unsupported IDs. Discovery and launch-specific
+  messages/configuration belong to the Claude implementation.
+- Runtime now consumes ordered actions and delivers start/native-line/authorized-
+  approval inputs. Claude owns initialization, acknowledgment, prompt timing,
+  wire encoding/decoding and explicit completion. Readiness no longer implicitly
+  sends a prompt. Runtime retains bounded I/O, deadlines, process cancellation,
+  single-use approval authorization and durable state/events; request acceptance
+  remains persisted before execution. Protocol failures also pass through normal
+  process/stderr cleanup.
+- `make ci` passed: 26 Server UT (31 Rust UT across the host crates), 20 final-
+  binary E2E cases, 40 frontend tests, formatting, generated types, workflow/shell
+  lint, Clippy, frontend build and Rustdoc. Focused tests cover handshake failure,
+  prompt timing and duplicate acknowledgment, malformed input, premature/native
+  completion, approval encoding, unsupported adapter selection, and ordered raw
+  writes without an implicit prompt. After allowing command preparation to retain
+  adapter context, Server UT, formatting and workspace Clippy passed again.
+- `make build` refreshed the debug macOS application and passed ad-hoc signing
+  with strict verification. No live Claude/model API, SSH host or native UI smoke
+  was performed for this refactor. The running user daemon was not replaced.
+  Only Claude is registered; wire protocol stays v1. No commit or push was made.

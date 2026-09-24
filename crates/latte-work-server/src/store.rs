@@ -37,6 +37,12 @@ impl Store {
         if !columns.iter().any(|name| name == "effort") {
             db.execute("ALTER TABLE requests ADD COLUMN effort TEXT", [])?;
         }
+        if !columns.iter().any(|name| name == "provider_fingerprint") {
+            db.execute(
+                "ALTER TABLE requests ADD COLUMN provider_fingerprint TEXT",
+                [],
+            )?;
+        }
         let store = Self { db };
         let interrupted = store.all_sessions()?;
         for mut session in interrupted.into_iter().filter(|s| s.status.active()) {
@@ -149,6 +155,9 @@ impl Store {
             [id],
         )?;
         Ok(())
+    }
+    pub fn has_active_sessions(&self) -> Result<bool> {
+        Ok(self.db.query_row("SELECT EXISTS(SELECT 1 FROM sessions WHERE json_extract(data, '$.status') IN ('running', 'waiting'))", [], |row| row.get(0))?)
     }
     fn all_sessions(&self) -> Result<Vec<Session>> {
         let rows = self
@@ -302,6 +311,7 @@ impl Store {
         text: &str,
         model: Option<&str>,
         effort: Option<Effort>,
+        provider_fingerprint: Option<&str>,
     ) -> Result<bool> {
         if request_id.is_empty()
             || request_id.len() > 100
@@ -313,7 +323,7 @@ impl Store {
         let existing = self
             .db
             .query_row(
-                "SELECT session_id,text,model,effort FROM requests WHERE id=?1",
+                "SELECT session_id,text,model,effort,provider_fingerprint FROM requests WHERE id=?1",
                 [request_id],
                 |r| {
                     Ok((
@@ -321,17 +331,23 @@ impl Store {
                         r.get::<_, String>(1)?,
                         r.get::<_, Option<String>>(2)?,
                         r.get::<_, Option<String>>(3)?,
+                        r.get::<_, Option<String>>(4)?,
                     ))
                 },
             )
             .optional()?;
-        if let Some((session, previous, previous_model, previous_effort)) = existing {
+        if let Some((session, previous, previous_model, previous_effort, previous_provider)) =
+            existing
+        {
             if session != id
                 || previous != text
                 || previous_model.as_deref() != model
                 || previous_effort.as_deref() != effort.map(Effort::as_str)
             {
                 bail!("请求 ID 已被其他任务使用");
+            }
+            if previous_provider.as_deref() != provider_fingerprint {
+                bail!("此请求已接受，但 Provider 配置已改变；请核对原请求状态后再发送新消息");
             }
             return Ok(true);
         }
@@ -345,8 +361,9 @@ impl Store {
         text: &str,
         model: Option<&str>,
         effort: Option<Effort>,
+        provider_fingerprint: Option<&str>,
     ) -> Result<bool> {
-        if self.already_accepted(id, request_id, text, model, effort)? {
+        if self.already_accepted(id, request_id, text, model, effort, provider_fingerprint)? {
             return Ok(false);
         }
         let mut session = self.session(id)?;
@@ -364,8 +381,8 @@ impl Store {
         }
         let tx = self.db.transaction()?;
         tx.execute(
-            "INSERT INTO requests(id,session_id,text,model,effort) VALUES (?1,?2,?3,?4,?5)",
-            params![request_id, id, text, model, effort.map(Effort::as_str)],
+            "INSERT INTO requests(id,session_id,text,model,effort,provider_fingerprint) VALUES (?1,?2,?3,?4,?5,?6)",
+            params![request_id, id, text, model, effort.map(Effort::as_str), provider_fingerprint],
         )?;
         tx.execute(
             "UPDATE sessions SET data=?2 WHERE id=?1",
@@ -415,6 +432,61 @@ impl Store {
 mod tests {
     use super::*;
     #[test]
+    fn turn_fingerprint_is_durable_and_conflicting_retries_fail() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("state.db");
+        let mut store = Store::open(&path).unwrap();
+        let project = store.add_project(tmp.path()).unwrap();
+        let session = store.create_session(project.id, "claude".into()).unwrap();
+        assert!(
+            store
+                .begin(
+                    &session.id,
+                    "snapshot",
+                    "hello",
+                    None,
+                    None,
+                    Some("digest-a")
+                )
+                .unwrap()
+        );
+        drop(store);
+        let mut reopened = Store::open(&path).unwrap();
+        assert_eq!(
+            reopened.session(&session.id).unwrap().status,
+            Status::Unknown
+        );
+        assert!(
+            !reopened
+                .begin(
+                    &session.id,
+                    "snapshot",
+                    "hello",
+                    None,
+                    None,
+                    Some("digest-a")
+                )
+                .unwrap()
+        );
+        assert!(
+            reopened
+                .begin(
+                    &session.id,
+                    "snapshot",
+                    "hello",
+                    None,
+                    None,
+                    Some("digest-b")
+                )
+                .is_err()
+        );
+        assert!(
+            reopened
+                .begin(&session.id, "snapshot", "hello", None, None, None)
+                .is_err()
+        );
+    }
+    #[test]
     fn session_organization_preserves_history_and_survives_restart() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("state.db");
@@ -428,7 +500,14 @@ mod tests {
         let pinned = store.pin_session(&s.id, true).unwrap().pinned_at;
         assert_eq!(store.pin_session(&s.id, true).unwrap().pinned_at, pinned);
         store
-            .begin(&s.id, "request", "must not overwrite title", None, None)
+            .begin(
+                &s.id,
+                "request",
+                "must not overwrite title",
+                None,
+                None,
+                None,
+            )
             .unwrap();
         assert_eq!(store.session(&s.id).unwrap().title, "新任务");
         assert!(store.archive_session(&s.id, true).is_err());
@@ -437,7 +516,11 @@ mod tests {
         store.archive_session(&s.id, true).unwrap();
         assert!(store.pinned_sessions().unwrap().is_empty());
         assert!(store.pin_session(&s.id, true).is_err());
-        assert!(store.begin(&s.id, "blocked", "hello", None, None).is_err());
+        assert!(
+            store
+                .begin(&s.id, "blocked", "hello", None, None, None)
+                .is_err()
+        );
         drop(store);
         let store = Store::open(&path).unwrap();
         let restored = store.session(&s.id).unwrap();
@@ -466,6 +549,7 @@ mod tests {
                     &session.id,
                     &format!("request-{index}"),
                     "hello",
+                    None,
                     None,
                     None,
                 )
@@ -504,22 +588,26 @@ mod tests {
         db.execute_batch("CREATE TABLE requests(id TEXT PRIMARY KEY,session_id TEXT NOT NULL,text TEXT NOT NULL); INSERT INTO requests VALUES('old','session','hello');").unwrap();
         drop(db);
         let mut store = Store::open(&path).unwrap();
-        assert!(!store.begin("session", "old", "hello", None, None).unwrap());
+        assert!(
+            !store
+                .begin("session", "old", "hello", None, None, None)
+                .unwrap()
+        );
         assert!(
             store
-                .begin("session", "old", "hello", Some("sonnet"), None)
+                .begin("session", "old", "hello", Some("sonnet"), None, None)
                 .is_err()
         );
         drop(store);
         let mut reopened = Store::open(&path).unwrap();
         assert!(
             reopened
-                .begin("session", "old", "hello", None, Some(Effort::High))
+                .begin("session", "old", "hello", None, Some(Effort::High), None)
                 .is_err()
         );
         assert!(
             !reopened
-                .begin("session", "old", "hello", None, None)
+                .begin("session", "old", "hello", None, None, None)
                 .unwrap()
         );
     }
@@ -531,10 +619,26 @@ mod tests {
         let p = store.add_project(tmp.path()).unwrap();
         assert_eq!(p.id, store.add_project(tmp.path()).unwrap().id);
         let s = store.create_session(p.id, "claude".into()).unwrap();
-        assert!(store.begin(&s.id, "one", "hello", None, None).unwrap());
-        assert!(!store.begin(&s.id, "one", "hello", None, None).unwrap());
-        assert!(store.begin(&s.id, "one", "different", None, None).is_err());
-        assert!(store.begin(&s.id, "two", "hello", None, None).is_err());
+        assert!(
+            store
+                .begin(&s.id, "one", "hello", None, None, None)
+                .unwrap()
+        );
+        assert!(
+            !store
+                .begin(&s.id, "one", "hello", None, None, None)
+                .unwrap()
+        );
+        assert!(
+            store
+                .begin(&s.id, "one", "different", None, None, None)
+                .is_err()
+        );
+        assert!(
+            store
+                .begin(&s.id, "two", "hello", None, None, None)
+                .is_err()
+        );
         drop(store);
         let store = Store::open(&path).unwrap();
         assert_eq!(store.session(&s.id).unwrap().status, Status::Unknown);
@@ -552,17 +656,17 @@ mod tests {
         let s = store.create_session(p.id, "claude".into()).unwrap();
         assert!(
             store
-                .begin(&s.id, "effort", "hello", None, Some(Effort::High))
+                .begin(&s.id, "effort", "hello", None, Some(Effort::High), None)
                 .unwrap()
         );
         assert!(
             !store
-                .begin(&s.id, "effort", "hello", None, Some(Effort::High))
+                .begin(&s.id, "effort", "hello", None, Some(Effort::High), None)
                 .unwrap()
         );
         assert!(
             store
-                .begin(&s.id, "effort", "hello", None, Some(Effort::Low))
+                .begin(&s.id, "effort", "hello", None, Some(Effort::Low), None)
                 .is_err()
         );
         store.state(&s.id, Status::Completed, None).unwrap();
@@ -571,7 +675,7 @@ mod tests {
         assert_eq!(store.session(&s.id).unwrap().effort, Some(Effort::High));
         assert!(
             store
-                .begin(&s.id, "automatic", "hello", None, None)
+                .begin(&s.id, "automatic", "hello", None, None, None)
                 .unwrap()
         );
         assert_eq!(store.session(&s.id).unwrap().effort, None);

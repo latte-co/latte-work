@@ -1,9 +1,10 @@
 //! Versioned, agent-independent desktop/host wire contract.
+pub mod lifecycle;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use ts_rs::TS;
 
-pub const VERSION: u32 = 9;
+pub const VERSION: u32 = 1;
 pub const MAX_FRAME: usize = 2 * 1024 * 1024;
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
@@ -175,7 +176,7 @@ pub struct AgentProviderBinding {
     pub provider_id: String,
     pub provider_revision: String,
 }
-// Only used between host services over private local/SSH transport; never a UI response.
+// Only used by native clients and host services over private transport; never a UI response.
 #[derive(Clone, Serialize, Deserialize, TS)]
 pub struct ProviderSnapshot {
     pub provider: Provider,
@@ -188,6 +189,13 @@ impl std::fmt::Debug for ProviderSnapshot {
             .field("credential", &"[redacted]")
             .finish()
     }
+}
+/// An explicit per-turn override, independent of the receiving host's saved bindings.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[serde(tag = "kind", content = "snapshot", rename_all = "snake_case")]
+pub enum TurnProvider {
+    Cli,
+    Snapshot(ProviderSnapshot),
 }
 #[derive(Clone, Serialize, Deserialize, TS)]
 pub struct ProviderDraft {
@@ -261,6 +269,31 @@ pub enum Request {
         provider_id: Option<String>,
         target: Option<ProviderTarget>,
     },
+    ProvidersForHost {
+        host_id: String,
+    },
+    ForgetHostProviders {
+        host_id: String,
+    },
+    BindHostAgentProvider {
+        host_id: String,
+        agent: String,
+        provider_id: Option<String>,
+    },
+    /// Native-only export of the current local association for a remote host.
+    ExportHostAgentProvider {
+        host_id: String,
+        agent: String,
+    },
+    ModelsForProvider {
+        agent: String,
+        model: Option<String>,
+        project_id: Option<String>,
+        provider: Option<Provider>,
+    },
+    Session {
+        session_id: String,
+    },
     SyncAgentProvider {
         agent: String,
         snapshot: Option<ProviderSnapshot>,
@@ -305,6 +338,9 @@ pub enum Request {
         agent: String,
     },
     Send {
+        #[serde(default)]
+        #[ts(optional)]
+        provider: Option<TurnProvider>,
         session_id: String,
         request_id: String,
         text: String,
@@ -361,6 +397,12 @@ pub enum Response {
         /// Display metadata only; keys remain the original selectable model IDs.
         #[serde(default)]
         model_labels: std::collections::BTreeMap<String, String>,
+    },
+    /// Native-only response. Must never be forwarded to the WebView.
+    ProviderSnapshot {
+        snapshot: Option<ProviderSnapshot>,
+        #[serde(default)]
+        configured: bool,
     },
     Providers {
         providers: Vec<Provider>,
@@ -428,7 +470,7 @@ mod tests {
 mod model_metadata_compatibility {
     use super::*;
     #[test]
-    fn version_eight_requests_and_responses_without_labels_remain_valid() {
+    fn requests_and_responses_without_labels_remain_valid() {
         let request: Request =
             serde_json::from_str(r#"{"method":"models","agent":"claude","model":null}"#).unwrap();
         assert!(matches!(

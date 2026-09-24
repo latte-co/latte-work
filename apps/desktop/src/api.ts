@@ -72,3 +72,23 @@ export function revealProject(
 ): Promise<void> {
   return invoke("reveal_project", { hostId, projectId });
 }
+
+export async function bindAgentProvider(
+  hostId: string,
+  agent: string,
+  providerId: string | null,
+): Promise<Response> {
+  const response = await invoke<Response>("bind_agent_provider", {
+    hostId,
+    agent,
+    providerId,
+  });
+  if (response.kind === "error") throw new Error(response.message);
+  return response;
+}
+
+export async function agentProviders(hostId: string): Promise<Response> {
+  const response = await invoke<Response>("agent_providers", { hostId });
+  if (response.kind === "error") throw new Error(response.message);
+  return response;
+}

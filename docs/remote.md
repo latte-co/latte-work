@@ -25,7 +25,7 @@ LATTE_WORK_CLAUDE=/absolute/path/to/claude \
 Normally no manual service start is needed: the Desktop's `connect` bridge
 starts it on demand, detached from that SSH connection. To diagnose startup,
 run `serve` in a terminal. To stop an existing daemon for an upgrade, send
-SIGTERM to its verified PID after stopping/finishing tasks; SIGTERM cancels
+SIGTERM to its verified PID after stopping/finishing tasks and closing terminals; SIGTERM cancels
 remaining tasks and closes the service. Do not delete its runtime database.
 
 First establish the normal SSH connection in your terminal so its host key is
@@ -48,9 +48,10 @@ saved host in the project form. Use **添加** to browse its folders, or enter a
 absolute path, then create the project. Local and remote projects share the
 sidebar; selecting a project routes files, Git and Claude to its host.
 
-This build uses protocol v9 (including sidebar PTY terminals, model selection and directory browsing). Upgrade
-the remote server from the same source before connecting; older daemons fail
-the handshake explicitly. Stop an old daemon only after finishing its tasks.
+This build uses protocol v1 (including model selection, Provider configuration and
+directory browsing). Build the desktop and remote server from the same source revision;
+protocol version mismatches fail the handshake. Stop an old daemon only after finishing
+its tasks and closing its terminals.
 
 A macOS binary cannot be copied to Linux. V0.1 does not automatically build,
 upload or update remote binaries. Shared state is per operating-system user,
@@ -62,8 +63,27 @@ reuses it for later reconnects during that run. Canceling the prompt leaves
 that host disconnected; use its reconnect action to try again. Host key checking
 stays enabled; unknown keys must be verified in a terminal first.
 
-Remote Provider synchronization currently opens a separate SSH connection through
-the local host service. It uses only the system OpenSSH configuration, so the
-settings page disables synchronization when a host uses an explicit identity
-file, password, or port. Project and Agent execution still use the configured
-desktop SSH connection.
+Remote Provider associations are saved on the local server. Each message carries the
+selected Provider snapshot over the existing authenticated SSH connection; the remote
+Agent connects directly to the model service. Password, identity-file and custom-port
+connections use the same path. Editing a Provider affects the next message, without a
+manual sync. Running turns keep their original snapshot and survive bridge disconnects.
+The remote server does not write these snapshots to its Provider catalog or request
+ledger. Agent CLI temporary settings can contain credentials until that turn finishes.
+
+Update the bundled local server and remote server together from the same source revision. Existing remotely saved
+Provider copies are preserved but are not used for desktop turns; select the intended
+Provider once in the new local host association, or explicitly save the remote CLI option.
+Until that choice is saved, an existing legacy remote binding blocks new desktop turns
+with a migration message, rather than silently changing the model service.
+
+## Local bundled server upgrades
+
+Local desktop connections compare the running server's executable fingerprint with
+the bundled server. If they differ, the daemon permits replacement only while idle
+and with no open terminal. Busy daemons remain running; finish tasks, close terminals,
+and reconnect to retry. No prompt is automatically replayed. A legacy daemon lacking
+the lifecycle handshake needs a one-time manual restart after checking tasks and
+terminals in the old app. Closing/reopening the desktop alone does not stop it.
+This behavior also applies to release bundles; it is not a debug-only workaround.
+Remote servers still require explicit installation and restart as described above.

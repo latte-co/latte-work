@@ -135,6 +135,9 @@ impl Drop for Terminal {
     }
 }
 impl Terminals {
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
     pub fn list(&self, project_id: &str) -> Result<Response> {
         let mut terminals = self
             .entries

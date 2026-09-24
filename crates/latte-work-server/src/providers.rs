@@ -1,7 +1,7 @@
 //! Host-owned provider configuration, independent of agent-native launch protocols.
 use anyhow::{Context, Result, bail};
 use latte_work_protocol::{
-    AgentProviderBinding, Provider, ProviderDraft, ProviderSnapshot, Response,
+    AgentProviderBinding, Provider, ProviderDraft, ProviderSnapshot, Response, TurnProvider,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -28,6 +28,8 @@ struct Config {
     bindings: BTreeMap<String, String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     active_id: Option<String>,
+    #[serde(default)]
+    host_bindings: BTreeMap<String, BTreeMap<String, String>>,
     providers: Vec<Record>,
 }
 impl Default for Config {
@@ -36,6 +38,7 @@ impl Default for Config {
             schema: 2,
             bindings: BTreeMap::new(),
             active_id: None,
+            host_bindings: BTreeMap::new(),
             providers: vec![],
         }
     }
@@ -117,6 +120,9 @@ impl ProviderStore {
         Ok(Self { path, config })
     }
     pub fn list(&self) -> Response {
+        self.list_bindings(&self.config.bindings)
+    }
+    fn list_bindings(&self, bindings: &BTreeMap<String, String>) -> Response {
         Response::Providers {
             providers: self
                 .config
@@ -124,9 +130,7 @@ impl ProviderStore {
                 .iter()
                 .map(|r| r.metadata.clone())
                 .collect(),
-            bindings: self
-                .config
-                .bindings
+            bindings: bindings
                 .iter()
                 .map(|(agent, id)| AgentProviderBinding {
                     agent: agent.clone(),
@@ -143,6 +147,63 @@ impl ProviderStore {
                 })
                 .collect(),
         }
+    }
+    pub fn list_for_host(&self, host_id: &str) -> Result<Response> {
+        validate_host_id(host_id)?;
+        Ok(self.list_bindings(
+            self.config
+                .host_bindings
+                .get(host_id)
+                .unwrap_or(&BTreeMap::new()),
+        ))
+    }
+    pub fn bind_host(
+        &mut self,
+        host_id: &str,
+        agent: &str,
+        id: Option<String>,
+    ) -> Result<Response> {
+        validate_host_id(host_id)?;
+        if crate::agents::provider_protocols(agent).is_none() {
+            bail!("Agent 尚未实现");
+        }
+        if let Some(id) = &id {
+            self.snapshot(agent, id)?;
+        }
+        let mut next = self.config.clone();
+        let bindings = next.host_bindings.entry(host_id.into()).or_default();
+        if let Some(id) = id {
+            bindings.insert(agent.into(), id);
+        } else {
+            bindings.remove(agent);
+        }
+        self.persist(next)?;
+        self.list_for_host(host_id)
+    }
+    pub fn host_configured(&self, host_id: &str) -> bool {
+        self.config.host_bindings.contains_key(host_id)
+    }
+    pub fn forget_host(&mut self, host_id: &str) -> Result<Response> {
+        validate_host_id(host_id)?;
+        let mut next = self.config.clone();
+        next.host_bindings.remove(host_id);
+        self.persist(next)
+    }
+    pub fn snapshot_for_host(
+        &self,
+        host_id: &str,
+        agent: &str,
+    ) -> Result<Option<ProviderSnapshot>> {
+        validate_host_id(host_id)?;
+        if crate::agents::provider_protocols(agent).is_none() {
+            bail!("Agent 尚未实现");
+        }
+        self.config
+            .host_bindings
+            .get(host_id)
+            .and_then(|bindings| bindings.get(agent))
+            .map(|id| self.snapshot(agent, id))
+            .transpose()
     }
     fn persist(&mut self, config: Config) -> Result<Response> {
         validate_config(&config)?;
@@ -233,8 +294,14 @@ impl ProviderStore {
         } else {
             next.bindings.remove(agent);
         }
-        next.providers
-            .retain(|r| !r.synced || next.bindings.values().any(|id| id == &r.metadata.id));
+        next.providers.retain(|r| {
+            !r.synced
+                || next
+                    .bindings
+                    .values()
+                    .chain(next.host_bindings.values().flat_map(|b| b.values()))
+                    .any(|id| id == &r.metadata.id)
+        });
         self.persist(next)
     }
     pub fn snapshot(&self, agent: &str, id: &str) -> Result<ProviderSnapshot> {
@@ -265,13 +332,25 @@ impl ProviderStore {
             credential: snapshot.credential,
         });
         next.bindings.insert(agent.into(), id);
-        next.providers
-            .retain(|r| !r.synced || next.bindings.values().any(|id| id == &r.metadata.id));
+        next.providers.retain(|r| {
+            !r.synced
+                || next
+                    .bindings
+                    .values()
+                    .chain(next.host_bindings.values().flat_map(|b| b.values()))
+                    .any(|id| id == &r.metadata.id)
+        });
         self.persist(next)
     }
     pub fn delete(&mut self, id: &str) -> Result<Response> {
-        if self.config.bindings.values().any(|bound| bound == id) {
-            bail!("请先在 Code Agent 设置中解除关联，再删除此 Provider");
+        if self
+            .config
+            .bindings
+            .values()
+            .chain(self.config.host_bindings.values().flat_map(|b| b.values()))
+            .any(|bound| bound == id)
+        {
+            bail!("请先在 Code Agent 设置中解除所有主机的关联，再删除此 Provider");
         }
         let mut next = self.config.clone();
         let length = next.providers.len();
@@ -282,26 +361,38 @@ impl ProviderStore {
         self.persist(next)
     }
     pub fn models(&self, agent: &str, model: Option<&str>) -> Result<Response> {
+        let config = self.launch_config(agent);
+        Self::models_for_provider(agent, model, config.provider.map(|p| p.metadata))
+    }
+    pub fn models_for_provider(
+        agent: &str,
+        model: Option<&str>,
+        provider: Option<Provider>,
+    ) -> Result<Response> {
         if crate::agents::provider_protocols(agent).is_none() {
             bail!("Agent 尚未实现");
         }
-        let config = self.launch_config(agent);
+        if let Some(p) = &provider {
+            compatible(agent, p)?;
+            // The catalog carries metadata only; validate it using a non-secret placeholder.
+            validate(p, "metadata-only")?;
+        }
         let effort_levels = crate::agents::effort_levels(
             agent,
-            model.or_else(|| config.provider.as_ref().map(|p| p.metadata.model.as_str())),
+            model.or_else(|| provider.as_ref().map(|p| p.model.as_str())),
         )
         .to_vec();
-        if let Some(p) = config.provider {
-            let mut models = vec![p.metadata.model.clone()];
-            for model in p.metadata.models {
+        if let Some(p) = provider {
+            let mut models = vec![p.model.clone()];
+            for model in p.models {
                 if !models.contains(&model) {
                     models.push(model);
                 }
             }
             Ok(Response::Models {
                 models,
-                provider: Some(p.metadata.name),
-                default_model: Some(p.metadata.model),
+                provider: Some(p.name),
+                default_model: Some(p.model),
                 effort_levels,
                 model_labels: BTreeMap::new(),
             })
@@ -326,6 +417,41 @@ impl ProviderStore {
             bail!("模型不在当前 Agent 的可选列表中，请刷新模型列表");
         }
         let mut config = self.launch_config(agent);
+        config.model = model.map(str::to_owned);
+        Ok(config)
+    }
+    pub fn turn_config(
+        &self,
+        agent: &str,
+        model: Option<&str>,
+        provider: Option<TurnProvider>,
+    ) -> Result<LaunchConfig> {
+        let Some(provider) = provider else {
+            return self.selected_config(agent, model);
+        };
+        let mut config = self.launch_config(agent);
+        config.provider = match provider {
+            TurnProvider::Cli => None,
+            TurnProvider::Snapshot(snapshot) => {
+                compatible(agent, &snapshot.provider)?;
+                validate(&snapshot.provider, &snapshot.credential)?;
+                Some(ResolvedProvider {
+                    metadata: snapshot.provider,
+                    credential: snapshot.credential,
+                })
+            }
+        };
+        let Response::Models { models, .. } = Self::models_for_provider(
+            agent,
+            model,
+            config.provider.as_ref().map(|p| p.metadata.clone()),
+        )?
+        else {
+            unreachable!()
+        };
+        if model.is_some_and(|m| !models.iter().any(|value| value == m)) {
+            bail!("模型不在当前 Provider 的可选列表中，请刷新模型列表");
+        }
         config.model = model.map(str::to_owned);
         Ok(config)
     }
@@ -361,7 +487,17 @@ fn validate_config(config: &Config) -> Result<()> {
             bail!("Provider ID 重复");
         }
     }
-    for (agent, id) in &config.bindings {
+    if config.host_bindings.len() > 256 {
+        bail!("主机关联数量超出限制");
+    }
+    for host_id in config.host_bindings.keys() {
+        validate_host_id(host_id)?;
+    }
+    for (agent, id) in config
+        .bindings
+        .iter()
+        .chain(config.host_bindings.values().flat_map(|b| b.iter()))
+    {
         let provider = config
             .providers
             .iter()
@@ -370,6 +506,23 @@ fn validate_config(config: &Config) -> Result<()> {
         compatible(agent, &provider.metadata)?;
     }
     Ok(())
+}
+fn validate_host_id(host_id: &str) -> Result<()> {
+    if host_id.is_empty()
+        || host_id == "local"
+        || host_id.len() > 255
+        || host_id.chars().any(char::is_control)
+    {
+        bail!("远程主机 ID 无效");
+    }
+    Ok(())
+}
+/// Only a digest reaches the durable request ledger; never persist a snapshot or credential.
+pub fn turn_fingerprint(provider: Option<&TurnProvider>) -> Result<Option<String>> {
+    use sha2::{Digest, Sha256};
+    provider
+        .map(|value| Ok(format!("{:x}", Sha256::digest(serde_json::to_vec(value)?))))
+        .transpose()
 }
 fn compatible(agent: &str, provider: &Provider) -> Result<()> {
     let protocols = crate::agents::provider_protocols(agent).context("Agent 尚未实现")?;
@@ -443,6 +596,122 @@ mod tests {
             Response::Providers { providers, .. } => providers.last().unwrap().id.clone(),
             _ => unreachable!(),
         }
+    }
+    #[test]
+    fn remote_associations_are_local_durable_and_validate_edits() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = ProviderStore::open(dir.path()).unwrap();
+        let id = saved(&mut store, draft(ProviderProtocol::AnthropicMessages));
+        store
+            .bind_host("remote-a", "claude", Some(id.clone()))
+            .unwrap();
+        assert!(
+            store
+                .snapshot_for_host("remote-b", "claude")
+                .unwrap()
+                .is_none()
+        );
+        assert!(store.snapshot_for_host("remote-a", "codex").is_err());
+        assert!(store.launch_config("claude").provider.is_none());
+        assert!(store.delete(&id).is_err());
+        let first = store
+            .snapshot_for_host("remote-a", "claude")
+            .unwrap()
+            .unwrap();
+        let mut edit = draft(ProviderProtocol::OpenaiChat);
+        edit.id = Some(id.clone());
+        assert!(store.save(edit.clone()).is_err());
+        edit.protocol = ProviderProtocol::AnthropicMessages;
+        edit.model = "second".into();
+        store.save(edit).unwrap();
+        let mut reopened = ProviderStore::open(dir.path()).unwrap();
+        let current = reopened
+            .snapshot_for_host("remote-a", "claude")
+            .unwrap()
+            .unwrap();
+        assert_eq!(first.provider.model, "first");
+        assert_eq!(current.provider.model, "second");
+        assert!(
+            !serde_json::to_string(&reopened.list_for_host("remote-a").unwrap())
+                .unwrap()
+                .contains("fixture-private-key")
+        );
+        reopened.bind_host("remote-a", "claude", None).unwrap();
+        reopened.delete(&id).unwrap();
+        let mut reopened = ProviderStore::open(dir.path()).unwrap();
+        assert!(reopened.host_configured("remote-a"));
+        assert!(
+            reopened
+                .snapshot_for_host("remote-a", "claude")
+                .unwrap()
+                .is_none()
+        );
+        reopened.forget_host("remote-a").unwrap();
+        assert!(
+            !ProviderStore::open(dir.path())
+                .unwrap()
+                .host_configured("remote-a")
+        );
+    }
+    #[test]
+    fn turn_overrides_ignore_saved_bindings_and_never_persist() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = ProviderStore::open(dir.path()).unwrap();
+        let id = saved(&mut store, draft(ProviderProtocol::AnthropicMessages));
+        store.bind("claude", Some(id.clone())).unwrap();
+        let before = std::fs::read(dir.path().join("providers.json")).unwrap();
+        assert!(
+            store
+                .turn_config("claude", None, Some(TurnProvider::Cli))
+                .unwrap()
+                .provider
+                .is_none()
+        );
+        let original = store.snapshot("claude", &id).unwrap();
+        let mut changed = original.clone();
+        changed.provider.model = "temporary".into();
+        let config = store
+            .turn_config(
+                "claude",
+                Some("temporary"),
+                Some(TurnProvider::Snapshot(changed.clone())),
+            )
+            .unwrap();
+        assert_eq!(config.provider.unwrap().metadata.model, "temporary");
+        assert!(
+            store
+                .turn_config(
+                    "claude",
+                    Some("outside-list"),
+                    Some(TurnProvider::Snapshot(changed.clone()))
+                )
+                .is_err()
+        );
+        changed.provider.protocol = ProviderProtocol::OpenaiChat;
+        assert!(
+            store
+                .turn_config("claude", None, Some(TurnProvider::Snapshot(changed)))
+                .is_err()
+        );
+        let mut empty_key = original.clone();
+        empty_key.credential.clear();
+        assert!(
+            store
+                .turn_config("claude", None, Some(TurnProvider::Snapshot(empty_key)))
+                .is_err()
+        );
+        let fingerprint =
+            turn_fingerprint(Some(&TurnProvider::Snapshot(original.clone()))).unwrap();
+        let mut rotated = original;
+        rotated.credential = "rotated-same-revision".into();
+        assert_ne!(
+            fingerprint,
+            turn_fingerprint(Some(&TurnProvider::Snapshot(rotated))).unwrap()
+        );
+        assert_eq!(
+            std::fs::read(dir.path().join("providers.json")).unwrap(),
+            before
+        );
     }
     #[test]
     fn catalog_binding_sync_and_revision_are_independent() {

@@ -1,11 +1,11 @@
 //! Claude Code CLI bidirectional stream-json/control protocol.
 //! Compatibility source: anthropics/claude-agent-sdk-python internal query/transport.
-use super::{AgentAdapter, AgentCommand, Output};
+use super::{Action, AgentAdapter, AgentCommand, Input};
 use crate::providers::LaunchConfig;
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use latte_work_protocol::EventKind;
 use serde_json::{Value, json};
-use std::io::Write;
+use std::{io::Write, path::PathBuf, process::Stdio, time::Duration};
 use tokio::process::Command;
 
 pub const MODEL_ALIASES: &[&str] = &["sonnet", "opus", "haiku", "fable"];
@@ -37,10 +37,70 @@ pub fn effort_levels(model: Option<&str>) -> &'static [latte_work_protocol::Effo
 #[derive(Default)]
 pub struct Claude {
     streamed: bool,
+    phase: Phase,
 }
+#[derive(Default)]
+enum Phase {
+    #[default]
+    Idle,
+    Initializing(String),
+    Running,
+    Finished,
+}
+
+pub(super) async fn discover() -> (String, latte_work_protocol::AgentInfo) {
+    let binary = binary();
+    let probe = tokio::time::timeout(
+        Duration::from_secs(5),
+        Command::new(&binary)
+            .arg("--version")
+            .stdin(Stdio::null())
+            .kill_on_drop(true)
+            .output(),
+    )
+    .await;
+    let (available, detail) = match probe {
+        Ok(Ok(result)) if result.status.success() => (
+            true,
+            String::from_utf8_lossy(&result.stdout).trim().to_owned(),
+        ),
+        _ => (
+            false,
+            "未找到 Claude Code；在此 Host 安装并登录后重启 Server。".into(),
+        ),
+    };
+    (
+        binary,
+        latte_work_protocol::AgentInfo {
+            id: "claude".into(),
+            name: "Claude Code".into(),
+            available,
+            provider_protocols: super::provider_protocols("claude").unwrap().to_vec(),
+            detail,
+        },
+    )
+}
+fn binary() -> String {
+    if let Ok(value) = std::env::var("LATTE_WORK_CLAUDE") {
+        return value;
+    }
+    if let Some(home) = std::env::var_os("HOME") {
+        let path = PathBuf::from(home).join(".local/bin/claude");
+        if path.is_file() {
+            return path.to_string_lossy().into_owned();
+        }
+    }
+    "claude".into()
+}
+fn write_action(value: Value) -> Result<Action> {
+    let mut bytes = serde_json::to_vec(&value)?;
+    bytes.push(b'\n');
+    Ok(Action::Write(bytes))
+}
+
 impl AgentAdapter for Claude {
     fn command(
-        &self,
+        &mut self,
         binary: &str,
         cwd: &str,
         resume: Option<&str>,
@@ -126,6 +186,31 @@ impl AgentAdapter for Claude {
             _settings: Some(file),
         })
     }
+    fn advance(&mut self, input: Input<'_>) -> Result<Vec<Action>> {
+        match input {
+            Input::Start { prompt } => {
+                if !matches!(self.phase, Phase::Idle) {
+                    bail!("Claude 本轮已经启动");
+                }
+                self.phase = Phase::Initializing(prompt.to_owned());
+                Ok(vec![write_action(self.initialize())?])
+            }
+            Input::Message(line) => {
+                if matches!(self.phase, Phase::Idle | Phase::Finished) {
+                    bail!("Claude 本轮未启动或已结束");
+                }
+                self.decode(serde_json::from_str(line).context("Claude 返回无效 JSON")?)
+            }
+            Input::Approval { id, input, allow } => {
+                if !matches!(self.phase, Phase::Running) {
+                    bail!("Claude 当前不可处理审批");
+                }
+                Ok(vec![write_action(self.approval(id, input, allow))?])
+            }
+        }
+    }
+}
+impl Claude {
     fn initialize(&self) -> Value {
         json!({"type":"control_request","request_id":"latte-init","request":{"subtype":"initialize"}})
     }
@@ -140,18 +225,26 @@ impl AgentAdapter for Claude {
         };
         json!({"type":"control_response","response":{"subtype":"success","request_id":id,"response":response}})
     }
-    fn decode(&mut self, m: Value) -> Result<Vec<Output>> {
+    fn decode(&mut self, m: Value) -> Result<Vec<Action>> {
         let mut output = Vec::new();
         match m["type"].as_str().unwrap_or_default() {
             "control_response" if m["response"]["request_id"] == "latte-init" => {
                 if m["response"]["subtype"] != "success" {
                     bail!("Claude 初始化失败: {}", m["response"]["error"]);
                 }
-                output.push(Output::Initialized);
+                if matches!(self.phase, Phase::Initializing(_)) {
+                    let Phase::Initializing(prompt) =
+                        std::mem::replace(&mut self.phase, Phase::Running)
+                    else {
+                        unreachable!()
+                    };
+                    output.push(Action::Ready);
+                    output.push(write_action(self.prompt(&prompt))?);
+                }
             }
             "system" if m["subtype"] == "init" => {
                 if let Some(id) = m["session_id"].as_str() {
-                    output.push(Output::NativeSession(id.into()));
+                    output.push(Action::NativeSession(id.into()));
                 }
             }
             "control_request" => {
@@ -161,13 +254,13 @@ impl AgentAdapter for Claude {
                     if id.is_empty() || !request["input"].is_object() {
                         bail!("无效的 Claude 审批请求");
                     }
-                    output.push(Output::Approval {
+                    output.push(Action::Approval {
                         id,
                         tool: request["tool_name"].as_str().unwrap_or("Tool").into(),
                         input: request["input"].clone(),
                     });
                 } else {
-                    output.push(Output::Reply(json!({"type":"control_response","response":{"subtype":"error","request_id":id,"error":"Unsupported control request in Latte Work v0.1"}})));
+                    output.push(write_action(json!({"type":"control_response","response":{"subtype":"error","request_id":id,"error":"Unsupported control request in Latte Work v0.1"}}))?);
                 }
             }
             "stream_event" => {
@@ -177,7 +270,7 @@ impl AgentAdapter for Claude {
                     && let Some(text) = event["delta"]["text"].as_str()
                 {
                     self.streamed = true;
-                    output.push(Output::Event(EventKind::Text { text: text.into() }));
+                    output.push(Action::Event(EventKind::Text { text: text.into() }));
                 }
             }
             "assistant" => {
@@ -187,11 +280,11 @@ impl AgentAdapter for Claude {
                             "text" if !self.streamed => {
                                 if let Some(text) = block["text"].as_str() {
                                     output
-                                        .push(Output::Event(EventKind::Text { text: text.into() }));
+                                        .push(Action::Event(EventKind::Text { text: text.into() }));
                                 }
                             }
                             "tool_use" => {
-                                output.push(Output::Event(EventKind::Tool {
+                                output.push(Action::Event(EventKind::Tool {
                                     id: block["id"].as_str().unwrap_or_default().into(),
                                     name: block["name"].as_str().unwrap_or("Tool").into(),
                                     input: block["input"].clone(),
@@ -207,7 +300,7 @@ impl AgentAdapter for Claude {
                 if let Some(blocks) = m["message"]["content"].as_array() {
                     for block in blocks {
                         if block["type"] == "tool_result" {
-                            output.push(Output::Event(EventKind::ToolResult {
+                            output.push(Action::Event(EventKind::ToolResult {
                                 id: block["tool_use_id"].as_str().unwrap_or_default().into(),
                                 content: block["content"].clone(),
                                 is_error: block["is_error"].as_bool().unwrap_or(false),
@@ -217,6 +310,10 @@ impl AgentAdapter for Claude {
                 }
             }
             "result" => {
+                if !matches!(self.phase, Phase::Running) {
+                    bail!("Claude 在初始化完成前返回了任务结果");
+                }
+                self.phase = Phase::Finished;
                 let failed = m["is_error"].as_bool().unwrap_or(false)
                     || m["subtype"]
                         .as_str()
@@ -231,7 +328,7 @@ impl AgentAdapter for Claude {
                 } else {
                     None
                 };
-                output.push(Output::Finished { failed, message });
+                output.push(Action::Finished { failed, message });
             }
             _ => {}
         }
@@ -321,6 +418,118 @@ mod tests {
         drop(prepared);
         assert!(!path.exists());
     }
+    fn message(adapter: &mut dyn AgentAdapter, value: Value) -> Result<Vec<Action>> {
+        adapter.advance(Input::Message(&value.to_string()))
+    }
+    fn encoded(actions: &[Action]) -> Vec<Value> {
+        actions
+            .iter()
+            .filter_map(|action| match action {
+                Action::Write(bytes) => {
+                    assert_eq!(bytes.last(), Some(&b'\n'));
+                    Some(serde_json::from_slice(bytes).unwrap())
+                }
+                _ => None,
+            })
+            .collect()
+    }
+    fn initialized() -> Value {
+        json!({"type":"control_response","response":{"request_id":"latte-init","subtype":"success"}})
+    }
+    #[test]
+    fn adapter_owns_handshake_and_sends_prompt_exactly_once() {
+        let mut adapter = super::super::create("claude").unwrap();
+        let start = adapter
+            .advance(Input::Start {
+                prompt: "hello\n你好",
+            })
+            .unwrap();
+        assert!(!start.iter().any(|a| matches!(a, Action::Ready)));
+        let outgoing = encoded(&start);
+        assert_eq!(outgoing.len(), 1);
+        assert_eq!(outgoing[0]["request"]["subtype"], "initialize");
+        let unrelated = message(adapter.as_mut(), json!({"type":"control_response","response":{"request_id":"another","subtype":"success"}})).unwrap();
+        assert!(unrelated.is_empty());
+        let ready = message(adapter.as_mut(), initialized()).unwrap();
+        assert!(matches!(ready[0], Action::Ready));
+        let outgoing = encoded(&ready);
+        assert_eq!(outgoing.len(), 1);
+        assert_eq!(outgoing[0]["message"]["content"], "hello\n你好");
+        assert!(message(adapter.as_mut(), initialized()).unwrap().is_empty());
+        assert!(
+            adapter
+                .advance(Input::Start {
+                    prompt: "must not replay"
+                })
+                .is_err()
+        );
+    }
+    #[test]
+    fn adapter_rejects_failed_handshake_malformed_input_and_premature_completion() {
+        let mut adapter = Claude::default();
+        assert!(message(&mut adapter, initialized()).is_err());
+        adapter
+            .advance(Input::Start {
+                prompt: "must not send",
+            })
+            .unwrap();
+        assert!(
+            adapter
+                .advance(Input::Approval {
+                    id: "r",
+                    input: json!({}),
+                    allow: true
+                })
+                .is_err()
+        );
+        assert!(message(&mut adapter, json!({"type":"control_response","response":{"request_id":"latte-init","subtype":"error","error":"denied"}})).is_err());
+        assert!(adapter.advance(Input::Message("invalid JSON")).is_err());
+        assert!(message(&mut adapter, json!({"type":"result","is_error":false})).is_err());
+    }
+    #[test]
+    fn adapter_encodes_approval_and_finishes_only_on_native_result() {
+        let mut adapter = Claude::default();
+        adapter.advance(Input::Start { prompt: "approve" }).unwrap();
+        message(&mut adapter, initialized()).unwrap();
+        let approval = message(&mut adapter, json!({"type":"control_request","request_id":"native-1","request":{"subtype":"can_use_tool","tool_name":"Write","input":{"file_path":"a.txt"}}})).unwrap();
+        assert!(matches!(&approval[0], Action::Approval {id, ..} if id == "native-1"));
+        assert!(encoded(&approval).is_empty());
+        let replies = adapter
+            .advance(Input::Approval {
+                id: "native-1",
+                input: json!({"file_path":"a.txt"}),
+                allow: true,
+            })
+            .unwrap();
+        let wire = encoded(&replies);
+        assert_eq!(wire[0]["response"]["request_id"], "native-1");
+        assert_eq!(
+            wire[0]["response"]["response"]["updatedInput"]["file_path"],
+            "a.txt"
+        );
+        let text = message(
+            &mut adapter,
+            json!({"type":"assistant","message":{"content":[{"type":"text","text":"done"}]}}),
+        )
+        .unwrap();
+        assert!(
+            !text
+                .iter()
+                .any(|action| matches!(action, Action::Finished { .. }))
+        );
+        let result = message(&mut adapter, json!({"type":"result","is_error":false})).unwrap();
+        assert!(matches!(result[0], Action::Finished { failed: false, .. }));
+        assert!(message(&mut adapter, initialized()).is_err());
+        assert!(
+            adapter
+                .advance(Input::Approval {
+                    id: "native-1",
+                    input: json!({}),
+                    allow: true
+                })
+                .is_err()
+        );
+    }
     #[test]
     fn streams_without_duplicating_final_message() {
         let mut a = Claude::default();
@@ -346,10 +555,11 @@ mod tests {
             "deny"
         );
         assert!(a.decode(json!({"type":"control_response","response":{"request_id":"latte-init","subtype":"error","error":"bad"}})).is_err());
+        a.phase = Phase::Running;
         assert!(matches!(
             &a.decode(json!({"type":"result","is_error":true,"result":"auth failed"}))
                 .unwrap()[0],
-            Output::Finished { failed: true, .. }
+            Action::Finished { failed: true, .. }
         ));
     }
 }

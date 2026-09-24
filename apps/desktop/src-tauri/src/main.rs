@@ -153,23 +153,10 @@ async fn connect_host(
                 passwords.remove(&host.id);
             }
         }
-        result
+        result.map_err(|e| format!("{e:#}"))
     } else {
-        let mut binary = std::env::current_exe()
-            .map_err(|e| e.to_string())?
-            .with_file_name("latte-work-server");
-        if !binary.is_file() {
-            let resource = app.path().resource_dir().map_err(|e| e.to_string())?;
-            binary = resource.join("latte-work-server");
-        }
-        if cfg!(debug_assertions)
-            && let Ok(path) = std::env::var("LATTE_WORK_SERVER")
-        {
-            binary = PathBuf::from(path);
-        }
-        Client::local(&binary, None).await
-    }
-    .map_err(|e| format!("{e:#}"))?;
+        connect_local(&app).await
+    }?;
     let mut client = client;
     let response = client
         .request(Request::Hello {
@@ -184,12 +171,49 @@ async fn connect_host(
         .insert(host.id, Arc::new(Mutex::new(client)));
     Ok(response)
 }
+async fn connect_local(app: &tauri::AppHandle) -> Result<Client, String> {
+    let mut binary = std::env::current_exe()
+        .map_err(|e| e.to_string())?
+        .with_file_name("latte-work-server");
+    if !binary.is_file() {
+        let resource = app.path().resource_dir().map_err(|e| e.to_string())?;
+        binary = resource.join("latte-work-server");
+    }
+    if cfg!(debug_assertions)
+        && let Ok(path) = std::env::var("LATTE_WORK_SERVER")
+    {
+        binary = PathBuf::from(path);
+    }
+    Client::local(&binary, None)
+        .await
+        .map_err(|e| format!("{e:#}"))
+}
+async fn local_client(
+    app: &tauri::AppHandle,
+    state: &Connections,
+) -> Result<Arc<Mutex<Client>>, String> {
+    if let Some(client) = state.clients.lock().await.get("local").cloned() {
+        return Ok(client);
+    }
+    let client = Arc::new(Mutex::new(connect_local(app).await?));
+    Ok(state
+        .clients
+        .lock()
+        .await
+        .entry("local".into())
+        .or_insert(client)
+        .clone())
+}
 #[tauri::command]
 async fn host_request(
+    app: tauri::AppHandle,
     state: State<'_, Connections>,
     host_id: String,
     request: Request,
 ) -> Result<Response, String> {
+    if matches!(request, Request::ExportHostAgentProvider { .. }) {
+        return Err("Provider 凭据仅供原生执行使用".into());
+    }
     let client = state
         .clients
         .lock()
@@ -197,12 +221,71 @@ async fn host_request(
         .get(&host_id)
         .cloned()
         .ok_or("Host 未连接")?;
-    client
+    let response =
+        if host_id != "local" && matches!(request, Request::Models { .. } | Request::Send { .. }) {
+            let local = local_client(&app, &state).await?;
+            latte_work_client::request_with_provider(&local, &client, host_id, request).await
+        } else {
+            client.lock().await.request(request).await
+        }
+        .map_err(|e| format!("{e:#}"))?;
+    ui_response(response)
+}
+fn ui_response(response: Response) -> Result<Response, String> {
+    if matches!(response, Response::ProviderSnapshot { .. }) {
+        return Err("Provider 凭据不能返回界面".into());
+    }
+    Ok(response)
+}
+#[tauri::command]
+async fn agent_providers(
+    app: tauri::AppHandle,
+    state: State<'_, Connections>,
+    host_id: String,
+) -> Result<Response, String> {
+    let local = local_client(&app, &state).await?;
+    let request = if host_id == "local" {
+        Request::Providers
+    } else {
+        Request::ProvidersForHost { host_id }
+    };
+    let response = local
         .lock()
         .await
         .request(request)
         .await
-        .map_err(|e| format!("{e:#}"))
+        .map_err(|e| format!("{e:#}"))?;
+    ui_response(response)
+}
+#[tauri::command]
+async fn bind_agent_provider(
+    app: tauri::AppHandle,
+    state: State<'_, Connections>,
+    host_id: String,
+    agent: String,
+    provider_id: Option<String>,
+) -> Result<Response, String> {
+    let local = local_client(&app, &state).await?;
+    let request = if host_id == "local" {
+        Request::BindAgentProvider {
+            agent,
+            provider_id,
+            target: None,
+        }
+    } else {
+        Request::BindHostAgentProvider {
+            host_id,
+            agent,
+            provider_id,
+        }
+    };
+    let response = local
+        .lock()
+        .await
+        .request(request)
+        .await
+        .map_err(|e| format!("{e:#}"))?;
+    ui_response(response)
 }
 #[tauri::command]
 async fn disconnect_host(state: State<'_, Connections>, host_id: String) -> Result<(), String> {
@@ -227,7 +310,30 @@ fn load_hosts(app: tauri::AppHandle) -> Result<Vec<Host>, String> {
     serde_json::from_slice(&data).map_err(|e| e.to_string())
 }
 #[tauri::command]
-fn save_hosts(app: tauri::AppHandle, hosts: Vec<Host>) -> Result<(), String> {
+async fn save_hosts(
+    app: tauri::AppHandle,
+    state: State<'_, Connections>,
+    hosts: Vec<Host>,
+) -> Result<(), String> {
+    let removed: Vec<_> = load_hosts(app.clone())?
+        .into_iter()
+        .filter(|old| !hosts.iter().any(|host| host.id == old.id))
+        .collect();
+    if !removed.is_empty() {
+        let local = local_client(&app, &state).await?;
+        let mut local = local.lock().await;
+        for host in removed {
+            match local
+                .request(Request::ForgetHostProviders { host_id: host.id })
+                .await
+                .map_err(|e| e.to_string())?
+            {
+                Response::Providers { .. } => {}
+                Response::Error { message, .. } => return Err(message),
+                _ => return Err("解除主机关联失败".into()),
+            }
+        }
+    }
     let path = host_file(&app)?;
     std::fs::create_dir_all(path.parent().ok_or("无效配置路径")?).map_err(|e| e.to_string())?;
     let temp = path.with_extension("tmp");
@@ -352,6 +458,8 @@ fn main() {
             connect_host,
             disconnect_host,
             host_request,
+            bind_agent_provider,
+            agent_providers,
             load_hosts,
             save_hosts,
             choose_project_folder,
@@ -366,6 +474,32 @@ fn main() {
 mod tests {
     use super::*;
     use tokio::io::AsyncReadExt;
+
+    #[test]
+    fn native_provider_snapshots_cannot_reach_the_webview() {
+        let response: Response = serde_json::from_value(serde_json::json!({
+            "kind": "provider_snapshot",
+            "snapshot": {
+                "provider": {
+                    "id": "provider", "name": "Fixture", "protocol": "anthropic_messages",
+                    "base_url": "https://example.test", "model": "model", "auth": "api_key",
+                    "has_credential": true
+                },
+                "credential": "native-only-secret"
+            }
+        }))
+        .unwrap();
+        assert!(!format!("{response:?}").contains("native-only-secret"));
+        let error = ui_response(response).unwrap_err();
+        assert!(!error.contains("native-only-secret"));
+        assert!(
+            ui_response(Response::Providers {
+                providers: vec![],
+                bindings: vec![]
+            })
+            .is_ok()
+        );
+    }
 
     #[test]
     fn old_host_records_default_to_openssh_and_password_is_not_serialized() {

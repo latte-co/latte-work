@@ -20,6 +20,7 @@ fn main() {
         ProviderTarget::decl(),
         AgentProviderBinding::decl(),
         ProviderSnapshot::decl(),
+        TurnProvider::decl(),
         Request::decl(),
         Response::decl(),
     ] {
