@@ -33,7 +33,10 @@ independent Claude processes. The explicit state-directory option creates an
 isolated instance for testing or a separate installation, not ordinary projects.
 
 Directory mode is 0700 and socket mode is 0600. There is no public TCP listener.
-SSH inherits the user's identity, configuration and host-key verification.
+SSH uses the user's OpenSSH configuration and host-key verification. The desktop
+can select a local identity file or provide a password through OpenSSH askpass;
+the latter remains in process memory for the current app run and is never saved
+in `hosts.json`.
 Remote programs are shell-quoted and Host input rejects option injection.
 Local and remote hosts use exactly the same command and protocol handlers.
 
@@ -98,6 +101,10 @@ Local folder selection uses the native Tauri dialog. Remote selection uses the v
 `browse_directories` request (directory metadata only, absolute paths, bounded output).
 Project file previews still enforce the registered project root. Upgrade both desktop
 and host server for protocol v8; an old server fails the handshake explicitly.
+An unsaved task draft selects a host-scoped project before its first send. The
+desktop connects to that project's host and sends `create_session` and `send` to
+the same host with the selected project ID. A disconnected host disables send;
+switching project does not move an existing session or persist an empty draft.
 
 Protocol v5 adds project rename and reversible removal. Removal hides a registered
 project from the catalog without deleting its directory, sessions, or events;

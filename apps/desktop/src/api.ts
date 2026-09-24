@@ -5,6 +5,9 @@ export interface Host {
   name: string;
   ssh: string | null;
   server_path: string | null;
+  auth?: "none" | "identity_file" | "password";
+  identity_file?: string | null;
+  port?: number | null;
 }
 export const localHost: Host = {
   id: "local",
@@ -13,18 +16,36 @@ export const localHost: Host = {
   server_path: null,
 };
 export const native = "__TAURI_INTERNALS__" in window;
-const connections = new Map<string, Promise<Response>>();
-export function connect(host: Host): Promise<Response> {
+const connections = new Map<
+  string,
+  { signature: string; promise: Promise<Response> }
+>();
+export function connect(host: Host, password?: string): Promise<Response> {
+  const signature = JSON.stringify(host);
   const pending = connections.get(host.id);
-  if (pending) return pending;
-  const promise = invoke<Response>("connect_host", { host }).finally(() =>
-    connections.delete(host.id),
-  );
-  connections.set(host.id, promise);
+  if (pending?.signature === signature && password === undefined)
+    return pending.promise;
+  const invokeConnection = () =>
+    invoke<Response>("connect_host", { host, password });
+  const promise = (
+    pending
+      ? pending.promise.catch(() => undefined).then(invokeConnection)
+      : invokeConnection()
+  ).finally(() => {
+    if (connections.get(host.id)?.promise === promise)
+      connections.delete(host.id);
+  });
+  connections.set(host.id, { signature, promise });
   return promise;
+}
+export function disconnect(hostId: string): Promise<void> {
+  return invoke("disconnect_host", { hostId });
 }
 export function chooseProjectFolder(): Promise<string | null> {
   return invoke("choose_project_folder");
+}
+export function chooseIdentityFile(): Promise<string | null> {
+  return invoke("choose_identity_file");
 }
 export async function request(
   hostId: string,
@@ -41,7 +62,8 @@ export async function saveHosts(hosts: Host[]): Promise<void> {
   return invoke("save_hosts", { hosts: hosts.filter((h) => h.id !== "local") });
 }
 export function message(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
+  const value = error instanceof Error ? error.message : String(error);
+  return value === "SSH_PASSWORD_REQUIRED" ? "请输入 SSH 密码后连接" : value;
 }
 
 export function revealProject(

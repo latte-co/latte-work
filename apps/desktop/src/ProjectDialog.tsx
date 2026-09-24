@@ -178,7 +178,9 @@ export function ProjectDialog({ state }: { state: Workbench }) {
                             role="menuitem"
                             onClick={() => {
                               setError("");
-                              setModal("host");
+                              state.setSettingsTab("ssh");
+                              state.setSettingsReturnToProject(true);
+                              setModal("settings");
                             }}
                           >
                             <Plus size={18} />

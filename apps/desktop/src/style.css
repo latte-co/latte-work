@@ -78,7 +78,7 @@ button svg {
   background: var(--color-sidebar);
   display: flex;
   flex-direction: column;
-  padding: 0 13px;
+  padding: 0 7px;
   min-width: 0;
 }
 .window-drag {
@@ -257,62 +257,168 @@ button svg {
 .project-heading {
   display: flex;
   align-items: center;
+  position: relative;
+  min-height: 31px;
+  border-radius: var(--radius-sm);
+}
+.project-heading:hover {
+  background: var(--color-hover);
+}
+.project-heading.selected {
+  background: var(--color-selected);
 }
 .project-heading .project-row {
-  flex: 1;
-  min-width: 0;
-  width: auto;
-}
-.project-toggle {
-  flex-shrink: 0;
-  width: 28px;
-  height: 32px;
-}
-.project-row {
   width: 100%;
-  padding: 10px 9px;
-  border-radius: var(--radius-sm);
-  color: #b4c0c2;
+  min-width: 0;
+  height: 31px;
+  padding: 0 7px;
+  gap: 8px;
+  border-radius: inherit;
+  color: var(--color-text-secondary);
   text-align: left;
+  font-size: var(--text-md);
 }
-.project-row > span {
+.project-heading .project-row:not(:disabled):hover {
+  background: transparent;
+}
+.project-folder {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  width: 16px;
+  flex: none;
+}
+.project-remote-mark {
+  position: absolute;
+  width: 5px;
+  height: 5px;
+  right: -1px;
+  bottom: -1px;
+  border-radius: 50%;
+  background: var(--color-success);
+  border: 1px solid var(--color-sidebar);
+}
+.project-name {
+  min-width: 0;
+  flex: 1;
   overflow: hidden;
   white-space: nowrap;
   text-overflow: ellipsis;
-  flex: 1;
 }
-.project-row.selected {
+.project-heading.selected .project-name {
   color: var(--color-text);
 }
-.project-row.selected > svg:first-child {
-  color: var(--accent);
+.project-activity {
+  flex: none;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--color-success);
+  margin-left: 4px;
+}
+.project-more,
+.project-new-task {
+  position: absolute;
+  top: 1px;
+  width: 27px;
+  height: 29px;
+  min-height: 29px;
+  visibility: hidden;
+  opacity: 0;
+  pointer-events: none;
+}
+.project-more {
+  right: 34px;
+}
+.project-new-task {
+  right: 4px;
+}
+.project-heading:hover .project-row,
+.project-heading:focus-within .project-row {
+  padding-right: 62px;
+}
+.project-heading:hover .project-host,
+.project-heading:hover .project-activity,
+.project-heading:focus-within .project-host,
+.project-heading:focus-within .project-activity {
+  visibility: hidden;
+}
+.project-heading:hover .project-more,
+.project-heading:hover .project-new-task,
+.project-heading:focus-within .project-more,
+.project-heading:focus-within .project-new-task {
+  visibility: visible;
+  opacity: 1;
+  pointer-events: auto;
+}
+@media (hover: none) {
+  .project-more,
+  .project-new-task {
+    visibility: visible;
+    opacity: 1;
+    pointer-events: auto;
+  }
+  .project-heading .project-row {
+    padding-right: 62px;
+  }
+  .project-host,
+  .project-activity {
+    visibility: hidden;
+  }
 }
 .session-list {
-  margin: 2px 0 10px 9px;
-  border-left: 1px solid var(--color-border-subtle);
-  padding-left: var(--space-2);
+  margin: 0 0 3px;
+  padding-left: 21px;
+}
+.session-item {
+  position: relative;
 }
 .session-row {
   width: 100%;
+  min-height: 30px;
   text-align: left;
-  padding: 9px;
+  padding: 4px 28px 4px 4px;
   border-radius: var(--radius-sm);
-  gap: 9px;
-  color: var(--color-text-muted);
-  font-size: var(--text-sm);
-}
-.session-row span:last-child {
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  gap: 7px;
+  color: var(--color-text-secondary);
+  font-size: var(--text-md);
 }
 .session-row.active {
   background: var(--color-selected);
   color: var(--color-text);
 }
+.session-more {
+  position: absolute;
+  right: 2px;
+  top: 1px;
+  width: 27px;
+  height: 28px;
+  visibility: hidden;
+  opacity: 0;
+  pointer-events: none;
+}
+.session-item:hover .session-more,
+.session-item:focus-within .session-more {
+  visibility: visible;
+  opacity: 1;
+  pointer-events: auto;
+}
+.session-item:hover .session-dot,
+.session-item:hover .unread-dot,
+.session-item:focus-within .session-dot,
+.session-item:focus-within .unread-dot {
+  visibility: hidden;
+}
+@media (hover: none) {
+  .session-more {
+    visibility: visible;
+    opacity: 1;
+    pointer-events: auto;
+  }
+}
 .session-dot {
-  width: 4px;
-  height: 4px;
+  width: 6px;
+  height: 6px;
   background: #6e8389;
   border-radius: 50%;
   flex-shrink: 0;
@@ -329,7 +435,7 @@ button svg {
 }
 .no-sessions {
   display: block;
-  padding: var(--space-2) var(--space-3);
+  padding: 6px 4px;
   font-size: var(--text-xs);
   color: #647a80;
 }
@@ -539,6 +645,95 @@ button svg {
   max-width: 870px;
   width: 100%;
   margin: auto;
+}
+.task-project-picker {
+  position: relative;
+  width: fit-content;
+  max-width: 100%;
+  margin-bottom: var(--space-2);
+}
+.task-project-trigger {
+  max-width: 100%;
+  min-height: 30px;
+  padding: 4px var(--space-2);
+  color: var(--color-text-secondary);
+  font-size: var(--text-md);
+}
+.task-project-trigger strong,
+.task-project-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.task-project-trigger strong {
+  font-weight: 500;
+}
+.task-project-host,
+.task-project-list small {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  color: var(--color-text-muted);
+  font-size: var(--text-xs);
+  white-space: nowrap;
+}
+.task-project-menu {
+  position: absolute;
+  bottom: calc(100% + 6px);
+  left: 0;
+  z-index: 12;
+  display: flex;
+  flex-direction: column;
+  width: min(350px, calc(100vw - 80px));
+  max-height: min(340px, calc(100dvh - 180px));
+  padding: var(--space-1);
+  overflow: hidden;
+  background: var(--color-elevated);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-panel);
+  box-shadow: var(--shadow-popover);
+}
+.task-project-menu > input {
+  min-height: 36px;
+  margin: var(--space-1);
+  padding: 0 var(--space-2);
+  background: var(--color-input);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-control);
+}
+.task-project-menu > input::placeholder {
+  color: var(--color-placeholder);
+}
+.task-project-list {
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+.task-project-list > button,
+.task-project-add {
+  width: 100%;
+  min-height: var(--menu-item-height);
+  padding: var(--space-2) var(--space-3);
+  text-align: left;
+  border-radius: var(--radius-sm);
+}
+.task-project-list > button.active {
+  background: var(--color-selected);
+}
+.task-project-name {
+  flex: 1;
+}
+.task-project-empty {
+  padding: var(--space-3);
+  color: var(--color-text-muted);
+  font-size: var(--text-sm);
+}
+.task-project-add {
+  flex-shrink: 0;
+  margin-top: var(--space-1);
+  border-top: 1px solid var(--color-border);
+  color: var(--color-text-secondary);
 }
 .composer {
   border: 1px solid var(--color-border-strong);
@@ -1012,6 +1207,9 @@ button svg {
   align-items: center;
   justify-content: center;
   z-index: 20;
+}
+.ssh-password-backdrop {
+  z-index: 40;
 }
 .modal {
   width: 450px;
@@ -1759,6 +1957,146 @@ button svg {
 }
 .settings-panel-content .agent-sync-note {
   color: var(--accent);
+}
+.ssh-settings-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-4);
+  margin-bottom: var(--space-6);
+}
+.ssh-settings-heading h2 {
+  margin-bottom: var(--space-2);
+}
+.ssh-settings-heading p {
+  margin: 0;
+  color: var(--color-text-muted);
+}
+.ssh-add {
+  flex: none;
+  padding: 0 var(--space-4);
+  gap: var(--space-2);
+}
+.ssh-host-list {
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-panel);
+  overflow: hidden;
+}
+.ssh-host-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-4);
+  background: var(--color-surface);
+}
+.ssh-host-row + .ssh-host-row {
+  border-top: 1px solid var(--color-border);
+}
+.ssh-host-row > svg {
+  color: var(--color-text-muted);
+  flex: none;
+}
+.ssh-host-main {
+  flex: 1;
+  min-width: 0;
+}
+.ssh-host-main strong {
+  display: block;
+  font-size: var(--text-md);
+  font-weight: 500;
+}
+.ssh-host-main small {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--color-text-muted);
+  margin-top: var(--space-1);
+}
+.ssh-status {
+  display: block;
+  color: var(--color-success);
+  font-size: var(--text-xs);
+  margin-top: var(--space-1);
+  overflow-wrap: anywhere;
+}
+.ssh-status-error {
+  color: var(--color-danger);
+}
+.ssh-host-actions {
+  display: flex;
+  gap: var(--space-2);
+  flex: none;
+}
+.ssh-host-actions button {
+  min-height: 32px;
+  padding: 0 var(--space-2);
+}
+.ssh-empty {
+  border: 1px dashed var(--color-border);
+  border-radius: var(--radius-panel);
+  padding: var(--space-6);
+}
+.ssh-modal {
+  width: 520px;
+}
+.ssh-auth-label {
+  color: var(--color-text-secondary);
+  font-size: var(--text-sm);
+  margin-bottom: var(--space-2);
+}
+.ssh-auth-options {
+  display: flex;
+  gap: var(--space-2);
+}
+.ssh-auth-options label {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex: 1;
+  min-height: var(--button-height);
+  margin: 0;
+  border-radius: var(--radius-control);
+  background: var(--color-input);
+  color: var(--color-text-muted);
+  cursor: pointer;
+}
+.ssh-auth-options label.selected {
+  background: var(--color-selected);
+  color: var(--color-text);
+}
+.ssh-auth-options input[type="radio"] {
+  position: absolute;
+  opacity: 0;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: 0;
+}
+.ssh-auth-options label:focus-within {
+  background: var(--color-focus-background);
+}
+.ssh-file-field {
+  display: flex;
+  align-items: end;
+  gap: var(--space-2);
+}
+.ssh-file-field input {
+  flex: 1;
+  min-width: 0;
+}
+.ssh-file-field button {
+  height: var(--control-height);
+  margin-top: var(--space-2);
+  padding: 0 var(--space-3);
+}
+.ssh-modal label small {
+  display: block;
+  color: var(--color-text-muted);
+  margin-top: var(--space-2);
+}
+.ssh-modal .modal-actions {
+  margin-top: var(--space-6);
 }
 
 .settings-window-drag {
