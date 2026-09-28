@@ -1,11 +1,20 @@
 import { useEffect, useRef, useState } from "react";
-import { ArrowLeft, Globe2, MessageSquare, Settings2 } from "lucide-react";
+import {
+  ArrowLeft,
+  Globe2,
+  MessageSquare,
+  Settings2,
+  Palette,
+} from "lucide-react";
 import { AgentSettings } from "./AgentSettings";
 import { ProviderSettings } from "./ProviderSettings";
 import { SSHSettings } from "./SSHSettings";
 import type { Workbench } from "./useWorkbench";
 
+import { AppearanceSettings } from "./AppearanceSettings";
+
 const tabs = [
+  { id: "appearance", label: "外观", icon: Palette },
   { id: "agents", label: "连接与 Agent", icon: MessageSquare },
   { id: "providers", label: "Provider", icon: Settings2 },
   { id: "ssh", label: "SSH 连接", icon: Globe2 },
@@ -46,15 +55,13 @@ export function SettingsPage({ state }: { state: Workbench }) {
   return (
     <div className="settings-page">
       <div className="settings-window-drag" data-tauri-drag-region />
-      <header className="settings-topbar">
-        <button className="settings-back" onClick={close} disabled={busy}>
-          <ArrowLeft size={16} />
-          返回工作台
-        </button>
-      </header>
       <div className="settings-layout">
         <aside className="settings-navigation">
           <h1>设置</h1>
+          <button className="settings-back" onClick={close} disabled={busy}>
+            <ArrowLeft size={16} />
+            返回工作台
+          </button>
           <div
             ref={navigation}
             role="tablist"
@@ -101,6 +108,14 @@ export function SettingsPage({ state }: { state: Workbench }) {
           </div>
         </aside>
         <main className="settings-body" aria-label="设置">
+          <section
+            id="settings-panel-appearance"
+            role="tabpanel"
+            aria-labelledby="settings-tab-appearance"
+            hidden={tab !== "appearance"}
+          >
+            {tab === "appearance" && <AppearanceSettings />}
+          </section>
           <section
             id="settings-panel-agents"
             role="tabpanel"

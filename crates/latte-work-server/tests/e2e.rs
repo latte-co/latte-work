@@ -199,6 +199,7 @@ async fn send(c: &mut Client, id: &str, request: &str, text: &str) -> Response {
     ask(
         c,
         Request::Send {
+            permission_mode: None,
             provider: None,
             session_id: id.into(),
             request_id: request.into(),
@@ -463,6 +464,52 @@ async fn inspection_reads_host_files_and_both_git_views() {
     assert!(
         matches!(ask(&mut c, Request::Files { project_id: id.clone(), path: "".into() }).await, Response::Files { entries } if entries.iter().any(|e| e.name == "hello.txt") && entries.iter().all(|e| e.name != ".git"))
     );
+    let outside = tempfile::tempdir().unwrap();
+    let external = outside.path().join("reference.txt");
+    std::fs::write(&external, "external reference").unwrap();
+    let absolute = external
+        .canonicalize()
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_owned();
+    assert!(
+        matches!(ask(&mut c, Request::ResolveReference { project_id: id.clone(), path: absolute.clone() }).await,
+        Response::FileReference { entry } if entry.path == absolute && !entry.directory)
+    );
+    assert!(matches!(
+        ask(
+            &mut c,
+            Request::ReadFile {
+                project_id: id.clone(),
+                path: absolute
+            }
+        )
+        .await,
+        Response::Error { .. }
+    ));
+    assert!(matches!(
+        ask(
+            &mut c,
+            Request::ResolveReference {
+                project_id: id.clone(),
+                path: "../outside".into()
+            }
+        )
+        .await,
+        Response::Error { .. }
+    ));
+    assert!(matches!(
+        ask(
+            &mut c,
+            Request::ResolveReference {
+                project_id: "unknown".into(),
+                path: external.to_str().unwrap().into()
+            }
+        )
+        .await,
+        Response::Error { .. }
+    ));
     assert!(
         matches!(ask(&mut c, Request::Diff { project_id: id.clone() }).await, Response::Content { text, .. } if text.contains("+working") && text.contains("+staged"))
     );
@@ -759,6 +806,7 @@ async fn models_select_per_turn_validate_and_persist_without_changing_provider()
         matches!(aliases, Response::Models { models, provider: None, .. } if models.contains(&"sonnet".into()))
     );
     let send_model = |request: &str, model: Option<&str>, text: &str| Request::Send {
+        permission_mode: None,
         provider: None,
         session_id: sid.clone(),
         request_id: request.into(),
@@ -966,6 +1014,7 @@ async fn effort_is_applied_on_launch_resume_and_reset() {
         ask(
             &mut client,
             Request::Send {
+                permission_mode: None,
                 provider: None,
                 session_id: id.clone(),
                 request_id: "unsupported".into(),
@@ -977,12 +1026,20 @@ async fn effort_is_applied_on_launch_resume_and_reset() {
         .await,
         Response::Error { .. }
     ));
+    std::fs::create_dir(project.path().join(".claude")).unwrap();
+    std::fs::write(
+        project.path().join(".claude/settings.json"),
+        r#"{"effortLevel":"medium"}"#,
+    )
+    .unwrap();
     for (request_id, effort, expected) in [
-        ("effort-high", Some(Effort::High), "fresh:high"),
+        ("effort-native", None, "fresh:medium"),
+        ("effort-high", Some(Effort::High), "resumed:high"),
         ("effort-low", Some(Effort::Low), "resumed:low"),
-        ("effort-auto", None, "resumed:auto"),
+        ("effort-inherit", None, "resumed:medium"),
     ] {
         let send = Request::Send {
+            permission_mode: None,
             provider: None,
             session_id: id.clone(),
             request_id: request_id.into(),
@@ -1161,6 +1218,7 @@ async fn remote_turns_use_latest_local_provider_without_persisting_snapshots() {
     let project = tempfile::tempdir().unwrap();
     let sid = session(&mut observer, project.path()).await;
     let send = |request_id: &str, text: &str| Request::Send {
+        permission_mode: Some("plan".into()),
         provider: None,
         session_id: sid.clone(),
         request_id: request_id.into(),
@@ -1241,6 +1299,7 @@ async fn remote_turns_use_latest_local_provider_without_persisting_snapshots() {
         Response::Error { .. }
     ));
     let original = Request::Send {
+        permission_mode: Some("plan".into()),
         provider: Some(TurnProvider::Snapshot(snapshot.clone())),
         session_id: sid.clone(),
         request_id: "first-turn".into(),
@@ -1259,6 +1318,7 @@ async fn remote_turns_use_latest_local_provider_without_persisting_snapshots() {
             .lock()
             .await
             .request(Request::Send {
+                permission_mode: Some("plan".into()),
                 provider: Some(TurnProvider::Snapshot(changed)),
                 session_id: sid.clone(),
                 request_id: "first-turn".into(),
@@ -2053,4 +2113,293 @@ async fn upgrade_racing_send_either_preserves_task_or_rejects_before_launch() {
         }
         other => panic!("{other:?}"),
     }
+}
+
+#[tokio::test]
+async fn agent_commands_discovery_dispatch_resume_and_unsupported_are_native() {
+    let host = Host::start().await;
+    let mut client = host.client().await;
+    let folder = tempfile::tempdir().unwrap();
+    let project_id = terminal_project(&mut client, folder.path()).await;
+    let response = ask(
+        &mut client,
+        Request::AgentCommands {
+            agent: "claude".into(),
+            project_id: project_id.clone(),
+        },
+    )
+    .await;
+    match response {
+        Response::AgentCommands { commands } => {
+            assert_eq!(commands.len(), 2);
+            assert_eq!(commands[0].name, "compact");
+            assert_eq!(commands[0].argument_hint, "[instructions]");
+            assert_eq!(
+                commands[1].description,
+                folder.path().file_name().unwrap().to_str().unwrap()
+            );
+        }
+        other => panic!("{other:?}"),
+    }
+    assert!(
+        matches!(ask(&mut client, Request::Sessions { project_id: project_id.clone() }).await, Response::Sessions { sessions } if sessions.is_empty())
+    );
+    for (agent, project) in [("codex", project_id.as_str()), ("claude", "missing")] {
+        assert!(matches!(
+            ask(
+                &mut client,
+                Request::AgentCommands {
+                    agent: agent.into(),
+                    project_id: project.into()
+                }
+            )
+            .await,
+            Response::Error { .. }
+        ));
+    }
+    let id = session(&mut client, folder.path()).await;
+    assert!(matches!(
+        send(
+            &mut client,
+            &id,
+            "first-command",
+            "/project:check 中文 参数"
+        )
+        .await,
+        Response::Accepted { duplicate: false }
+    ));
+    let events = wait(&mut client, &id, Status::Completed).await;
+    assert!(events.iter().any(|event| matches!(&event.event, EventKind::Text { text } if text == "fresh:/project:check 中文 参数")));
+    assert!(matches!(
+        send(
+            &mut client,
+            &id,
+            "first-command",
+            "/project:check 中文 参数"
+        )
+        .await,
+        Response::Accepted { duplicate: true }
+    ));
+    send(&mut client, &id, "second-command", "/compact 保留关键内容").await;
+    let events = wait(&mut client, &id, Status::Completed).await;
+    assert!(events.iter().any(|event| matches!(&event.event, EventKind::Text { text } if text == "resumed:/compact 保留关键内容")));
+    send(&mut client, &id, "unknown-command", "/not-supported").await;
+    let events = wait(&mut client, &id, Status::Failed).await;
+    assert!(events.iter().any(|event| matches!(&event.event, EventKind::State { message: Some(message), .. } if message.contains("不支持命令"))));
+    assert!(!events.iter().any(
+        |event| matches!(&event.event, EventKind::Text { text } if text.contains("not-supported"))
+    ));
+}
+
+#[tokio::test]
+async fn permission_discovery_launch_resume_reset_and_approval_stay_native() {
+    let host = Host::start().await;
+    let mut client = host.client().await;
+    let project = tempfile::tempdir().unwrap();
+    let id = session(&mut client, project.path()).await;
+    std::fs::create_dir(project.path().join(".claude")).unwrap();
+    std::fs::write(
+        project.path().join(".claude/settings.json"),
+        r#"{"permissions":{"defaultMode":"dontAsk"}}"#,
+    )
+    .unwrap();
+    assert!(matches!(
+        ask(&mut client, Request::AgentPermissions { agent: "claude".into() }).await,
+        Response::AgentPermissions { modes } if modes.len() == 5 && !modes.iter().any(|m| m.id == "auto")
+    ));
+    assert!(matches!(
+        ask(
+            &mut client,
+            Request::AgentPermissions {
+                agent: "codex".into()
+            }
+        )
+        .await,
+        Response::Error { .. }
+    ));
+    let turn = |request_id: &str, mode: Option<&str>, text: &str| Request::Send {
+        provider: None,
+        session_id: id.clone(),
+        request_id: request_id.into(),
+        text: text.into(),
+        model: None,
+        effort: None,
+        permission_mode: mode.map(str::to_owned),
+    };
+    assert!(matches!(
+        ask(&mut client, turn("bad-mode", Some("auto"), "permission")).await,
+        Response::Error { .. }
+    ));
+    assert!(
+        matches!(ask(&mut client, Request::Poll { session_id: id.clone(), after: 0.0 }).await,
+        Response::Events { events, session, .. } if events.is_empty() && session.permission_mode.is_none())
+    );
+    for (request_id, mode, expected) in [
+        ("native", None, "fresh:dontAsk"),
+        ("edits", Some("acceptEdits"), "resumed:acceptEdits"),
+        ("plan", Some("plan"), "resumed:plan"),
+        (
+            "bypass",
+            Some("bypassPermissions"),
+            "resumed:bypassPermissions",
+        ),
+        ("reset", None, "resumed:dontAsk"),
+    ] {
+        let request = turn(request_id, mode, "permission");
+        assert!(matches!(
+            ask(&mut client, request.clone()).await,
+            Response::Accepted { duplicate: false }
+        ));
+        let events = wait(&mut client, &id, Status::Completed).await;
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(&e.event, EventKind::Text { text } if text == expected))
+        );
+        assert!(matches!(
+            ask(&mut client, request).await,
+            Response::Accepted { duplicate: true }
+        ));
+        assert!(matches!(
+            ask(&mut client, turn(request_id, Some("default"), "permission")).await,
+            Response::Error { .. }
+        ));
+        let mut reconnect = host.client().await;
+        assert!(
+            matches!(ask(&mut reconnect, Request::Poll { session_id: id.clone(), after: 0.0 }).await,
+            Response::Events { session, .. } if session.permission_mode.as_deref() == mode)
+        );
+    }
+    // Even if an Agent asks while bypass is selected, the host never fabricates approval.
+    assert!(matches!(
+        ask(
+            &mut client,
+            turn("approval", Some("bypassPermissions"), "approve")
+        )
+        .await,
+        Response::Accepted { .. }
+    ));
+    let events = wait(&mut client, &id, Status::Waiting).await;
+    assert!(!project.path().join("approved.txt").exists());
+    ask(
+        &mut client,
+        Request::Approve {
+            session_id: id.clone(),
+            request_id: permission(&events),
+            allow: false,
+        },
+    )
+    .await;
+    wait(&mut client, &id, Status::Completed).await;
+    assert!(!project.path().join("approved.txt").exists());
+}
+
+#[tokio::test]
+async fn pasted_attachments_are_chunked_host_owned_and_abortable() {
+    let host = Host::start().await;
+    let mut client = host.client().await;
+    let id = match ask(
+        &mut client,
+        Request::BeginAttachment {
+            name: "image.png".into(),
+            size: 70000,
+        },
+    )
+    .await
+    {
+        Response::AttachmentUpload { id } => id,
+        other => panic!("{other:?}"),
+    };
+    assert!(matches!(
+        ask(
+            &mut client,
+            Request::AttachmentChunk {
+                id: id.clone(),
+                offset: 1,
+                data: vec![1]
+            }
+        )
+        .await,
+        Response::Error { .. }
+    ));
+    assert!(matches!(
+        ask(&mut client, Request::FinishAttachment { id: id.clone() }).await,
+        Response::Error { .. }
+    ));
+    for (offset, data) in [(0, vec![42; 65536]), (65536, vec![42; 4464])] {
+        assert!(matches!(
+            ask(
+                &mut client,
+                Request::AttachmentChunk {
+                    id: id.clone(),
+                    offset,
+                    data
+                }
+            )
+            .await,
+            Response::Ok
+        ));
+    }
+    let entry = match ask(&mut client, Request::FinishAttachment { id }).await {
+        Response::FileReference { entry } => entry,
+        other => panic!("{other:?}"),
+    };
+    assert!(
+        Path::new(&entry.path).starts_with(
+            host.directory
+                .path()
+                .canonicalize()
+                .unwrap()
+                .join("paste-tmp")
+        )
+    );
+    assert_eq!(std::fs::read(&entry.path).unwrap(), vec![42; 70000]);
+    let second = Host::start().await;
+    let mut remote = second.client().await;
+    let id = match ask(
+        &mut remote,
+        Request::BeginAttachment {
+            name: "remote.txt".into(),
+            size: 0,
+        },
+    )
+    .await
+    {
+        Response::AttachmentUpload { id } => id,
+        other => panic!("{other:?}"),
+    };
+    assert!(matches!(
+        ask(&mut client, Request::FinishAttachment { id: id.clone() }).await,
+        Response::Error { .. }
+    ));
+    assert!(matches!(
+        ask(&mut remote, Request::AbortAttachment { id: id.clone() }).await,
+        Response::Ok
+    ));
+    assert!(matches!(
+        ask(&mut remote, Request::FinishAttachment { id }).await,
+        Response::Error { .. }
+    ));
+    assert!(matches!(
+        ask(
+            &mut client,
+            Request::BeginAttachment {
+                name: "../escape".into(),
+                size: 0
+            }
+        )
+        .await,
+        Response::Error { .. }
+    ));
+    assert!(matches!(
+        ask(
+            &mut client,
+            Request::BeginAttachment {
+                name: "huge".into(),
+                size: 64 * 1024 * 1024 + 1
+            }
+        )
+        .await,
+        Response::Error { .. }
+    ));
 }

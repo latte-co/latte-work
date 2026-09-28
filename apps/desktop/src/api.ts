@@ -44,6 +44,11 @@ export function disconnect(hostId: string): Promise<void> {
 export function chooseProjectFolder(): Promise<string | null> {
   return invoke("choose_project_folder");
 }
+export function chooseReferencePath(
+  directory: boolean,
+): Promise<string | null> {
+  return invoke("choose_reference_path", { directory });
+}
 export function chooseIdentityFile(): Promise<string | null> {
   return invoke("choose_identity_file");
 }

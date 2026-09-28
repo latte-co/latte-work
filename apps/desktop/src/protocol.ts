@@ -32,6 +32,7 @@ export type Session = {
   native_id: string | null;
   model: string | null;
   effort: Effort | null;
+  permission_mode: string | null;
   status: Status;
   created_at: number;
   custom_title: boolean;
@@ -61,6 +62,18 @@ export type AgentInfo = {
   available: boolean;
   provider_protocols: Array<ProviderProtocol>;
   detail: string;
+};
+export type AgentPermissionMode = {
+  id: string;
+  label: string;
+  description: string;
+  elevated: boolean;
+};
+export type AgentSlashCommand = {
+  name: string;
+  display_name?: string | null;
+  description: string;
+  argument_hint: string;
 };
 export type ProviderProtocol =
   "anthropic_messages" | "openai_chat" | "openai_responses";
@@ -119,6 +132,8 @@ export type Request =
     }
   | { method: "close_terminal"; terminal_id: string }
   | { method: "providers" }
+  | { method: "agent_permissions"; agent: string }
+  | { method: "agent_commands"; agent: string; project_id: string }
   | {
       method: "models";
       agent: string;
@@ -174,6 +189,7 @@ export type Request =
       text: string;
       model: string | null;
       effort: Effort | null;
+      permission_mode: string | null;
     }
   | { method: "poll"; session_id: string; after: number }
   | {
@@ -184,9 +200,21 @@ export type Request =
     }
   | { method: "cancel"; session_id: string }
   | { method: "files"; project_id: string; path: string }
+  | { method: "begin_attachment"; name: string; size: number }
+  | {
+      method: "attachment_chunk";
+      id: string;
+      offset: number;
+      data: Array<number>;
+    }
+  | { method: "finish_attachment"; id: string }
+  | { method: "abort_attachment"; id: string }
+  | { method: "resolve_reference"; project_id: string; path: string }
   | { method: "read_file"; project_id: string; path: string }
   | { method: "diff"; project_id: string };
 export type Response =
+  | { kind: "agent_permissions"; modes: Array<AgentPermissionMode> }
+  | { kind: "agent_commands"; commands: Array<AgentSlashCommand> }
   | { kind: "terminals"; terminals: Array<TerminalInfo> }
   | { kind: "terminal"; terminal: TerminalInfo }
   | {
@@ -223,6 +251,7 @@ export type Response =
       version: number;
       server_id: string;
       agents: Array<AgentInfo>;
+      permission_settings: boolean;
     }
   | { kind: "projects"; projects: Array<Project> }
   | { kind: "project"; project: Project }
@@ -236,6 +265,8 @@ export type Response =
       has_more: boolean;
     }
   | { kind: "files"; entries: Array<FileEntry> }
+  | { kind: "attachment_upload"; id: string }
+  | { kind: "file_reference"; entry: FileEntry }
   | {
       kind: "directories";
       path: string;

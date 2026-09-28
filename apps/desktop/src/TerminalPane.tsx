@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import "@xterm/xterm/css/xterm.css";
+import { APPEARANCE_EVENT } from "./appearance";
 import { request, message } from "./api";
 import type { TerminalInfo } from "./protocol";
 
@@ -46,14 +47,19 @@ export function TerminalPane({
       const term = new Terminal({
         cursorBlink: true,
         fontSize: 13,
-        fontFamily: '"SFMono-Regular", Menlo, Monaco, monospace',
+        fontFamily: styles.getPropertyValue("--font-code").trim(),
+        fontWeight: Number(
+          styles.getPropertyValue("--weight-code").trim() || 400,
+        ),
         scrollback: 5000,
         allowProposedApi: false,
         theme: {
           background: styles.getPropertyValue("--color-canvas").trim(),
           foreground: styles.getPropertyValue("--color-text").trim(),
           cursor: styles.getPropertyValue("--color-text").trim(),
-          selectionBackground: "#9bb8c43d",
+          selectionBackground: styles
+            .getPropertyValue("--color-selection")
+            .trim(),
         },
       });
       const fit = new FitAddon();
@@ -140,6 +146,25 @@ export function TerminalPane({
       if (!disposed && dimensions !== `${term.cols}:${term.rows}`)
         void resize();
     };
+    const appearanceChanged = () => {
+      if (!container.current) return;
+      const styles = getComputedStyle(container.current);
+      term.options.theme = {
+        background: styles.getPropertyValue("--color-canvas").trim(),
+        foreground: styles.getPropertyValue("--color-text").trim(),
+        cursor: styles.getPropertyValue("--color-text").trim(),
+        selectionBackground: styles
+          .getPropertyValue("--color-selection")
+          .trim(),
+      };
+      term.options.fontFamily = styles.getPropertyValue("--font-code").trim();
+      term.options.fontWeight = Number(
+        styles.getPropertyValue("--weight-code").trim() || 400,
+      );
+      void resize();
+    };
+    appearanceChanged();
+    window.addEventListener(APPEARANCE_EVENT, appearanceChanged);
     const observer = new ResizeObserver(() => {
       clearTimeout(timer);
       timer = setTimeout(() => void resize(), 80);
@@ -150,6 +175,7 @@ export function TerminalPane({
     return () => {
       disposed = true;
       observer.disconnect();
+      window.removeEventListener(APPEARANCE_EVENT, appearanceChanged);
       clearTimeout(timer);
     };
   }, [active, connected, hostId, terminal.id, terminal.exited]);

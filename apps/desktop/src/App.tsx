@@ -141,11 +141,8 @@ export default function App() {
             </div>
           )}
           <Conversation
-            key={
-              session
-                ? `${hostId}:${projectId}:${session.id}:${workbench.viewRevision}`
-                : `draft:${workbench.viewRevision}`
-            }
+            agent={agent}
+            key={workbench.viewRevision}
             session={session}
             hostId={hostId}
             settingsOpen={workbench.modal === "settings"}

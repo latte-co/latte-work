@@ -1,7 +1,9 @@
 import React from "react";
 import { createRoot } from "react-dom/client";
 import App from "./App";
+import { AppearanceProvider } from "./AppearanceProvider";
 import "./style.css";
+import "./appearance.css";
 
 // Suppress WebView menus (reload, lookup, translation, etc.) across the app,
 // including portal content and editable fields. Custom menu handlers still run.
@@ -11,6 +13,8 @@ document.addEventListener("contextmenu", (event) => event.preventDefault(), {
 
 createRoot(document.getElementById("root")!).render(
   <React.StrictMode>
-    <App />
+    <AppearanceProvider>
+      <App />
+    </AppearanceProvider>
   </React.StrictMode>,
 );

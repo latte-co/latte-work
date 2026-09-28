@@ -1,0 +1,30 @@
+{
+  "version": 1,
+  "mode": "system",
+  "light": {
+    "accent": "#2563EB",
+    "background": "#FFFFFF",
+    "foreground": "#222222",
+    "contrast": 50,
+    "translucentSidebar": false,
+    "uiFont": "system",
+    "contentFont": "inherit",
+    "codeFont": "system",
+    "uiWeight": "400",
+    "contentWeight": "400",
+    "codeWeight": "400"
+  },
+  "dark": {
+    "accent": "#F1F1F1",
+    "background": "#111111",
+    "foreground": "#EEEEEE",
+    "contrast": 50,
+    "translucentSidebar": false,
+    "uiFont": "system",
+    "contentFont": "inherit",
+    "codeFont": "system",
+    "uiWeight": "400",
+    "contentWeight": "400",
+    "codeWeight": "400"
+  }
+}

@@ -42,6 +42,17 @@ pub fn effort_levels(agent: &str, model: Option<&str>) -> &'static [latte_work_p
     }
 }
 
+/// Probe the selected host's executable; unknown adapters never inherit another policy.
+pub async fn permission_modes(
+    agent: &str,
+    binary: &str,
+) -> Result<Vec<latte_work_protocol::AgentPermissionMode>> {
+    match agent {
+        "claude" => claude::permission_modes(binary).await,
+        _ => bail!("此 Agent 尚未实现权限设置：{agent}"),
+    }
+}
+
 /// Return display-only model names from the selected Host's native Agent settings.
 pub fn model_labels(
     agent: &str,

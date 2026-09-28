@@ -14,6 +14,7 @@ const session = (id: string, pin: number | null = 1): Session => ({
   native_id: null,
   model: null,
   effort: null,
+  permission_mode: null,
   status: "ready",
   created_at: 1,
   pinned_at: pin,

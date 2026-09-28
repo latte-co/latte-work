@@ -13,6 +13,8 @@ pub struct AgentCommand {
 }
 
 pub enum Input<'a> {
+    /// Initialize for metadata only. Must never send a user prompt.
+    DiscoverCommands,
     /// Delivered exactly once after spawning; the adapter decides when to send the prompt.
     Start { prompt: &'a str },
     /// One complete line without its delimiter. Only the adapter interprets its payload.
@@ -26,6 +28,7 @@ pub enum Input<'a> {
 }
 
 pub enum Action {
+    Commands(Vec<latte_work_protocol::AgentSlashCommand>),
     /// Already encoded bytes, including framing. Runtime only bounds and writes them.
     Write(Vec<u8>),
     /// Stop the startup deadline; this does not implicitly send any message.

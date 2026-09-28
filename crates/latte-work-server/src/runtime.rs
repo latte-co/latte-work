@@ -95,6 +95,7 @@ impl TurnState {
     ) -> Result<Option<Outcome>> {
         for action in actions {
             match action {
+                Action::Commands(_) => bail!("执行中的 Agent 返回了意外的命令目录"),
                 Action::Write(bytes) => write(input, &bytes).await?,
                 Action::Ready => self.ready = true,
                 Action::NativeSession(id) => db(database, |s| {
@@ -280,6 +281,61 @@ async fn run(
     outcome
 }
 
+/// A bounded metadata-only launch, sharing supervision but never storing or sending a turn.
+pub async fn commands(
+    binary: &str,
+    agent: &str,
+    path: &str,
+    config: &LaunchConfig,
+) -> Result<Vec<latte_work_protocol::AgentSlashCommand>> {
+    let mut adapter = agents::create(agent)?;
+    let start = adapter.advance(Input::DiscoverCommands)?;
+    let mut prepared = adapter.command(binary, path, None, config)?;
+    let child = prepared
+        .command
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .kill_on_drop(true)
+        .process_group(0)
+        .spawn()
+        .context("无法启动 Agent 读取命令列表")?;
+    let pid = child.id().context("Agent PID missing")? as i32;
+    let mut group = Group { child, pid };
+    let mut input = group.child.stdin.take().context("Agent stdin missing")?;
+    let mut output = FramedRead::new(
+        group.child.stdout.take().context("Agent stdout missing")?,
+        LinesCodec::new_with_max_length(1024 * 1024),
+    );
+    let result = tokio::time::timeout(Duration::from_secs(12), async {
+        for action in start {
+            match action {
+                Action::Write(bytes) => write(&mut input, &bytes).await?,
+                _ => bail!("Agent 不支持命令发现"),
+            }
+        }
+        for _ in 0..128 {
+            let line = output
+                .next()
+                .await
+                .context("Agent 在返回命令列表前退出")??;
+            for action in adapter.advance(Input::Message(&line))? {
+                match action {
+                    Action::Commands(commands) => return Ok(commands),
+                    // Discovery may reject control requests, but never approve tools.
+                    Action::Write(bytes) => write(&mut input, &bytes).await?,
+                    _ => bail!("命令发现期间 Agent 请求执行任务"),
+                }
+            }
+        }
+        bail!("Agent 命令发现消息超出限制")
+    })
+    .await;
+    let _ = killpg(Pid::from_raw(pid), Signal::SIGKILL);
+    let _ = group.child.wait().await;
+    result.context("读取 Agent 命令超时，请重试")?
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -293,6 +349,7 @@ mod tests {
             provider: None,
             model: None,
             effort: None,
+            permission_mode: None,
             settings_dir: dir.path().into(),
         };
         let (mut writer, mut reader) = tokio::io::duplex(1024);

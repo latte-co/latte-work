@@ -5,6 +5,7 @@ export interface SelectOption {
   value: string;
   label: string;
   description?: string;
+  tone?: "warning";
 }
 /** Application-owned popover: native WebKit menus cannot inherit the dark theme. */
 export function Select({
@@ -39,6 +40,9 @@ export function Select({
   const trigger = useRef<HTMLButtonElement>(null);
   const menu = useRef<HTMLDivElement>(null);
   const id = useId();
+  useEffect(() => {
+    if (disabled) setOpen(false);
+  }, [disabled]);
   function show() {
     setActive(
       Math.max(
@@ -185,7 +189,9 @@ export function Select({
                 tabIndex={-1}
                 key={o.value}
                 title={compact ? o.label : undefined}
-                className={active === index ? "highlighted" : ""}
+                className={[active === index ? "highlighted" : "", o.tone ?? ""]
+                  .filter(Boolean)
+                  .join(" ")}
                 onMouseEnter={() => setActive(index)}
                 onClick={() => choose(index)}
               >

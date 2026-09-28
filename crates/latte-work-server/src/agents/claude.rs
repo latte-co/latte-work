@@ -34,9 +34,128 @@ pub fn effort_levels(model: Option<&str>) -> &'static [latte_work_protocol::Effo
     &[Low, Medium, High, Xhigh, Max]
 }
 
+/// Discover CLI-supported flags without starting a session or touching user settings.
+pub(super) async fn permission_modes(
+    binary: &str,
+) -> Result<Vec<latte_work_protocol::AgentPermissionMode>> {
+    use tokio::io::AsyncReadExt;
+    let mut child = Command::new(binary)
+        .arg("--help")
+        .env("NO_COLOR", "1")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .kill_on_drop(true)
+        .spawn()
+        .context("无法读取 Agent 权限选项")?;
+    let result = tokio::time::timeout(Duration::from_secs(5), async {
+        let mut bytes = Vec::new();
+        child
+            .stdout
+            .take()
+            .context("Agent 未提供帮助输出")?
+            .take(128 * 1024 + 1)
+            .read_to_end(&mut bytes)
+            .await?;
+        if bytes.len() > 128 * 1024 {
+            bail!("Agent 帮助输出超出限制");
+        }
+        if !child.wait().await?.success() {
+            bail!("Agent 权限能力读取失败");
+        }
+        modes_from_help(std::str::from_utf8(&bytes)?)
+    })
+    .await
+    .context("读取 Agent 权限选项超时")
+    .and_then(|result| result);
+    // Also reap on oversized output, protocol errors and timeout.
+    if result.is_err() {
+        let _ = child.kill().await;
+        let _ = child.wait().await;
+    }
+    result
+}
+
+fn modes_from_help(help: &str) -> Result<Vec<latte_work_protocol::AgentPermissionMode>> {
+    let option = help
+        .split("--permission-mode")
+        .nth(1)
+        .and_then(|part| part.split("\n  --").next())
+        .context("此 CLI 未公布可设置的权限模式，请更新 Agent")?;
+    let choices = option
+        .split("choices:")
+        .nth(1)
+        .and_then(|part| part.split(')').next())
+        .context("此 CLI 未公布权限模式列表")?;
+    let ids: Vec<_> = choices
+        .split(',')
+        .map(|value| value.trim().trim_matches('"').trim_matches(char::from(39)))
+        .collect();
+    let manual = if ids.contains(&"manual") {
+        "manual"
+    } else {
+        "default"
+    };
+    let known = [
+        (
+            manual,
+            "请求批准",
+            "按 Agent 的权限规则，对需要确认的操作请求批准。",
+            false,
+        ),
+        (
+            "acceptEdits",
+            "自动接受编辑",
+            "自动批准文件编辑；其他操作仍按 Agent 规则确认。",
+            false,
+        ),
+        (
+            "plan",
+            "计划模式",
+            "分析和规划任务，不直接修改项目文件。",
+            false,
+        ),
+        (
+            "auto",
+            "自动判断",
+            "由 Agent 的安全检查决定是否批准；需账号和策略支持。",
+            false,
+        ),
+        (
+            "dontAsk",
+            "不询问",
+            "只执行已获许可的操作，拒绝其他需要批准的操作。",
+            false,
+        ),
+        (
+            "bypassPermissions",
+            "完全访问权限",
+            "跳过常规权限确认，可执行命令和修改文件；仍受主机策略约束。",
+            true,
+        ),
+    ];
+    let modes: Vec<_> = known
+        .into_iter()
+        .filter(|(id, ..)| ids.contains(id))
+        .map(
+            |(id, label, description, elevated)| latte_work_protocol::AgentPermissionMode {
+                id: id.into(),
+                label: label.into(),
+                description: description.into(),
+                elevated,
+            },
+        )
+        .collect();
+    if modes.is_empty() {
+        bail!("此 CLI 没有已适配的权限模式");
+    }
+    Ok(modes)
+}
+
 #[derive(Default)]
 pub struct Claude {
     streamed: bool,
+    emitted_text: bool,
     phase: Phase,
 }
 #[derive(Default)]
@@ -44,6 +163,7 @@ enum Phase {
     #[default]
     Idle,
     Initializing(String),
+    Discovering,
     Running,
     Finished,
 }
@@ -118,22 +238,24 @@ impl AgentAdapter for Claude {
             "--permission-prompt-tool",
             "stdio",
         ]);
+        if matches!(self.phase, Phase::Discovering) {
+            command.arg("--no-session-persistence");
+        }
         if let Some(id) = resume {
             command.arg(format!("--resume={id}"));
         }
         command.current_dir(cwd).env_remove("CLAUDECODE");
-        let effort = config
-            .effort
-            .map_or("auto", latte_work_protocol::Effort::as_str);
-        command.env("CLAUDE_CODE_EFFORT_LEVEL", effort);
+        if let Some(mode) = &config.permission_mode {
+            command.arg(format!("--permission-mode={mode}"));
+        }
         if let Some(level) = config.effort {
+            command.env("CLAUDE_CODE_EFFORT_LEVEL", level.as_str());
             command.arg(format!("--effort={}", level.as_str()));
         }
-        let settings = if let Some(provider) = &config.provider {
+        let mut settings = if let Some(provider) = &config.provider {
             let metadata = &provider.metadata;
             let model = config.model.as_deref().unwrap_or(&metadata.model);
             let mut env = json!({
-                "CLAUDE_CODE_EFFORT_LEVEL": effort,
                 "ANTHROPIC_BASE_URL": metadata.base_url,
                 "ANTHROPIC_MODEL": model,
                 "ANTHROPIC_DEFAULT_MODEL": model,
@@ -170,8 +292,12 @@ impl AgentAdapter for Claude {
             } else if resume.is_some() {
                 command.arg("--model=default");
             }
-            json!({"env":{"CLAUDE_CODE_EFFORT_LEVEL":effort}})
+            json!({"env":{}})
         };
+        if let Some(level) = config.effort {
+            settings["env"]["CLAUDE_CODE_EFFORT_LEVEL"] = json!(level.as_str());
+        }
+        // An absent override leaves native environment/settings resolution intact.
         // Settings env overrides inherited env. Keep turn-specific effort and
         // credentials in a private file; never change the user's CLI settings.
         let mut file = tempfile::Builder::new()
@@ -188,6 +314,14 @@ impl AgentAdapter for Claude {
     }
     fn advance(&mut self, input: Input<'_>) -> Result<Vec<Action>> {
         match input {
+            Input::DiscoverCommands => {
+                if !matches!(self.phase, Phase::Idle) {
+                    bail!("Claude 已经启动");
+                }
+                self.phase = Phase::Discovering;
+                Ok(vec![write_action(self.initialize())?])
+            }
+
             Input::Start { prompt } => {
                 if !matches!(self.phase, Phase::Idle) {
                     bail!("Claude 本轮已经启动");
@@ -232,12 +366,36 @@ impl Claude {
                 if m["response"]["subtype"] != "success" {
                     bail!("Claude 初始化失败: {}", m["response"]["error"]);
                 }
+                if matches!(self.phase, Phase::Discovering) {
+                    let commands = parse_commands(&m["response"]["response"]["commands"])?;
+                    self.phase = Phase::Finished;
+                    return Ok(vec![Action::Commands(commands)]);
+                }
                 if matches!(self.phase, Phase::Initializing(_)) {
                     let Phase::Initializing(prompt) =
                         std::mem::replace(&mut self.phase, Phase::Running)
                     else {
                         unreachable!()
                     };
+                    if let Some(name) = prompt
+                        .trim_start()
+                        .strip_prefix('/')
+                        .and_then(|s| s.split_whitespace().next())
+                    {
+                        let commands = parse_commands(&m["response"]["response"]["commands"])?;
+                        let alias = m["response"]["response"]["commands"]
+                            .as_array()
+                            .is_some_and(|items| {
+                                items.iter().any(|item| {
+                                    item["aliases"].as_array().is_some_and(|aliases| {
+                                        aliases.iter().any(|alias| alias.as_str() == Some(name))
+                                    })
+                                })
+                            });
+                        if !commands.iter().any(|command| command.name == name) && !alias {
+                            bail!("当前 Claude 不支持命令 /{name}；输入 / 查看可用命令");
+                        }
+                    }
                     output.push(Action::Ready);
                     output.push(write_action(self.prompt(&prompt))?);
                 }
@@ -270,6 +428,7 @@ impl Claude {
                     && let Some(text) = event["delta"]["text"].as_str()
                 {
                     self.streamed = true;
+                    self.emitted_text = true;
                     output.push(Action::Event(EventKind::Text { text: text.into() }));
                 }
             }
@@ -279,6 +438,7 @@ impl Claude {
                         match block["type"].as_str().unwrap_or_default() {
                             "text" if !self.streamed => {
                                 if let Some(text) = block["text"].as_str() {
+                                    self.emitted_text = true;
                                     output
                                         .push(Action::Event(EventKind::Text { text: text.into() }));
                                 }
@@ -328,6 +488,14 @@ impl Claude {
                 } else {
                     None
                 };
+                // Native commands may only return their output in result, without
+                // assistant text. Preserve that output without duplicating a turn.
+                if !failed
+                    && !self.emitted_text
+                    && let Some(text) = m["result"].as_str().filter(|text| !text.is_empty())
+                {
+                    output.push(Action::Event(EventKind::Text { text: text.into() }));
+                }
                 output.push(Action::Finished { failed, message });
             }
             _ => {}
@@ -335,8 +503,162 @@ impl Claude {
         Ok(output)
     }
 }
+fn parse_commands(value: &Value) -> Result<Vec<latte_work_protocol::AgentSlashCommand>> {
+    let entries = value
+        .as_array()
+        .context("此 Claude CLI 未返回命令列表，请更新 CLI 后重试")?;
+    if entries.len() > 2000 {
+        bail!("Agent 命令列表超出限制");
+    }
+    let mut names = std::collections::HashSet::new();
+    let mut result = Vec::new();
+    for entry in entries {
+        let name = entry["name"].as_str().context("无效的 Agent 命令名称")?;
+        if name.is_empty()
+            || name.len() > 256
+            || name
+                .chars()
+                .any(|c| c.is_whitespace() || c.is_control() || c == '/')
+        {
+            bail!("无效的 Agent 命令名称");
+        }
+        if !names.insert(name.to_owned()) {
+            continue;
+        }
+        let description = entry["description"].as_str().unwrap_or_default();
+        let argument_hint = entry["argumentHint"].as_str().unwrap_or_default();
+        result.push(latte_work_protocol::AgentSlashCommand {
+            name: name.into(),
+            display_name: ["displayName", "display_name", "title"]
+                .iter()
+                .filter_map(|key| entry[key].as_str())
+                .map(str::trim)
+                .find(|value| {
+                    !value.is_empty()
+                        && value.chars().count() <= 80
+                        && !value.chars().any(char::is_control)
+                })
+                .map(str::to_owned),
+            description: description.chars().take(2048).collect(),
+            argument_hint: argument_hint.chars().take(512).collect(),
+        });
+    }
+    Ok(result)
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn permission_choices_follow_installed_cli_and_do_not_invent_modes() {
+        let modes = super::modes_from_help(
+            "--permission-mode <mode> (choices: \"default\", \"plan\")\n  --other auto",
+        )
+        .unwrap();
+        assert_eq!(
+            modes.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(),
+            ["default", "plan"]
+        );
+        let modern = super::modes_from_help("--permission-mode <mode>\n (choices: \"manual\", \"auto\",\n \"bypassPermissions\", \"future-mode\")").unwrap();
+        assert_eq!(
+            modern.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(),
+            ["manual", "auto", "bypassPermissions"]
+        );
+        assert!(modern.last().unwrap().elevated);
+        assert!(super::modes_from_help("--other (choices: \"auto\")").is_err());
+        assert!(
+            super::modes_from_help("--permission-mode <mode>\n  --other (choices: \"auto\")")
+                .is_err()
+        );
+        assert!(
+            super::modes_from_help("--permission-mode <mode> (choices: \"future-mode\")").is_err()
+        );
+    }
+
+    #[test]
+    fn permission_launch_omits_inheritance_and_passes_explicit_modes_on_resume() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = crate::providers::LaunchConfig {
+            provider: None,
+            model: None,
+            effort: None,
+            permission_mode: None,
+            settings_dir: dir.path().into(),
+        };
+        for mode in [None, Some("plan"), Some("bypassPermissions"), None] {
+            config.permission_mode = mode.map(str::to_owned);
+            let mut adapter = super::Claude::default();
+            let launch = super::AgentAdapter::command(
+                &mut adapter,
+                "claude",
+                "/tmp",
+                Some("native"),
+                &config,
+            )
+            .unwrap();
+            let args: Vec<_> = launch
+                .command
+                .as_std()
+                .get_args()
+                .map(|v| v.to_string_lossy().into_owned())
+                .collect();
+            assert_eq!(
+                args.iter()
+                    .find(|a| a.starts_with("--permission-mode="))
+                    .cloned(),
+                mode.map(|m| format!("--permission-mode={m}"))
+            );
+            assert!(!args.iter().any(|a| a == "--dangerously-skip-permissions"
+                || a == "--allow-dangerously-skip-permissions"));
+        }
+    }
+
+    #[test]
+    fn discovers_native_commands_without_sending_a_prompt() {
+        let mut adapter = Claude::default();
+        assert_eq!(
+            encoded(&adapter.advance(Input::DiscoverCommands).unwrap())[0]["request"]["subtype"],
+            "initialize"
+        );
+        let response = json!({"type":"control_response","response":{"request_id":"latte-init","subtype":"success","response":{"commands":[{"name":"compact","displayName":"Compact conversation","description":"Compact history","argumentHint":"[instructions]"},{"name":"project:check","description":"Project command"}]}}});
+        let actions = message(&mut adapter, response).unwrap();
+        assert!(encoded(&actions).is_empty());
+        assert!(
+            matches!(&actions[0], Action::Commands(commands) if commands.len() == 2 && commands[0].argument_hint == "[instructions]" && commands[0].display_name.as_deref() == Some("Compact conversation"))
+        );
+        assert!(parse_commands(&json!(null)).is_err());
+        assert!(parse_commands(&json!([{"name":"bad name"}])).is_err());
+    }
+    #[test]
+    fn dispatches_native_commands_verbatim_and_rejects_unknown_commands() {
+        let response = json!({"type":"control_response","response":{"request_id":"latte-init","subtype":"success","response":{"commands":[{"name":"compact"}]}}});
+        let mut adapter = Claude::default();
+        adapter
+            .advance(Input::Start {
+                prompt: "/compact 保留关键结论",
+            })
+            .unwrap();
+        let actions = message(&mut adapter, response.clone()).unwrap();
+        assert_eq!(
+            encoded(&actions)[0]["message"]["content"],
+            "/compact 保留关键结论"
+        );
+        let result = message(
+            &mut adapter,
+            json!({"type":"result","is_error":false,"result":"Not enough messages to compact."}),
+        )
+        .unwrap();
+        assert!(
+            matches!(&result[0], Action::Event(EventKind::Text { text }) if text == "Not enough messages to compact.")
+        );
+        let mut adapter = Claude::default();
+        adapter
+            .advance(Input::Start {
+                prompt: "/not-supported",
+            })
+            .unwrap();
+        assert!(message(&mut adapter, response).is_err());
+    }
+
     #[test]
     fn effort_choices_follow_claude_model_capabilities() {
         use latte_work_protocol::Effort::{High, Low, Max, Medium, Xhigh};
@@ -364,6 +686,7 @@ mod tests {
             provider: None,
             model: None,
             effort: None,
+            permission_mode: None,
             settings_dir: dir.path().into(),
         };
         let default = Claude::default()
@@ -373,7 +696,14 @@ mod tests {
             &std::fs::read(default._settings.as_ref().unwrap().path()).unwrap(),
         )
         .unwrap();
-        assert_eq!(settings, json!({"env":{"CLAUDE_CODE_EFFORT_LEVEL":"auto"}}));
+        assert_eq!(settings, json!({"env":{}}));
+        assert!(
+            !default
+                .command
+                .as_std()
+                .get_envs()
+                .any(|(key, _)| key == "CLAUDE_CODE_EFFORT_LEVEL")
+        );
         config.provider = Some(ResolvedProvider {
             metadata: Provider {
                 id: "one".into(),

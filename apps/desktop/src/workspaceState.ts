@@ -28,7 +28,7 @@ export function readWorkspace(key: string): WorkspaceState {
   let state: WorkspaceState = {
     tabs: [],
     current: "",
-    visible: true,
+    visible: false,
     expanded: false,
     width: 350,
   };
