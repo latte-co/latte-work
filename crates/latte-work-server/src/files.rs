@@ -8,6 +8,40 @@ use std::{
 };
 use tokio::{io::AsyncReadExt, process::Command};
 const LIMIT: usize = 512 * 1024;
+/// Resolve an explicitly chosen host path for a prompt reference only. This does
+/// not grant access, read contents, or relax project browsing/read containment.
+pub async fn reference(root: &Path, path: &str) -> Result<FileEntry> {
+    if path.len() > 4096 || path.contains('\0') || !Path::new(path).is_absolute() {
+        bail!("请输入不超过 4096 字节的绝对路径");
+    }
+    tokio::time::timeout(Duration::from_secs(5), async {
+        let target = tokio::fs::canonicalize(path)
+            .await
+            .context("路径不存在或无法访问")?;
+        let metadata = tokio::fs::metadata(&target).await?;
+        if !metadata.is_file() && !metadata.is_dir() {
+            bail!("只能引用普通文件或目录");
+        }
+        let root = tokio::fs::canonicalize(root).await?;
+        let reference = target.strip_prefix(&root).unwrap_or(&target);
+        let path = reference.to_str().context("路径不是 UTF-8")?;
+        Ok(FileEntry {
+            name: target
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("/")
+                .into(),
+            path: if path.is_empty() {
+                ".".into()
+            } else {
+                path.into()
+            },
+            directory: metadata.is_dir(),
+        })
+    })
+    .await
+    .context("读取路径超时，请检查主机或文件系统")?
+}
 /// Project selection precedes project registration: browse directory names only,
 /// under the authenticated host user's filesystem permissions. No file content.
 pub fn browse_directories(path: Option<&str>) -> Result<latte_work_protocol::Response> {
@@ -178,6 +212,73 @@ async fn git(root: &Path, args: &[&str]) -> Result<(String, bool)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn explicit_references_resolve_without_expanding_project_access() {
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let file = outside.path().join("中文 file.txt");
+        std::fs::write(&file, "reference only").unwrap();
+        let reference_file = reference(root.path(), file.to_str().unwrap())
+            .await
+            .unwrap();
+        assert_eq!(
+            reference_file.path,
+            file.canonicalize().unwrap().to_str().unwrap()
+        );
+        assert!(!reference_file.directory);
+        assert!(
+            reference(root.path(), outside.path().to_str().unwrap())
+                .await
+                .unwrap()
+                .directory
+        );
+        std::fs::write(root.path().join("inside"), "text").unwrap();
+        assert_eq!(
+            reference(root.path(), root.path().join("inside").to_str().unwrap())
+                .await
+                .unwrap()
+                .path,
+            "inside"
+        );
+        assert_eq!(
+            reference(root.path(), root.path().to_str().unwrap())
+                .await
+                .unwrap()
+                .path,
+            "."
+        );
+        std::os::unix::fs::symlink(&file, root.path().join("link")).unwrap();
+        assert_eq!(
+            reference(root.path(), root.path().join("link").to_str().unwrap())
+                .await
+                .unwrap()
+                .path,
+            reference_file.path
+        );
+        assert!(resolve(root.path(), "link").is_err());
+        assert!(read(root.path(), &reference_file.path).await.is_err());
+        assert!(list(root.path(), outside.path().to_str().unwrap()).is_err());
+        for invalid in [
+            "relative",
+            "../escape",
+            "/missing/latte-reference",
+            "/nul\0path",
+        ] {
+            assert!(reference(root.path(), invalid).await.is_err());
+        }
+        assert!(
+            reference(root.path(), &format!("/{}", "x".repeat(4096)))
+                .await
+                .is_err()
+        );
+        let socket = outside.path().join("socket");
+        let _listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+        assert!(
+            reference(root.path(), socket.to_str().unwrap())
+                .await
+                .is_err()
+        );
+    }
     #[test]
     fn directory_picker_bounds_large_listings_and_rejects_files() {
         let root = tempfile::tempdir().unwrap();

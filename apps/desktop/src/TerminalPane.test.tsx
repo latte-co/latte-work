@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import { act, cleanup, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
+import { APPEARANCE_EVENT } from "./appearance";
 import { TerminalPane } from "./TerminalPane";
 import type { Request, Response, TerminalInfo } from "./protocol";
 const mocks = vi.hoisted(() => ({
@@ -8,6 +9,7 @@ const mocks = vi.hoisted(() => ({
   write: vi.fn(),
   input: null as null | ((text: string) => void),
   dispose: vi.fn(),
+  options: {} as Record<string, unknown>,
 }));
 vi.mock("./api", () => ({
   request: mocks.request,
@@ -15,7 +17,7 @@ vi.mock("./api", () => ({
 }));
 vi.mock("@xterm/xterm", () => ({
   Terminal: class {
-    options = {};
+    options = mocks.options;
     cols = 80;
     rows = 24;
     loadAddon() {}
@@ -46,6 +48,7 @@ const terminal: TerminalInfo = {
 beforeEach(() => {
   vi.useFakeTimers();
   vi.clearAllMocks();
+  mocks.options = {};
   vi.stubGlobal(
     "ResizeObserver",
     class {
@@ -147,4 +150,28 @@ it("does not replay ambiguous input or queued commands on retry", async () => {
   expect(
     mocks.request.mock.calls.filter((c) => c[1].method === "write_terminal"),
   ).toHaveLength(1);
+});
+
+it("refreshes colors and fonts without recreating a live terminal or replaying input", async () => {
+  const view = render(
+    <TerminalPane hostId="local" terminal={terminal} active connected />,
+  );
+  const pane = view.container.querySelector<HTMLElement>(".terminal-screen")!;
+  pane.style.setProperty("--color-canvas", "#ffffff");
+  pane.style.setProperty("--color-text", "#202020");
+  pane.style.setProperty("--font-code", "Menlo, monospace");
+  pane.style.setProperty("--weight-code", "500");
+  await act(async () => window.dispatchEvent(new Event(APPEARANCE_EVENT)));
+  expect(mocks.options.theme).toMatchObject({
+    background: "#ffffff",
+    foreground: "#202020",
+  });
+  expect(mocks.options.fontFamily).toBe("Menlo, monospace");
+  expect(mocks.options.fontWeight).toBe(500);
+  expect(mocks.dispose).not.toHaveBeenCalled();
+  expect(
+    mocks.request.mock.calls.some(
+      ([, request]) => request.method === "write_terminal",
+    ),
+  ).toBe(false);
 });

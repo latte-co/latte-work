@@ -94,3 +94,90 @@ for contract/adapter/runtime UT, followed by `make test-e2e` for real server/bri
 behavior with the deterministic CLI fixture. These do not measure coverage or
 validate a live model service. Internal interface changes do not require a wire
 protocol version increment.
+
+## Composer references and native Agent commands
+
+`agent_commands` is an additive protocol request scoped to agent and project. The
+host launches a metadata-only adapter handshake with a 12-second deadline, bounded
+frames/message count and at most two concurrent probes. No user prompt or Latte
+session is created. Process groups are terminated after discovery, failure or timeout.
+Only the Claude adapter knows the initialize response's command schema. Commands
+are checked again against the actual turn's initialize response before sending the
+original prompt, avoiding Claude's unknown-command fallback to an ordinary model turn.
+The existing send request ID, persistence, resume, cancellation and approval flow are
+shared by native commands. Terminal-only commands absent from the native SDK catalog
+are not synthesized. Agent command effects and configuration scope remain native;
+Latte's explicit model/effort selections continue to apply on each launched turn.
+
+The `@` picker reuses the server's bounded, canonical project-file listing for local
+and SSH hosts. It attaches relative path references for the Agent to read, not file
+uploads or clipboard screenshots. A remote server must be updated for command discovery.
+The `+` menu also accepts explicitly chosen files/folders outside the project:
+native pickers are local-only, while manual absolute paths are resolved by the
+selected execution host through `resolve_reference`. This bounded metadata-only
+request returns a canonical absolute reference (or a project-relative path when
+contained). It does not read contents, add allowed directories, change Agent
+permissions, or relax `files`/`read_file` canonical containment. Remote hosts need
+an updated server for this additive request. Late selection results are discarded
+after project, host, session or composer state changes.
+Focused tests: `npm test`, adapter/runtime unit tests and the final-binary
+`agent_commands_discovery_dispatch_resume_and_unsupported_are_native` test. A real
+CLI smoke check should separately verify discovery and a non-model native command.
+
+## Remembered Agent selections
+
+The desktop persists explicit model and effort choices per host / Agent in local
+storage. New drafts restore those choices across projects and restarts; existing
+sessions retain their own parameters. Reading a catalog or falling back from an
+unsupported effort is not an explicit preference change. Selecting native defaults
+persists null; missing effort leaves both CLI arguments and native effort environment
+untouched, including when a Provider is bound. Claude resolves its own settings.
+Focused checks: `useAgentPreferences.test.tsx`, `ModelPicker.test.tsx`, and the
+final-binary `effort_is_applied_on_launch_resume_and_reset` test.
+
+## Agent permission modes
+
+The composer requests `agent_permissions` from the execution host. Each adapter
+owns discovery, labels and launch mapping. Claude probes the installed CLI's
+`--help` (5-second / 128 KiB limits, shared probe concurrency limit); only known,
+advertised modes are offered. Account, model and managed-policy eligibility is
+still enforced by the native Agent; rejection is surfaced, never replaced by a
+different mode. Unsupported adapters fail explicitly.
+
+A nullable `permission_mode` travels with each send, is stored with the Session
+and participates in durable request identity. Null omits the CLI override.
+Explicit choices are remembered per host / Agent; running turns cannot be changed.
+Only the native CLI decides which tools require approval. Requests that reach the
+host approval flow retain its single-use session-bound checks, even in bypass mode.
+Permission changes do not edit native settings or expand sandbox/network policies.
+The Hello capability `permission_settings` prevents a new client from sending
+an override to an older server that would silently ignore the field. Remote hosts
+must update their server; local and SSH transports share the same implementation.
+
+## Clipboard attachments
+
+Composer paste snapshots text/files before awaiting native work. Plain text stays
+at the selection; more than 8,000 UTF-16 code units or 200 lines becomes a UTF-8
+`.txt` attachment. File URLs from the macOS pasteboard are handled by native code;
+a conflicting text snapshot takes precedence over a subsequently changed clipboard.
+Images/video/documents are file references, not simulated vision/video processing.
+
+The desktop stages all pasted bytes in the local host's private `paste-tmp/`
+directory under its state directory. An SSH task then receives a streamed copy in
+that host's own `paste-tmp/`; only the destination path is attached. The native
+adapter does not run Agents or change their permissions. macOS file URLs are
+revalidated against the current pasteboard before opening. Local pasted directories
+are references only; remote directory transfer is explicitly unsupported.
+
+The additive `begin_attachment` / `attachment_chunk` / `finish_attachment` /
+`abort_attachment` protocol bounds chunks to 64 KiB, each file to 64 MiB, concurrent
+uploads to 8, and each host's managed cache to 2 GiB / 4,096 entries. Offsets and
+declared sizes must match. Files become visible only after complete writes and
+fsync; private cache directories use 0700 and files 0600. Incomplete in-memory
+uploads expire after ten minutes on subsequent admissions; completed files remain
+available for saved prompts and retries. They are not automatically deleted on
+session close. Remote servers must be updated before using clipboard transfers.
+
+Tests: `pasteAttachments.test.ts`, `Composer.test.tsx`, server attachment unit tests,
+and final-binary `pasted_attachments_are_chunked_host_owned_and_abortable`. Report
+native clipboard tests and actual remote-host execution separately.

@@ -21,6 +21,7 @@ const session = (status: Session["status"], unread = false): Session => ({
   native_id: null,
   model: null,
   effort: null,
+  permission_mode: null,
   status,
   created_at: 1,
   custom_title: false,

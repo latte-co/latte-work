@@ -46,7 +46,7 @@ export function ModelSelector({
   const footer = useRef<HTMLButtonElement>(null);
   const id = useId();
   const selected = options.find((o) => o.value === value)?.label ?? value;
-  const effortValue = effort && levels.includes(effort) ? effort : "auto";
+  const effortValue = effort && levels.includes(effort) ? effort : "跟随 Agent";
   function close(restoreFocus = true) {
     setOpen(false);
     setReasoning(false);
@@ -300,7 +300,9 @@ export function ModelSelector({
                     key={level ?? "auto"}
                     type="button"
                     role="menuitemradio"
-                    aria-checked={(level ?? "auto") === effortValue}
+                    aria-checked={
+                      level === effort || (!effort && level === null)
+                    }
                     tabIndex={-1}
                     onMouseEnter={(e) => e.currentTarget.focus()}
                     onClick={() => {
@@ -308,7 +310,7 @@ export function ModelSelector({
                       close();
                     }}
                   >
-                    <span>{level ?? "auto"}</span>
+                    <span>{level ?? "跟随 Agent"}</span>
                     <Check
                       size={15}
                       className="model-option-check"

@@ -275,7 +275,6 @@ export function Sidebar({ state }: { state: Workbench }) {
         <span className="brand-name">
           Latte<span className="brand-light"> Work</span>
         </span>
-        <span className="version">PREVIEW</span>
       </div>
       <button
         className="new-task"
@@ -485,19 +484,12 @@ export function Sidebar({ state }: { state: Workbench }) {
             {h.name} 暂时无法连接 · 重试
           </button>
         ))}
-      <button className="add-project-link" onClick={openProject}>
-        <Plus size={15} />
-        添加项目
-      </button>
       <div className="sidebar-footer">
         <button onClick={() => setModal("settings")}>
           <Settings2 size={16} />
           设置
           <span className={`connection-dot ${connected ? "online" : ""}`} />
         </button>
-        <div className="footer-note">
-          <span className="mini-mark">L</span>你的项目。你的 Agent。
-        </div>
       </div>
       {sessionContext && (
         <SessionActions

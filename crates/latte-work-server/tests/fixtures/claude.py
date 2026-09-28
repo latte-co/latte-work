@@ -3,12 +3,14 @@
 import sys,json,time,os,subprocess
 if '--version' in sys.argv:
     print('fixture-claude 1.0');sys.exit(0)
+if '--help' in sys.argv:
+    print('--permission-mode <mode> (choices: "default", "acceptEdits", "plan", "dontAsk", "bypassPermissions")');sys.exit(0)
 def emit(value): print(json.dumps(value),flush=True)
 resumed=any(arg.startswith('--resume=') for arg in sys.argv)
 for line in sys.stdin:
     value=json.loads(line)
     if value['type']=='control_request':
-        emit({'type':'control_response','response':{'subtype':'success','request_id':value['request_id'],'response':{}}})
+        emit({'type':'control_response','response':{'subtype':'success','request_id':value['request_id'],'response':{'commands':[{'name':'compact','description':'Compact history','argumentHint':'[instructions]'},{'name':'project:check','description':os.path.basename(os.getcwd()),'argumentHint':'<target>'}]}}})
     elif value['type']=='user':
         text=value['message']['content']
         emit({'type':'system','subtype':'init','session_id':'11111111-1111-4111-8111-111111111111'})
@@ -18,12 +20,27 @@ for line in sys.stdin:
             child=subprocess.Popen(['sleep','120'])
             emit({'type':'assistant','message':{'content':[{'type':'text','text':f'child:{child.pid}'}]}})
             time.sleep(120)
-        if text=='effort':
+        if text.startswith('/'):
+            emit({'type':'result','subtype':'success','is_error':False,'result':('resumed:' if resumed else 'fresh:')+text})
+        elif text=='permission':
+            mode=next((a.split('=',1)[1] for a in sys.argv if a.startswith('--permission-mode=')), None)
+            if mode is None:
+                with open(os.path.join(os.getcwd(),'.claude/settings.json')) as f:mode=json.load(f)['permissions']['defaultMode']
+            emit({'type':'assistant','message':{'content':[{'type':'text','text':('resumed:' if resumed else 'fresh:')+mode}]}})
+            emit({'type':'result','subtype':'success','is_error':False})
+        elif text=='effort':
             with open(sys.argv[sys.argv.index('--settings')+1]) as f:settings=json.load(f)
-            effort=settings['env']['CLAUDE_CODE_EFFORT_LEVEL']
-            assert os.environ['CLAUDE_CODE_EFFORT_LEVEL']==effort
-            if effort!='auto':assert '--effort='+effort in sys.argv
-            else:assert not any(a.startswith('--effort=') for a in sys.argv)
+            effort=settings['env'].get('CLAUDE_CODE_EFFORT_LEVEL')
+            if effort is not None:
+                assert os.environ['CLAUDE_CODE_EFFORT_LEVEL']==effort
+                assert '--effort='+effort in sys.argv
+            else:
+                assert not any(a.startswith('--effort=') for a in sys.argv)
+                native={}
+                for path in [os.path.join(os.environ['CLAUDE_CONFIG_DIR'],'settings.json'),os.path.join(os.getcwd(),'.claude/settings.json'),os.path.join(os.getcwd(),'.claude/settings.local.json')]:
+                    if os.path.isfile(path):
+                        with open(path) as f:native.update(json.load(f))
+                effort=native.get('effortLevel','native-default')
             emit({'type':'assistant','message':{'content':[{'type':'text','text':('resumed:' if resumed else 'fresh:')+effort}]}})
             emit({'type':'result','subtype':'success','is_error':False})
         elif text=='model':

@@ -193,7 +193,7 @@ export function useWorkbench() {
   const [error, setError] = useState("");
   const [modal, setModal] = useState<"project" | "settings" | null>(null);
   const [settingsTab, setSettingsTab] = useState<
-    "agents" | "providers" | "ssh"
+    "agents" | "providers" | "ssh" | "appearance"
   >("agents");
   const [settingsReturnToProject, setSettingsReturnToProject] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -248,6 +248,7 @@ export function useWorkbench() {
         text: string;
         model: string | null;
         effort: Effort | null;
+        permission_mode: string | null;
       }
     | undefined
   >(undefined);
@@ -608,6 +609,7 @@ export function useWorkbench() {
     text: string,
     model: string | null,
     effort: Effort | null,
+    permission_mode: string | null,
   ): Promise<boolean> {
     if (!connected || !text.trim() || sending.current) return false;
     sending.current = true;
@@ -621,7 +623,8 @@ export function useWorkbench() {
         old.session === target.id &&
         old.text === text &&
         old.model === model &&
-        old.effort === effort
+        old.effort === effort &&
+        old.permission_mode === permission_mode
           ? old.id
           : crypto.randomUUID();
       pendingSend.current = {
@@ -631,6 +634,7 @@ export function useWorkbench() {
         text,
         model,
         effort,
+        permission_mode,
       };
       await request(hostId, {
         method: "send",
@@ -639,6 +643,7 @@ export function useWorkbench() {
         text,
         model,
         effort,
+        permission_mode,
       });
       if (pendingSend.current?.id === id) pendingSend.current = undefined;
       if (
@@ -648,7 +653,9 @@ export function useWorkbench() {
         return true;
       setSessions((previous) =>
         previous.map((s) =>
-          s.id === target.id ? { ...s, status: "running", model, effort } : s,
+          s.id === target.id
+            ? { ...s, status: "running", model, effort, permission_mode }
+            : s,
         ),
       );
       setError("");

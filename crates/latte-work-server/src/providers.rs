@@ -50,6 +50,7 @@ pub struct LaunchConfig {
     pub settings_dir: PathBuf,
     pub model: Option<String>,
     pub effort: Option<latte_work_protocol::Effort>,
+    pub permission_mode: Option<String>,
 }
 #[derive(Clone)]
 pub struct ResolvedProvider {
@@ -458,6 +459,7 @@ impl ProviderStore {
     pub fn launch_config(&self, agent: &str) -> LaunchConfig {
         LaunchConfig {
             effort: None,
+            permission_mode: None,
             model: None,
             settings_dir: self
                 .path

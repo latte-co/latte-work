@@ -14,6 +14,7 @@ pub struct Client {
     input: ChildStdin,
     output: FramedRead<ChildStdout, LinesCodec>,
     broken: bool,
+    permission_settings: bool,
 }
 
 pub enum SshAuthentication<'a> {
@@ -63,11 +64,17 @@ impl Client {
             input,
             output,
             broken: false,
+            permission_settings: false,
         };
         match client.request(Request::Hello { version: VERSION }).await? {
             Response::Hello {
-                version: VERSION, ..
-            } => Ok(client),
+                version: VERSION,
+                permission_settings,
+                ..
+            } => {
+                client.permission_settings = permission_settings;
+                Ok(client)
+            }
             Response::Error { code, message } if code == "version_mismatch" => bail!(
                 "远程 Server 与客户端不兼容，请等待远程任务结束并关闭终端后，更新并重启远程 Server：{message}"
             ),
@@ -78,6 +85,16 @@ impl Client {
     pub async fn request(&mut self, request: Request) -> Result<Response> {
         if self.broken {
             bail!("连接已失效，请重新连接；任务不会自动重发");
+        }
+        if matches!(
+            &request,
+            Request::Send {
+                permission_mode: Some(_),
+                ..
+            }
+        ) && !self.permission_settings
+        {
+            bail!("此 Server 不支持权限设置，请更新 Server 后重新连接；任务未发送");
         }
         let result = tokio::time::timeout(Duration::from_secs(25), async {
             let mut data = serde_json::to_vec(&request)?;
@@ -177,6 +194,7 @@ pub async fn request_with_provider(
             text,
             model,
             effort,
+            permission_mode,
             ..
         } => Request::Send {
             session_id,
@@ -184,6 +202,7 @@ pub async fn request_with_provider(
             text,
             model,
             effort,
+            permission_mode,
             provider: Some(
                 snapshot
                     .map(latte_work_protocol::TurnProvider::Snapshot)
@@ -308,6 +327,44 @@ fn shell_quote(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn legacy_server_never_receives_a_permission_override() {
+        let mut command = Command::new("python3");
+        command.args([
+            "-u",
+            "-c",
+            r#"
+import sys,json
+for line in sys.stdin:
+    req=json.loads(line)
+    if req['method']=='hello':
+        print(json.dumps({'kind':'hello','version':1,'server_id':'legacy','agents':[]}),flush=True)
+    else:
+        assert req['method']=='projects', 'permission override reached legacy server'
+        print(json.dumps({'kind':'projects','projects':[]}),flush=True)
+"#,
+        ]);
+        let mut client = Client::spawn(command).await.unwrap();
+        let error = client
+            .request(Request::Send {
+                session_id: "s".into(),
+                request_id: "r".into(),
+                text: "hello".into(),
+                provider: None,
+                model: None,
+                effort: None,
+                permission_mode: Some("plan".into()),
+            })
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("不支持权限设置"));
+        assert!(matches!(
+            client.request(Request::Projects).await.unwrap(),
+            Response::Projects { .. }
+        ));
+    }
+
     #[test]
     fn prevents_ssh_options_and_shell_injection() {
         for host in ["-oProxyCommand=bad", "a;touch x", "$(id)", "a b", ""] {

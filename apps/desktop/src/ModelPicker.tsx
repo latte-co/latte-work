@@ -15,6 +15,7 @@ export function ModelPicker({
   onChange,
   effort,
   onEffortChange,
+  onEffortInvalid,
   disabled,
 }: {
   hostId: string;
@@ -26,9 +27,12 @@ export function ModelPicker({
   onChange: (model: string | null) => void;
   effort: Effort | null;
   onEffortChange: (effort: Effort | null) => void;
+  onEffortInvalid?: () => void;
   disabled: boolean;
 }) {
-  const [catalog, setCatalog] = useState<Catalog>();
+  const scope = JSON.stringify([hostId, projectId, agent, value]);
+  const [loaded, setCatalog] = useState<{ scope: string; catalog: Catalog }>();
+  const catalog = loaded?.scope === scope ? loaded.catalog : undefined;
   const [error, setError] = useState("");
   const [retry, setRetry] = useState(0);
   useEffect(() => {
@@ -44,7 +48,7 @@ export function ModelPicker({
     })
       .then((result) => {
         if (result.kind !== "models") throw new Error("无法加载模型列表");
-        if (!disposed) setCatalog(result);
+        if (!disposed) setCatalog({ scope, catalog: result });
       })
       .catch((e) => {
         if (!disposed) setError(message(e));
@@ -55,8 +59,8 @@ export function ModelPicker({
   }, [hostId, projectId, agent, connected, settingsOpen, retry, value]);
   useEffect(() => {
     if (catalog && effort && !catalog.effort_levels.includes(effort))
-      onEffortChange(null);
-  }, [catalog, effort, onEffortChange]);
+      onEffortInvalid?.();
+  }, [catalog, effort, onEffortInvalid]);
   const options = modelOptions(catalog?.models ?? [], catalog?.model_labels);
   if (value && catalog && !catalog.models.includes(value))
     options.push({

@@ -1,12 +1,5 @@
 import { useEffect, useId, useRef, useState } from "react";
-import {
-  Check,
-  ChevronDown,
-  Folder,
-  Globe2,
-  Monitor,
-  Plus,
-} from "lucide-react";
+import { Check, ChevronDown, Folder, Plus } from "lucide-react";
 import type { Host } from "./api";
 import type { HostedProject } from "./projectCatalog";
 
@@ -34,6 +27,10 @@ export function TaskProjectPicker({
   const id = useId();
   const hostName = (hostId: string) =>
     hosts.find((host) => host.id === hostId)?.name ?? hostId;
+  const hostLabel = (hostId: string) =>
+    hostId === "local" ? "本机" : `SSH · ${hostName(hostId)}`;
+  const projectDescription = (value: HostedProject) =>
+    `${hostLabel(value.hostId)} · ${value.path}`;
   const filtered = projects.filter((candidate) => {
     const term = query.trim().toLocaleLowerCase();
     return (
@@ -67,6 +64,8 @@ export function TaskProjectPicker({
         type="button"
         className="task-project-trigger"
         aria-label="选择任务项目"
+        aria-description={project ? projectDescription(project) : undefined}
+        title={project ? projectDescription(project) : undefined}
         aria-haspopup="listbox"
         aria-expanded={open}
         aria-controls={open ? id : undefined}
@@ -88,14 +87,12 @@ export function TaskProjectPicker({
       >
         <Folder size={15} />
         <strong>{project?.name ?? "选择项目"}</strong>
-        {project && (
+        {project && project.hostId !== "local" && (
           <span className="task-project-host">
-            {project.hostId === "local" ? (
-              <Monitor size={13} />
-            ) : (
-              <Globe2 size={13} />
-            )}
-            {hostName(project.hostId)}
+            <span>SSH ·</span>
+            <span className="task-project-host-name">
+              {hostName(project.hostId)}
+            </span>
           </span>
         )}
         <ChevronDown size={14} />
@@ -144,20 +141,13 @@ export function TaskProjectPicker({
                   candidate.id === project?.id
                 }
                 className={active === index ? "active" : ""}
-                title={candidate.path}
+                title={projectDescription(candidate)}
                 onMouseEnter={() => setActive(index)}
                 onClick={() => choose(candidate)}
               >
                 <Folder size={15} />
                 <span className="task-project-name">{candidate.name}</span>
-                <small>
-                  {candidate.hostId === "local" ? (
-                    <Monitor size={12} />
-                  ) : (
-                    <Globe2 size={12} />
-                  )}
-                  {hostName(candidate.hostId)}
-                </small>
+                <small>{hostLabel(candidate.hostId)}</small>
                 {candidate.hostId === project?.hostId &&
                   candidate.id === project?.id && <Check size={14} />}
               </button>

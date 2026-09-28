@@ -1,5 +1,6 @@
 //! A single host daemon; `connect` is a disposable local/SSH byte bridge.
 mod agents;
+mod attachments;
 mod files;
 mod providers;
 mod runtime;
@@ -28,10 +29,12 @@ use tokio_util::codec::{FramedRead, LinesCodec};
 
 #[derive(Clone)]
 struct Service {
+    attachments: Arc<Mutex<attachments::Attachments>>,
     lifecycle: Arc<upgrade::Lifecycle>,
     terminals: terminal::SharedTerminals,
     database: Database,
     runs: Runs,
+    command_probes: Arc<tokio::sync::Semaphore>,
     agent_binary: String,
     agent: AgentInfo,
     server_id: String,
@@ -152,11 +155,13 @@ async fn serve(dir: &Path) -> Result<()> {
     let database = Arc::new(Mutex::new(store::Store::open(&dir.join("state.sqlite"))?));
     let (agent_binary, agent) = agents::discover().await;
     let service = Service {
+        attachments: Arc::new(Mutex::new(attachments::Attachments::new(dir)?)),
         lifecycle: Arc::new(upgrade::Lifecycle::new()?),
         terminals: Arc::new(Mutex::new(terminal::Terminals::default())),
         providers: Arc::new(Mutex::new(providers::ProviderStore::open(dir)?)),
         database,
         runs: Arc::new(Mutex::new(HashMap::new())),
+        command_probes: Arc::new(tokio::sync::Semaphore::new(2)),
         agent_binary,
         agent,
         server_id: uuid::Uuid::new_v4().to_string(),
@@ -230,6 +235,7 @@ async fn connection(stream: UnixStream, service: Service) -> Result<()> {
                             version: VERSION,
                             server_id: service.server_id.clone(),
                             agents: vec![service.agent.clone()],
+                            permission_settings: true,
                         }
                     } else {
                         Response::Error {
@@ -275,6 +281,37 @@ async fn dispatch(s: &Service, request: Request) -> Result<Response> {
             .lock()
             .map_err(|_| anyhow::anyhow!("Provider 配置锁异常"))?
             .list(),
+        Request::AgentPermissions { agent } => {
+            if agent != s.agent.id || !s.agent.available {
+                bail!("此 Agent 不可用或尚未实现：{agent}");
+            }
+            let _permit = s
+                .command_probes
+                .try_acquire()
+                .context("权限选项正在加载，请稍后重试")?;
+            Response::AgentPermissions {
+                modes: agents::permission_modes(&agent, &s.agent_binary).await?,
+            }
+        }
+        Request::AgentCommands { agent, project_id } => {
+            if agent != s.agent.id || !s.agent.available {
+                bail!("此 Agent 不可用或尚未实现：{agent}");
+            }
+            let project = db(&s.database, |d| d.project(&project_id))?;
+            let _permit = s
+                .command_probes
+                .try_acquire()
+                .context("命令列表正在加载，请稍后重试")?;
+            let config = s
+                .providers
+                .lock()
+                .map_err(|_| anyhow::anyhow!("Provider 配置锁异常"))?
+                .selected_config(&agent, None)?;
+            Response::AgentCommands {
+                commands: runtime::commands(&s.agent_binary, &agent, &project.path, &config)
+                    .await?,
+            }
+        }
         Request::Models {
             agent,
             model,
@@ -512,6 +549,7 @@ async fn dispatch(s: &Service, request: Request) -> Result<Response> {
             text,
             model,
             effort,
+            permission_mode,
         } => {
             let fingerprint = providers::turn_fingerprint(provider.as_ref())?;
             if db(&s.database, |d| {
@@ -522,6 +560,7 @@ async fn dispatch(s: &Service, request: Request) -> Result<Response> {
                     model.as_deref(),
                     effort,
                     fingerprint.as_deref(),
+                    permission_mode.as_deref(),
                 )
             })? {
                 return Ok(Response::Accepted { duplicate: true });
@@ -552,6 +591,20 @@ async fn dispatch(s: &Service, request: Request) -> Result<Response> {
             }) {
                 bail!("此 Agent 不支持所选思考强度");
             }
+            if let Some(mode) = &permission_mode {
+                let _permit = s
+                    .command_probes
+                    .try_acquire()
+                    .context("权限能力正在加载，请稍后重试")?;
+                if !agents::permission_modes(&agent_id, &s.agent_binary)
+                    .await?
+                    .iter()
+                    .any(|item| &item.id == mode)
+                {
+                    bail!("此 Agent 不支持所选权限模式：{mode}");
+                }
+            }
+            launch_config.permission_mode = permission_mode.clone();
             launch_config.effort = effort;
             let (new, session, path) = db(&s.database, |d| {
                 let session = d.session(&session_id)?;
@@ -563,6 +616,7 @@ async fn dispatch(s: &Service, request: Request) -> Result<Response> {
                     model.as_deref(),
                     effort,
                     fingerprint.as_deref(),
+                    permission_mode.as_deref(),
                 )?;
                 Ok((new, session, path))
             })?;
@@ -628,6 +682,40 @@ async fn dispatch(s: &Service, request: Request) -> Result<Response> {
             let p = db(&s.database, |d| d.project(&project_id))?;
             Response::Files {
                 entries: files::list(Path::new(&p.path), &path)?,
+            }
+        }
+        Request::BeginAttachment { name, size } => Response::AttachmentUpload {
+            id: s
+                .attachments
+                .lock()
+                .map_err(|_| anyhow::anyhow!("附件存储锁异常"))?
+                .begin(name, size)?,
+        },
+        Request::AttachmentChunk { id, offset, data } => {
+            s.attachments
+                .lock()
+                .map_err(|_| anyhow::anyhow!("附件存储锁异常"))?
+                .chunk(&id, offset, &data)?;
+            Response::Ok
+        }
+        Request::FinishAttachment { id } => Response::FileReference {
+            entry: s
+                .attachments
+                .lock()
+                .map_err(|_| anyhow::anyhow!("附件存储锁异常"))?
+                .finish(&id)?,
+        },
+        Request::AbortAttachment { id } => {
+            s.attachments
+                .lock()
+                .map_err(|_| anyhow::anyhow!("附件存储锁异常"))?
+                .abort(&id);
+            Response::Ok
+        }
+        Request::ResolveReference { project_id, path } => {
+            let p = db(&s.database, |d| d.project(&project_id))?;
+            Response::FileReference {
+                entry: files::reference(Path::new(&p.path), &path).await?,
             }
         }
         Request::ReadFile { project_id, path } => {

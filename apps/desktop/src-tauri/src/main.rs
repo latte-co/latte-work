@@ -1,4 +1,5 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+mod paste;
 use latte_work_client::{Client, SshAuthentication};
 use latte_work_protocol::{Request, Response};
 use serde::{Deserialize, Serialize};
@@ -345,6 +346,34 @@ async fn save_hosts(
     std::fs::rename(temp, path).map_err(|e| e.to_string())
 }
 #[tauri::command]
+async fn choose_reference_path(
+    app: tauri::AppHandle,
+    directory: bool,
+) -> Result<Option<String>, String> {
+    let (send, receive) = tokio::sync::oneshot::channel();
+    let dialog = app.dialog().file().set_title(if directory {
+        "引用文件夹"
+    } else {
+        "引用文件"
+    });
+    let callback = move |file: Option<tauri_plugin_dialog::FilePath>| {
+        let result = file
+            .map(|p| {
+                p.into_path()
+                    .map(|p| p.to_string_lossy().into_owned())
+                    .map_err(|e| e.to_string())
+            })
+            .transpose();
+        let _ = send.send(result);
+    };
+    if directory {
+        dialog.pick_folder(callback);
+    } else {
+        dialog.pick_file(callback);
+    }
+    receive.await.map_err(|e| e.to_string())?
+}
+#[tauri::command]
 async fn choose_project_folder(app: tauri::AppHandle) -> Result<Option<String>, String> {
     let (send, receive) = tokio::sync::oneshot::channel();
     app.dialog()
@@ -463,6 +492,11 @@ fn main() {
             load_hosts,
             save_hosts,
             choose_project_folder,
+            choose_reference_path,
+            paste::clipboard_file_paths,
+            paste::paste_stage,
+            paste::finish_paste_upload,
+            paste::import_clipboard_file,
             choose_identity_file,
             reveal_project
         ])

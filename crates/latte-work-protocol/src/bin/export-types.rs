@@ -13,6 +13,8 @@ fn main() {
         Event::decl(),
         FileEntry::decl(),
         AgentInfo::decl(),
+        AgentPermissionMode::decl(),
+        AgentSlashCommand::decl(),
         ProviderProtocol::decl(),
         ProviderAuth::decl(),
         Provider::decl(),

@@ -49,6 +49,8 @@ pub struct Session {
     pub model: Option<String>,
     #[serde(default)]
     pub effort: Option<Effort>,
+    #[serde(default)]
+    pub permission_mode: Option<String>,
     pub status: Status,
     pub created_at: f64,
     #[serde(default)]
@@ -129,6 +131,14 @@ pub struct FileEntry {
     pub name: String,
     pub path: String,
     pub directory: bool,
+}
+/// Adapter-owned native permission choice; IDs are never translated by the UI.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+pub struct AgentPermissionMode {
+    pub id: String,
+    pub label: String,
+    pub description: String,
+    pub elevated: bool,
 }
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 pub struct AgentInfo {
@@ -218,6 +228,16 @@ impl std::fmt::Debug for ProviderDraft {
             .finish_non_exhaustive()
     }
 }
+/// A command reported by the selected native Agent in the project context.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+pub struct AgentSlashCommand {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
+    pub description: String,
+    pub argument_hint: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[serde(tag = "method", rename_all = "snake_case")]
 pub enum Request {
@@ -251,6 +271,13 @@ pub enum Request {
         terminal_id: String,
     },
     Providers,
+    AgentPermissions {
+        agent: String,
+    },
+    AgentCommands {
+        agent: String,
+        project_id: String,
+    },
     Models {
         agent: String,
         #[serde(default)]
@@ -348,6 +375,8 @@ pub enum Request {
         model: Option<String>,
         #[serde(default)]
         effort: Option<Effort>,
+        #[serde(default)]
+        permission_mode: Option<String>,
     },
     Poll {
         session_id: String,
@@ -365,6 +394,27 @@ pub enum Request {
         project_id: String,
         path: String,
     },
+    BeginAttachment {
+        name: String,
+        #[ts(type = "number")]
+        size: u64,
+    },
+    AttachmentChunk {
+        id: String,
+        #[ts(type = "number")]
+        offset: u64,
+        data: Vec<u8>,
+    },
+    FinishAttachment {
+        id: String,
+    },
+    AbortAttachment {
+        id: String,
+    },
+    ResolveReference {
+        project_id: String,
+        path: String,
+    },
     ReadFile {
         project_id: String,
         path: String,
@@ -376,6 +426,12 @@ pub enum Request {
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Response {
+    AgentPermissions {
+        modes: Vec<AgentPermissionMode>,
+    },
+    AgentCommands {
+        commands: Vec<AgentSlashCommand>,
+    },
     Terminals {
         terminals: Vec<TerminalInfo>,
     },
@@ -412,6 +468,8 @@ pub enum Response {
         version: u32,
         server_id: String,
         agents: Vec<AgentInfo>,
+        #[serde(default)]
+        permission_settings: bool,
     },
     Projects {
         projects: Vec<Project>,
@@ -435,6 +493,12 @@ pub enum Response {
     },
     Files {
         entries: Vec<FileEntry>,
+    },
+    AttachmentUpload {
+        id: String,
+    },
+    FileReference {
+        entry: FileEntry,
     },
     Directories {
         path: String,

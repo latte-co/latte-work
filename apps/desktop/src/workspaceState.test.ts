@@ -76,3 +76,12 @@ it("preserves a conversation saved by the earlier preview without making host/pr
     localStorage.getItem("latte-work.conversation-workspace.v1:" + id),
   ).not.toBeNull();
 });
+
+it("keeps a new task focused on conversation while restoring explicit panel preferences", async () => {
+  const fresh = workspaceKey(crypto.randomUUID());
+  expect(readWorkspace(fresh)).toMatchObject({ visible: false, tabs: [] });
+  updateWorkspace(fresh, { visible: true });
+  vi.resetModules();
+  const reloaded = await import("./workspaceState");
+  expect(reloaded.readWorkspace(fresh).visible).toBe(true);
+});
