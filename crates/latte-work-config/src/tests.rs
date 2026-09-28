@@ -1,0 +1,236 @@
+use super::*;
+use latte_work_protocol::{ProviderAuth, ProviderProtocol};
+fn draft(name: &str) -> ProviderDraft {
+    ProviderDraft {
+        id: None,
+        name: name.into(),
+        protocol: ProviderProtocol::AnthropicMessages,
+        base_url: "https://example.test".into(),
+        model: "first".into(),
+        models: vec![],
+        auth: ProviderAuth::ApiKey,
+        credential: Some("fixture-private-key".into()),
+    }
+}
+fn save(store: &mut ProviderStore, draft: ProviderDraft) -> String {
+    let Response::Providers { providers, .. } = store.save(draft).unwrap() else {
+        panic!()
+    };
+    providers.last().unwrap().id.clone()
+}
+#[test]
+fn offline_catalog_and_host_choices_survive_restart_without_credentials_in_responses() {
+    let directory = tempfile::tempdir().unwrap();
+    let id;
+    {
+        let mut store = ProviderStore::open(directory.path(), None).unwrap();
+        id = save(&mut store, draft("Team"));
+        // App configuration is independent even of future/unknown Agent registries.
+        store
+            .bind("devbox", "future-agent", Some(id.clone()))
+            .unwrap();
+        store.bind("local", "claude", Some(id.clone())).unwrap();
+        assert!(
+            store
+                .snapshot_for_host("other", "claude")
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            store
+                .snapshot_for_host("devbox", "claude")
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            !serde_json::to_string(&store.list())
+                .unwrap()
+                .contains("fixture-private-key")
+        );
+        assert!(store.delete(&id).is_err());
+        let before = std::fs::read(directory.path().join("providers.json")).unwrap();
+        let mut edit = draft("Changed");
+        edit.id = Some(id.clone());
+        edit.protocol = ProviderProtocol::OpenaiChat;
+        assert!(store.save(edit).is_err());
+        assert_eq!(
+            before,
+            std::fs::read(directory.path().join("providers.json")).unwrap()
+        );
+    }
+    let mut store = ProviderStore::open(directory.path(), None).unwrap();
+    let mut edit = draft("Changed");
+    edit.id = Some(id.clone());
+    edit.model = "second".into();
+    edit.credential = None;
+    store.save(edit).unwrap();
+    let remote = store
+        .snapshot_for_host("devbox", "future-agent")
+        .unwrap()
+        .unwrap();
+    assert_eq!(remote.credential, "fixture-private-key");
+    assert_eq!(remote.provider.model, "second");
+    store.bind("local", "claude", None).unwrap();
+    assert!(
+        store
+            .snapshot_for_host("local", "claude")
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        store
+            .snapshot_for_host("devbox", "future-agent")
+            .unwrap()
+            .is_some()
+    );
+    store.forget_host("devbox").unwrap();
+    store.delete(&id).unwrap();
+    // CRUD supports all protocols with no installed/running Agent.
+    for protocol in [
+        ProviderProtocol::AnthropicMessages,
+        ProviderProtocol::OpenaiChat,
+        ProviderProtocol::OpenaiResponses,
+    ] {
+        let mut value = draft("Unbound");
+        value.protocol = protocol;
+        save(&mut store, value);
+    }
+    #[cfg(unix)]
+    assert_eq!(
+        std::fs::metadata(directory.path().join("providers.json"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777,
+        0o600
+    );
+}
+#[test]
+fn migration_is_read_only_once_and_preserves_local_remote_associations() {
+    for schema in [1, 2] {
+        let legacy = tempfile::tempdir().unwrap();
+        let app = tempfile::tempdir().unwrap();
+        let id;
+        {
+            let mut old = ProviderStore::open(legacy.path(), None).unwrap();
+            id = save(&mut old, draft("Legacy"));
+            old.bind("local", "claude", Some(id.clone())).unwrap();
+            old.bind("devbox", "claude", Some(id.clone())).unwrap();
+        }
+        let path = legacy.path().join("providers.json");
+        if schema == 1 {
+            let mut value: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+            value["schema"] = 1.into();
+            value["active_id"] = id.clone().into();
+            value["bindings"] = serde_json::json!({});
+            value["providers"][0]["metadata"]["revision"] = "".into();
+            std::fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
+        }
+        let before = std::fs::read(&path).unwrap();
+        {
+            let store = ProviderStore::open(app.path(), Some(&path)).unwrap();
+            for host in ["local", "devbox"] {
+                let snapshot = store.snapshot_for_host(host, "claude").unwrap().unwrap();
+                assert_eq!(snapshot.provider.id, id);
+                assert_eq!(snapshot.credential, "fixture-private-key");
+                assert!(!snapshot.provider.revision.is_empty());
+            }
+        }
+        assert_eq!(before, std::fs::read(&path).unwrap());
+        std::fs::write(&path, "invalid now").unwrap();
+        let store = ProviderStore::open(app.path(), Some(&path)).unwrap();
+        assert!(
+            store
+                .snapshot_for_host("devbox", "claude")
+                .unwrap()
+                .is_some()
+        );
+    }
+}
+#[test]
+fn schema_one_incompatible_or_missing_selection_keeps_native_defaults() {
+    for protocol in [
+        ProviderProtocol::OpenaiChat,
+        ProviderProtocol::OpenaiResponses,
+    ] {
+        for missing in [false, true] {
+            let legacy = tempfile::tempdir().unwrap();
+            let app = tempfile::tempdir().unwrap();
+            let id = {
+                let mut old = ProviderStore::open(legacy.path(), None).unwrap();
+                let mut provider = draft("Legacy OpenAI");
+                provider.protocol = protocol.clone();
+                save(&mut old, provider)
+            };
+            let path = legacy.path().join("providers.json");
+            let mut value: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+            value["schema"] = 1.into();
+            value["active_id"] = if missing { "missing" } else { &id }.into();
+            let before = serde_json::to_vec(&value).unwrap();
+            std::fs::write(&path, &before).unwrap();
+            for _ in 0..2 {
+                let store = ProviderStore::open(app.path(), Some(&path)).unwrap();
+                for host in ["local", "devbox"] {
+                    assert!(store.snapshot_for_host(host, "claude").unwrap().is_none());
+                }
+                assert!(
+                    matches!(store.list(), Response::Providers { providers, bindings }
+                    if providers.len() == 1 && providers[0].id == id && bindings.is_empty())
+                );
+                assert_eq!(store.config.providers[0].credential, "fixture-private-key");
+            }
+            assert_eq!(std::fs::read(&path).unwrap(), before);
+        }
+    }
+}
+#[test]
+fn invalid_or_oversized_migration_cannot_replace_configuration() {
+    let legacy = tempfile::tempdir().unwrap();
+    let app = tempfile::tempdir().unwrap();
+    let path = legacy.path().join("providers.json");
+    for bytes in [
+        b"{secret-invalid-json".to_vec(),
+        vec![b' '; MAX_CONFIG as usize + 1],
+    ] {
+        std::fs::write(&path, &bytes).unwrap();
+        let error = ProviderStore::open(app.path(), Some(&path))
+            .err()
+            .unwrap()
+            .to_string();
+        assert!(!error.contains("secret"));
+        assert!(!app.path().join("providers.json").exists());
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
+    }
+}
+#[test]
+fn concurrent_app_transactions_reload_before_writing() {
+    let directory = tempfile::tempdir().unwrap();
+    let threads: Vec<_> = (0..8)
+        .map(|i| {
+            let path = directory.path().to_owned();
+            std::thread::spawn(move || {
+                let mut store = ProviderStore::open(&path, None).unwrap();
+                save(&mut store, draft(&format!("Provider {i}")));
+            })
+        })
+        .collect();
+    for thread in threads {
+        thread.join().unwrap();
+    }
+    let store = ProviderStore::open(directory.path(), None).unwrap();
+    assert!(matches!(store.list(), Response::Providers { providers, .. } if providers.len() == 8));
+}
+#[cfg(unix)]
+#[test]
+fn symlinked_app_or_legacy_config_is_rejected() {
+    let target = tempfile::tempdir().unwrap();
+    let app = tempfile::tempdir().unwrap();
+    let private = target.path().join("private");
+    std::fs::write(&private, "unchanged").unwrap();
+    let link = app.path().join("providers.json");
+    std::os::unix::fs::symlink(&private, &link).unwrap();
+    assert!(ProviderStore::open(app.path(), None).is_err());
+    assert_eq!(std::fs::read_to_string(private).unwrap(), "unchanged");
+}

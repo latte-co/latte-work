@@ -1,5 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 mod paste;
+mod providers;
 use latte_work_client::{Client, SshAuthentication};
 use latte_work_protocol::{Request, Response};
 use serde::{Deserialize, Serialize};
@@ -212,8 +213,20 @@ async fn host_request(
     host_id: String,
     request: Request,
 ) -> Result<Response, String> {
-    if matches!(request, Request::ExportHostAgentProvider { .. }) {
-        return Err("Provider 凭据仅供原生执行使用".into());
+    if matches!(
+        request,
+        Request::Providers
+            | Request::ProvidersForHost { .. }
+            | Request::SaveProvider { .. }
+            | Request::DeleteProvider { .. }
+            | Request::BindAgentProvider { .. }
+            | Request::BindHostAgentProvider { .. }
+            | Request::ForgetHostProviders { .. }
+            | Request::ExportHostAgentProvider { .. }
+            | Request::SyncAgentProvider { .. }
+            | Request::ModelsForProvider { .. }
+    ) {
+        return Err("Provider 配置由 App 管理，请使用 App 设置入口".into());
     }
     let client = state
         .clients
@@ -222,14 +235,17 @@ async fn host_request(
         .get(&host_id)
         .cloned()
         .ok_or("Host 未连接")?;
-    let response =
-        if host_id != "local" && matches!(request, Request::Models { .. } | Request::Send { .. }) {
-            let local = local_client(&app, &state).await?;
-            latte_work_client::request_with_provider(&local, &client, host_id, request).await
-        } else {
-            client.lock().await.request(request).await
-        }
-        .map_err(|e| format!("{e:#}"))?;
+    let response = if matches!(request, Request::Models { .. } | Request::Send { .. }) {
+        latte_work_client::request_with_app_provider(&client, request, |agent| async move {
+            providers::with_store(app, move |store| store.snapshot_for_host(&host_id, &agent))
+                .await
+                .map_err(anyhow::Error::msg)
+        })
+        .await
+    } else {
+        client.lock().await.request(request).await
+    }
+    .map_err(|e| format!("{e:#}"))?;
     ui_response(response)
 }
 fn ui_response(response: Response) -> Result<Response, String> {
@@ -237,56 +253,6 @@ fn ui_response(response: Response) -> Result<Response, String> {
         return Err("Provider 凭据不能返回界面".into());
     }
     Ok(response)
-}
-#[tauri::command]
-async fn agent_providers(
-    app: tauri::AppHandle,
-    state: State<'_, Connections>,
-    host_id: String,
-) -> Result<Response, String> {
-    let local = local_client(&app, &state).await?;
-    let request = if host_id == "local" {
-        Request::Providers
-    } else {
-        Request::ProvidersForHost { host_id }
-    };
-    let response = local
-        .lock()
-        .await
-        .request(request)
-        .await
-        .map_err(|e| format!("{e:#}"))?;
-    ui_response(response)
-}
-#[tauri::command]
-async fn bind_agent_provider(
-    app: tauri::AppHandle,
-    state: State<'_, Connections>,
-    host_id: String,
-    agent: String,
-    provider_id: Option<String>,
-) -> Result<Response, String> {
-    let local = local_client(&app, &state).await?;
-    let request = if host_id == "local" {
-        Request::BindAgentProvider {
-            agent,
-            provider_id,
-            target: None,
-        }
-    } else {
-        Request::BindHostAgentProvider {
-            host_id,
-            agent,
-            provider_id,
-        }
-    };
-    let response = local
-        .lock()
-        .await
-        .request(request)
-        .await
-        .map_err(|e| format!("{e:#}"))?;
-    ui_response(response)
 }
 #[tauri::command]
 async fn disconnect_host(state: State<'_, Connections>, host_id: String) -> Result<(), String> {
@@ -311,29 +277,19 @@ fn load_hosts(app: tauri::AppHandle) -> Result<Vec<Host>, String> {
     serde_json::from_slice(&data).map_err(|e| e.to_string())
 }
 #[tauri::command]
-async fn save_hosts(
-    app: tauri::AppHandle,
-    state: State<'_, Connections>,
-    hosts: Vec<Host>,
-) -> Result<(), String> {
+async fn save_hosts(app: tauri::AppHandle, hosts: Vec<Host>) -> Result<(), String> {
     let removed: Vec<_> = load_hosts(app.clone())?
         .into_iter()
         .filter(|old| !hosts.iter().any(|host| host.id == old.id))
         .collect();
     if !removed.is_empty() {
-        let local = local_client(&app, &state).await?;
-        let mut local = local.lock().await;
-        for host in removed {
-            match local
-                .request(Request::ForgetHostProviders { host_id: host.id })
-                .await
-                .map_err(|e| e.to_string())?
-            {
-                Response::Providers { .. } => {}
-                Response::Error { message, .. } => return Err(message),
-                _ => return Err("解除主机关联失败".into()),
+        providers::with_store(app.clone(), move |store| {
+            for host in removed {
+                store.forget_host(&host.id)?;
             }
-        }
+            Ok(())
+        })
+        .await?;
     }
     let path = host_file(&app)?;
     std::fs::create_dir_all(path.parent().ok_or("无效配置路径")?).map_err(|e| e.to_string())?;
@@ -487,8 +443,9 @@ fn main() {
             connect_host,
             disconnect_host,
             host_request,
-            bind_agent_provider,
-            agent_providers,
+            providers::provider_request,
+            providers::bind_agent_provider,
+            providers::agent_providers,
             load_hosts,
             save_hosts,
             choose_project_folder,

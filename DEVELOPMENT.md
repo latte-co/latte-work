@@ -181,3 +181,13 @@ session close. Remote servers must be updated before using clipboard transfers.
 Tests: `pasteAttachments.test.ts`, `Composer.test.tsx`, server attachment unit tests,
 and final-binary `pasted_attachments_are_chunked_host_owned_and_abortable`. Report
 native clipboard tests and actual remote-host execution separately.
+
+## App-owned Provider configuration
+
+`latte-work-config` owns App Provider definitions and per-host/Agent choices. It has
+no runtime Agent or Server dependency. Tauri accesses it on a blocking worker using
+a short-lived OS file lock. UI Provider CRUD must use `provider_request`, never
+`host_request` or a local Server connection. Only model discovery and execution
+contact the selected host. Each desktop send chooses an explicit snapshot or CLI
+configuration, including for the local host. See `docs/providers.md` for read-only
+legacy migration, paths and confidentiality requirements.

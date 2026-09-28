@@ -2403,3 +2403,194 @@ async fn pasted_attachments_are_chunked_host_owned_and_abortable() {
         Response::Error { .. }
     ));
 }
+
+/// The App owns the catalog. No local Server/client is constructed in this flow.
+#[tokio::test]
+async fn app_providers_and_native_defaults_only_contact_the_selected_host() {
+    use latte_work_client::request_with_app_provider;
+    use latte_work_config::ProviderStore;
+    use latte_work_protocol::{ProviderAuth, ProviderDraft, ProviderProtocol};
+    use tokio::sync::Mutex;
+    let app = tempfile::tempdir().unwrap();
+    let first = Host::start().await;
+    let second = Host::start().await;
+    let draft = ProviderDraft {
+        id: None,
+        name: "App-only".into(),
+        protocol: ProviderProtocol::AnthropicMessages,
+        base_url: "https://example.test".into(),
+        model: "first".into(),
+        models: vec![],
+        auth: ProviderAuth::ApiKey,
+        credential: Some("fixture-private-key".into()),
+    };
+    let id = {
+        let mut store = ProviderStore::open(app.path(), None).unwrap();
+        let Response::Providers { providers, .. } = store.save(draft.clone()).unwrap() else {
+            panic!()
+        };
+        let id = providers[0].id.clone();
+        // A broken/offline local host's explicit Provider must not affect either remote default.
+        store.bind("local", "claude", Some(id.clone())).unwrap();
+        id
+    };
+    let app_path = app.path();
+    let models = || Request::Models {
+        agent: "claude".into(),
+        model: None,
+        project_id: None,
+    };
+    for (host, host_id, name) in [
+        (&first, "first-host", "First native"),
+        (&second, "second-host", "Second native"),
+    ] {
+        let config = host.directory.path().join("claude-config");
+        std::fs::create_dir(&config).unwrap();
+        std::fs::write(
+            config.join("settings.json"),
+            serde_json::json!({"env": {"ANTHROPIC_DEFAULT_SONNET_MODEL": "native-id", "ANTHROPIC_DEFAULT_SONNET_MODEL_NAME": name}}).to_string(),
+        )
+        .unwrap();
+        let target = Mutex::new(host.client().await);
+        let response = request_with_app_provider(&target, models(), |agent| async move {
+            ProviderStore::open(app_path, None)?.snapshot_for_host(host_id, &agent)
+        })
+        .await
+        .unwrap();
+        assert!(
+            matches!(response, Response::Models { provider: None, model_labels, .. } if model_labels.get("sonnet").map(String::as_str) == Some(name))
+        );
+    }
+    // Kill one environment entirely; the other still supports native and custom turns.
+    drop(first);
+    let target = Mutex::new(second.client().await);
+    let resolve = |agent: String| async move {
+        ProviderStore::open(app_path, None)?.snapshot_for_host("second-host", &agent)
+    };
+    let mut observer = second.client().await;
+    let project = tempfile::tempdir().unwrap();
+    let sid = session(&mut observer, project.path()).await;
+    let send = |request_id: &str, text: &str| Request::Send {
+        session_id: sid.clone(),
+        request_id: request_id.into(),
+        text: text.into(),
+        model: None,
+        effort: None,
+        permission_mode: None,
+        provider: None,
+    };
+    assert!(matches!(
+        request_with_app_provider(&target, send("native", "model"), resolve)
+            .await
+            .unwrap(),
+        Response::Accepted { .. }
+    ));
+    assert!(
+        wait(&mut observer, &sid, Status::Completed)
+            .await
+            .iter()
+            .any(|e| matches!(&e.event, EventKind::Text { text } if text == "fresh:cli-config"))
+    );
+    ProviderStore::open(app.path(), None)
+        .unwrap()
+        .bind("second-host", "claude", Some(id.clone()))
+        .unwrap();
+    assert!(
+        matches!(request_with_app_provider(&target, models(), resolve).await.unwrap(), Response::Models { default_model: Some(model), .. } if model == "first")
+    );
+    assert!(matches!(
+        request_with_app_provider(&target, send("custom", "provider"), resolve)
+            .await
+            .unwrap(),
+        Response::Accepted { .. }
+    ));
+    let events = wait(&mut observer, &sid, Status::Completed).await;
+    assert!(
+        events.iter().any(
+            |e| matches!(&e.event, EventKind::Text { text } if text == "resumed:first:api_key")
+        )
+    );
+    assert!(
+        !serde_json::to_string(&events)
+            .unwrap()
+            .contains("fixture-private-key")
+    );
+    // An App edit is used for the next turn, including after reconnect.
+    let mut edit = draft.clone();
+    edit.id = Some(id);
+    edit.model = "second".into();
+    edit.credential = None;
+    ProviderStore::open(app.path(), None)
+        .unwrap()
+        .save(edit)
+        .unwrap();
+    let target = Mutex::new(second.client().await);
+    assert!(matches!(
+        request_with_app_provider(&target, send("updated", "provider"), resolve)
+            .await
+            .unwrap(),
+        Response::Accepted { .. }
+    ));
+    assert!(
+        wait(&mut observer, &sid, Status::Completed)
+            .await
+            .iter()
+            .any(
+                |e| matches!(&e.event, EventKind::Text { text } if text == "resumed:second:api_key")
+            )
+    );
+    assert!(!second.directory.path().join("providers.json").exists());
+    // A failed config read must not silently fall back or submit the request.
+    assert!(
+        request_with_app_provider(&target, send("not-sent", "model"), |_| async {
+            anyhow::bail!("App config invalid")
+        })
+        .await
+        .is_err()
+    );
+    let Response::Session { session: before } = observer
+        .request(Request::Session {
+            session_id: sid.clone(),
+        })
+        .await
+        .unwrap()
+    else {
+        panic!()
+    };
+    assert_eq!(before.status, Status::Completed);
+    // Explicit CLI defaults also bypass a stale legacy binding on the target.
+    let Response::Providers { providers, .. } = observer
+        .request(Request::SaveProvider { provider: draft })
+        .await
+        .unwrap()
+    else {
+        panic!()
+    };
+    observer
+        .request(Request::BindAgentProvider {
+            agent: "claude".into(),
+            provider_id: Some(providers[0].id.clone()),
+            target: None,
+        })
+        .await
+        .unwrap();
+    ProviderStore::open(app.path(), None)
+        .unwrap()
+        .bind("second-host", "claude", None)
+        .unwrap();
+    assert!(
+        matches!(request_with_app_provider(&target, models(), resolve).await.unwrap(), Response::Models { provider: None, model_labels, .. } if model_labels.get("sonnet").map(String::as_str) == Some("Second native"))
+    );
+    assert!(matches!(
+        request_with_app_provider(&target, send("native-again", "model"), resolve)
+            .await
+            .unwrap(),
+        Response::Accepted { .. }
+    ));
+    assert!(
+        wait(&mut observer, &sid, Status::Completed)
+            .await
+            .iter()
+            .any(|e| matches!(&e.event, EventKind::Text { text } if text == "resumed:default"))
+    );
+}
