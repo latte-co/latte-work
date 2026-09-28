@@ -414,6 +414,7 @@ impl Claude {
                     }
                     output.push(Action::Approval {
                         id,
+                        tool_use_id: request["tool_use_id"].as_str().map(str::to_owned),
                         tool: request["tool_name"].as_str().unwrap_or("Tool").into(),
                         input: request["input"].clone(),
                     });

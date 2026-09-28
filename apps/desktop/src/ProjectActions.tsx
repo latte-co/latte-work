@@ -1,3 +1,4 @@
+import { Modal } from "./Modal";
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { Folder, Pencil, X } from "lucide-react";
@@ -21,6 +22,13 @@ export function ProjectActions({
   const [error, setError] = useState("");
   const [position, setPosition] = useState(point);
   const menu = useRef<HTMLDivElement>(null);
+  const opener = useRef(document.activeElement as HTMLElement | null);
+  useEffect(
+    () => () => {
+      if (opener.current?.isConnected) opener.current.focus();
+    },
+    [],
+  );
   useLayoutEffect(() => {
     if (menu.current) {
       const rect = menu.current.getBoundingClientRect();
@@ -137,7 +145,7 @@ export function ProjectActions({
         if (e.target === e.currentTarget && !busy) close();
       }}
     >
-      <section
+      <Modal
         className="modal"
         role="dialog"
         aria-modal="true"
@@ -198,7 +206,7 @@ export function ProjectActions({
             </button>
           </div>
         </form>
-      </section>
+      </Modal>
     </div>,
     document.body,
   );

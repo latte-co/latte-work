@@ -20,7 +20,13 @@ const tabs = [
   { id: "ssh", label: "SSH 连接", icon: Globe2 },
 ] as const;
 
-export function SettingsPage({ state }: { state: Workbench }) {
+export function SettingsPage({
+  state,
+  active,
+}: {
+  state: Workbench;
+  active: boolean;
+}) {
   const tab = state.settingsTab;
   const setTab = state.setSettingsTab;
   const [agentBusy, setAgentBusy] = useState(false);
@@ -29,13 +35,16 @@ export function SettingsPage({ state }: { state: Workbench }) {
   const navigation = useRef<HTMLDivElement>(null);
   const busy = agentBusy || providerBusy || sshBusy;
   useEffect(() => {
+    if (!active) return;
     navigation.current
       ?.querySelector<HTMLButtonElement>(`#settings-tab-${tab}`)
       ?.focus();
-  }, []);
+  }, [active]);
   useEffect(() => {
+    if (!active) return;
     const key = (event: KeyboardEvent) => {
       if (
+        !event.defaultPrevented &&
         event.key === "Escape" &&
         !busy &&
         !document.querySelector(".ssh-password-modal") &&
@@ -45,7 +54,7 @@ export function SettingsPage({ state }: { state: Workbench }) {
     };
     window.addEventListener("keydown", key);
     return () => window.removeEventListener("keydown", key);
-  }, [busy, state.setModal, state.settingsReturnToProject]);
+  }, [active, busy, state.setModal, state.settingsReturnToProject]);
   function close() {
     if (!busy) {
       state.setModal(state.settingsReturnToProject ? "project" : null);
@@ -85,6 +94,7 @@ export function SettingsPage({ state }: { state: Workbench }) {
                         tabs.length) %
                       tabs.length;
               setTab(tabs[next].id);
+              if (!active) return;
               navigation.current
                 ?.querySelectorAll<HTMLButtonElement>("button")
                 [next]?.focus();
@@ -124,7 +134,7 @@ export function SettingsPage({ state }: { state: Workbench }) {
           >
             <AgentSettings
               state={state}
-              active={tab === "agents"}
+              active={active && tab === "agents"}
               onBusy={setAgentBusy}
             />
           </section>
@@ -135,7 +145,7 @@ export function SettingsPage({ state }: { state: Workbench }) {
             hidden={tab !== "providers"}
           >
             <ProviderSettings
-              active={tab === "providers"}
+              active={active && tab === "providers"}
               onBusy={setProviderBusy}
             />
           </section>

@@ -513,6 +513,24 @@ async fn inspection_reads_host_files_and_both_git_views() {
     assert!(
         matches!(ask(&mut c, Request::Diff { project_id: id.clone() }).await, Response::Content { text, .. } if text.contains("+working") && text.contains("+staged"))
     );
+    assert!(
+        matches!(ask(&mut c, Request::Changes { project_id: id.clone() }).await, Response::Changes { entries, truncated: false } if entries.iter().filter(|entry| entry.path == "hello.txt").count() == 2)
+    );
+    assert!(
+        matches!(ask(&mut c, Request::ChangeDiff { project_id: id.clone(), path: "hello.txt".into(), section: latte_work_protocol::ChangeSection::Staged }).await, Response::Content { text, truncated: false } if text.contains("+staged") && !text.contains("+working"))
+    );
+    assert!(matches!(
+        ask(
+            &mut c,
+            Request::ChangeDiff {
+                project_id: id.clone(),
+                path: "../outside".into(),
+                section: latte_work_protocol::ChangeSection::Untracked
+            }
+        )
+        .await,
+        Response::Error { .. }
+    ));
     std::fs::write(project.path().join("binary"), [0, 1, 2]).unwrap();
     assert!(matches!(
         ask(

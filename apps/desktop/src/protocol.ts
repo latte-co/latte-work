@@ -45,7 +45,13 @@ export type EventKind =
   | { kind: "text"; text: string }
   | { kind: "tool"; id: string; name: string; input: JsonValue }
   | { kind: "tool_result"; id: string; content: JsonValue; is_error: boolean }
-  | { kind: "approval"; request_id: string; tool: string; input: JsonValue }
+  | {
+      kind: "approval";
+      request_id: string;
+      tool_use_id?: string;
+      tool: string;
+      input: JsonValue;
+    }
   | { kind: "approval_resolved"; request_id: string; allow: boolean }
   | { kind: "state"; status: Status; message: string | null }
   | { kind: "notice"; text: string };
@@ -56,6 +62,13 @@ export type Event = {
   event: EventKind;
 };
 export type FileEntry = { name: string; path: string; directory: boolean };
+export type ChangeSection = "unstaged" | "staged" | "untracked";
+export type GitChange = {
+  path: string;
+  previous_path: string | null;
+  section: ChangeSection;
+  status: string;
+};
 export type AgentInfo = {
   id: string;
   name: string;
@@ -211,8 +224,16 @@ export type Request =
   | { method: "abort_attachment"; id: string }
   | { method: "resolve_reference"; project_id: string; path: string }
   | { method: "read_file"; project_id: string; path: string }
-  | { method: "diff"; project_id: string };
+  | { method: "diff"; project_id: string }
+  | { method: "changes"; project_id: string }
+  | {
+      method: "change_diff";
+      project_id: string;
+      path: string;
+      section: ChangeSection;
+    };
 export type Response =
+  | { kind: "changes"; entries: Array<GitChange>; truncated: boolean }
   | { kind: "agent_permissions"; modes: Array<AgentPermissionMode> }
   | { kind: "agent_commands"; commands: Array<AgentSlashCommand> }
   | { kind: "terminals"; terminals: Array<TerminalInfo> }

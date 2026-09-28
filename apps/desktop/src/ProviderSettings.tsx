@@ -34,6 +34,9 @@ export function ProviderSettings({
   const [catalog, setCatalog] = useState<Catalog>();
   const [draft, setDraft] = useState<ProviderDraft | null>(null);
   const [error, setError] = useState("");
+  const baseline = useRef<string>("");
+  const [notice, setNotice] = useState("");
+  const dirty = !!draft && JSON.stringify(draft) !== baseline.current;
   const [busy, setBusy] = useState(false);
   const [remove, setRemove] = useState<string | null>(null);
   const generation = useRef(0);
@@ -72,6 +75,11 @@ export function ProviderSettings({
         setCatalog(result);
         setDraft(null);
         setRemove(null);
+        setNotice(
+          value.method === "save_provider"
+            ? "Provider 已保存；下次发送时生效。"
+            : "Provider 已移除。",
+        );
       }
     } catch (e) {
       if (current === generation.current) setError(message(e));
@@ -81,7 +89,7 @@ export function ProviderSettings({
     }
   }
   function edit(p: Provider) {
-    setDraft({
+    const next: ProviderDraft = {
       id: p.id,
       name: p.name,
       protocol: p.protocol,
@@ -90,7 +98,10 @@ export function ProviderSettings({
       models: p.models,
       auth: p.auth,
       credential: null,
-    });
+    };
+    baseline.current = JSON.stringify(next);
+    setDraft(next);
+    setNotice("");
     setRemove(null);
     setError("");
   }
@@ -106,6 +117,11 @@ export function ProviderSettings({
         <div className="form-error" role="alert">
           {error}
         </div>
+      )}
+      {notice && (
+        <p className="agent-notice" role="status">
+          {notice}
+        </p>
       )}
       {busy && !catalog && <p>正在加载…</p>}
       {catalog && (
@@ -130,7 +146,7 @@ export function ProviderSettings({
                 <div className="provider-entry-actions">
                   <button
                     className="text-button"
-                    disabled={busy}
+                    disabled={busy || !!draft}
                     onClick={() => edit(p)}
                   >
                     编辑
@@ -138,7 +154,7 @@ export function ProviderSettings({
                   {!catalog.bindings.some((b) => b.provider_id === p.id) && (
                     <button
                       className="text-button"
-                      disabled={busy}
+                      disabled={busy || !!draft}
                       onClick={() =>
                         remove === p.id
                           ? void mutate({
@@ -160,7 +176,10 @@ export function ProviderSettings({
               className="secondary wide"
               disabled={busy}
               onClick={() => {
-                setDraft(empty());
+                const next = empty();
+                baseline.current = JSON.stringify(next);
+                setDraft(next);
+                setNotice("");
                 setError("");
               }}
             >
@@ -172,7 +191,8 @@ export function ProviderSettings({
               className="provider-form"
               onSubmit={(e) => {
                 e.preventDefault();
-                void mutate({ method: "save_provider", provider: draft });
+                if (dirty && !busy)
+                  void mutate({ method: "save_provider", provider: draft });
               }}
             >
               <h3>{draft.id ? "编辑 Provider" : "添加 Provider"}</h3>
@@ -257,7 +277,7 @@ export function ProviderSettings({
                   可选模型 ID（每行一个）
                   <textarea
                     aria-label="可选模型 ID"
-                    placeholder="例如：claude-sonnet-5\nclaude-opus-5"
+                    placeholder={"例如：claude-sonnet-5\nclaude-opus-5"}
                     value={draft.models.join("\n")}
                     onChange={(e) =>
                       setDraft({ ...draft, models: e.target.value.split("\n") })
@@ -293,6 +313,15 @@ export function ProviderSettings({
                   更改地址或认证方式时，请重新填写凭据。修改后的配置会在下一次发送消息时生效。
                 </p>
                 <div className="modal-actions">
+                  <span className="form-note" role="status">
+                    {busy
+                      ? "正在保存…"
+                      : dirty
+                        ? "有未保存的修改 · 离开设置后保留"
+                        : draft.id
+                          ? "已保存"
+                          : "填写服务信息"}
+                  </span>
                   <button
                     type="button"
                     className="secondary"
@@ -300,7 +329,11 @@ export function ProviderSettings({
                   >
                     取消
                   </button>
-                  <button className="primary" type="submit">
+                  <button
+                    className="primary"
+                    type="submit"
+                    disabled={!dirty || busy}
+                  >
                     {busy ? "正在保存…" : "保存 Provider"}
                   </button>
                 </div>

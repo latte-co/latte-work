@@ -32,7 +32,8 @@ button {
   gap: var(--space-2);
 }
 button:disabled {
-  opacity: 0.4;
+  color: var(--color-disabled-text);
+  opacity: 1;
   cursor: default;
 }
 button:not(:disabled):hover {
@@ -525,6 +526,9 @@ button svg {
   background: var(--color-hover);
 }
 .conversation {
+  container-type: inline-size;
+  container-name: conversation;
+  --content-gutter: clamp(16px, 4cqw, 48px);
   display: flex;
   flex-direction: column;
   flex: 1;
@@ -535,6 +539,9 @@ button svg {
   overflow: hidden;
 }
 .sidebar-collapsed .conversation {
+  container-type: inline-size;
+  container-name: conversation;
+  --content-gutter: clamp(16px, 4cqw, 48px);
   margin-left: var(--space-2);
 }
 .conversation-scroll {
@@ -588,6 +595,8 @@ button svg {
   transform: rotate(45deg);
 }
 .composer-wrap {
+  container-type: inline-size;
+  container-name: composer;
   padding: var(--space-3) var(--content-gutter) var(--space-4);
   max-width: calc(var(--content-width) + 2 * var(--content-gutter));
   width: 100%;
@@ -943,11 +952,7 @@ button svg {
   line-height: 1.5;
 }
 .composer textarea::placeholder {
-  color: color-mix(
-    in srgb,
-    var(--color-placeholder) 80%,
-    var(--color-composer)
-  );
+  color: var(--color-placeholder);
   font-weight: 400;
   opacity: 1;
 }
@@ -979,7 +984,7 @@ button svg {
 .claude-mark {
   flex-shrink: 0;
   font-size: 18px;
-  color: var(--color-brand);
+  color: var(--color-text-secondary);
   line-height: 1;
 }
 .permission-picker {
@@ -1015,8 +1020,9 @@ button svg {
   color: var(--color-danger);
 }
 .send {
-  background: var(--color-primary);
-  color: var(--color-on-primary);
+  flex-shrink: 0;
+  background: var(--color-action);
+  color: var(--color-on-action);
   width: 30px;
   height: 30px;
   justify-content: center;
@@ -1024,14 +1030,20 @@ button svg {
   padding: 0;
 }
 .send:not(:disabled):hover {
-  background: var(--color-primary-hover);
+  background: var(--color-action-hover);
 }
 .send:disabled {
   opacity: 1;
 }
 .send.stop {
-  background: var(--color-primary);
-  color: var(--color-on-primary);
+  background: var(--color-stop);
+  color: var(--color-on-stop);
+}
+.send.stop:not(:disabled):hover {
+  background: var(--color-stop-hover);
+}
+.permission-picker:has(button:disabled) {
+  color: var(--color-disabled-text);
 }
 .messages {
   font-family: var(--font-content);
@@ -1044,6 +1056,7 @@ button svg {
   line-height: 1.8;
 }
 .user-message {
+  overflow-wrap: anywhere;
   margin: 0 0 28px auto;
   padding: 13px 18px;
   background: var(--color-surface);
@@ -1063,8 +1076,58 @@ button svg {
   letter-spacing: 0.3px;
 }
 .assistant-message {
+  min-width: 0;
+  overflow-wrap: anywhere;
   margin-bottom: var(--space-6);
   color: var(--color-text);
+}
+.return-latest {
+  align-self: center;
+  flex-shrink: 0;
+  padding: 6px 12px;
+  margin: 0 0 8px;
+  border: 1px solid var(--color-border);
+  background: var(--color-elevated);
+  font-size: var(--text-sm);
+}
+.code-block {
+  min-width: 0;
+  margin: 16px 0;
+  border-radius: var(--radius-control);
+  background: var(--color-input);
+}
+.code-block-heading {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 6px 12px;
+  color: var(--color-text-muted);
+  font-size: var(--text-sm);
+}
+.code-block pre {
+  margin: 0;
+}
+.copy-action button {
+  min-height: 28px;
+  font-size: var(--text-xs);
+  color: var(--color-text-secondary);
+}
+.copy-action > span {
+  display: block;
+  color: var(--color-danger);
+  font-size: var(--text-xs);
+}
+.message-actions {
+  opacity: 0;
+}
+.assistant-message:hover .message-actions,
+.message-actions:focus-within {
+  opacity: 1;
+}
+@media (hover: none) {
+  .message-actions {
+    opacity: 1;
+  }
 }
 .markdown p {
   margin: 0 0 14px;
@@ -1113,13 +1176,22 @@ button svg {
   border-radius: var(--radius-sm);
 }
 .markdown pre code {
+  font-size: 13px;
+  white-space: pre;
+  overflow-wrap: normal;
   background: none;
   padding: 0;
 }
 .markdown a {
   color: var(--accent);
 }
+.markdown img {
+  max-width: 100%;
+  height: auto;
+}
 .markdown table {
+  color: inherit;
+  max-width: 100%;
   display: block;
   overflow: auto;
   border-collapse: collapse;
@@ -1218,6 +1290,8 @@ button svg {
 }
 .activity-row + .assistant-message,
 .activity-group + .assistant-message {
+  min-width: 0;
+  overflow-wrap: anywhere;
   margin-top: 22px;
 }
 .approval-card {
@@ -1227,19 +1301,38 @@ button svg {
   padding: 14px;
   margin: 18px 0;
 }
-.approval-card > div {
+.approval-card[data-resolved="true"] {
+  background: var(--color-surface);
+}
+.approval-card[data-resolved="true"] > div:first-child {
+  color: var(--color-text-secondary);
+}
+.approval-card > div:first-child {
   display: flex;
   align-items: center;
   gap: var(--space-2);
-  color: var(--accent);
+  color: var(--color-warning);
   font-size: var(--text-sm);
 }
 .approval-card strong {
   font-weight: 500;
 }
-.approval-card > div span {
+.approval-card > div:first-child span {
   margin-left: auto;
   font-size: var(--text-xs);
+}
+.approval-operation {
+  display: grid;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+.approval-operation small {
+  color: var(--color-text-muted);
+}
+.approval-operation pre {
+  max-height: 140px;
+  margin: 4px 0 0;
+  font-size: var(--text-sm);
 }
 .approval-card footer {
   display: flex;
@@ -1502,6 +1595,64 @@ button svg {
   font-size: var(--text-xs);
   padding: 0;
   color: var(--color-text-muted);
+}
+.changes-list {
+  overflow-y: auto;
+  min-height: 0;
+  padding: 8px 12px;
+}
+.changes-list h3 {
+  display: flex;
+  gap: 8px;
+  font-size: var(--text-sm);
+  color: var(--color-text-secondary);
+  margin: 16px 0 6px;
+}
+.changes-list h3 span {
+  color: var(--color-text-muted);
+  font-weight: 400;
+}
+.changes-list button {
+  width: 100%;
+  min-height: 36px;
+  padding: 6px 8px;
+}
+.changes-list button > span {
+  flex: 1;
+  min-width: 0;
+  text-align: left;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.changes-list small,
+.panel-notice {
+  color: var(--color-text-muted);
+  font-size: var(--text-xs);
+}
+.panel-notice {
+  padding: 8px 12px;
+  margin: 0;
+}
+.approval-summary {
+  overflow-wrap: anywhere;
+  margin: 8px 0;
+  font-size: var(--text-sm);
+}
+.approval-card details {
+  font-size: var(--text-sm);
+  color: var(--color-text-secondary);
+  margin: 8px 0;
+}
+.ssh-setup {
+  line-height: 1.7;
+}
+.ssh-setup pre {
+  overflow: auto;
+  font-size: var(--text-sm);
+  background: var(--color-input);
+  padding: 12px;
+  border-radius: 8px;
 }
 .code-view {
   overflow: auto;
@@ -2293,9 +2444,15 @@ button svg {
   font-size: var(--text-md);
   font-weight: 500;
 }
+.settings-connection small[data-state="connected"] {
+  color: var(--color-success);
+}
+.settings-connection small[data-state="error"] {
+  color: var(--color-danger);
+}
 .settings-connection small {
   display: block;
-  color: var(--color-success);
+  color: var(--color-text-secondary);
   font-size: var(--text-xs);
   margin-top: 6px;
 }
@@ -2483,6 +2640,31 @@ button svg {
   min-width: 0;
 }
 /* One model trigger, with Agent-native effort values in a nested menu. */
+@container composer (max-width: 480px) {
+  .model-effort-value {
+    display: none;
+  }
+  .composer-toolbar {
+    gap: 6px;
+  }
+  .permission-picker .select-trigger > span {
+    max-width: 76px;
+  }
+  .composer-menu-heading > span:last-child {
+    display: none;
+  }
+  .composer-menu-option small {
+    display: none;
+  }
+}
+@container composer (max-width: 360px) {
+  .permission-picker .select-trigger > span {
+    display: none;
+  }
+  .composer {
+    padding: 12px;
+  }
+}
 .model-effort-value {
   color: var(--color-text-muted);
   flex-shrink: 0;
@@ -2554,6 +2736,9 @@ button[aria-checked="true"] .model-option-check {
   font-weight: 400;
   line-height: 24px;
   color: var(--color-text);
+}
+.model-picker .select-trigger:disabled {
+  color: var(--color-disabled-text);
 }
 .model-picker-error {
   font-size: var(--text-xs);

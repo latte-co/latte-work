@@ -1,10 +1,12 @@
+import { copyText } from "./clipboard";
+import { Modal } from "./Modal";
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import {
   Archive,
   ArchiveRestore,
   Check,
-  ChevronRight,
+  ArrowLeft,
   Copy,
   Eye,
   Pencil,
@@ -39,8 +41,16 @@ export function SessionActions({
   const [copied, setCopied] = useState(false);
   const [position, setPosition] = useState(point);
   const menu = useRef<HTMLDivElement>(null);
+  const opener = useRef(document.activeElement as HTMLElement | null);
+  useEffect(
+    () => () => {
+      if (opener.current?.isConnected) opener.current.focus();
+    },
+    [],
+  );
   const menuView = view === "menu" || view === "copy";
   const active = ["running", "waiting"].includes(session.status);
+  const previousView = useRef(view);
   useLayoutEffect(() => {
     if (!menu.current) return;
     const rect = menu.current.getBoundingClientRect();
@@ -49,18 +59,41 @@ export function SessionActions({
       y: Math.max(8, Math.min(point.y, innerHeight - rect.height - 8)),
     });
     menu.current
-      .querySelector<HTMLButtonElement>("button:not(:disabled)")
+      .querySelector<HTMLButtonElement>(
+        view === "menu" && previousView.current === "copy"
+          ? "[data-copy]"
+          : "button:not(:disabled)",
+      )
       ?.focus();
+    previousView.current = view;
   }, [point, view]);
   useEffect(() => {
     const key = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
         e.preventDefault();
         e.stopImmediatePropagation();
-        if (!busy) close();
+        if (!busy) {
+          if (view === "copy") setView("menu");
+          else close();
+        }
         return;
       }
       if (!menuView) return;
+      if (e.key === "ArrowLeft" && view === "copy") {
+        e.preventDefault();
+        e.stopImmediatePropagation();
+        setView("menu");
+        return;
+      }
+      if (
+        e.key === "ArrowRight" &&
+        (document.activeElement as HTMLElement)?.dataset.copy === "true"
+      ) {
+        e.preventDefault();
+        e.stopImmediatePropagation();
+        setView("copy");
+        return;
+      }
       if (e.key === "Tab") {
         close();
         return;
@@ -95,7 +128,7 @@ export function SessionActions({
       window.removeEventListener("keydown", key, true);
       document.removeEventListener("pointerdown", outside);
     };
-  }, [close, busy, menuView]);
+  }, [close, busy, menuView, view]);
   async function perform(action: () => Promise<unknown>, dismiss = true) {
     setBusy(true);
     setError("");
@@ -112,7 +145,7 @@ export function SessionActions({
     void perform(() => state.sessionAction(session.hostId, action));
   const id = session.id;
   async function copy(text: string) {
-    await navigator.clipboard.writeText(text);
+    await copyText(text);
     setCopied(true);
   }
   if (menuView)
@@ -132,6 +165,7 @@ export function SessionActions({
               disabled={busy}
               onClick={() => setView("menu")}
             >
+              <ArrowLeft size={17} />
               返回
             </button>
             <button
@@ -217,11 +251,11 @@ export function SessionActions({
             <button
               role="menuitem"
               disabled={busy}
+              data-copy="true"
               onClick={() => setView("copy")}
             >
               <Copy size={17} />
-              复制
-              <ChevronRight size={15} className="menu-chevron" />
+              复制…
             </button>
             <div role="separator" />
             {active && (
@@ -270,7 +304,7 @@ export function SessionActions({
         if (e.target === e.currentTarget && !busy) close();
       }}
     >
-      <section
+      <Modal
         className="modal"
         role="dialog"
         aria-modal="true"
@@ -351,7 +385,7 @@ export function SessionActions({
             </div>
           </>
         )}
-      </section>
+      </Modal>
     </div>,
     document.body,
   );

@@ -36,6 +36,11 @@ import {
 } from "./pasteAttachments";
 
 interface Props {
+  referenceState?: { scope: string; entries: ComposerReference[] };
+  onReferencesChange?: (value: {
+    scope: string;
+    entries: ComposerReference[];
+  }) => void;
   agent: string;
   hostId: string;
   projectId?: string;
@@ -99,10 +104,12 @@ export function Composer(props: Props) {
   const scope = `${hostId}:${projectId}:${agent}`;
   const currentScope = useRef(scope);
   currentScope.current = scope;
-  const [references, setReferences] = useState<{
+  const [localReferences, setLocalReferences] = useState<{
     scope: string;
     entries: ComposerReference[];
   }>({ scope, entries: [] });
+  const references = props.referenceState ?? localReferences;
+  const setReferences = props.onReferencesChange ?? setLocalReferences;
   const attached = references.scope === scope ? references.entries : [];
   const [pasting, setPasting] = useState(false);
   const [pasteProgress, setPasteProgress] = useState("");
@@ -168,10 +175,11 @@ export function Composer(props: Props) {
   useEffect(() => {
     close();
     setNotice("");
-    setReferences({ scope, entries: [] });
+    // A different project never inherits references. Existing-session drafts survive remounts.
+    if (references.scope !== scope) setReferences({ scope, entries: [] });
   }, [scope]);
   useEffect(() => {
-    if (!sending) {
+    if (!sending && !props.referenceState) {
       setReferences({ scope, entries: [] });
       close();
     }
@@ -352,8 +360,10 @@ export function Composer(props: Props) {
                   id: `entry:${item.path}`,
                   label: item.name,
                   detail: item.directory
-                    ? "打开文件夹，或按 Tab 引用"
-                    : item.path,
+                    ? "Tab 引用"
+                    : item.path === item.name
+                      ? ""
+                      : item.path,
                   icon: item.directory
                     ? ("folder" as const)
                     : ("file" as const),
@@ -487,7 +497,7 @@ export function Composer(props: Props) {
     close();
     try {
       if (await onSubmit(referencePrompt(value, attached))) {
-        if (currentScope.current === owner)
+        if (!props.referenceState && currentScope.current === owner)
           setReferences({ scope: owner, entries: [] });
         setNotice("");
       }
@@ -639,7 +649,11 @@ export function Composer(props: Props) {
                 <div
                   key={option.id}
                   id={`${listId}-${i}`}
-                  title={`${option.label}${option.icon === "command" ? ` /${option.id}` : ""} ${option.detail}`}
+                  title={
+                    option.id.startsWith("entry:")
+                      ? option.id.slice(6)
+                      : `${option.label} ${option.detail}`
+                  }
                   role="option"
                   aria-selected={i === index}
                   onMouseEnter={() => setSelected(i)}
@@ -704,7 +718,7 @@ export function Composer(props: Props) {
               }}
             >
               {externalError && <p role="alert">{externalError}</p>}
-              {hostId === "local" && (
+              {hostId === "local" && external && (
                 <>
                   <button
                     disabled={externalBusy || !connected}
@@ -732,7 +746,7 @@ export function Composer(props: Props) {
                 {external
                   ? "返回项目目录"
                   : hostId === "local"
-                    ? "输入绝对路径…"
+                    ? "工作区外引用…"
                     : "引用远程路径…"}
               </button>
             </div>

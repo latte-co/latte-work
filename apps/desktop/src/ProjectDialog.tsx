@@ -1,3 +1,4 @@
+import { Modal } from "./Modal";
 import { useEffect, useRef, useState } from "react";
 import {
   ArrowLeft,
@@ -39,6 +40,13 @@ export function ProjectDialog({ state }: { state: Workbench }) {
   } = state;
   const host = hosts.find((h) => h.id === projectHostId) ?? hosts[0];
   const [menu, setMenu] = useState(false);
+  const source = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (menu)
+      source.current
+        ?.querySelector<HTMLButtonElement>('[aria-checked="true"]')
+        ?.focus();
+  }, [menu]);
   const [picking, setPicking] = useState(false);
   const [remoteBrowser, setRemoteBrowser] = useState(false);
   const mounted = useRef(true);
@@ -79,11 +87,23 @@ export function ProjectDialog({ state }: { state: Workbench }) {
         if (e.target === e.currentTarget && !disabled) setModal(null);
       }}
     >
-      <section
+      <Modal
         className="modal project-modal"
         role="dialog"
         aria-modal="true"
         aria-label="创建项目"
+        onKeyDown={(event) => {
+          if (event.key !== "Escape" || disabled) return;
+          event.preventDefault();
+          event.stopPropagation();
+          if (menu) {
+            setMenu(false);
+            event.currentTarget
+              .querySelector<HTMLButtonElement>(".source-trigger")
+              ?.focus();
+          } else if (remoteBrowser) setRemoteBrowser(false);
+          else setModal(null);
+        }}
       >
         <button
           className="modal-close icon-button"
@@ -118,7 +138,7 @@ export function ProjectDialog({ state }: { state: Workbench }) {
                 </div>
                 <h3>源文件夹</h3>
                 <div className="folder-source">
-                  <div className="source-selector">
+                  <div className="source-selector" ref={source}>
                     <button
                       type="button"
                       className="source-trigger"
@@ -142,6 +162,25 @@ export function ProjectDialog({ state }: { state: Workbench }) {
                           className="source-menu"
                           role="menu"
                           aria-label="项目所在主机"
+                          onKeyDown={(event) => {
+                            if (!["ArrowDown", "ArrowUp"].includes(event.key))
+                              return;
+                            event.preventDefault();
+                            const items = Array.from(
+                              event.currentTarget.querySelectorAll<HTMLButtonElement>(
+                                "button",
+                              ),
+                            );
+                            const index = items.indexOf(
+                              document.activeElement as HTMLButtonElement,
+                            );
+                            items[
+                              (index +
+                                (event.key === "ArrowDown" ? 1 : -1) +
+                                items.length) %
+                                items.length
+                            ]?.focus();
+                          }}
                         >
                           {hosts.map((h, i) => (
                             <div key={h.id}>
@@ -161,6 +200,11 @@ export function ProjectDialog({ state }: { state: Workbench }) {
                                     setError("");
                                   }
                                   setMenu(false);
+                                  source.current
+                                    ?.querySelector<HTMLButtonElement>(
+                                      ".source-trigger",
+                                    )
+                                    ?.focus();
                                 }}
                               >
                                 {h.ssh ? (
@@ -244,7 +288,7 @@ export function ProjectDialog({ state }: { state: Workbench }) {
             </form>
           </>
         )}
-      </section>
+      </Modal>
     </div>
   );
 }

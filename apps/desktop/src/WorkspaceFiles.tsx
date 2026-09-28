@@ -1,7 +1,10 @@
+import { CodeView } from "./CodeView";
 import { useEffect, useState } from "react";
 import { FileText, Folder, ArrowLeft, RefreshCw } from "lucide-react";
 import type { FileEntry, Project } from "./protocol";
 import { request, message } from "./api";
+import { ChangesView } from "./ChangesView";
+
 export function WorkspaceFiles({
   hostId,
   project,
@@ -19,33 +22,30 @@ export function WorkspaceFiles({
   file: string;
   navigate: (value: { path?: string; file?: string }) => void;
 }) {
-  const setPath = (path: string) => navigate({ path });
   const [entries, setEntries] = useState<FileEntry[]>([]);
   const [content, setContent] = useState("");
-  const setFile = (file: string) => navigate({ file });
   const [error, setError] = useState("");
   const [truncated, setTruncated] = useState(false);
   const [revision, refresh] = useState(0);
   const [loading, setLoading] = useState(false);
   useEffect(() => {
-    if (!active) return;
+    if (!active || tab !== "files") return;
     let disposed = false;
     setLoading(true);
     setError("");
-    const query =
-      tab === "diff"
-        ? { method: "diff" as const, project_id: project.id }
-        : file
-          ? { method: "read_file" as const, project_id: project.id, path: file }
-          : { method: "files" as const, project_id: project.id, path };
-    void request(hostId, query)
+    void request(
+      hostId,
+      file
+        ? { method: "read_file", project_id: project.id, path: file }
+        : { method: "files", project_id: project.id, path },
+    )
       .then((r) => {
         if (disposed) return;
         if (r.kind === "files") setEntries(r.entries);
-        if (r.kind === "content") {
+        else if (r.kind === "content") {
           setContent(r.text);
           setTruncated(r.truncated);
-        }
+        } else throw new Error("无法读取项目文件，请检查 Server 版本");
       })
       .catch((e) => {
         if (!disposed) setError(message(e));
@@ -57,10 +57,12 @@ export function WorkspaceFiles({
       disposed = true;
     };
   }, [hostId, project.id, path, file, tab, revision, active]);
+  if (tab === "diff")
+    return <ChangesView hostId={hostId} project={project} active={active} />;
   return (
     <>
       <div className="workspace-file-heading">
-        <span>{tab === "files" ? "项目文件" : "工作区改动"}</span>
+        <span>项目文件</span>
         <button
           className="icon-button"
           aria-label="刷新"
@@ -71,59 +73,55 @@ export function WorkspaceFiles({
           <RefreshCw size={14} />
         </button>
       </div>
-      <div className="breadcrumb">
+      <div className="breadcrumb" title={file || path || project.path}>
         {project.name}
         <span>/</span>
-        {tab === "diff" ? "Git diff" : file || path || "文件"}
+        {file || path || "文件"}
       </div>
-      {loading ? (
-        <div className="panel-empty">正在读取…</div>
-      ) : error ? (
-        <div className="panel-error">{error}</div>
-      ) : tab === "files" && !file ? (
-        <div className="file-list">
-          {path && (
-            <button
-              onClick={() => setPath(path.split("/").slice(0, -1).join("/"))}
-            >
-              <ArrowLeft size={15} />
-              上一级
-            </button>
+      {(file || path) && (
+        <div className="file-toolbar">
+          <button
+            onClick={() =>
+              file
+                ? navigate({ file: "" })
+                : navigate({ path: path.split("/").slice(0, -1).join("/") })
+            }
+          >
+            <ArrowLeft size={13} />
+            {file ? "返回目录" : "上一级"}
+          </button>
+          {file && !loading && !error && (
+            <span>只读预览{truncated ? " · 内容已截断" : ""}</span>
           )}
-          {entries.map((e) => (
+        </div>
+      )}
+      {loading ? (
+        <div className="panel-empty" role="status">
+          正在读取…
+        </div>
+      ) : error ? (
+        <div className="panel-error" role="alert">
+          {error}
+        </div>
+      ) : !file ? (
+        <div className="file-list">
+          {entries.map((entry) => (
             <button
-              key={e.path}
-              onClick={() => (e.directory ? setPath(e.path) : setFile(e.path))}
+              key={entry.path}
+              onClick={() =>
+                navigate(
+                  entry.directory ? { path: entry.path } : { file: entry.path },
+                )
+              }
             >
-              {e.directory ? <Folder size={15} /> : <FileText size={15} />}
-              <span>{e.name}</span>
+              {entry.directory ? <Folder size={15} /> : <FileText size={15} />}
+              <span>{entry.name}</span>
             </button>
           ))}
           {entries.length === 0 && <p className="muted">目录为空</p>}
         </div>
       ) : (
-        <>
-          <div className="file-toolbar">
-            {tab === "files" && (
-              <button onClick={() => setFile("")}>
-                <ArrowLeft size={13} />
-                返回目录
-              </button>
-            )}
-            <span>只读预览{truncated ? " · 内容已截断" : ""}</span>
-          </div>
-          <div className="code-view">
-            {content.split("\n").map((line, i) => (
-              <div
-                className={`code-line ${tab === "diff" ? (line.startsWith("+") ? "added" : line.startsWith("-") ? "removed" : line.startsWith("@@") ? "hunk" : "") : ""}`}
-                key={i}
-              >
-                <span className="line-number">{i + 1}</span>
-                <code>{line || " "}</code>
-              </div>
-            ))}
-          </div>
-        </>
+        <CodeView content={content} />
       )}
     </>
   );

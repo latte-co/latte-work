@@ -148,3 +148,32 @@ describe("readable activity projection", () => {
     ).toBe("future_agent_tool");
   });
 });
+it("keeps parallel approval decisions bound to explicit tool IDs", () => {
+  const approval = e(3, {
+    kind: "approval",
+    request_id: "approval",
+    tool_use_id: "b",
+    tool: "Read",
+    input: {},
+  });
+  expect(
+    activityTranscript([call(1, "a"), call(2, "b"), approval]),
+  ).toMatchObject([
+    { type: "tool", status: "pending" },
+    { type: "tool", status: "waiting" },
+    { type: "event", resolved: false },
+  ]);
+  expect(
+    activityTranscript([
+      call(1, "a"),
+      call(2, "b"),
+      approval,
+      e(4, { kind: "approval_resolved", request_id: "approval", allow: false }),
+      result(5, "b", true),
+    ]),
+  ).toMatchObject([
+    { type: "tool", status: "pending" },
+    { type: "tool", status: "denied" },
+    { type: "event", decision: "denied" },
+  ]);
+});

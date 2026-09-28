@@ -4,6 +4,8 @@ import {
   Folder,
   FolderOpen,
   CirclePause,
+  CircleAlert,
+  CircleHelp,
   ChevronDown,
   ChevronRight,
   Settings2,
@@ -191,6 +193,7 @@ export function Sidebar({ state }: { state: Workbench }) {
         }}
         onContextMenu={(e) => {
           e.preventDefault();
+          e.currentTarget.focus();
           showMenu({ x: e.clientX, y: e.clientY });
         }}
         onKeyDown={(e) => {
@@ -231,6 +234,19 @@ export function Sidebar({ state }: { state: Workbench }) {
             >
               <title>等待确认</title>
             </CirclePause>
+          ) : s.status === "failed" ? (
+            <CircleAlert
+              size={14}
+              className="failure"
+              role="img"
+              aria-label="执行失败"
+            >
+              <title>执行失败</title>
+            </CircleAlert>
+          ) : s.status === "unknown" ? (
+            <CircleHelp size={14} role="img" aria-label="状态待确认">
+              <title>状态待确认</title>
+            </CircleHelp>
           ) : s.unread ? (
             <span
               className="unread-dot"
@@ -299,7 +315,14 @@ export function Sidebar({ state }: { state: Workbench }) {
       )}
       <div className="section-heading">
         {sectionToggle("projects", "项目")}
-        <button title="添加项目" className="icon-button" onClick={openProject}>
+        <button
+          title="添加项目"
+          className="icon-button"
+          onClick={(event) => {
+            event.currentTarget.focus();
+            openProject();
+          }}
+        >
           <Plus size={15} />
         </button>
       </div>
@@ -334,6 +357,9 @@ export function Sidebar({ state }: { state: Workbench }) {
                 className={`project-heading ${selected ? "selected" : ""}`}
                 onContextMenu={(e) => {
                   e.preventDefault();
+                  e.currentTarget
+                    .querySelector<HTMLButtonElement>(".project-row")
+                    ?.focus();
                   const rect = e.currentTarget.getBoundingClientRect();
                   showProjectMenu({
                     x: e.clientX || rect.left + 20,

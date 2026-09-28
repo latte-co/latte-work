@@ -86,7 +86,26 @@ it("loads and saves remote Agent associations without connecting to the local Se
       };
     }
     if (command === "agent_providers" || command === "bind_agent_provider")
-      return { kind: "providers", providers: [], bindings: [] };
+      return {
+        kind: "providers",
+        providers: [
+          {
+            id: "test-provider",
+            name: "Test Provider",
+            protocol: "anthropic_messages",
+            base_url: "https://example.test",
+            model: "model",
+            models: [],
+            auth: "bearer",
+            has_credential: true,
+            revision: "r",
+          },
+        ],
+        bindings:
+          command === "bind_agent_provider"
+            ? [{ agent: "claude", provider_id: "test-provider" }]
+            : [],
+      };
     throw new Error("Unexpected call");
   });
   render(
@@ -96,14 +115,47 @@ it("loads and saves remote Agent associations without connecting to the local Se
       onBusy={() => {}}
     />,
   );
-  fireEvent.click(await screen.findByRole("button", { name: "保存关联" }));
+  const save = await screen.findByRole("button", { name: "保存关联" });
+  expect((save as HTMLButtonElement).disabled).toBe(true);
+  fireEvent.click(
+    screen.getByRole("combobox", { name: "Claude Code 关联 Provider" }),
+  );
+  fireEvent.click(screen.getByRole("option", { name: /Test Provider/ }));
+  fireEvent.click(save);
   await screen.findByText("关联已保存；下次发送消息时使用最新配置。");
   expect(invoke).toHaveBeenCalledWith("bind_agent_provider", {
     hostId: "devbox",
     agent: "claude",
-    providerId: null,
+    providerId: "test-provider",
   });
   expect(
     invoke.mock.calls.filter(([command]) => command === "connect_host"),
   ).toEqual([["connect_host", { host: remote, password: undefined }]]);
+});
+it("retains an unsaved Provider form while settings are hidden, without saving credentials", async () => {
+  invoke.mockResolvedValue({ kind: "providers", providers: [], bindings: [] });
+  const view = render(<ProviderSettings active onBusy={() => {}} />);
+  fireEvent.click(await screen.findByRole("button", { name: "添加 Provider" }));
+  fireEvent.change(screen.getByLabelText("名称"), {
+    target: { value: "unsaved" },
+  });
+  fireEvent.change(screen.getByLabelText("凭据"), {
+    target: { value: "fixture-key" },
+  });
+  view.rerender(<ProviderSettings active={false} onBusy={() => {}} />);
+  view.rerender(<ProviderSettings active onBusy={() => {}} />);
+  await waitFor(() =>
+    expect((screen.getByLabelText("名称") as HTMLInputElement).value).toBe(
+      "unsaved",
+    ),
+  );
+  expect((screen.getByLabelText("凭据") as HTMLInputElement).value).toBe(
+    "fixture-key",
+  );
+  expect(
+    invoke.mock.calls.every(
+      ([command, args]) =>
+        command === "provider_request" && args.request.method === "providers",
+    ),
+  ).toBe(true);
 });

@@ -367,3 +367,27 @@
     grid-template-columns: 1fr;
   }
 }
+
+.appearance-state-preview {
+  container-type: inline-size;
+  container-name: composer;
+  width: 100%;
+  min-width: 0;
+}
+.preview-states {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+.preview-states button {
+  padding: 6px 10px;
+}
+.preview-states button[aria-pressed="true"] {
+  background: var(--color-selected);
+}
+.preview-states span {
+  color: var(--color-text-muted);
+  font-size: var(--text-xs);
+  margin-left: auto;
+}

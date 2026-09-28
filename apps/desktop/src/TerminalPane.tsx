@@ -1,3 +1,4 @@
+import { terminalTheme } from "./terminalTheme";
 import { useEffect, useRef, useState } from "react";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
@@ -53,14 +54,8 @@ export function TerminalPane({
         ),
         scrollback: 5000,
         allowProposedApi: false,
-        theme: {
-          background: styles.getPropertyValue("--color-canvas").trim(),
-          foreground: styles.getPropertyValue("--color-text").trim(),
-          cursor: styles.getPropertyValue("--color-text").trim(),
-          selectionBackground: styles
-            .getPropertyValue("--color-selection")
-            .trim(),
-        },
+        minimumContrastRatio: 4.5,
+        theme: terminalTheme(styles),
       });
       const fit = new FitAddon();
       term.loadAddon(fit);
@@ -149,14 +144,7 @@ export function TerminalPane({
     const appearanceChanged = () => {
       if (!container.current) return;
       const styles = getComputedStyle(container.current);
-      term.options.theme = {
-        background: styles.getPropertyValue("--color-canvas").trim(),
-        foreground: styles.getPropertyValue("--color-text").trim(),
-        cursor: styles.getPropertyValue("--color-text").trim(),
-        selectionBackground: styles
-          .getPropertyValue("--color-selection")
-          .trim(),
-      };
+      term.options.theme = terminalTheme(styles);
       term.options.fontFamily = styles.getPropertyValue("--font-code").trim();
       term.options.fontWeight = Number(
         styles.getPropertyValue("--weight-code").trim() || 400,

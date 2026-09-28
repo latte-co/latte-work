@@ -12,6 +12,8 @@ fn main() {
         EventKind::decl(),
         Event::decl(),
         FileEntry::decl(),
+        ChangeSection::decl(),
+        GitChange::decl(),
         AgentInfo::decl(),
         AgentPermissionMode::decl(),
         AgentSlashCommand::decl(),

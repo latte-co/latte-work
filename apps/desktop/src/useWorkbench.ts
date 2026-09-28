@@ -594,12 +594,18 @@ export function useWorkbench() {
       if (
         (event.metaKey || event.ctrlKey) &&
         event.key.toLowerCase() === "n" &&
-        !modal
+        !modal &&
+        !document.querySelector('[role="dialog"]')
       ) {
         event.preventDefault();
         void createSession().catch((e) => setError(message(e)));
       }
-      if (event.key === "Escape" && !busy && modal !== "settings")
+      if (
+        !event.defaultPrevented &&
+        event.key === "Escape" &&
+        !busy &&
+        modal !== "settings"
+      )
         setModal(null);
     };
     window.addEventListener("keydown", key);
@@ -784,7 +790,16 @@ export function useWorkbench() {
     setError("");
     setModal("project");
   }
+  const resizeCleanup = useRef<(() => void) | null>(null);
+  useEffect(() => () => resizeCleanup.current?.(), []);
   function resize(e: React.PointerEvent, side: "left" | "right") {
+    e.preventDefault();
+    resizeCleanup.current?.();
+    const selectionStyle = document.body.style.userSelect;
+    const webkitStyle = document.body.style.webkitUserSelect;
+    document.body.style.userSelect = "none";
+    document.body.style.webkitUserSelect = "none";
+    window.getSelection()?.removeAllRanges();
     const x = e.clientX;
     const width = side === "left" ? leftWidth : rightWidth;
     e.currentTarget.setPointerCapture(e.pointerId);
@@ -816,9 +831,15 @@ export function useWorkbench() {
     const stop = () => {
       window.removeEventListener("pointermove", move);
       window.removeEventListener("pointerup", stop);
+      window.removeEventListener("pointercancel", stop);
+      document.body.style.userSelect = selectionStyle;
+      document.body.style.webkitUserSelect = webkitStyle;
+      resizeCleanup.current = null;
     };
     window.addEventListener("pointermove", move);
+    resizeCleanup.current = stop;
     window.addEventListener("pointerup", stop);
+    window.addEventListener("pointercancel", stop);
   }
   return {
     hosts,

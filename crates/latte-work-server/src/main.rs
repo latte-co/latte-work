@@ -723,6 +723,20 @@ async fn dispatch(s: &Service, request: Request) -> Result<Response> {
             let (text, truncated) = files::read(Path::new(&p.path), &path).await?;
             Response::Content { text, truncated }
         }
+        Request::Changes { project_id } => {
+            let p = db(&s.database, |d| d.project(&project_id))?;
+            let (entries, truncated) = files::changes(Path::new(&p.path)).await?;
+            Response::Changes { entries, truncated }
+        }
+        Request::ChangeDiff {
+            project_id,
+            path,
+            section,
+        } => {
+            let p = db(&s.database, |d| d.project(&project_id))?;
+            let (text, truncated) = files::change_diff(Path::new(&p.path), &path, section).await?;
+            Response::Content { text, truncated }
+        }
         Request::Diff { project_id } => {
             let p = db(&s.database, |d| d.project(&project_id))?;
             let (text, truncated) = files::diff(Path::new(&p.path)).await?;

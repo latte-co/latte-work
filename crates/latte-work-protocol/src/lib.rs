@@ -104,6 +104,9 @@ pub enum EventKind {
     },
     Approval {
         request_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        tool_use_id: Option<String>,
         tool: String,
         input: Value,
     },
@@ -422,10 +425,37 @@ pub enum Request {
     Diff {
         project_id: String,
     },
+    Changes {
+        project_id: String,
+    },
+    ChangeDiff {
+        project_id: String,
+        path: String,
+        section: ChangeSection,
+    },
 }
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+pub enum ChangeSection {
+    Unstaged,
+    Staged,
+    Untracked,
+}
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+pub struct GitChange {
+    pub path: String,
+    pub previous_path: Option<String>,
+    pub section: ChangeSection,
+    pub status: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Response {
+    Changes {
+        entries: Vec<GitChange>,
+        truncated: bool,
+    },
     AgentPermissions {
         modes: Vec<AgentPermissionMode>,
     },

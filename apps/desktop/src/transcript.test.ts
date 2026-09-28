@@ -45,3 +45,13 @@ describe("durable transcript projection", () => {
     ).toMatchObject({ resolved: true });
   });
 });
+it("does not reactivate an interrupted approval when a later turn starts", () => {
+  expect(
+    transcript([
+      e(1, { kind: "approval", request_id: "old", tool: "Write", input: {} }),
+      e(2, { kind: "state", status: "stopped", message: null }),
+      e(3, { kind: "user", text: "new", request_id: "new" }),
+      e(4, { kind: "state", status: "running", message: null }),
+    ])[0],
+  ).toMatchObject({ resolved: true, decision: "expired" });
+});

@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { Check, RefreshCw, Monitor } from "lucide-react";
+import { Check, RefreshCw, Monitor, LoaderCircle } from "lucide-react";
 import {
   agentProviders,
   bindAgentProvider,
@@ -112,10 +112,18 @@ export function AgentSettings({
         />
       </label>
       <div className="settings-connection">
-        <Monitor size={18} />
+        {busy && !serverId ? (
+          <LoaderCircle size={18} className="spin" />
+        ) : (
+          <Monitor size={18} />
+        )}
         <div>
           <strong>{host.name}</strong>
-          <small>
+          <small
+            data-state={
+              busy && !serverId ? "pending" : serverId ? "connected" : "error"
+            }
+          >
             {busy && !serverId
               ? "正在连接…"
               : serverId
@@ -157,6 +165,11 @@ export function AgentSettings({
               description: p.model,
             })),
           ];
+          const saved =
+            catalog.bindings.find((b) => b.agent === agent.id)?.provider_id ||
+            "";
+          const dirty = (choices[agent.id] || "") !== saved;
+          const provider = catalog.providers.find((p) => p.id === saved);
           return (
             <div className="agent-card" key={agent.id}>
               <h3>{agent.name}</h3>
@@ -174,21 +187,28 @@ export function AgentSettings({
               <p className="form-note">
                 支持{" "}
                 {agent.provider_protocols.map((p) => protocols[p]).join("、")}。
-                {host.ssh
-                  ? "每次发送消息时，通过 SSH 传递本轮配置；远程 Agent 直接连接模型服务。"
-                  : "使用 App 中保存的 Provider 配置。"}
+                {provider
+                  ? `当前使用 App 中的 ${provider.name}，每轮发送时读取最新配置。`
+                  : `当前使用 ${host.name} 上的 Agent CLI 配置。`}
+                {dirty && " 新选择尚未保存。"}
               </p>
-              <button
-                className="primary wide"
-                disabled={
-                  busy ||
-                  (!!choices[agent.id] &&
-                    !compatible.some((p) => p.id === choices[agent.id]))
-                }
-                onClick={() => void bind(agent.id)}
-              >
-                {busy ? "正在保存…" : "保存关联"}
-              </button>
+              <div className="modal-actions">
+                <span className="form-note" role="status">
+                  {dirty ? "有未保存的修改" : "已保存"}
+                </span>
+                <button
+                  className="primary"
+                  disabled={
+                    busy ||
+                    !dirty ||
+                    (!!choices[agent.id] &&
+                      !compatible.some((p) => p.id === choices[agent.id]))
+                  }
+                  onClick={() => void bind(agent.id)}
+                >
+                  {busy ? "正在保存…" : "保存关联"}
+                </button>
+              </div>
             </div>
           );
         })}

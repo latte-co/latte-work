@@ -1,3 +1,5 @@
+import { useRef } from "react";
+import { DraftStore } from "./drafts";
 import {
   Folder,
   Monitor,
@@ -21,6 +23,7 @@ import { useWorkbench } from "./useWorkbench";
 
 export default function App() {
   const workbench = useWorkbench();
+  const drafts = useRef(new DraftStore()).current;
   const {
     hostId,
     connected,
@@ -141,6 +144,7 @@ export default function App() {
             </div>
           )}
           <Conversation
+            drafts={drafts}
             agent={agent}
             key={workbench.viewRevision}
             session={session}
@@ -203,7 +207,12 @@ export default function App() {
         />
         <HostDialogs state={workbench} />
       </div>
-      {workbench.modal === "settings" && <SettingsPage state={workbench} />}
+      <div hidden={workbench.modal !== "settings"}>
+        <SettingsPage
+          state={workbench}
+          active={workbench.modal === "settings"}
+        />
+      </div>
       {workbench.passwordPrompt && (
         <SshPasswordDialog
           key={workbench.passwordPrompt.id}

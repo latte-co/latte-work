@@ -37,6 +37,7 @@ pub enum Action {
     NativeSession(String),
     Approval {
         id: String,
+        tool_use_id: Option<String>,
         tool: String,
         input: Value,
     },

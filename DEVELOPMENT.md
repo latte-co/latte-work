@@ -191,3 +191,19 @@ a short-lived OS file lock. UI Provider CRUD must use `provider_request`, never
 contact the selected host. Each desktop send chooses an explicit snapshot or CLI
 configuration, including for the local host. See `docs/providers.md` for read-only
 legacy migration, paths and confidentiality requirements.
+
+## Read-only change inspection and presentation metadata
+
+`changes` returns bounded, project-relative `GitChange` entries grouped by staged,
+unstaged and untracked status. `change_diff` returns one file's bounded content;
+tracked files use literal Git pathspecs with external diff and textconv disabled,
+and untracked previews use the existing canonical project containment checks.
+The legacy `diff` request remains available, with status scoped to the same project
+as its patches. New clients explicitly report unsupported requests on older
+servers; use a matching remote Server revision for the structured view.
+
+Approval events may include optional `tool_use_id` metadata from the adapter.
+It only links presentation to a known tool call. Authorization remains bound to
+the existing public approval request ID, session and single-use runtime decision.
+Histories without this metadata still display explicit approval outcomes, but do
+not guess which parallel tool an old decision belongs to.

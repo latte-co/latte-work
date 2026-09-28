@@ -58,7 +58,7 @@ for line in sys.stdin:
             emit({'type':'result','subtype':'success','is_error':False})
         elif text=='approve':
             emit({'type':'assistant','message':{'content':[{'type':'tool_use','id':'tool-1','name':'Write','input':{'file_path':'approved.txt','content':'approved'}}]}})
-            emit({'type':'control_request','request_id':'permission-1','request':{'subtype':'can_use_tool','tool_name':'Write','input':{'file_path':'approved.txt','content':'approved'}}})
+            emit({'type':'control_request','request_id':'permission-1','request':{'subtype':'can_use_tool','tool_use_id':'tool-1','tool_name':'Write','input':{'file_path':'approved.txt','content':'approved'}}})
         else:
             for token in ['resumed:' if resumed else 'fresh:','你好']:
                 emit({'type':'stream_event','event':{'type':'content_block_delta','delta':{'type':'text_delta','text':token}}})

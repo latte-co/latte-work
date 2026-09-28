@@ -108,6 +108,7 @@ impl TurnState {
                 })?,
                 Action::Approval {
                     id,
+                    tool_use_id,
                     tool,
                     input: original,
                 } => {
@@ -122,6 +123,7 @@ impl TurnState {
                             session_id,
                             config.redact_event(EventKind::Approval {
                                 request_id: public_id,
+                                tool_use_id,
                                 tool,
                                 input: original,
                             })?,

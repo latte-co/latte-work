@@ -7,7 +7,14 @@ export interface ToolActivity {
   name: string;
   input?: JsonValue;
   output?: JsonValue;
-  status: "pending" | "completed" | "failed" | "unconfirmed";
+  status:
+    | "pending"
+    | "waiting"
+    | "denied"
+    | "expired"
+    | "completed"
+    | "failed"
+    | "unconfirmed";
 }
 export type ActivityItem =
   | Item
@@ -69,7 +76,8 @@ export function activityTranscript(events: Event[]): ActivityItem[] {
       const tool = value.id ? pending.get(value.id) : undefined;
       if (tool) {
         tool.output = value.content;
-        tool.status = value.is_error ? "failed" : "completed";
+        if (tool.status !== "denied")
+          tool.status = value.is_error ? "failed" : "completed";
         pending.delete(value.id);
         unfinished.delete(tool);
       } else {
@@ -82,16 +90,36 @@ export function activityTranscript(events: Event[]): ActivityItem[] {
           status: value.is_error ? "failed" : "completed",
         });
       }
-    } else rows.push(item);
+    } else {
+      if (value.kind === "approval" && value.tool_use_id) {
+        const tool = pending.get(value.tool_use_id);
+        if (tool)
+          tool.status =
+            item.decision === "denied"
+              ? "denied"
+              : item.decision === "expired"
+                ? "expired"
+                : item.decision === "allowed"
+                  ? "pending"
+                  : "waiting";
+      }
+      rows.push(item);
+    }
   }
   if (terminalIndex < terminal.length) finish();
   const grouped: ActivityItem[] = [];
   for (const row of rows) {
     const last = grouped.at(-1);
     // Failures and approval controls remain visible outside collapsed groups.
-    if (row.type === "tool" && row.status !== "failed") {
+    if (
+      row.type === "tool" &&
+      ["pending", "completed", "unconfirmed"].includes(row.status)
+    ) {
       if (last?.type === "tools") last.tools.push(row);
-      else if (last?.type === "tool" && last.status !== "failed")
+      else if (
+        last?.type === "tool" &&
+        ["pending", "completed", "unconfirmed"].includes(last.status)
+      )
         grouped.splice(-1, 1, {
           key: last.key,
           type: "tools",
