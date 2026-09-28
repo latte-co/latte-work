@@ -45,15 +45,14 @@ export function AgentSettings({
     setCatalog(undefined);
     setAgents([]);
     void (async () => {
-      const [hello, home] = await Promise.all([
+      const [hello, target] = await Promise.all([
         connect(host),
-        connect(localHost),
+        agentProviders(host.id),
       ]);
-      if (hello.kind !== "hello" || home.kind !== "hello")
+      if (hello.kind !== "hello")
         throw new Error("无法读取 Agent，请检查主机连接和 Server 版本");
       if (current !== generation.current) return;
       setServerId(hello.server_id);
-      const target = await agentProviders(host.id);
       if (target.kind !== "providers") throw new Error("Provider 响应不匹配");
       if (current !== generation.current) return;
       setAgents(hello.agents);
@@ -177,7 +176,7 @@ export function AgentSettings({
                 {agent.provider_protocols.map((p) => protocols[p]).join("、")}。
                 {host.ssh
                   ? "每次发送消息时，通过 SSH 传递本轮配置；远程 Agent 直接连接模型服务。"
-                  : "使用本机统一管理的 Provider。"}
+                  : "使用 App 中保存的 Provider 配置。"}
               </p>
               <button
                 className="primary wide"

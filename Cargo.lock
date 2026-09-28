@@ -1753,10 +1753,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "latte-work-config"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "latte-work-protocol",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "url",
+ "uuid",
+]
+
+[[package]]
 name = "latte-work-desktop"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "latte-work-client",
+ "latte-work-config",
  "latte-work-protocol",
  "objc2-app-kit",
  "objc2-foundation",
@@ -1785,6 +1800,7 @@ dependencies = [
  "filedescriptor",
  "futures-util",
  "latte-work-client",
+ "latte-work-config",
  "latte-work-protocol",
  "nix 0.30.1",
  "portable-pty",

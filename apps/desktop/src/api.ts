@@ -97,3 +97,15 @@ export async function agentProviders(hostId: string): Promise<Response> {
   if (response.kind === "error") throw new Error(response.message);
   return response;
 }
+
+export type ProviderRequest = Extract<
+  Request,
+  { method: "providers" | "save_provider" | "delete_provider" }
+>;
+export async function providerRequest(
+  request: ProviderRequest,
+): Promise<Response> {
+  const response = await invoke<Response>("provider_request", { request });
+  if (response.kind === "error") throw new Error(response.message);
+  return response;
+}

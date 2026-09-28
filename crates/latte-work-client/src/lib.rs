@@ -122,7 +122,8 @@ impl Client {
     }
 }
 
-/// Prepare a remote turn or model catalog from the latest host association on the local server.
+/// Legacy Server-owned association flow for standalone clients. Desktop uses
+/// `request_with_app_provider` and never connects to a local Server for configuration.
 /// Secrets remain in native memory and travel only on the authenticated transport.
 pub async fn request_with_provider(
     local: &tokio::sync::Mutex<Client>,
@@ -130,7 +131,6 @@ pub async fn request_with_provider(
     host_id: String,
     request: Request,
 ) -> Result<Response> {
-    let is_send = matches!(&request, Request::Send { .. });
     let agent = match &request {
         Request::Models { agent, .. } => agent.clone(),
         Request::Send { session_id, .. } => {
@@ -177,6 +177,46 @@ pub async fn request_with_provider(
             _ => bail!("远程 Provider 响应格式不匹配"),
         }
     }
+    request_with_snapshot(target, request, snapshot).await
+}
+
+/// Resolve App-owned configuration and send only to the selected host. No local
+/// Server is involved, including for CLI defaults and remote session lookup.
+pub async fn request_with_app_provider<F, Fut>(
+    target: &tokio::sync::Mutex<Client>,
+    request: Request,
+    resolve: F,
+) -> Result<Response>
+where
+    F: FnOnce(String) -> Fut,
+    Fut: std::future::Future<Output = Result<Option<latte_work_protocol::ProviderSnapshot>>>,
+{
+    let agent = match &request {
+        Request::Models { agent, .. } => agent.clone(),
+        Request::Send { session_id, .. } => match target
+            .lock()
+            .await
+            .request(Request::Session {
+                session_id: session_id.clone(),
+            })
+            .await?
+        {
+            Response::Session { session } => session.agent,
+            Response::Error { message, .. } => bail!("{message}"),
+            _ => bail!("会话响应格式不匹配"),
+        },
+        _ => bail!("此请求不接受本轮 Provider 配置"),
+    };
+    let snapshot = resolve(agent).await?;
+    request_with_snapshot(target, request, snapshot).await
+}
+
+async fn request_with_snapshot(
+    target: &tokio::sync::Mutex<Client>,
+    request: Request,
+    snapshot: Option<latte_work_protocol::ProviderSnapshot>,
+) -> Result<Response> {
+    let is_send = matches!(&request, Request::Send { .. });
     let request = match request {
         Request::Models {
             agent,

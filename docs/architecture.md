@@ -247,15 +247,20 @@ prompts, so collapsing a project does not stop its status updates.
 
 ## Remote Provider execution
 
-The local Provider store owns associations keyed by desktop host ID and Agent ID.
+The App-owned `latte-work-config` store owns Provider definitions and associations
+keyed by desktop host ID and Agent ID, without Agent registry or Server dependencies.
 Desktop association changes do not contact or mutate the remote Provider catalog.
-For model catalogs, the native client exports the selected Provider and forwards only
+Provider CRUD uses native App commands and works with every Server offline.
+The legacy local Provider file is read once without starting its daemon, and remains
+untouched. Configuration transactions use an OS file lock and atomic replacement.
+For model catalogs, the native client reads the selected Provider and forwards only
 its metadata to the execution host. For each send it resolves the session's Agent,
-exports a fresh selected snapshot and attaches it to that send over the existing SSH
+reads a fresh selected snapshot and attaches it to that send over the existing target
 connection. The WebView cannot export credentials or receive snapshot responses.
 
-A turn explicitly chooses a snapshot or the remote CLI configuration, overriding any
-legacy saved remote binding. The receiving host validates protocol, models and effort,
+Both local and remote turns explicitly choose a snapshot or their target CLI configuration, overriding any
+legacy saved binding. Only the selected host resolves native model names and defaults;
+no request connects to another environment first. The receiving host validates protocol, models and effort,
 then persists the request before spawning. Snapshots are held in native memory and
 CLI temporary settings only, never in the remote Provider catalog, request ledger or
 events. Existing remote Provider data is preserved; migration does not delete it.

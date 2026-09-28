@@ -1,12 +1,11 @@
 import { useEffect, useRef, useState } from "react";
 import { Plus } from "lucide-react";
 import { Select } from "./Select";
-import { connect, localHost, message, request } from "./api";
+import { message, providerRequest, type ProviderRequest } from "./api";
 import type {
   Provider,
   ProviderDraft,
   ProviderProtocol,
-  Request,
   Response,
 } from "./protocol";
 type Catalog = Extract<Response, { kind: "providers" }>;
@@ -46,13 +45,8 @@ export function ProviderSettings({
     setError("");
     const current = ++generation.current;
     setBusy(true);
-    void connect(localHost)
-      .then(async (hello) => {
-        if (hello.kind !== "hello")
-          throw new Error(
-            hello.kind === "error" ? hello.message : "本机 Server 连接失败",
-          );
-        const result = await request("local", { method: "providers" });
+    void providerRequest({ method: "providers" })
+      .then((result) => {
         if (result.kind !== "providers") throw new Error("Provider 响应不匹配");
         if (current === generation.current) setCatalog(result);
       })
@@ -66,13 +60,13 @@ export function ProviderSettings({
       generation.current++;
     };
   }, [active]);
-  async function mutate(value: Request) {
+  async function mutate(value: ProviderRequest) {
     const current = generation.current;
     setBusy(true);
     onBusy(true);
     setError("");
     try {
-      const result = await request("local", value);
+      const result = await providerRequest(value);
       if (result.kind !== "providers") throw new Error("Provider 响应不匹配");
       if (current === generation.current) {
         setCatalog(result);
@@ -105,7 +99,8 @@ export function ProviderSettings({
       <h2>Provider</h2>
       <p>统一管理模型服务，在 Code Agent 设置中关联使用。</p>
       <p className="form-note">
-        配置保存在本机。远程 Agent 每轮执行时，通过 SSH 接收最新配置。
+        配置保存在 App 中，无需连接主机。关联后，所选环境的 Agent
+        每轮使用最新配置。
       </p>
       {error && (
         <div className="form-error" role="alert">

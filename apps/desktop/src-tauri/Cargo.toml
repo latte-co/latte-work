@@ -8,6 +8,8 @@ custom-protocol = ["tauri/custom-protocol"]
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 [dependencies]
+anyhow.workspace = true
+latte-work-config.workspace = true
 tauri = { version = "2", features = [] }
 tauri-plugin-dialog = "2"
 latte-work-protocol.workspace = true

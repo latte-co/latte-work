@@ -63,19 +63,20 @@ reuses it for later reconnects during that run. Canceling the prompt leaves
 that host disconnected; use its reconnect action to try again. Host key checking
 stays enabled; unknown keys must be verified in a terminal first.
 
-Remote Provider associations are saved on the local server. Each message carries the
-selected Provider snapshot over the existing authenticated SSH connection; the remote
-Agent connects directly to the model service. Password, identity-file and custom-port
-connections use the same path. Editing a Provider affects the next message, without a
-manual sync. Running turns keep their original snapshot and survive bridge disconnects.
-The remote server does not write these snapshots to its Provider catalog or request
-ledger. Agent CLI temporary settings can contain credentials until that turn finishes.
+Provider definitions and per-host Agent associations belong to the App configuration,
+not the local Server. Management works offline. For both local and SSH execution,
+the native App reads the latest selection and contacts only the selected host:
+model requests carry metadata, and sends carry a fresh snapshot or explicit CLI mode.
+A failed local Server cannot block remote model loading or sending. With no Provider
+selected, each host uses only its own Agent configuration and model labels.
 
-Update the bundled local server and remote server together from the same source revision. Existing remotely saved
-Provider copies are preserved but are not used for desktop turns; select the intended
-Provider once in the new local host association, or explicitly save the remote CLI option.
-Until that choice is saved, an existing legacy remote binding blocks new desktop turns
-with a migration message, rather than silently changing the model service.
+Password, identity-file and custom-port connections share this path. Running turns
+keep their original snapshot and survive bridge disconnects. The remote Server never
+writes snapshots to its Provider catalog or request ledger; temporary CLI settings can
+contain credentials until a turn finishes. App startup migrates the legacy local
+Provider file once, directly from disk, preserving the source. Legacy target-side
+copies remain untouched and do not override explicit CLI mode. See [Provider](providers.md)
+for paths, migration and error behavior. Existing per-turn protocol support is required.
 
 ## Local bundled server upgrades
 
