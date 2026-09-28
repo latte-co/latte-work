@@ -149,6 +149,43 @@ fn migration_is_read_only_once_and_preserves_local_remote_associations() {
     }
 }
 #[test]
+fn schema_one_incompatible_or_missing_selection_keeps_native_defaults() {
+    for protocol in [
+        ProviderProtocol::OpenaiChat,
+        ProviderProtocol::OpenaiResponses,
+    ] {
+        for missing in [false, true] {
+            let legacy = tempfile::tempdir().unwrap();
+            let app = tempfile::tempdir().unwrap();
+            let id = {
+                let mut old = ProviderStore::open(legacy.path(), None).unwrap();
+                let mut provider = draft("Legacy OpenAI");
+                provider.protocol = protocol.clone();
+                save(&mut old, provider)
+            };
+            let path = legacy.path().join("providers.json");
+            let mut value: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+            value["schema"] = 1.into();
+            value["active_id"] = if missing { "missing" } else { &id }.into();
+            let before = serde_json::to_vec(&value).unwrap();
+            std::fs::write(&path, &before).unwrap();
+            for _ in 0..2 {
+                let store = ProviderStore::open(app.path(), Some(&path)).unwrap();
+                for host in ["local", "devbox"] {
+                    assert!(store.snapshot_for_host(host, "claude").unwrap().is_none());
+                }
+                assert!(
+                    matches!(store.list(), Response::Providers { providers, bindings }
+                    if providers.len() == 1 && providers[0].id == id && bindings.is_empty())
+                );
+                assert_eq!(store.config.providers[0].credential, "fixture-private-key");
+            }
+            assert_eq!(std::fs::read(&path).unwrap(), before);
+        }
+    }
+}
+#[test]
 fn invalid_or_oversized_migration_cannot_replace_configuration() {
     let legacy = tempfile::tempdir().unwrap();
     let app = tempfile::tempdir().unwrap();

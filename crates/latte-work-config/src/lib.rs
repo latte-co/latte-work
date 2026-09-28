@@ -75,7 +75,15 @@ fn read_config(path: &Path) -> Result<Config> {
         serde_json::from_slice(&bytes).map_err(|_| anyhow::anyhow!("Provider 配置文件格式无效"))?;
     if config.schema == 1 {
         config.schema = 2;
-        if let Some(id) = config.active_id.take() {
+        // Schema 1's global selection only applied to Claude when compatible.
+        // Preserve that legacy behavior without consulting any installed Agent.
+        if let Some(id) = config.active_id.take()
+            && config.providers.iter().any(|record| {
+                record.metadata.id == id
+                    && record.metadata.protocol
+                        == latte_work_protocol::ProviderProtocol::AnthropicMessages
+            })
+        {
             config.bindings.insert("claude".into(), id);
         }
         for record in &mut config.providers {

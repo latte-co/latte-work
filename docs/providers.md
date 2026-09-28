@@ -61,7 +61,9 @@ Provider 和关联保存在 Tauri `app_config_dir()/providers.json`。macOS 默�
 
 App 文件不存在时，直接读取 `~/.local/share/latte-work/providers.json`，将 Provider 定义、
 凭据、本机关联和 SSH 主机关联一次性迁移到 App 配置。迁移不启动旧 Server，也不修改原文件；
-schema 1 的全局选择保留为本机 Claude 关联。无旧配置时创建空 App 配置，之后不重复导入。
+schema 1 的全局选择仅在指向现有 Anthropic Provider 时保留为本机 Claude 关联；
+OpenAI Provider 或已失效的选择沿用旧版行为，不创建关联，保留各主机的 CLI 默认配置。
+Provider 定义及凭据仍完整迁移。无旧配置时创建空 App 配置，之后不重复导入。
 无效旧文件会报错并保留原文件，不写空配置覆盖它。后续旧版 App 对 Server 配置的修改不会
 自动同步回新版 App。
 
