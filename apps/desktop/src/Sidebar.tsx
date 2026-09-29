@@ -48,9 +48,6 @@ export function Sidebar({ state }: { state: Workbench }) {
   const [projectErrors, setProjectErrors] = useState<Record<string, string>>(
     {},
   );
-  const [archivedProjects, setArchivedProjects] = useState<
-    Record<string, boolean>
-  >({});
   const [sections, setSections] = useState(() => {
     const defaults = { pinned: true, projects: true };
     try {
@@ -145,7 +142,7 @@ export function Sidebar({ state }: { state: Workbench }) {
       disposed = true;
       clearTimeout(timer);
     };
-  }, [backgroundProjects, connected]);
+  }, [backgroundProjects, connected, state.modal]);
   async function loadProjectSessions(project: HostedProject) {
     const key = `${project.hostId}:${project.id}`;
     setLoadingProjects((old) => ({ ...old, [key]: true }));
@@ -413,9 +410,6 @@ export function Sidebar({ state }: { state: Workbench }) {
           const projectSessions = selected
             ? sessions
             : (sessionCache[key] ?? []);
-          const showArchived = selected
-            ? state.showArchived
-            : (archivedProjects[key] ?? false);
           const running = projectSessions.some((s) => s.status === "running");
           const waiting = projectSessions.some((s) => s.status === "waiting");
           const toggle = () => {
@@ -536,30 +530,9 @@ export function Sidebar({ state }: { state: Workbench }) {
                 {expanded && (
                   <div className="session-list">
                     {projectSessions
-                      .filter((s) => s.archived === showArchived)
+                      .filter((s) => !s.archived)
                       .map((s) => sessionRow({ ...s, hostId: p.hostId }))}
-                    {(projectSessions.some((s) => s.archived) ||
-                      showArchived) && (
-                      <button
-                        className="archive-toggle"
-                        onClick={() => {
-                          if (selected)
-                            state.setShowArchived((value) => !value);
-                          else
-                            setArchivedProjects((old) => ({
-                              ...old,
-                              [key]: !showArchived,
-                            }));
-                        }}
-                      >
-                        <Archive size={13} />
-                        {showArchived
-                          ? "返回会话"
-                          : `已归档 (${projectSessions.filter((s) => s.archived).length})`}
-                      </button>
-                    )}
-                    {projectSessions.filter((s) => s.archived === showArchived)
-                      .length === 0 &&
+                    {projectSessions.filter((s) => !s.archived).length === 0 &&
                       (projectErrors[key] ? (
                         <button
                           className="no-sessions"
@@ -572,9 +545,7 @@ export function Sidebar({ state }: { state: Workbench }) {
                         <span className="no-sessions">
                           {loadingProjects[key]
                             ? "正在加载任务…"
-                            : showArchived
-                              ? "没有已归档会话"
-                              : "还没有任务"}
+                            : "还没有任务"}
                         </span>
                       ))}
                   </div>

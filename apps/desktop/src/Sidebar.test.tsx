@@ -140,3 +140,10 @@ it("scopes quick pin/archive actions and prevents archiving active tasks", async
     pinned: true,
   });
 });
+it("keeps archived chats and archive navigation out of project sections", () => {
+  render(
+    <Sidebar state={state([{ ...session("completed"), archived: true }])} />,
+  );
+  expect(screen.queryByText("Task")).toBeNull();
+  expect(screen.queryByText(/已归档/)).toBeNull();
+});

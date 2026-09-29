@@ -143,7 +143,6 @@ export function useWorkbench() {
   const selectedSessionId = useRef(sessionId);
   selectedSessionId.current = sessionId;
   const [pinCache, setPinCache] = useState(readPinnedCache);
-  const [showArchived, setShowArchived] = useState(false);
   const pendingSession = useRef<{
     hostId: string;
     projectId: string;
@@ -193,7 +192,7 @@ export function useWorkbench() {
   const [error, setError] = useState("");
   const [modal, setModal] = useState<"project" | "settings" | null>(null);
   const [settingsTab, setSettingsTab] = useState<
-    "agents" | "providers" | "ssh" | "appearance"
+    "agents" | "providers" | "ssh" | "appearance" | "archived"
   >("agents");
   const [settingsReturnToProject, setSettingsReturnToProject] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -492,7 +491,6 @@ export function useWorkbench() {
       projectId: target.project_id,
       id: target.id,
     };
-    setShowArchived(target.archived);
     if (target.hostId === hostId && target.project_id === projectId) {
       pendingSession.current = null;
       if (target.id !== sessionId) {
@@ -521,7 +519,6 @@ export function useWorkbench() {
     selectedSessionId.current = "";
     setSessionId("");
     setEvents([]);
-    setShowArchived(false);
     setError("");
     if (target && (target.hostId !== hostId || target.id !== projectId)) {
       setSessions([]);
@@ -547,7 +544,6 @@ export function useWorkbench() {
     setSessionId("");
     setSessions([]);
     setEvents([]);
-    setShowArchived(false);
     setError("");
     if (targetHostId !== hostId) {
       setConnected(false);
@@ -579,7 +575,6 @@ export function useWorkbench() {
           copyWorkspace(workspaceId, workspaceKey(r.session.id));
           draft.current = false;
           selectedSessionId.current = r.session.id;
-          setShowArchived(false);
           setSessionId(r.session.id);
           setEvents([]);
         }
@@ -749,7 +744,6 @@ export function useWorkbench() {
       setServerId("");
       setHostId(targetHostId);
     }
-    setShowArchived(false);
     setError("");
     setProjectId(id);
     setSessions([]);
@@ -859,8 +853,6 @@ export function useWorkbench() {
     pinned,
     openSession,
     sessionAction,
-    showArchived,
-    setShowArchived,
     sessionId,
     workspaceId,
     viewRevision,

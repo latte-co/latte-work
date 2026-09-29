@@ -1,11 +1,13 @@
 import { useEffect, useRef, useState } from "react";
 import {
+  Archive,
   ArrowLeft,
   Globe2,
   MessageSquare,
   Settings2,
   Palette,
 } from "lucide-react";
+import { ArchivedChats } from "./ArchivedChats";
 import { AgentSettings } from "./AgentSettings";
 import { ProviderSettings } from "./ProviderSettings";
 import { SSHSettings } from "./SSHSettings";
@@ -18,6 +20,7 @@ const tabs = [
   { id: "agents", label: "连接与 Agent", icon: MessageSquare },
   { id: "providers", label: "Provider", icon: Settings2 },
   { id: "ssh", label: "SSH 连接", icon: Globe2 },
+  { id: "archived", label: "已归档的聊天", icon: Archive },
 ] as const;
 
 export function SettingsPage({
@@ -33,7 +36,8 @@ export function SettingsPage({
   const [providerBusy, setProviderBusy] = useState(false);
   const [sshBusy, setSshBusy] = useState(false);
   const navigation = useRef<HTMLDivElement>(null);
-  const busy = agentBusy || providerBusy || sshBusy;
+  const [archiveBusy, setArchiveBusy] = useState(false);
+  const busy = agentBusy || providerBusy || sshBusy || archiveBusy;
   useEffect(() => {
     if (!active) return;
     navigation.current
@@ -118,6 +122,18 @@ export function SettingsPage({
           </div>
         </aside>
         <main className="settings-body" aria-label="设置">
+          <section
+            id="settings-panel-archived"
+            role="tabpanel"
+            aria-labelledby="settings-tab-archived"
+            hidden={tab !== "archived"}
+          >
+            <ArchivedChats
+              state={state}
+              active={active && tab === "archived"}
+              onBusy={setArchiveBusy}
+            />
+          </section>
           <section
             id="settings-panel-appearance"
             role="tabpanel"
