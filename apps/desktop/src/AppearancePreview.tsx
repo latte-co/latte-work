@@ -1,5 +1,6 @@
 import { useState } from "react";
-import { Shield, ShieldCheck, Plus, ChevronDown } from "lucide-react";
+import { Shield, Plus, ChevronDown } from "lucide-react";
+import { ApprovalCard } from "./ApprovalCard";
 import { ComposerAction } from "./ComposerAction";
 export function AppearancePreview() {
   const [running, setRunning] = useState(false);
@@ -45,13 +46,18 @@ export function AppearancePreview() {
           <ComposerAction disabled />
         </div>
       </div>
-      <div className="approval-card" data-resolved={!running}>
-        <div>
-          <ShieldCheck size={16} />
-          <strong>{running ? "需要你的确认" : "已允许此次操作"}</strong>
-        </div>
-        <p className="approval-summary">写入 README.md</p>
-      </div>
+      <ApprovalCard
+        request={{
+          kind: "approval",
+          request_id: "preview",
+          tool: "Write",
+          input: { file_path: "README.md", content: "# Latte Work" },
+        }}
+        resolved={!running}
+        decision={!running ? "allowed" : undefined}
+        disabled
+        onDecision={() => {}}
+      />
     </div>
   );
 }

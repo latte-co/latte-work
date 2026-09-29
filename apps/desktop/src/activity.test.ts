@@ -160,8 +160,7 @@ it("keeps parallel approval decisions bound to explicit tool IDs", () => {
     activityTranscript([call(1, "a"), call(2, "b"), approval]),
   ).toMatchObject([
     { type: "tool", status: "pending" },
-    { type: "tool", status: "waiting" },
-    { type: "event", resolved: false },
+    { type: "event", resolved: false, approvalTool: { status: "waiting" } },
   ]);
   expect(
     activityTranscript([
@@ -173,7 +172,29 @@ it("keeps parallel approval decisions bound to explicit tool IDs", () => {
     ]),
   ).toMatchObject([
     { type: "tool", status: "pending" },
-    { type: "tool", status: "denied" },
-    { type: "event", decision: "denied" },
+    { type: "event", decision: "denied", approvalTool: { status: "denied" } },
+  ]);
+});
+
+it("keeps execution failures inside the linked approval after allowing", () => {
+  expect(
+    activityTranscript([
+      call(1, "a"),
+      e(2, {
+        kind: "approval",
+        request_id: "r",
+        tool_use_id: "a",
+        tool: "Read",
+        input: {},
+      }),
+      e(3, { kind: "approval_resolved", request_id: "r", allow: true }),
+      result(4, "a", true),
+    ]),
+  ).toMatchObject([
+    {
+      type: "event",
+      decision: "allowed",
+      approvalTool: { status: "failed", output: expect.anything() },
+    },
   ]);
 });

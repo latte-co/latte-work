@@ -143,3 +143,24 @@ it("keeps copy for a completed direct answer without a process", () => {
   );
   expect(screen.getByRole("button", { name: "复制回复" })).toBeTruthy();
 });
+it("does not treat text before an approval-backed tool as a final answer", () => {
+  const turns = turnTranscript(
+    events(
+      user("write"),
+      text("progress"),
+      tool,
+      {
+        kind: "approval",
+        request_id: "a",
+        tool_use_id: "t",
+        tool: "Read",
+        input: {},
+      },
+      { kind: "approval_resolved", request_id: "a", allow: true },
+      result,
+      state("completed"),
+    ),
+  );
+  expect(turns[0].finalKey).toBeUndefined();
+  expect(turns[0].process).toHaveLength(0);
+});

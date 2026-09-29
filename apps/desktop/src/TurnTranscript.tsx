@@ -37,7 +37,12 @@ export function turnTranscript(events: Event[]) {
       finalIndex >= 0 &&
       !items
         .slice(finalIndex + 1)
-        .some((item) => item.type === "tool" || item.type === "tools") &&
+        .some(
+          (item) =>
+            item.type === "tool" ||
+            item.type === "tools" ||
+            (item.type === "event" && !!item.approvalTool),
+        ) &&
       !items.some(
         (item) =>
           item.type === "event" &&

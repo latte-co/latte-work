@@ -1,15 +1,9 @@
-import { ApprovalOperation } from "./ApprovalOperation";
+import { ApprovalCard } from "./ApprovalCard";
 import { ComposerAction } from "./ComposerAction";
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { MessageContent } from "./MessageContent";
 import { DraftStore, useDraft, type Draft } from "./drafts";
-import {
-  ArrowUp,
-  ArrowDown,
-  ShieldCheck,
-  LoaderCircle,
-  Bot,
-} from "lucide-react";
+import { ArrowUp, ArrowDown, LoaderCircle, Bot } from "lucide-react";
 import type { AgentInfo, Effort, Event, Session } from "./protocol";
 import type { Host } from "./api";
 import type { HostedProject } from "./projectCatalog";
@@ -18,7 +12,6 @@ import { useAgentPreferences } from "./useAgentPreferences";
 import { PermissionPicker } from "./PermissionPicker";
 import { ModelPicker } from "./ModelPicker";
 import { TaskProjectPicker } from "./TaskProjectPicker";
-import { toolLabel } from "./activity";
 import { TurnTranscript } from "./TurnTranscript";
 import { ToolGroup, ToolRow } from "./ToolActivity";
 export const statusNames = {
@@ -241,60 +234,18 @@ export function Conversation({
                     const v = item.value;
                     if (v.kind === "approval")
                       return (
-                        <div
-                          className="approval-card"
-                          data-resolved={!!item.resolved}
+                        <ApprovalCard
                           key={item.key}
-                        >
-                          <div>
-                            <ShieldCheck size={17} />
-                            <strong>
-                              {item.resolved
-                                ? item.decision === "allowed"
-                                  ? "已允许此次操作"
-                                  : item.decision === "denied"
-                                    ? "已拒绝此次操作"
-                                    : "审批已过期"
-                                : "需要你的确认"}
-                            </strong>
-                            <span>{v.tool}</span>
-                          </div>
-                          <p className="approval-summary">
-                            {toolLabel({
-                              key: item.key,
-                              type: "tool",
-                              name: v.tool,
-                              input: v.input,
-                              status: "waiting",
-                            })}
-                          </p>
-                          {!item.resolved && (
-                            <ApprovalOperation input={v.input} />
-                          )}
-                          <details>
-                            <summary>查看操作参数</summary>
-                            <pre>{JSON.stringify(v.input, null, 2)}</pre>
-                          </details>
-                          {!item.resolved && (
-                            <footer>
-                              <button
-                                disabled={!connected || !!approving}
-                                onClick={() => void decide(v.request_id, false)}
-                              >
-                                拒绝
-                              </button>
-                              <button
-                                className="primary"
-                                disabled={!connected || !!approving}
-                                onClick={() => void decide(v.request_id, true)}
-                              >
-                                {approving === v.request_id
-                                  ? "处理中…"
-                                  : "允许此次操作"}
-                              </button>
-                            </footer>
-                          )}
-                        </div>
+                          request={v}
+                          resolved={item.resolved}
+                          decision={item.decision}
+                          tool={item.approvalTool}
+                          disabled={!connected || !!approving}
+                          busy={approving === v.request_id}
+                          onDecision={(allow) =>
+                            void decide(v.request_id, allow)
+                          }
+                        />
                       );
                     if (v.kind === "state" && v.message)
                       return (

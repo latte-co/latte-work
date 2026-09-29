@@ -1322,55 +1322,91 @@ button svg {
   margin-top: 22px;
 }
 .approval-card {
-  border: 1px solid var(--color-border-strong);
+  border: 1px solid var(--color-border);
   border-radius: var(--radius-control);
-  background: color-mix(in srgb, var(--color-warning) 5%, transparent);
-  padding: 14px;
-  margin: 18px 0;
+  background: var(--color-canvas);
+  padding: 16px;
+  margin: 16px 0;
 }
-.approval-card[data-resolved="true"] {
-  background: var(--color-surface);
-}
-.approval-card[data-resolved="true"] > div:first-child {
-  color: var(--color-text-secondary);
-}
-.approval-card > div:first-child {
+.approval-card header {
   display: flex;
   align-items: center;
-  gap: var(--space-2);
-  color: var(--color-warning);
-  font-size: var(--text-sm);
-}
-.approval-card strong {
-  font-weight: 500;
-}
-.approval-card > div:first-child span {
-  margin-left: auto;
+  gap: 8px;
+  color: var(--color-text-secondary);
   font-size: var(--text-xs);
+}
+.approval-card header svg {
+  color: var(--color-warning);
 }
 .approval-operation {
   display: grid;
   gap: 8px;
-  margin-bottom: 12px;
 }
-.approval-operation small {
+.approval-operation small,
+.approval-result-output small {
   color: var(--color-text-muted);
+  font-size: var(--text-xs);
 }
-.approval-operation pre {
-  max-height: 140px;
+.approval-operation pre,
+.approval-result pre,
+.approval-parameters pre {
+  background: var(--color-hover);
+  border-radius: var(--radius-sm);
+  padding: 10px 12px;
+  max-height: 180px;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
   margin: 4px 0 0;
   font-size: var(--text-sm);
+  line-height: 1.6;
 }
 .approval-card footer {
   display: flex;
-  gap: 10px;
-  justify-content: flex-end;
+  align-items: flex-start;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-top: 12px;
 }
-.approval-card footer button {
+.approval-actions {
+  display: flex;
+  gap: 8px;
+  margin-left: auto;
+}
+.approval-actions button {
+  min-height: 36px;
   font-size: var(--text-xs);
-  padding: 7px 11px;
+  padding: 7px 12px;
   border-radius: var(--radius-sm);
   border: 1px solid var(--color-border);
+}
+.approval-parameters {
+  min-width: 0;
+  color: var(--color-text-muted);
+  font-size: var(--text-xs);
+}
+.approval-parameters summary {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-height: 36px;
+  cursor: pointer;
+  list-style: none;
+}
+.approval-parameters summary::-webkit-details-marker {
+  display: none;
+}
+.approval-parameters[open] > summary svg {
+  transform: rotate(90deg);
+}
+.approval-card footer > .approval-parameters[open] {
+  flex-basis: 100%;
+}
+.approval-result-body {
+  margin: 8px 0 12px 24px;
+}
+.approval-result-output {
+  margin-top: 12px;
 }
 .notice {
   padding: var(--space-2) 0;
@@ -1663,13 +1699,10 @@ button svg {
 }
 .approval-summary {
   overflow-wrap: anywhere;
-  margin: 8px 0;
+  margin: 8px 0 12px;
   font-size: var(--text-sm);
-}
-.approval-card details {
-  font-size: var(--text-sm);
-  color: var(--color-text-secondary);
-  margin: 8px 0;
+  color: var(--color-text);
+  font-weight: 500;
 }
 .ssh-setup {
   line-height: 1.7;

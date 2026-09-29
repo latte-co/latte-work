@@ -17,7 +17,7 @@ export interface ToolActivity {
     | "unconfirmed";
 }
 export type ActivityItem =
-  | Item
+  | (Item & { approvalTool?: ToolActivity })
   | ToolActivity
   | {
       key: number;
@@ -27,7 +27,8 @@ export type ActivityItem =
 
 /** Pair by tool ID within a user turn, never by result arrival order. */
 export function activityTranscript(events: Event[]): ActivityItem[] {
-  const rows: (Item | ToolActivity)[] = [];
+  const rows: ActivityItem[] = [];
+  const attached = new Set<ToolActivity>();
   const pending = new Map<string, ToolActivity>();
   const unfinished = new Set<ToolActivity>();
   function finish() {
@@ -93,7 +94,9 @@ export function activityTranscript(events: Event[]): ActivityItem[] {
     } else {
       if (value.kind === "approval" && value.tool_use_id) {
         const tool = pending.get(value.tool_use_id);
-        if (tool)
+        if (tool) {
+          attached.add(tool);
+          rows.push({ ...item, approvalTool: tool });
           tool.status =
             item.decision === "denied"
               ? "denied"
@@ -102,6 +105,8 @@ export function activityTranscript(events: Event[]): ActivityItem[] {
                 : item.decision === "allowed"
                   ? "pending"
                   : "waiting";
+          continue;
+        }
       }
       rows.push(item);
     }
@@ -109,6 +114,7 @@ export function activityTranscript(events: Event[]): ActivityItem[] {
   if (terminalIndex < terminal.length) finish();
   const grouped: ActivityItem[] = [];
   for (const row of rows) {
+    if (row.type === "tool" && attached.has(row)) continue;
     const last = grouped.at(-1);
     // Failures and approval controls remain visible outside collapsed groups.
     if (
