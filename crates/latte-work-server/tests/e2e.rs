@@ -2624,6 +2624,17 @@ async fn usage_snapshot_survives_bridge_reconnect_without_billing_inflation() {
         Response::Accepted { duplicate: false }
     ));
     let events = wait(&mut client, &id, Status::Completed).await;
+    assert!(events.iter().any(|e| matches!(
+        e.event,
+        EventKind::Progress {
+            phase: latte_work_protocol::ExecutionPhase::Thinking
+        }
+    )));
+    assert!(
+        !serde_json::to_string(&events)
+            .unwrap()
+            .contains("private fixture reasoning")
+    );
     let latest = events
         .iter()
         .rev()

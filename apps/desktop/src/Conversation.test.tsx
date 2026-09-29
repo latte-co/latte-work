@@ -127,3 +127,39 @@ it.each([true, false])(
     expect(input().value).toBe(accepted ? "" : "fast response");
   },
 );
+
+it("shows actual thinking and stop progress, restoring status when cancellation fails", async () => {
+  const p = props();
+  let rejectStop!: (value: boolean) => void;
+  p.cancel.mockImplementation(
+    () =>
+      new Promise<boolean>((resolve) => {
+        rejectStop = resolve;
+      }),
+  );
+  const running = { ...session("s"), status: "running" as const };
+  const events = [
+    {
+      seq: 1,
+      at: 0,
+      session_id: "s",
+      event: { kind: "progress" as const, phase: "thinking" as const },
+    },
+  ];
+  const view = render(
+    <Conversation {...p} session={running} events={events} />,
+  );
+  expect(screen.getByRole("status").textContent).toBe("正在思考");
+  fireEvent.click(screen.getByRole("button", { name: "停止任务" }));
+  expect(screen.getByRole("status").textContent).toBe("正在停止");
+  await act(async () => rejectStop(false));
+  expect(screen.getByRole("status").textContent).toBe("正在思考");
+  view.rerender(
+    <Conversation
+      {...p}
+      session={{ ...running, status: "completed" }}
+      events={events}
+    />,
+  );
+  expect(screen.queryByRole("status")).toBeNull();
+});

@@ -40,6 +40,7 @@ export type Session = {
   unread: boolean;
   archived: boolean;
 };
+export type ExecutionPhase = "waiting" | "thinking" | "replying";
 export type ContextUsage = {
   model: string;
   used_tokens: number;
@@ -54,6 +55,7 @@ export type TurnUsage = {
   steps: number | null;
 };
 export type EventKind =
+  | { kind: "progress"; phase: ExecutionPhase }
   | { kind: "usage"; context: ContextUsage | null; totals: TurnUsage | null }
   | { kind: "user"; text: string; request_id: string }
   | { kind: "text"; text: string }

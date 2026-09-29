@@ -1,9 +1,11 @@
+import { WorkingStatus } from "./WorkingStatus";
+import { executionStatus } from "./executionStatus";
 import { ApprovalCard } from "./ApprovalCard";
 import { ComposerAction } from "./ComposerAction";
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { MessageContent } from "./MessageContent";
 import { DraftStore, useDraft, type Draft } from "./drafts";
-import { ArrowUp, ArrowDown, LoaderCircle, Bot } from "lucide-react";
+import { ArrowUp, ArrowDown, Bot } from "lucide-react";
 import type { AgentInfo, Effort, Event, Session } from "./protocol";
 import type { Host } from "./api";
 import type { HostedProject } from "./projectCatalog";
@@ -46,7 +48,7 @@ interface Props {
     effort: Effort | null,
     permissionMode: string | null,
   ) => Promise<boolean>;
-  cancel: () => void;
+  cancel: () => void | Promise<boolean>;
   approve: (id: string, allow: boolean) => Promise<void>;
 }
 export function Conversation({
@@ -118,7 +120,25 @@ export function Conversation({
   const follow = useRef(true);
   const [away, setAway] = useState(false);
   const [newOutput, setNewOutput] = useState(false);
+  const [stopping, setStopping] = useState(false);
+  const stopGeneration = useRef(0);
   const active = session && ["running", "waiting"].includes(session.status);
+  useEffect(() => {
+    stopGeneration.current++;
+    setStopping(false);
+  }, [draftKey, active]);
+  const workingStatus = executionStatus(session, events, connected, stopping);
+  async function stop() {
+    if (stopping) return;
+    const generation = ++stopGeneration.current;
+    setStopping(true);
+    try {
+      if ((await cancel()) === false && stopGeneration.current === generation)
+        setStopping(false);
+    } catch {
+      if (stopGeneration.current === generation) setStopping(false);
+    }
+  }
   useEffect(() => {
     if (follow.current)
       scroller.current?.scrollTo({ top: scroller.current.scrollHeight });
@@ -268,13 +288,13 @@ export function Conversation({
                 )
               }
             </TurnTranscript>
-            {active && (
-              <div className="working">
-                <LoaderCircle size={14} className="spin" />
-                {session.status === "waiting"
-                  ? "等待你确认操作"
-                  : "Claude 正在处理任务…"}
-              </div>
+            {workingStatus && (
+              <WorkingStatus
+                label={workingStatus}
+                animated={
+                  connected && (session?.status !== "waiting" || stopping)
+                }
+              />
             )}
           </div>
         )}
@@ -387,7 +407,7 @@ export function Conversation({
                       !available ||
                       sending
                 }
-                onClick={active ? cancel : submit}
+                onClick={active ? stop : submit}
               />
             </>
           )}

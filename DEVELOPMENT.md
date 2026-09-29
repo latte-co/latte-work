@@ -280,3 +280,11 @@ Missing capacity/counters remain unknown, including older CLI/provider responses
 Context breakdown, tool duration, TTFT and generation TPS are not fabricated from
 wall time. Sources: [SDK cost tracking](https://code.claude.com/docs/en/agent-sdk/cost-tracking)
 and [SDK wire types](https://github.com/anthropics/claude-agent-sdk-python/blob/main/src/claude_agent_sdk/types.py).
+
+The additive `progress` event carries only waiting/thinking/replying phases.
+Claude thinking block/delta events map to thinking without storing their text;
+phase changes are deduplicated and subagent phase events ignored. See the
+[streaming event contract](https://platform.claude.com/docs/en/build-with-claude/streaming).
+The UI combines phases with current-turn pending tool IDs, explicit approval,
+connection and cancel state. Silence never implies thinking; terminal sessions
+remove the status line. Both progress and usage are excluded before text merging.

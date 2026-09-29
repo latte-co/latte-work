@@ -3,7 +3,7 @@
 use super::{Action, AgentAdapter, AgentCommand, Input};
 use crate::providers::LaunchConfig;
 use anyhow::{Context, Result, bail};
-use latte_work_protocol::{ContextUsage, EventKind, TurnUsage};
+use latte_work_protocol::{ContextUsage, EventKind, ExecutionPhase, TurnUsage};
 use serde_json::{Value, json};
 use std::{io::Write, path::PathBuf, process::Stdio, time::Duration};
 use tokio::process::Command;
@@ -165,6 +165,7 @@ pub struct Claude {
     streamed: bool,
     emitted_text: bool,
     context: Option<ContextUsage>,
+    progress: Option<ExecutionPhase>,
     phase: Phase,
 }
 #[derive(Default)]
@@ -447,10 +448,39 @@ impl Claude {
             }
             "stream_event" => {
                 let event = &m["event"];
+                if m["parent_tool_use_id"].is_null() {
+                    let phase = match event["type"].as_str() {
+                        Some("content_block_start") => {
+                            match event["content_block"]["type"].as_str() {
+                                Some("thinking" | "redacted_thinking") => {
+                                    Some(ExecutionPhase::Thinking)
+                                }
+                                Some("text") => Some(ExecutionPhase::Replying),
+                                _ => Some(ExecutionPhase::Waiting),
+                            }
+                        }
+                        Some("content_block_delta") => match event["delta"]["type"].as_str() {
+                            Some("thinking_delta") => Some(ExecutionPhase::Thinking),
+                            // Existing Text events already signal reply streaming.
+                            _ => None,
+                        },
+                        Some("message_start" | "message_stop" | "content_block_stop") => {
+                            Some(ExecutionPhase::Waiting)
+                        }
+                        _ => None,
+                    };
+                    if let Some(phase) = phase
+                        && self.progress != Some(phase)
+                    {
+                        self.progress = Some(phase);
+                        output.push(Action::Event(EventKind::Progress { phase }));
+                    }
+                }
                 if event["type"] == "content_block_delta"
                     && event["delta"]["type"] == "text_delta"
                     && let Some(text) = event["delta"]["text"].as_str()
                 {
+                    self.progress = Some(ExecutionPhase::Replying);
                     self.streamed = true;
                     self.emitted_text = true;
                     output.push(Action::Event(EventKind::Text { text: text.into() }));
@@ -618,6 +648,40 @@ fn parse_commands(value: &Value) -> Result<Vec<latte_work_protocol::AgentSlashCo
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn thinking_status_is_deduplicated_and_never_carries_reasoning_text() {
+        use super::*;
+        let mut agent = Claude::default();
+        let thinking = json!({"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"thinking_delta","thinking":"private reasoning"}}});
+        let actions = agent.decode(thinking.clone()).unwrap();
+        assert!(matches!(
+            &actions[..],
+            [Action::Event(EventKind::Progress {
+                phase: ExecutionPhase::Thinking
+            })]
+        ));
+        assert!(agent.decode(thinking.clone()).unwrap().is_empty());
+        let mut child = thinking;
+        child["parent_tool_use_id"] = json!("child");
+        assert!(agent.decode(child).unwrap().is_empty());
+        let stopped = agent
+            .decode(json!({"type":"stream_event","event":{"type":"content_block_stop"}}))
+            .unwrap();
+        assert!(matches!(
+            &stopped[..],
+            [Action::Event(EventKind::Progress {
+                phase: ExecutionPhase::Waiting
+            })]
+        ));
+        let reply = agent.decode(json!({"type":"stream_event","event":{"type":"content_block_start","content_block":{"type":"text"}}})).unwrap();
+        assert!(matches!(
+            &reply[..],
+            [Action::Event(EventKind::Progress {
+                phase: ExecutionPhase::Replying
+            })]
+        ));
+    }
+
     #[test]
     fn usage_is_request_snapshot_not_cumulative_and_excludes_subagents() {
         use super::*;

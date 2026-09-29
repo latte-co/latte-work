@@ -167,12 +167,18 @@ export default function App() {
             }}
             openProject={workbench.openProject}
             send={send}
-            cancel={() => {
-              if (session)
-                void request(hostId, {
+            cancel={async () => {
+              if (!session) return false;
+              try {
+                await request(hostId, {
                   method: "cancel",
                   session_id: session.id,
-                }).catch((e) => setError(message(e)));
+                });
+                return true;
+              } catch (e) {
+                setError(message(e));
+                return false;
+              }
             }}
             approve={async (id, allow) => {
               if (!session) return;

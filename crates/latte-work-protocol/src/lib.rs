@@ -82,6 +82,15 @@ impl Effort {
         }
     }
 }
+/// Presentation-only execution phase; never contains reasoning text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+pub enum ExecutionPhase {
+    Waiting,
+    Thinking,
+    Replying,
+}
+
 /// Latest main-agent request input, never cumulative billing usage.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 pub struct ContextUsage {
@@ -102,6 +111,9 @@ pub struct TurnUsage {
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum EventKind {
+    Progress {
+        phase: ExecutionPhase,
+    },
     Usage {
         context: Option<ContextUsage>,
         totals: Option<TurnUsage>,
