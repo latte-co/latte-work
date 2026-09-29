@@ -627,6 +627,7 @@ button svg {
   margin: 0 auto;
 }
 .composer-context {
+  position: relative;
   display: flex;
   align-items: center;
   gap: var(--space-3);
@@ -1200,13 +1201,19 @@ button svg {
   color: var(--color-text);
 }
 .return-latest {
-  align-self: center;
-  flex-shrink: 0;
+  position: absolute;
+  left: 50%;
+  bottom: 0;
+  transform: translateX(-50%);
+  white-space: nowrap;
   padding: 6px 12px;
-  margin: 0 0 8px;
+  margin: 0;
   border: 1px solid var(--color-border);
   background: var(--color-elevated);
   font-size: var(--text-sm);
+}
+.return-latest ~ .agent-badge {
+  max-width: calc(50% - 100px);
 }
 .code-block {
   min-width: 0;
@@ -2935,6 +2942,12 @@ button svg {
 }
 /* One model trigger, with Agent-native effort values in a nested menu. */
 @container composer (max-width: 480px) {
+  .return-latest ~ .agent-badge {
+    max-width: calc(50% - 28px);
+  }
+  .return-latest > span {
+    display: none;
+  }
   .model-effort-value {
     display: none;
   }

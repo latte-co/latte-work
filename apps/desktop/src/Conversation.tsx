@@ -299,22 +299,27 @@ export function Conversation({
           </div>
         )}
       </div>
-      {away && (
-        <button
-          className="return-latest"
-          onClick={() => {
-            follow.current = true;
-            setAway(false);
-            setNewOutput(false);
-            scroller.current?.scrollTo({ top: scroller.current.scrollHeight });
-          }}
-        >
-          <ArrowDown size={15} />
-          {newOutput ? "有新内容 · 回到最新" : "回到最新"}
-        </button>
-      )}
       <div className="composer-wrap">
         <div className="composer-context">
+          {away && (
+            <button
+              className="return-latest"
+              aria-label={newOutput ? "有新内容 · 回到最新" : "回到最新"}
+              title={newOutput ? "有新内容 · 回到最新" : "回到最新"}
+              onClick={() => {
+                follow.current = true;
+                setAway(false);
+                setNewOutput(false);
+                scroller.current?.scrollTo({
+                  top: scroller.current.scrollHeight,
+                });
+              }}
+            >
+              <ArrowDown size={15} />
+              <span>{newOutput ? "有新内容 · 回到最新" : "回到最新"}</span>
+            </button>
+          )}
+
           {!session && (
             <TaskProjectPicker
               project={project}
