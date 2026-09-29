@@ -1323,8 +1323,8 @@ button svg {
 }
 .approval-card {
   border: 1px solid var(--color-border);
-  border-radius: var(--radius-control);
-  background: var(--color-canvas);
+  border-radius: 20px;
+  background: var(--color-surface);
   padding: 16px;
   margin: 16px 0;
 }
@@ -1336,7 +1336,7 @@ button svg {
   font-size: var(--text-xs);
 }
 .approval-card header svg {
-  color: var(--color-warning);
+  flex-shrink: 0;
 }
 .approval-operation {
   display: grid;
@@ -1361,6 +1361,9 @@ button svg {
   font-size: var(--text-sm);
   line-height: 1.6;
 }
+.approval-card .approval-operation pre {
+  background: color-mix(in srgb, var(--color-canvas) 35%, transparent);
+}
 .approval-card footer {
   display: flex;
   align-items: flex-start;
@@ -1375,9 +1378,9 @@ button svg {
 }
 .approval-actions button {
   min-height: 36px;
-  font-size: var(--text-xs);
-  padding: 7px 12px;
-  border-radius: var(--radius-sm);
+  font-size: var(--text-sm);
+  padding: 6px 16px;
+  border-radius: 999px;
   border: 1px solid var(--color-border);
 }
 .approval-parameters {
@@ -1700,7 +1703,7 @@ button svg {
 .approval-summary {
   overflow-wrap: anywhere;
   margin: 8px 0 12px;
-  font-size: var(--text-sm);
+  font-size: var(--text-body);
   color: var(--color-text);
   font-weight: 500;
 }

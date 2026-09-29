@@ -1,4 +1,12 @@
-import { ChevronRight, ShieldCheck } from "lucide-react";
+import {
+  ChevronRight,
+  ShieldCheck,
+  Terminal,
+  FileText,
+  FilePenLine,
+  Search,
+  Wrench,
+} from "lucide-react";
 import type { Event } from "./protocol";
 import { toolLabel, type ToolActivity } from "./activity";
 import { ApprovalOperation } from "./ApprovalOperation";
@@ -28,6 +36,21 @@ export function ApprovalCard({
     input: request.input,
     status: "waiting",
   });
+  const kind = request.tool.toLowerCase();
+  const [Icon, category] =
+    kind === "bash"
+      ? ([Terminal, "终端"] as const)
+      : kind === "write"
+        ? ([FileText, "写入文件"] as const)
+        : ["edit", "multiedit"].includes(kind)
+          ? ([FilePenLine, "编辑文件"] as const)
+          : kind === "read"
+            ? ([FileText, "读取文件"] as const)
+            : ["glob", "grep"].includes(kind)
+              ? ([Search, "搜索"] as const)
+              : ([Wrench, request.tool] as const);
+  const question =
+    kind === "bash" ? "是否允许运行以下命令？" : `是否允许${label}？`;
   const status =
     decision === "denied"
       ? "已拒绝"
@@ -83,23 +106,23 @@ export function ApprovalCard({
   return (
     <section className="approval-card" aria-label={`${label}，需要确认`}>
       <header>
-        <ShieldCheck size={16} />
-        <span>需要确认</span>
+        <Icon size={16} aria-hidden="true" />
+        <span>{category}</span>
       </header>
-      <p className="approval-summary">{label}</p>
-      <ApprovalOperation input={request.input} />
+      <p className="approval-summary">{question}</p>
+      <ApprovalOperation input={request.input} compact />
       <footer>
         {parameters}
         <div className="approval-actions">
-          <button disabled={disabled} onClick={() => onDecision(false)}>
+          <button disabled={disabled || busy} onClick={() => onDecision(false)}>
             拒绝
           </button>
           <button
             className="primary"
-            disabled={disabled}
+            disabled={disabled || busy}
             onClick={() => onDecision(true)}
           >
-            {busy ? "处理中…" : "允许此次操作"}
+            {busy ? "处理中…" : "允许一次"}
           </button>
         </div>
       </footer>

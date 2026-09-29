@@ -1,6 +1,12 @@
 import type { JsonValue } from "./protocol";
 /** A bounded, readable preview; full redacted parameters remain available below it. */
-export function ApprovalOperation({ input }: { input: JsonValue }) {
+export function ApprovalOperation({
+  input,
+  compact = false,
+}: {
+  input: JsonValue;
+  compact?: boolean;
+}) {
   if (!input || typeof input !== "object" || Array.isArray(input)) return null;
   const fields = [
     ["command", "命令"],
@@ -14,7 +20,7 @@ export function ApprovalOperation({ input }: { input: JsonValue }) {
         const text = input[key] as string;
         return (
           <div key={key}>
-            <small>{label}</small>
+            {(!compact || fields.length > 1) && <small>{label}</small>}
             <pre>
               {text.slice(0, 4000)}
               {text.length > 4000 ? "\n…预览已截断，请展开完整参数" : ""}

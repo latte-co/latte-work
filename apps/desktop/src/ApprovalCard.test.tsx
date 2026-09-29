@@ -12,12 +12,12 @@ const request = {
 it("shows one readable operation with explicit one-time decisions and collapsed raw parameters", () => {
   const decide = vi.fn();
   render(<ApprovalCard request={request} onDecision={decide} />);
-  expect(screen.getAllByText("写入 approved.txt")).toHaveLength(1);
+  expect(screen.getAllByText("是否允许写入 approved.txt？")).toHaveLength(1);
   expect(screen.getByText("approved")).toBeTruthy();
   expect(screen.queryByText("未收到工具结果。")).toBeNull();
   expect(screen.getByText("操作参数").closest("details")?.open).toBe(false);
   fireEvent.click(screen.getByRole("button", { name: "拒绝" }));
-  fireEvent.click(screen.getByRole("button", { name: "允许此次操作" }));
+  fireEvent.click(screen.getByRole("button", { name: "允许一次" }));
   expect(decide.mock.calls).toEqual([[false], [true]]);
 });
 it("disables both decisions during submission or disconnection", () => {
