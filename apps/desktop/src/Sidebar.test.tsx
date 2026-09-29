@@ -88,10 +88,7 @@ it("refreshes collapsed background projects even while the current view rerender
   };
   const view = render(<Sidebar state={props()} />);
   await act(async () => {});
-  const project = screen.getByRole("button", {
-    name: /^Other/,
-    expanded: false,
-  });
+  const project = screen.getByTitle("/other · Local");
   expect(
     within(project).getByRole("img", { name: "项目中有对话执行中" }),
   ).toBeTruthy();
@@ -106,4 +103,40 @@ it("refreshes collapsed background projects even while the current view rerender
     within(project).queryByRole("img", { name: "项目中有对话执行中" }),
   ).toBeNull();
   expect(mocks.request).toHaveBeenCalledTimes(2);
+});
+it("opens row menus without selecting a conversation and keeps the trigger marked open", () => {
+  const s = state([session("running")]);
+  render(<Sidebar state={s} />);
+  const more = screen.getByRole("button", { name: "Task 的更多操作" });
+  fireEvent.click(more);
+  expect(s.openSession).not.toHaveBeenCalled();
+  expect(more.getAttribute("aria-expanded")).toBe("true");
+  expect(more.closest(".session-item")?.getAttribute("data-menu-open")).toBe(
+    "true",
+  );
+  expect(screen.getByRole("menu", { name: "Task 会话操作" })).toBeTruthy();
+  fireEvent.keyDown(document, { key: "Escape" });
+  expect(more.getAttribute("aria-expanded")).toBe("false");
+  const project = screen.getByRole("button", { name: "Project 的更多操作" });
+  fireEvent.click(project);
+  expect(project.getAttribute("aria-expanded")).toBe("true");
+});
+it("scopes quick pin/archive actions and prevents archiving active tasks", async () => {
+  const s = state([session("running")]);
+  s.sessionAction = vi.fn().mockResolvedValue(undefined);
+  mocks.request.mockResolvedValue({
+    kind: "sessions",
+    sessions: [session("running")],
+  });
+  render(<Sidebar state={s} />);
+  fireEvent.click(screen.getByRole("button", { name: "归档 Task" }));
+  expect(s.sessionAction).not.toHaveBeenCalled();
+  await act(async () =>
+    fireEvent.click(screen.getByRole("button", { name: "置顶 Task" })),
+  );
+  expect(s.sessionAction).toHaveBeenCalledWith("local", {
+    method: "pin_session",
+    session_id: "s",
+    pinned: true,
+  });
 });

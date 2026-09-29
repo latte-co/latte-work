@@ -14,6 +14,9 @@ import {
   MessageCirclePlus,
   PanelLeft,
   SquarePen,
+  MoreHorizontal,
+  PinOff,
+  ArchiveRestore,
 } from "lucide-react";
 import { SessionActions } from "./SessionActions";
 import type { HostedSession } from "./sessionNavigation";
@@ -24,6 +27,7 @@ import { statusNames } from "./Conversation";
 import type { Session } from "./protocol";
 import type { Workbench } from "./useWorkbench";
 export function Sidebar({ state }: { state: Workbench }) {
+  const [actionBusy, setActionBusy] = useState<string | null>(null);
   const [sessionContext, setSessionContext] = useState<{
     session: HostedSession;
     point: { x: number; y: number };
@@ -258,10 +262,81 @@ export function Sidebar({ state }: { state: Workbench }) {
         </span>
       </button>
     );
-    if (shortcut) return <div key={`${s.hostId}:${s.id}`}>{row}</div>;
+    const menuOpen =
+      sessionContext?.session.id === s.id &&
+      sessionContext.session.hostId === s.hostId;
+    const runAction = async (
+      action: Parameters<Workbench["sessionAction"]>[1],
+    ) => {
+      setActionBusy(`${s.hostId}:${s.id}`);
+      try {
+        await state.sessionAction(s.hostId, action);
+        if (sourceProject) await loadProjectSessions(sourceProject);
+      } catch (error) {
+        setError(message(error));
+      } finally {
+        setActionBusy(null);
+      }
+    };
     return (
-      <div className="session-item" key={`${s.hostId}:${s.id}`}>
+      <div
+        className="session-item"
+        data-menu-open={menuOpen}
+        key={`${s.hostId}:${s.id}`}
+      >
         {row}
+        <div className="session-row-actions">
+          <button
+            className="icon-button"
+            aria-label={`${s.title} 的更多操作`}
+            title="更多操作"
+            aria-haspopup="menu"
+            aria-expanded={menuOpen}
+            onClick={(e) => {
+              e.currentTarget.focus();
+              const rect = e.currentTarget.getBoundingClientRect();
+              showMenu({ x: rect.left, y: rect.bottom });
+            }}
+          >
+            <MoreHorizontal size={15} />
+          </button>
+          <button
+            className="icon-button"
+            aria-label={`${s.pinned_at === null ? "置顶" : "取消置顶"} ${s.title}`}
+            title={s.pinned_at === null ? "置顶" : "取消置顶"}
+            disabled={!!actionBusy || s.archived}
+            onClick={() =>
+              void runAction({
+                method: "pin_session",
+                session_id: s.id,
+                pinned: s.pinned_at === null,
+              })
+            }
+          >
+            {s.pinned_at === null ? <Pin size={14} /> : <PinOff size={14} />}
+          </button>
+          <button
+            className="icon-button"
+            aria-label={`${s.archived ? "取消归档" : "归档"} ${s.title}`}
+            title={
+              ["running", "waiting"].includes(s.status)
+                ? "请先停止任务，再归档"
+                : s.archived
+                  ? "取消归档"
+                  : "归档"
+            }
+            disabled={!!actionBusy || ["running", "waiting"].includes(s.status)}
+            onClick={() =>
+              void runAction({
+                method: "archive_session",
+                session_id: s.id,
+                archived: !s.archived,
+              })
+            }
+          >
+            {s.archived ? <ArchiveRestore size={14} /> : <Archive size={14} />}
+          </button>
+        </div>
       </div>
     );
   };
@@ -355,6 +430,10 @@ export function Sidebar({ state }: { state: Workbench }) {
             <div className="project-group" key={key}>
               <div
                 className={`project-heading ${selected ? "selected" : ""}`}
+                data-menu-open={
+                  context?.project.id === p.id &&
+                  context.project.hostId === p.hostId
+                }
                 onContextMenu={(e) => {
                   e.preventDefault();
                   e.currentTarget
@@ -422,17 +501,36 @@ export function Sidebar({ state }: { state: Workbench }) {
                       ) : null)}
                   </span>
                 </button>
-                <button
-                  className="project-new-task icon-button"
-                  aria-label={`在 ${p.name} 中新建任务`}
-                  title={`在 ${p.name} 中新建任务`}
-                  onClick={() => {
-                    setExpandedProjects((old) => ({ ...old, [key]: true }));
-                    void createSession(p).catch((e) => setError(message(e)));
-                  }}
-                >
-                  <SquarePen size={15} />
-                </button>
+                <div className="project-row-actions">
+                  <button
+                    className="icon-button"
+                    aria-label={`${p.name} 的更多操作`}
+                    title="更多操作"
+                    aria-haspopup="menu"
+                    aria-expanded={
+                      context?.project.id === p.id &&
+                      context.project.hostId === p.hostId
+                    }
+                    onClick={(e) => {
+                      e.currentTarget.focus();
+                      const rect = e.currentTarget.getBoundingClientRect();
+                      showProjectMenu({ x: rect.left, y: rect.bottom });
+                    }}
+                  >
+                    <MoreHorizontal size={15} />
+                  </button>
+                  <button
+                    className="project-new-task icon-button"
+                    aria-label={`在 ${p.name} 中新建任务`}
+                    title={`在 ${p.name} 中新建任务`}
+                    onClick={() => {
+                      setExpandedProjects((old) => ({ ...old, [key]: true }));
+                      void createSession(p).catch((e) => setError(message(e)));
+                    }}
+                  >
+                    <SquarePen size={15} />
+                  </button>
+                </div>
               </div>
               <div id={`sessions-${key}`} hidden={!expanded}>
                 {expanded && (

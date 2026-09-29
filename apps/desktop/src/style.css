@@ -300,42 +300,66 @@ button svg {
 .project-heading.selected .project-name {
   color: var(--color-text);
 }
-.project-new-task {
+.project-row-actions,
+.session-row-actions {
   position: absolute;
-  top: 1px;
-  width: 27px;
-  height: 29px;
-  right: 28px;
-  min-height: 29px;
+  right: 3px;
+  top: 50%;
+  transform: translateY(-50%);
+  display: flex;
+  gap: 0;
   visibility: hidden;
-  opacity: 0;
   pointer-events: none;
 }
-.project-heading:hover .project-row,
-.project-heading:focus-within .project-row {
-  padding-right: 58px;
+.project-row-actions button,
+.session-row-actions button {
+  width: 28px;
+  height: 28px;
+  min-height: 28px;
+  padding: 5px;
 }
-.project-heading:hover .project-host,
-.project-heading:focus-within .project-host {
+:is(.project-heading, .session-item):is(
+    :hover,
+    :focus-within,
+    [data-menu-open="true"]
+  )
+  .row-status {
   visibility: hidden;
 }
-.project-heading:hover .project-new-task,
-.project-heading:focus-within .project-new-task {
+.project-heading:is(:hover, :focus-within, [data-menu-open="true"])
+  .project-row {
+  padding-right: 62px;
+}
+.project-heading:is(:hover, :focus-within, [data-menu-open="true"])
+  .project-host {
+  display: none;
+}
+.session-item:is(:hover, :focus-within, [data-menu-open="true"]) .session-row {
+  padding-right: 90px;
+}
+.project-heading:is(:hover, :focus-within, [data-menu-open="true"])
+  .project-row-actions,
+.session-item:is(:hover, :focus-within, [data-menu-open="true"])
+  .session-row-actions {
   visibility: visible;
-  opacity: 1;
   pointer-events: auto;
 }
 @media (hover: none) {
-  .project-new-task {
+  .project-row-actions,
+  .session-row-actions {
     visibility: visible;
-    opacity: 1;
     pointer-events: auto;
   }
   .project-heading .project-row {
-    padding-right: 58px;
+    padding-right: 62px;
   }
-  .project-host {
-    visibility: hidden;
+  .session-item .session-row {
+    padding-right: 90px;
+  }
+  .project-host,
+  .project-heading .row-status,
+  .session-item .row-status {
+    display: none;
   }
 }
 .session-list {
