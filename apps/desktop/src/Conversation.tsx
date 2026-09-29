@@ -119,7 +119,6 @@ export function Conversation({
   const scroller = useRef<HTMLDivElement>(null);
   const follow = useRef(true);
   const [away, setAway] = useState(false);
-  const [newOutput, setNewOutput] = useState(false);
   const [stopping, setStopping] = useState(false);
   const stopGeneration = useRef(0);
   const active = session && ["running", "waiting"].includes(session.status);
@@ -142,12 +141,10 @@ export function Conversation({
   useEffect(() => {
     if (follow.current)
       scroller.current?.scrollTo({ top: scroller.current.scrollHeight });
-    else setNewOutput(true);
   }, [events]);
   useEffect(() => {
     follow.current = true;
     setAway(false);
-    setNewOutput(false);
   }, [session?.id]);
   async function submit(prompt: string): Promise<boolean> {
     if (
@@ -200,7 +197,6 @@ export function Conversation({
           follow.current =
             el.scrollHeight - el.scrollTop - el.clientHeight < 90;
           setAway(!follow.current);
-          if (follow.current) setNewOutput(false);
         }}
       >
         {events.length === 0 ? (
@@ -304,19 +300,18 @@ export function Conversation({
           {away && (
             <button
               className="return-latest"
-              aria-label={newOutput ? "有新内容 · 回到最新" : "回到最新"}
-              title={newOutput ? "有新内容 · 回到最新" : "回到最新"}
+              aria-label="回到最新"
+              title="回到最新"
               onClick={() => {
                 follow.current = true;
                 setAway(false);
-                setNewOutput(false);
                 scroller.current?.scrollTo({
                   top: scroller.current.scrollHeight,
                 });
               }}
             >
               <ArrowDown size={15} />
-              <span>{newOutput ? "有新内容 · 回到最新" : "回到最新"}</span>
+              <span>回到最新</span>
             </button>
           )}
 
