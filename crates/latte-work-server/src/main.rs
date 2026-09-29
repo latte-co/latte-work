@@ -1,4 +1,5 @@
 //! A single host daemon; `connect` is a disposable local/SSH byte bridge.
+mod agent_environment;
 mod agents;
 mod attachments;
 mod files;
@@ -153,7 +154,11 @@ async fn serve(dir: &Path) -> Result<()> {
         std::fs::remove_file(&socket)?;
     }
     let database = Arc::new(Mutex::new(store::Store::open(&dir.join("state.sqlite"))?));
-    let (agent_binary, agent) = agents::discover().await;
+    let environment_warning = agent_environment::initialize().await;
+    let (agent_binary, mut agent) = agents::discover().await;
+    if let Some(warning) = environment_warning {
+        agent.detail = format!("{} · {warning}", agent.detail);
+    }
     let service = Service {
         attachments: Arc::new(Mutex::new(attachments::Attachments::new(dir)?)),
         lifecycle: Arc::new(upgrade::Lifecycle::new()?),
@@ -721,6 +726,20 @@ async fn dispatch(s: &Service, request: Request) -> Result<Response> {
         Request::ReadFile { project_id, path } => {
             let p = db(&s.database, |d| d.project(&project_id))?;
             let (text, truncated) = files::read(Path::new(&p.path), &path).await?;
+            Response::Content { text, truncated }
+        }
+        Request::Changes { project_id } => {
+            let p = db(&s.database, |d| d.project(&project_id))?;
+            let (entries, truncated) = files::changes(Path::new(&p.path)).await?;
+            Response::Changes { entries, truncated }
+        }
+        Request::ChangeDiff {
+            project_id,
+            path,
+            section,
+        } => {
+            let p = db(&s.database, |d| d.project(&project_id))?;
+            let (text, truncated) = files::change_diff(Path::new(&p.path), &path, section).await?;
             Response::Content { text, truncated }
         }
         Request::Diff { project_id } => {

@@ -1,7 +1,12 @@
+import { Modal } from "./Modal";
 import { useEffect, useState } from "react";
 import { FolderOpen, Globe2, Plus, RefreshCw, Trash2, X } from "lucide-react";
+import { CopyButton } from "./MessageContent";
 import { chooseIdentityFile, message, type Host } from "./api";
 import type { Workbench } from "./useWorkbench";
+
+const setupCommands =
+  'cargo build --release -p latte-work-server --locked\nmkdir -p "$HOME/.local/bin"\ninstall -m 755 target/release/latte-work-server "$HOME/.local/bin/latte-work-server"';
 
 type Auth = NonNullable<Host["auth"]>;
 type Draft = {
@@ -29,7 +34,7 @@ function draftFor(host?: Host): Draft {
 }
 
 const authOptions: { id: Auth; label: string }[] = [
-  { id: "none", label: "无身份验证" },
+  { id: "none", label: "默认身份验证" },
   { id: "identity_file", label: "身份文件" },
   { id: "password", label: "密码" },
 ];
@@ -150,7 +155,8 @@ export function SSHSettings({
         </div>
         <button
           className="primary ssh-add"
-          onClick={() => {
+          onClick={(event) => {
+            event.currentTarget.focus();
             setError("");
             setDraft(draftFor());
           }}
@@ -158,6 +164,32 @@ export function SSHSettings({
           <Plus size={16} /> 添加
         </button>
       </div>
+      <details className="settings-details ssh-setup">
+        <summary>准备远程设备</summary>
+        <ol>
+          <li>
+            在终端运行 <code>ssh 你的主机</code>，核对并确认主机指纹。
+          </li>
+          <li>
+            在远端安装并登录 Claude Code，用 <code>claude --version</code>{" "}
+            检查。Server 与桌面端应从同一版本源码构建。
+          </li>
+          <li>
+            在远端源码目录执行（需要 Rust 1.97 和 C 编译器）：
+            <pre>{setupCommands}</pre>
+            <CopyButton text={setupCommands} label="复制安装命令" />
+          </li>
+          <li>
+            运行 <code>~/.local/bin/latte-work-server --help</code>{" "}
+            检查可执行文件，然后添加连接。无需手动常驻启动服务。
+          </li>
+        </ol>
+        <p>
+          连接失败时先检查 SSH 登录、主机指纹、Server 路径及版本；Agent
+          不可用时检查远端 CLI 登录和非交互 Shell 的
+          PATH。升级前先结束任务并关闭终端。
+        </p>
+      </details>
       {hosts.length ? (
         <div className="ssh-host-list">
           {hosts.map((host) => {
@@ -205,7 +237,8 @@ export function SSHSettings({
                   <button
                     className="secondary"
                     disabled={!!workingHost || busy}
-                    onClick={() => {
+                    onClick={(event) => {
+                      event.currentTarget.focus();
                       setError("");
                       setDraft(draftFor(host));
                     }}
@@ -229,7 +262,7 @@ export function SSHSettings({
         <p className="ssh-empty">尚未添加 SSH 连接。</p>
       )}
       <p className="form-note">
-        无身份验证使用现有 OpenSSH 配置或 SSH
+        默认身份验证使用现有 OpenSSH 配置或 SSH
         Agent。首次连接请先在终端确认主机指纹。密码仅在本次应用运行期间保留；重启后连接时会提示重新输入。
       </p>
       {!draft && error && (
@@ -244,7 +277,7 @@ export function SSHSettings({
             if (event.target === event.currentTarget && !busy) setDraft(null);
           }}
         >
-          <section
+          <Modal
             className="modal ssh-modal"
             role="dialog"
             aria-modal="true"
@@ -298,20 +331,23 @@ export function SSHSettings({
                   onChange={(event) => update({ port: event.target.value })}
                 />
               </label>
-              <label>
-                远程 Server 路径（可选）
-                <input
-                  placeholder="自动查找远程 Server"
-                  value={draft.serverPath}
-                  onChange={(event) =>
-                    update({ serverPath: event.target.value })
-                  }
-                />
-                <small>
-                  留空时自动查找远端 ~/.local/bin/latte-work-server 及 PATH。
-                  其他安装位置可填写绝对路径。
-                </small>
-              </label>
+              <details className="settings-details">
+                <summary>高级设置</summary>
+                <label>
+                  远程 Server 路径（可选）
+                  <input
+                    placeholder="自动查找远程 Server"
+                    value={draft.serverPath}
+                    onChange={(event) =>
+                      update({ serverPath: event.target.value })
+                    }
+                  />
+                  <small>
+                    留空时自动查找远端 ~/.local/bin/latte-work-server 及 PATH。
+                    其他安装位置可填写绝对路径。
+                  </small>
+                </label>
+              </details>
               <div className="ssh-auth-label">身份验证</div>
               <div
                 className="ssh-auth-options"
@@ -399,7 +435,7 @@ export function SSHSettings({
                 </button>
               </div>
             </form>
-          </section>
+          </Modal>
         </div>
       )}
     </div>

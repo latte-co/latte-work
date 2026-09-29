@@ -1,3 +1,5 @@
+import { copyText } from "./clipboard";
+import { AppearancePreview } from "./AppearancePreview";
 import { useEffect, useRef, useState, type CSSProperties } from "react";
 import { Check, Copy, RotateCcw, Upload } from "lucide-react";
 import { Select } from "./Select";
@@ -76,37 +78,6 @@ function ColorControl({
       {!valid && <small role="status">请输入 #RRGGBB</small>}
     </div>
   );
-}
-async function copyThemeText(text: string): Promise<void> {
-  const focused = document.activeElement;
-  const selection = window.getSelection();
-  const ranges = selection
-    ? Array.from({ length: selection.rangeCount }, (_, i) =>
-        selection.getRangeAt(i).cloneRange(),
-      )
-    : [];
-  const field = document.createElement("textarea");
-  field.value = text;
-  field.readOnly = true;
-  field.className = "appearance-copy-buffer";
-  field.setAttribute("aria-hidden", "true");
-  document.body.appendChild(field);
-  let copied = false;
-  try {
-    field.focus({ preventScroll: true });
-    field.select();
-    copied = document.execCommand?.("copy") ?? false;
-  } catch {
-    // Modern clipboard is a fallback when the WebView disables legacy copying.
-  } finally {
-    field.remove();
-    if (focused instanceof HTMLElement) focused.focus({ preventScroll: true });
-    if (selection) {
-      selection.removeAllRanges();
-      ranges.forEach((range) => selection.addRange(range));
-    }
-  }
-  if (!copied) await navigator.clipboard.writeText(text);
 }
 
 export function AppearanceSettings() {
@@ -223,6 +194,12 @@ export function AppearanceSettings() {
           </div>
         </div>
       </div>
+      <div
+        className="appearance-preview"
+        style={themeTokens(theme) as CSSProperties}
+      >
+        <AppearancePreview />
+      </div>
       <div className="appearance-controls" id="appearance-controls">
         <div className="appearance-row">
           <strong>{editing === "dark" ? "深色主题" : "浅色主题"}</strong>
@@ -247,7 +224,7 @@ export function AppearanceSettings() {
                 setNotice("");
                 setTransferring(true);
                 try {
-                  await copyThemeText(JSON.stringify(settings, null, 2));
+                  await copyText(JSON.stringify(settings, null, 2));
                   setNotice("已复制完整主题 JSON，可保存为 .json 文件后导入。");
                 } catch {
                   setImportError(

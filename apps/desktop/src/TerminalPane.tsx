@@ -1,3 +1,5 @@
+import { useAppClose } from "./appLifecycle";
+import { terminalTheme } from "./terminalTheme";
 import { useEffect, useRef, useState } from "react";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
@@ -9,7 +11,7 @@ import type { TerminalInfo } from "./protocol";
 export function TerminalPane({
   hostId,
   terminal,
-  active,
+  active: visible,
   connected,
 }: {
   hostId: string;
@@ -30,8 +32,25 @@ export function TerminalPane({
   const [ready, setReady] = useState(false);
   const [finished, setFinished] = useState(false);
   const [lost, setLost] = useState(false);
+  const [closing, setClosing] = useState(false);
+  const active = visible && !closing;
+  useAppClose(
+    `终端 ${terminal.title} · ${hostId}`,
+    async () => {
+      setClosing(true);
+      writable.current = false;
+      await chain.current.catch(() => undefined);
+      await request(hostId, {
+        method: "close_terminal",
+        terminal_id: terminal.id,
+      });
+      exited.current = true;
+      setFinished(true);
+    },
+    () => setClosing(false),
+  );
   writable.current =
-    connected && !error && ready && !finished && !terminal.exited;
+    !closing && connected && !error && ready && !finished && !terminal.exited;
 
   useEffect(
     () => () => {
@@ -53,14 +72,8 @@ export function TerminalPane({
         ),
         scrollback: 5000,
         allowProposedApi: false,
-        theme: {
-          background: styles.getPropertyValue("--color-canvas").trim(),
-          foreground: styles.getPropertyValue("--color-text").trim(),
-          cursor: styles.getPropertyValue("--color-text").trim(),
-          selectionBackground: styles
-            .getPropertyValue("--color-selection")
-            .trim(),
-        },
+        minimumContrastRatio: 4.5,
+        theme: terminalTheme(styles),
       });
       const fit = new FitAddon();
       term.loadAddon(fit);
@@ -149,14 +162,7 @@ export function TerminalPane({
     const appearanceChanged = () => {
       if (!container.current) return;
       const styles = getComputedStyle(container.current);
-      term.options.theme = {
-        background: styles.getPropertyValue("--color-canvas").trim(),
-        foreground: styles.getPropertyValue("--color-text").trim(),
-        cursor: styles.getPropertyValue("--color-text").trim(),
-        selectionBackground: styles
-          .getPropertyValue("--color-selection")
-          .trim(),
-      };
+      term.options.theme = terminalTheme(styles);
       term.options.fontFamily = styles.getPropertyValue("--font-code").trim();
       term.options.fontWeight = Number(
         styles.getPropertyValue("--weight-code").trim() || 400,

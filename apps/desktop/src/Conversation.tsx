@@ -1,16 +1,21 @@
-import { useEffect, useRef, useState } from "react";
-import ReactMarkdown from "react-markdown";
-import remarkGfm from "remark-gfm";
-import { ArrowUp, Square, ShieldCheck, LoaderCircle, Bot } from "lucide-react";
+import { WorkingStatus } from "./WorkingStatus";
+import { executionStatus } from "./executionStatus";
+import { ApprovalCard } from "./ApprovalCard";
+import { ComposerAction } from "./ComposerAction";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { MessageContent } from "./MessageContent";
+import { DraftStore, useDraft, type Draft } from "./drafts";
+import { ArrowUp, ArrowDown, Bot } from "lucide-react";
 import type { AgentInfo, Effort, Event, Session } from "./protocol";
 import type { Host } from "./api";
 import type { HostedProject } from "./projectCatalog";
 import { Composer } from "./Composer";
 import { useAgentPreferences } from "./useAgentPreferences";
 import { PermissionPicker } from "./PermissionPicker";
+import { UsageIndicator } from "./UsageIndicator";
 import { ModelPicker } from "./ModelPicker";
 import { TaskProjectPicker } from "./TaskProjectPicker";
-import { activityTranscript } from "./activity";
+import { TurnTranscript } from "./TurnTranscript";
 import { ToolGroup, ToolRow } from "./ToolActivity";
 export const statusNames = {
   ready: "就绪",
@@ -22,6 +27,7 @@ export const statusNames = {
   unknown: "状态待确认",
 };
 interface Props {
+  drafts: DraftStore;
   agent?: AgentInfo;
   session?: Session;
   hostId: string;
@@ -42,10 +48,11 @@ interface Props {
     effort: Effort | null,
     permissionMode: string | null,
   ) => Promise<boolean>;
-  cancel: () => void;
+  cancel: () => void | Promise<boolean>;
   approve: (id: string, allow: boolean) => Promise<void>;
 }
 export function Conversation({
+  drafts,
   agent,
   session,
   hostId,
@@ -64,8 +71,35 @@ export function Conversation({
   cancel,
   approve,
 }: Props) {
-  const [text, setText] = useState("");
+  const draftKey = session ? JSON.stringify([hostId, session.id]) : "new-task";
+  const draft = useDraft(drafts, draftKey);
+  const text = draft.text;
+  const setText = (text: string) => drafts.update(draftKey, { text });
+  const root = useRef<HTMLElement>(null);
   const [sending, setSending] = useState(false);
+  const previousDraftKey = useRef(draftKey);
+  const migrated = useRef<string | null>(null);
+  const submission = useRef<{
+    key: string;
+    draft: Draft;
+    accepted?: boolean;
+  } | null>(null);
+  useLayoutEffect(() => {
+    if (
+      submission.current?.key === "new-task" &&
+      previousDraftKey.current === "new-task" &&
+      draftKey !== "new-task"
+    ) {
+      const submitted = submission.current;
+      drafts.adopt(draftKey, submitted.draft);
+      migrated.current = draftKey;
+      if (submitted.accepted !== undefined) {
+        if (submitted.accepted) drafts.clear(draftKey, submitted.draft);
+        drafts.clear(submitted.key, submitted.draft);
+      }
+    }
+    previousDraftKey.current = draftKey;
+  }, [draftKey, sending, drafts]);
   const agentId = session?.agent ?? agent?.id ?? "claude";
   const agentName =
     agent?.id === agentId
@@ -84,14 +118,33 @@ export function Conversation({
   const [approving, setApproving] = useState<string | null>(null);
   const scroller = useRef<HTMLDivElement>(null);
   const follow = useRef(true);
+  const [away, setAway] = useState(false);
+  const [stopping, setStopping] = useState(false);
+  const stopGeneration = useRef(0);
   const active = session && ["running", "waiting"].includes(session.status);
+  useEffect(() => {
+    stopGeneration.current++;
+    setStopping(false);
+  }, [draftKey, active]);
+  const workingStatus = executionStatus(session, events, connected, stopping);
+  async function stop() {
+    if (stopping) return;
+    const generation = ++stopGeneration.current;
+    setStopping(true);
+    try {
+      if ((await cancel()) === false && stopGeneration.current === generation)
+        setStopping(false);
+    } catch {
+      if (stopGeneration.current === generation) setStopping(false);
+    }
+  }
   useEffect(() => {
     if (follow.current)
       scroller.current?.scrollTo({ top: scroller.current.scrollHeight });
   }, [events]);
   useEffect(() => {
-    if (!sending) setText("");
     follow.current = true;
+    setAway(false);
   }, [session?.id]);
   async function submit(prompt: string): Promise<boolean> {
     if (
@@ -103,15 +156,26 @@ export function Conversation({
       session?.archived
     )
       return false;
+    migrated.current = null;
+    const submitted = {
+      key: draftKey,
+      draft,
+      accepted: undefined as boolean | undefined,
+    };
+    submission.current = submitted;
     setSending(true);
     try {
-      if (await send(prompt, model, effort, permissionMode)) {
-        setText("");
+      submitted.accepted = await send(prompt, model, effort, permissionMode);
+      if (submitted.accepted) {
+        drafts.clear(draftKey, draft);
+        if (migrated.current) drafts.clear(migrated.current, draft);
         follow.current = true;
         return true;
       }
       return false;
     } finally {
+      submitted.accepted ??= false;
+      if (migrated.current) drafts.clear(draftKey, draft);
       setSending(false);
     }
   }
@@ -124,7 +188,7 @@ export function Conversation({
     }
   }
   return (
-    <section className="conversation">
+    <section className="conversation" ref={root}>
       <div
         className={`conversation-scroll${events.length === 0 ? " empty" : ""}`}
         ref={scroller}
@@ -132,6 +196,7 @@ export function Conversation({
           const el = scroller.current!;
           follow.current =
             el.scrollHeight - el.scrollTop - el.clientHeight < 90;
+          setAway(!follow.current);
         }}
       >
         {events.length === 0 ? (
@@ -142,107 +207,114 @@ export function Conversation({
                 ? `在 ${projectName} 中与 Claude Code 一起工作。`
                 : "选择本地或远程项目，与 Claude Code 一起工作。"}
             </p>
-            <div className="suggestions">
-              {["梳理项目结构", "帮我实现一个功能", "检查最近的改动"].map(
-                (s) => (
-                  <button
-                    key={s}
-                    disabled={!projectName || !!session?.archived}
-                    onClick={() => setText(s)}
-                  >
-                    {s}
-                    <ArrowUp size={14} />
-                  </button>
-                ),
-              )}
-            </div>
+            {!text.trim() && (
+              <div className="suggestions">
+                {["梳理项目结构", "帮我实现一个功能", "检查最近的改动"].map(
+                  (s) => (
+                    <button
+                      key={s}
+                      disabled={!projectName || !!session?.archived}
+                      onClick={() => {
+                        setText(s);
+                        root.current?.querySelector("textarea")?.focus();
+                      }}
+                    >
+                      {s}
+                      <ArrowUp size={14} />
+                    </button>
+                  ),
+                )}
+              </div>
+            )}
           </div>
         ) : (
           <div className="messages">
-            {activityTranscript(events).map((item) =>
-              item.type === "user" ? (
-                <div className="user-message" key={item.key}>
-                  {item.text}
-                </div>
-              ) : item.type === "assistant" ? (
-                <article className="assistant-message markdown" key={item.key}>
-                  <ReactMarkdown remarkPlugins={[remarkGfm]}>
+            <TurnTranscript events={events}>
+              {(item) =>
+                item.type === "user" ? (
+                  <div className="user-message" key={item.key}>
                     {item.text}
-                  </ReactMarkdown>
-                </article>
-              ) : item.type === "tool" ? (
-                <ToolRow key={item.key} tool={item} />
-              ) : item.type === "tools" ? (
-                <ToolGroup key={item.key} tools={item.tools} />
-              ) : (
-                (() => {
-                  const v = item.value;
-                  if (v.kind === "approval")
-                    return (
-                      <div className="approval-card" key={item.key}>
-                        <div>
-                          <ShieldCheck size={17} />
-                          <strong>
-                            {item.resolved
-                              ? "审批已处理或过期"
-                              : "需要你的确认"}
-                          </strong>
-                          <span>{v.tool}</span>
+                  </div>
+                ) : item.type === "assistant" ? (
+                  <article
+                    className="assistant-message markdown"
+                    key={item.key}
+                  >
+                    <MessageContent text={item.text} />
+                  </article>
+                ) : item.type === "tool" ? (
+                  <ToolRow key={item.key} tool={item} />
+                ) : item.type === "tools" ? (
+                  <ToolGroup key={item.key} tools={item.tools} />
+                ) : (
+                  (() => {
+                    const v = item.value;
+                    if (v.kind === "approval")
+                      return (
+                        <ApprovalCard
+                          key={item.key}
+                          request={v}
+                          resolved={item.resolved}
+                          decision={item.decision}
+                          tool={item.approvalTool}
+                          disabled={!connected || !!approving}
+                          busy={approving === v.request_id}
+                          onDecision={(allow) =>
+                            void decide(v.request_id, allow)
+                          }
+                        />
+                      );
+                    if (v.kind === "state" && v.message)
+                      return (
+                        <div
+                          className={`notice ${v.status === "failed" ? "failure" : ""}`}
+                          key={item.key}
+                        >
+                          {v.message}
                         </div>
-                        <pre>{JSON.stringify(v.input, null, 2)}</pre>
-                        {!item.resolved && (
-                          <footer>
-                            <button
-                              disabled={!connected || !!approving}
-                              onClick={() => void decide(v.request_id, false)}
-                            >
-                              拒绝
-                            </button>
-                            <button
-                              className="primary"
-                              disabled={!connected || !!approving}
-                              onClick={() => void decide(v.request_id, true)}
-                            >
-                              {approving === v.request_id
-                                ? "处理中…"
-                                : "允许此次操作"}
-                            </button>
-                          </footer>
-                        )}
-                      </div>
-                    );
-                  if (v.kind === "state" && v.message)
-                    return (
-                      <div
-                        className={`notice ${v.status === "failed" ? "failure" : ""}`}
-                        key={item.key}
-                      >
-                        {v.message}
-                      </div>
-                    );
-                  if (v.kind === "notice")
-                    return (
-                      <div className="notice" key={item.key}>
-                        {v.text}
-                      </div>
-                    );
-                  return null;
-                })()
-              ),
-            )}
-            {active && (
-              <div className="working">
-                <LoaderCircle size={14} className="spin" />
-                {session.status === "waiting"
-                  ? "等待你确认操作"
-                  : "Claude 正在处理任务…"}
-              </div>
+                      );
+                    if (v.kind === "notice")
+                      return (
+                        <div className="notice" key={item.key}>
+                          {v.text}
+                        </div>
+                      );
+                    return null;
+                  })()
+                )
+              }
+            </TurnTranscript>
+            {workingStatus && (
+              <WorkingStatus
+                label={workingStatus}
+                animated={
+                  connected && (session?.status !== "waiting" || stopping)
+                }
+              />
             )}
           </div>
         )}
       </div>
       <div className="composer-wrap">
         <div className="composer-context">
+          {away && (
+            <button
+              className="return-latest"
+              aria-label="回到最新"
+              title="回到最新"
+              onClick={() => {
+                follow.current = true;
+                setAway(false);
+                scroller.current?.scrollTo({
+                  top: scroller.current.scrollHeight,
+                });
+              }}
+            >
+              <ArrowDown size={15} />
+              <span>回到最新</span>
+            </button>
+          )}
+
           {!session && (
             <TaskProjectPicker
               project={project}
@@ -265,6 +337,10 @@ export function Conversation({
           </span>
         </div>
         <Composer
+          referenceState={draft.references}
+          onReferencesChange={(references) =>
+            drafts.update(draftKey, { references })
+          }
           agent={agentId}
           hostId={hostId}
           projectId={projectId}
@@ -297,6 +373,12 @@ export function Conversation({
                   !!active || sending || !projectName || !!session?.archived
                 }
               />
+              <UsageIndicator
+                key={draftKey}
+                events={events}
+                sessionId={session?.id}
+                hidden={settingsOpen}
+              />
               <ModelPicker
                 hostId={hostId}
                 projectId={projectId}
@@ -312,36 +394,21 @@ export function Conversation({
                   !!active || sending || !projectName || !!session?.archived
                 }
               />
-              {active ? (
-                <button
-                  className="send stop"
-                  aria-label="停止任务"
-                  disabled={!connected}
-                  onClick={cancel}
-                >
-                  <Square size={14} fill="currentColor" />
-                </button>
-              ) : (
-                <button
-                  className="send"
-                  aria-label="发送任务"
-                  disabled={
-                    session?.archived ||
-                    !hasContent ||
-                    !projectName ||
-                    !connected ||
-                    !available ||
-                    sending
-                  }
-                  onClick={submit}
-                >
-                  {sending ? (
-                    <LoaderCircle size={17} className="spin" />
-                  ) : (
-                    <ArrowUp size={19} />
-                  )}
-                </button>
-              )}
+              <ComposerAction
+                active={!!active}
+                sending={sending}
+                disabled={
+                  active
+                    ? !connected
+                    : !!session?.archived ||
+                      !hasContent ||
+                      !projectName ||
+                      !connected ||
+                      !available ||
+                      sending
+                }
+                onClick={active ? stop : submit}
+              />
             </>
           )}
         />

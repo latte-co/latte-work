@@ -14,6 +14,20 @@ for line in sys.stdin:
     elif value['type']=='user':
         text=value['message']['content']
         emit({'type':'system','subtype':'init','session_id':'11111111-1111-4111-8111-111111111111'})
+        if text=='environment':
+            output=subprocess.check_output(['latte-env-fixture'],text=True)
+            emit({'type':'assistant','message':{'content':[{'type':'text','text':output}]}})
+            emit({'type':'result','subtype':'success','is_error':False})
+            continue
+        if text=='usage':
+            emit({'type':'stream_event','event':{'type':'content_block_delta','delta':{'type':'thinking_delta','thinking':'private fixture reasoning'}}})
+            emit({'type':'stream_event','event':{'type':'content_block_stop'}})
+            emit({'type':'stream_event','event':{'type':'message_start','message':{'model':'fixture-model','usage':{'input_tokens':0,'output_tokens':0}}}})
+            emit({'type':'assistant','message':{'model':'fixture-model','usage':{'input_tokens':0,'output_tokens':0},'content':[{'type':'text','text':'usage fixture'}]}})
+            emit({'type':'stream_event','event':{'type':'message_delta','usage':{'input_tokens':100,'cache_read_input_tokens':600,'cache_creation_input_tokens':300,'output_tokens':80}}})
+            emit({'type':'stream_event','event':{'type':'message_stop'}})
+            emit({'type':'result','subtype':'success','is_error':False,'modelUsage':{'fixture-model':{'contextWindow':200000,'inputTokens':900000}},'usage':{'input_tokens':200,'cache_read_input_tokens':1200,'cache_creation_input_tokens':600,'output_tokens':80},'duration_api_ms':52500,'num_turns':2})
+            continue
         if text=='malformed': print('this is not json',flush=True);sys.exit(0)
         if text=='exit': sys.exit(2)
         if text=='hang':
@@ -58,7 +72,7 @@ for line in sys.stdin:
             emit({'type':'result','subtype':'success','is_error':False})
         elif text=='approve':
             emit({'type':'assistant','message':{'content':[{'type':'tool_use','id':'tool-1','name':'Write','input':{'file_path':'approved.txt','content':'approved'}}]}})
-            emit({'type':'control_request','request_id':'permission-1','request':{'subtype':'can_use_tool','tool_name':'Write','input':{'file_path':'approved.txt','content':'approved'}}})
+            emit({'type':'control_request','request_id':'permission-1','request':{'subtype':'can_use_tool','tool_use_id':'tool-1','tool_name':'Write','input':{'file_path':'approved.txt','content':'approved'}}})
         else:
             for token in ['resumed:' if resumed else 'fresh:','你好']:
                 emit({'type':'stream_event','event':{'type':'content_block_delta','delta':{'type':'text_delta','text':token}}})

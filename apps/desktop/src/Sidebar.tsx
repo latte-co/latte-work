@@ -4,6 +4,8 @@ import {
   Folder,
   FolderOpen,
   CirclePause,
+  CircleAlert,
+  CircleHelp,
   ChevronDown,
   ChevronRight,
   Settings2,
@@ -12,6 +14,9 @@ import {
   MessageCirclePlus,
   PanelLeft,
   SquarePen,
+  MoreHorizontal,
+  PinOff,
+  ArchiveRestore,
 } from "lucide-react";
 import { SessionActions } from "./SessionActions";
 import type { HostedSession } from "./sessionNavigation";
@@ -22,6 +27,7 @@ import { statusNames } from "./Conversation";
 import type { Session } from "./protocol";
 import type { Workbench } from "./useWorkbench";
 export function Sidebar({ state }: { state: Workbench }) {
+  const [actionBusy, setActionBusy] = useState<string | null>(null);
   const [sessionContext, setSessionContext] = useState<{
     session: HostedSession;
     point: { x: number; y: number };
@@ -42,9 +48,6 @@ export function Sidebar({ state }: { state: Workbench }) {
   const [projectErrors, setProjectErrors] = useState<Record<string, string>>(
     {},
   );
-  const [archivedProjects, setArchivedProjects] = useState<
-    Record<string, boolean>
-  >({});
   const [sections, setSections] = useState(() => {
     const defaults = { pinned: true, projects: true };
     try {
@@ -139,7 +142,7 @@ export function Sidebar({ state }: { state: Workbench }) {
       disposed = true;
       clearTimeout(timer);
     };
-  }, [backgroundProjects, connected]);
+  }, [backgroundProjects, connected, state.modal]);
   async function loadProjectSessions(project: HostedProject) {
     const key = `${project.hostId}:${project.id}`;
     setLoadingProjects((old) => ({ ...old, [key]: true }));
@@ -191,6 +194,7 @@ export function Sidebar({ state }: { state: Workbench }) {
         }}
         onContextMenu={(e) => {
           e.preventDefault();
+          e.currentTarget.focus();
           showMenu({ x: e.clientX, y: e.clientY });
         }}
         onKeyDown={(e) => {
@@ -231,6 +235,19 @@ export function Sidebar({ state }: { state: Workbench }) {
             >
               <title>等待确认</title>
             </CirclePause>
+          ) : s.status === "failed" ? (
+            <CircleAlert
+              size={14}
+              className="failure"
+              role="img"
+              aria-label="执行失败"
+            >
+              <title>执行失败</title>
+            </CircleAlert>
+          ) : s.status === "unknown" ? (
+            <CircleHelp size={14} role="img" aria-label="状态待确认">
+              <title>状态待确认</title>
+            </CircleHelp>
           ) : s.unread ? (
             <span
               className="unread-dot"
@@ -242,10 +259,81 @@ export function Sidebar({ state }: { state: Workbench }) {
         </span>
       </button>
     );
-    if (shortcut) return <div key={`${s.hostId}:${s.id}`}>{row}</div>;
+    const menuOpen =
+      sessionContext?.session.id === s.id &&
+      sessionContext.session.hostId === s.hostId;
+    const runAction = async (
+      action: Parameters<Workbench["sessionAction"]>[1],
+    ) => {
+      setActionBusy(`${s.hostId}:${s.id}`);
+      try {
+        await state.sessionAction(s.hostId, action);
+        if (sourceProject) await loadProjectSessions(sourceProject);
+      } catch (error) {
+        setError(message(error));
+      } finally {
+        setActionBusy(null);
+      }
+    };
     return (
-      <div className="session-item" key={`${s.hostId}:${s.id}`}>
+      <div
+        className="session-item"
+        data-menu-open={menuOpen}
+        key={`${s.hostId}:${s.id}`}
+      >
         {row}
+        <div className="session-row-actions">
+          <button
+            className="icon-button"
+            aria-label={`${s.title} 的更多操作`}
+            title="更多操作"
+            aria-haspopup="menu"
+            aria-expanded={menuOpen}
+            onClick={(e) => {
+              e.currentTarget.focus();
+              const rect = e.currentTarget.getBoundingClientRect();
+              showMenu({ x: rect.left, y: rect.bottom });
+            }}
+          >
+            <MoreHorizontal size={15} />
+          </button>
+          <button
+            className="icon-button"
+            aria-label={`${s.pinned_at === null ? "置顶" : "取消置顶"} ${s.title}`}
+            title={s.pinned_at === null ? "置顶" : "取消置顶"}
+            disabled={!!actionBusy || s.archived}
+            onClick={() =>
+              void runAction({
+                method: "pin_session",
+                session_id: s.id,
+                pinned: s.pinned_at === null,
+              })
+            }
+          >
+            {s.pinned_at === null ? <Pin size={14} /> : <PinOff size={14} />}
+          </button>
+          <button
+            className="icon-button"
+            aria-label={`${s.archived ? "取消归档" : "归档"} ${s.title}`}
+            title={
+              ["running", "waiting"].includes(s.status)
+                ? "请先停止任务，再归档"
+                : s.archived
+                  ? "取消归档"
+                  : "归档"
+            }
+            disabled={!!actionBusy || ["running", "waiting"].includes(s.status)}
+            onClick={() =>
+              void runAction({
+                method: "archive_session",
+                session_id: s.id,
+                archived: !s.archived,
+              })
+            }
+          >
+            {s.archived ? <ArchiveRestore size={14} /> : <Archive size={14} />}
+          </button>
+        </div>
       </div>
     );
   };
@@ -299,7 +387,14 @@ export function Sidebar({ state }: { state: Workbench }) {
       )}
       <div className="section-heading">
         {sectionToggle("projects", "项目")}
-        <button title="添加项目" className="icon-button" onClick={openProject}>
+        <button
+          title="添加项目"
+          className="icon-button"
+          onClick={(event) => {
+            event.currentTarget.focus();
+            openProject();
+          }}
+        >
           <Plus size={15} />
         </button>
       </div>
@@ -315,9 +410,6 @@ export function Sidebar({ state }: { state: Workbench }) {
           const projectSessions = selected
             ? sessions
             : (sessionCache[key] ?? []);
-          const showArchived = selected
-            ? state.showArchived
-            : (archivedProjects[key] ?? false);
           const running = projectSessions.some((s) => s.status === "running");
           const waiting = projectSessions.some((s) => s.status === "waiting");
           const toggle = () => {
@@ -332,8 +424,15 @@ export function Sidebar({ state }: { state: Workbench }) {
             <div className="project-group" key={key}>
               <div
                 className={`project-heading ${selected ? "selected" : ""}`}
+                data-menu-open={
+                  context?.project.id === p.id &&
+                  context.project.hostId === p.hostId
+                }
                 onContextMenu={(e) => {
                   e.preventDefault();
+                  e.currentTarget
+                    .querySelector<HTMLButtonElement>(".project-row")
+                    ?.focus();
                   const rect = e.currentTarget.getBoundingClientRect();
                   showProjectMenu({
                     x: e.clientX || rect.left + 20,
@@ -396,46 +495,44 @@ export function Sidebar({ state }: { state: Workbench }) {
                       ) : null)}
                   </span>
                 </button>
-                <button
-                  className="project-new-task icon-button"
-                  aria-label={`在 ${p.name} 中新建任务`}
-                  title={`在 ${p.name} 中新建任务`}
-                  onClick={() => {
-                    setExpandedProjects((old) => ({ ...old, [key]: true }));
-                    void createSession(p).catch((e) => setError(message(e)));
-                  }}
-                >
-                  <SquarePen size={15} />
-                </button>
+                <div className="project-row-actions">
+                  <button
+                    className="icon-button"
+                    aria-label={`${p.name} 的更多操作`}
+                    title="更多操作"
+                    aria-haspopup="menu"
+                    aria-expanded={
+                      context?.project.id === p.id &&
+                      context.project.hostId === p.hostId
+                    }
+                    onClick={(e) => {
+                      e.currentTarget.focus();
+                      const rect = e.currentTarget.getBoundingClientRect();
+                      showProjectMenu({ x: rect.left, y: rect.bottom });
+                    }}
+                  >
+                    <MoreHorizontal size={15} />
+                  </button>
+                  <button
+                    className="project-new-task icon-button"
+                    aria-label={`在 ${p.name} 中新建任务`}
+                    title={`在 ${p.name} 中新建任务`}
+                    onClick={() => {
+                      setExpandedProjects((old) => ({ ...old, [key]: true }));
+                      void createSession(p).catch((e) => setError(message(e)));
+                    }}
+                  >
+                    <SquarePen size={15} />
+                  </button>
+                </div>
               </div>
               <div id={`sessions-${key}`} hidden={!expanded}>
                 {expanded && (
                   <div className="session-list">
                     {projectSessions
-                      .filter((s) => s.archived === showArchived)
+                      .filter((s) => !s.archived)
                       .map((s) => sessionRow({ ...s, hostId: p.hostId }))}
-                    {(projectSessions.some((s) => s.archived) ||
-                      showArchived) && (
-                      <button
-                        className="archive-toggle"
-                        onClick={() => {
-                          if (selected)
-                            state.setShowArchived((value) => !value);
-                          else
-                            setArchivedProjects((old) => ({
-                              ...old,
-                              [key]: !showArchived,
-                            }));
-                        }}
-                      >
-                        <Archive size={13} />
-                        {showArchived
-                          ? "返回会话"
-                          : `已归档 (${projectSessions.filter((s) => s.archived).length})`}
-                      </button>
-                    )}
-                    {projectSessions.filter((s) => s.archived === showArchived)
-                      .length === 0 &&
+                    {projectSessions.filter((s) => !s.archived).length === 0 &&
                       (projectErrors[key] ? (
                         <button
                           className="no-sessions"
@@ -448,9 +545,7 @@ export function Sidebar({ state }: { state: Workbench }) {
                         <span className="no-sessions">
                           {loadingProjects[key]
                             ? "正在加载任务…"
-                            : showArchived
-                              ? "没有已归档会话"
-                              : "还没有任务"}
+                            : "还没有任务"}
                         </span>
                       ))}
                   </div>

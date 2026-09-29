@@ -266,7 +266,7 @@ it("opens one file picker and applies the documented JSON without a second impor
   expect(open).toHaveBeenCalledOnce();
   expect(screen.queryByText("导入并应用")).toBeNull();
   expect(screen.queryByText("选择 JSON 文件")).toBeNull();
-  expect(view.container.querySelector("textarea")).toBeNull();
+  expect(view.container.querySelector("textarea:not([readonly])")).toBeNull();
   expect(file.hidden).toBe(true);
   expect(parseAppearance(JSON.stringify(exampleTheme))).toEqual(
     defaultAppearance(),
@@ -353,7 +353,7 @@ it("copies a complete importable theme in WebKit and restores focus without expo
   expect(copy).toHaveBeenCalledWith("copy");
   expect(parseAppearance(copied)).toEqual(defaultAppearance());
   expect(document.activeElement).toBe(button);
-  expect(document.querySelector("textarea")).toBeNull();
+  expect(document.querySelector("textarea:not([readonly])")).toBeNull();
   expect(screen.getByText(/已复制完整主题 JSON/)).toBeTruthy();
 });
 
@@ -382,5 +382,5 @@ it("uses the modern clipboard fallback and reports failure without claiming a su
   );
   expect(screen.getByRole("alert").textContent).toContain("无法写入剪贴板");
   expect(screen.queryByText(/已复制完整主题 JSON/)).toBeNull();
-  expect(document.querySelector("textarea")).toBeNull();
+  expect(document.querySelector("textarea:not([readonly])")).toBeNull();
 });

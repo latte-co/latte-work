@@ -1,6 +1,7 @@
 import {
   ChevronRight,
   CircleAlert,
+  CirclePause,
   FileText,
   LoaderCircle,
   Terminal,
@@ -14,6 +15,8 @@ function outputText(value: JsonValue): string {
   return JSON.stringify(value, null, 2);
 }
 function ToolIcon({ tool }: { tool: ToolActivity }) {
+  if (["waiting", "denied", "expired"].includes(tool.status))
+    return <CirclePause size={16} />;
   if (tool.status === "failed") return <CircleAlert size={16} />;
   if (tool.status === "pending")
     return <LoaderCircle size={16} className="spin" />;
@@ -25,11 +28,17 @@ function ToolIcon({ tool }: { tool: ToolActivity }) {
 function Status({ status }: { status: ToolActivity["status"] }) {
   return status === "completed" ? null : (
     <span className={`activity-status ${status === "failed" ? "failure" : ""}`}>
-      {status === "pending"
-        ? "执行中"
-        : status === "failed"
-          ? "失败"
-          : "结果待确认"}
+      {status === "waiting"
+        ? "等待确认"
+        : status === "denied"
+          ? "已拒绝"
+          : status === "expired"
+            ? "审批已过期"
+            : status === "pending"
+              ? "执行中"
+              : status === "failed"
+                ? "失败"
+                : "结果待确认"}
     </span>
   );
 }

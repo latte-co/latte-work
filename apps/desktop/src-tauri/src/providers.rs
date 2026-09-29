@@ -96,3 +96,15 @@ pub async fn bind_agent_provider(
     })
     .await
 }
+
+#[tauri::command]
+pub async fn fetch_provider_models(
+    app: tauri::AppHandle,
+    provider: latte_work_protocol::ProviderDraft,
+) -> Result<Vec<latte_work_config::discovery::DiscoveredModel>, String> {
+    let endpoint = with_store(app, move |store| store.model_endpoint(provider)).await?;
+    tokio::task::spawn_blocking(move || endpoint.fetch())
+        .await
+        .map_err(|_| "获取模型任务失败".to_owned())?
+        .map_err(|e| e.to_string())
+}

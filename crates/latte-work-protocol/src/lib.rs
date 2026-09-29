@@ -82,9 +82,42 @@ impl Effort {
         }
     }
 }
+/// Presentation-only execution phase; never contains reasoning text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+pub enum ExecutionPhase {
+    Waiting,
+    Thinking,
+    Replying,
+}
+
+/// Latest main-agent request input, never cumulative billing usage.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+pub struct ContextUsage {
+    pub model: String,
+    pub used_tokens: f64,
+    pub window_tokens: Option<f64>,
+}
+/// Main-agent totals for a single submitted turn. Missing telemetry stays unknown.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+pub struct TurnUsage {
+    pub input_tokens: Option<f64>,
+    pub cache_read_tokens: Option<f64>,
+    pub cache_write_tokens: Option<f64>,
+    pub output_tokens: Option<f64>,
+    pub model_time_ms: Option<f64>,
+    pub steps: Option<f64>,
+}
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum EventKind {
+    Progress {
+        phase: ExecutionPhase,
+    },
+    Usage {
+        context: Option<ContextUsage>,
+        totals: Option<TurnUsage>,
+    },
     User {
         text: String,
         request_id: String,
@@ -104,6 +137,9 @@ pub enum EventKind {
     },
     Approval {
         request_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        tool_use_id: Option<String>,
         tool: String,
         input: Value,
     },
@@ -158,6 +194,7 @@ pub enum ProviderProtocol {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "snake_case")]
 pub enum ProviderAuth {
+    None,
     Bearer,
     ApiKey,
 }
@@ -170,6 +207,8 @@ pub struct Provider {
     pub model: String,
     #[serde(default)]
     pub models: Vec<String>,
+    #[serde(default)]
+    pub model_labels: std::collections::BTreeMap<String, String>,
     pub auth: ProviderAuth,
     pub has_credential: bool,
     #[serde(default)]
@@ -216,6 +255,8 @@ pub struct ProviderDraft {
     pub model: String,
     #[serde(default)]
     pub models: Vec<String>,
+    #[serde(default)]
+    pub model_labels: std::collections::BTreeMap<String, String>,
     pub auth: ProviderAuth,
     /// None preserves a saved credential; plaintext is write-only over the private host transport.
     pub credential: Option<String>,
@@ -422,10 +463,37 @@ pub enum Request {
     Diff {
         project_id: String,
     },
+    Changes {
+        project_id: String,
+    },
+    ChangeDiff {
+        project_id: String,
+        path: String,
+        section: ChangeSection,
+    },
 }
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+pub enum ChangeSection {
+    Unstaged,
+    Staged,
+    Untracked,
+}
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+pub struct GitChange {
+    pub path: String,
+    pub previous_path: Option<String>,
+    pub section: ChangeSection,
+    pub status: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Response {
+    Changes {
+        entries: Vec<GitChange>,
+        truncated: bool,
+    },
     AgentPermissions {
         modes: Vec<AgentPermissionMode>,
     },

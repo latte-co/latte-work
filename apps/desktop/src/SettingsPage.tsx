@@ -1,11 +1,13 @@
 import { useEffect, useRef, useState } from "react";
 import {
+  Archive,
   ArrowLeft,
   Globe2,
   MessageSquare,
   Settings2,
   Palette,
 } from "lucide-react";
+import { ArchivedChats } from "./ArchivedChats";
 import { AgentSettings } from "./AgentSettings";
 import { ProviderSettings } from "./ProviderSettings";
 import { SSHSettings } from "./SSHSettings";
@@ -16,26 +18,37 @@ import { AppearanceSettings } from "./AppearanceSettings";
 const tabs = [
   { id: "appearance", label: "外观", icon: Palette },
   { id: "agents", label: "连接与 Agent", icon: MessageSquare },
-  { id: "providers", label: "Provider", icon: Settings2 },
+  { id: "providers", label: "模型服务", icon: Settings2 },
   { id: "ssh", label: "SSH 连接", icon: Globe2 },
+  { id: "archived", label: "已归档的聊天", icon: Archive },
 ] as const;
 
-export function SettingsPage({ state }: { state: Workbench }) {
+export function SettingsPage({
+  state,
+  active,
+}: {
+  state: Workbench;
+  active: boolean;
+}) {
   const tab = state.settingsTab;
   const setTab = state.setSettingsTab;
   const [agentBusy, setAgentBusy] = useState(false);
   const [providerBusy, setProviderBusy] = useState(false);
   const [sshBusy, setSshBusy] = useState(false);
   const navigation = useRef<HTMLDivElement>(null);
-  const busy = agentBusy || providerBusy || sshBusy;
+  const [archiveBusy, setArchiveBusy] = useState(false);
+  const busy = agentBusy || providerBusy || sshBusy || archiveBusy;
   useEffect(() => {
+    if (!active) return;
     navigation.current
       ?.querySelector<HTMLButtonElement>(`#settings-tab-${tab}`)
       ?.focus();
-  }, []);
+  }, [active]);
   useEffect(() => {
+    if (!active) return;
     const key = (event: KeyboardEvent) => {
       if (
+        !event.defaultPrevented &&
         event.key === "Escape" &&
         !busy &&
         !document.querySelector(".ssh-password-modal") &&
@@ -45,7 +58,7 @@ export function SettingsPage({ state }: { state: Workbench }) {
     };
     window.addEventListener("keydown", key);
     return () => window.removeEventListener("keydown", key);
-  }, [busy, state.setModal, state.settingsReturnToProject]);
+  }, [active, busy, state.setModal, state.settingsReturnToProject]);
   function close() {
     if (!busy) {
       state.setModal(state.settingsReturnToProject ? "project" : null);
@@ -85,6 +98,7 @@ export function SettingsPage({ state }: { state: Workbench }) {
                         tabs.length) %
                       tabs.length;
               setTab(tabs[next].id);
+              if (!active) return;
               navigation.current
                 ?.querySelectorAll<HTMLButtonElement>("button")
                 [next]?.focus();
@@ -109,6 +123,18 @@ export function SettingsPage({ state }: { state: Workbench }) {
         </aside>
         <main className="settings-body" aria-label="设置">
           <section
+            id="settings-panel-archived"
+            role="tabpanel"
+            aria-labelledby="settings-tab-archived"
+            hidden={tab !== "archived"}
+          >
+            <ArchivedChats
+              state={state}
+              active={active && tab === "archived"}
+              onBusy={setArchiveBusy}
+            />
+          </section>
+          <section
             id="settings-panel-appearance"
             role="tabpanel"
             aria-labelledby="settings-tab-appearance"
@@ -124,7 +150,7 @@ export function SettingsPage({ state }: { state: Workbench }) {
           >
             <AgentSettings
               state={state}
-              active={tab === "agents"}
+              active={active && tab === "agents"}
               onBusy={setAgentBusy}
             />
           </section>
@@ -135,7 +161,7 @@ export function SettingsPage({ state }: { state: Workbench }) {
             hidden={tab !== "providers"}
           >
             <ProviderSettings
-              active={tab === "providers"}
+              active={active && tab === "providers"}
               onBusy={setProviderBusy}
             />
           </section>

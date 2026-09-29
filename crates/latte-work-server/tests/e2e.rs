@@ -16,17 +16,22 @@ struct Host {
 }
 impl Host {
     async fn start() -> Self {
+        Self::start_with_environment(&[]).await
+    }
+    async fn start_with_environment(env: &[(&str, &std::ffi::OsStr)]) -> Self {
         let directory = tempfile::Builder::new()
             .prefix("lw-")
             .tempdir_in("/tmp")
             .unwrap();
         let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/claude.py");
         let process = Command::new(env!("CARGO_BIN_EXE_latte-work-server"))
+            .env("LATTE_WORK_AGENT_ENV", "inherit")
             .arg("serve")
             .arg("--state-dir")
             .arg(directory.path())
             .env("LATTE_WORK_CLAUDE", fixture)
             .env("CLAUDE_CONFIG_DIR", directory.path().join("claude-config"))
+            .envs(env.iter().copied())
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -513,6 +518,24 @@ async fn inspection_reads_host_files_and_both_git_views() {
     assert!(
         matches!(ask(&mut c, Request::Diff { project_id: id.clone() }).await, Response::Content { text, .. } if text.contains("+working") && text.contains("+staged"))
     );
+    assert!(
+        matches!(ask(&mut c, Request::Changes { project_id: id.clone() }).await, Response::Changes { entries, truncated: false } if entries.iter().filter(|entry| entry.path == "hello.txt").count() == 2)
+    );
+    assert!(
+        matches!(ask(&mut c, Request::ChangeDiff { project_id: id.clone(), path: "hello.txt".into(), section: latte_work_protocol::ChangeSection::Staged }).await, Response::Content { text, truncated: false } if text.contains("+staged") && !text.contains("+working"))
+    );
+    assert!(matches!(
+        ask(
+            &mut c,
+            Request::ChangeDiff {
+                project_id: id.clone(),
+                path: "../outside".into(),
+                section: latte_work_protocol::ChangeSection::Untracked
+            }
+        )
+        .await,
+        Response::Error { .. }
+    ));
     std::fs::write(project.path().join("binary"), [0, 1, 2]).unwrap();
     assert!(matches!(
         ask(
@@ -579,6 +602,7 @@ async fn provider_catalog_local_binding_and_remote_sync_use_host_protocol() {
         base_url: "https://example.test".into(),
         model: "first".into(),
         models: vec!["alternate".into()],
+        model_labels: Default::default(),
         auth: ProviderAuth::ApiKey,
         credential: Some("fixture-private-key".into()),
     };
@@ -686,6 +710,7 @@ async fn provider_catalog_local_binding_and_remote_sync_use_host_protocol() {
             base_url: "https://example.test/v1".into(),
             model: "model".into(),
             models: vec![],
+            model_labels: Default::default(),
             auth: ProviderAuth::Bearer,
             credential: Some("other-key".into()),
         };
@@ -844,6 +869,7 @@ async fn models_select_per_turn_validate_and_persist_without_changing_provider()
                 base_url: "https://example.test".into(),
                 model: "first".into(),
                 models: vec!["second".into(), "third".into()],
+                model_labels: Default::default(),
                 auth: ProviderAuth::ApiKey,
                 credential: Some("fixture-private-key".into()),
             },
@@ -1142,6 +1168,7 @@ async fn native_model_names_are_host_project_scoped_and_do_not_override_provider
                 base_url: "https://example.test".into(),
                 model: "sonnet".into(),
                 models: vec![],
+                model_labels: Default::default(),
                 auth: ProviderAuth::ApiKey,
                 credential: Some("fixture-only".into()),
             },
@@ -1180,6 +1207,7 @@ async fn remote_turns_use_latest_local_provider_without_persisting_snapshots() {
         base_url: "https://example.test".into(),
         model: "first".into(),
         models: vec!["alternate".into()],
+        model_labels: Default::default(),
         auth: ProviderAuth::ApiKey,
         credential: Some("fixture-private-key".into()),
     };
@@ -1406,6 +1434,7 @@ async fn remote_turns_use_latest_local_provider_without_persisting_snapshots() {
                 base_url: "https://example.test".into(),
                 model: "legacy".into(),
                 models: vec![],
+                model_labels: Default::default(),
                 auth: ProviderAuth::ApiKey,
                 credential: Some("legacy-secret".into()),
             },
@@ -1787,6 +1816,7 @@ async fn terminal_daemon_shutdown_cleans_up_and_restart_never_replays() {
     );
     drop(client);
     host.process = Command::new(env!("CARGO_BIN_EXE_latte-work-server"))
+        .env("LATTE_WORK_AGENT_ENV", "inherit")
         .arg("serve")
         .arg("--state-dir")
         .arg(host.directory.path())
@@ -2421,6 +2451,7 @@ async fn app_providers_and_native_defaults_only_contact_the_selected_host() {
         base_url: "https://example.test".into(),
         model: "first".into(),
         models: vec![],
+        model_labels: Default::default(),
         auth: ProviderAuth::ApiKey,
         credential: Some("fixture-private-key".into()),
     };
@@ -2592,5 +2623,133 @@ async fn app_providers_and_native_defaults_only_contact_the_selected_host() {
             .await
             .iter()
             .any(|e| matches!(&e.event, EventKind::Text { text } if text == "resumed:default"))
+    );
+}
+
+#[tokio::test]
+async fn usage_snapshot_survives_bridge_reconnect_without_billing_inflation() {
+    let host = Host::start().await;
+    let mut client = host.client().await;
+    let project = tempfile::tempdir().unwrap();
+    let id = session(&mut client, project.path()).await;
+    assert!(matches!(
+        send(&mut client, &id, "usage-request", "usage").await,
+        Response::Accepted { duplicate: false }
+    ));
+    let events = wait(&mut client, &id, Status::Completed).await;
+    assert!(events.iter().any(|e| matches!(
+        e.event,
+        EventKind::Progress {
+            phase: latte_work_protocol::ExecutionPhase::Thinking
+        }
+    )));
+    assert!(
+        !serde_json::to_string(&events)
+            .unwrap()
+            .contains("private fixture reasoning")
+    );
+    let latest = events
+        .iter()
+        .rev()
+        .find(|e| matches!(e.event, EventKind::Usage { .. }))
+        .unwrap();
+    assert!(
+        matches!(&latest.event,EventKind::Usage {context:Some(c),totals:Some(t)} if c.used_tokens == 1000.0 && c.window_tokens == Some(200000.0) && t.input_tokens == Some(200.0) && t.cache_read_tokens == Some(1200.0))
+    );
+    drop(client);
+    let mut reconnected = host.client().await;
+    let replay = wait(&mut reconnected, &id, Status::Completed).await;
+    assert_eq!(
+        serde_json::to_value(&events).unwrap(),
+        serde_json::to_value(&replay).unwrap()
+    );
+}
+
+#[tokio::test]
+async fn native_idle_shutdown_preserves_busy_terminal_then_exits_after_close() {
+    let mut host = Host::start().await;
+    let mut client = host.client().await;
+    let project = tempfile::tempdir().unwrap();
+    let project_id = terminal_project(&mut client, project.path()).await;
+    let id = uuid::Uuid::new_v4().to_string();
+    assert!(matches!(
+        ask(
+            &mut client,
+            Request::CreateTerminal {
+                project_id,
+                terminal_id: id.clone(),
+                cols: 80,
+                rows: 24
+            }
+        )
+        .await,
+        Response::Terminal { .. }
+    ));
+    assert!(!client.shutdown_if_idle().await.unwrap());
+    terminal_write(
+        &mut client,
+        &id,
+        b"echo $$ > shell.pid; printf '\\nIDLE:%s\\n' alive\n",
+    )
+    .await;
+    terminal_until(&mut client, &id, &mut 0.0, "IDLE:alive\r\n").await;
+    let pid = Pid::from_raw(
+        std::fs::read_to_string(project.path().join("shell.pid"))
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap(),
+    );
+    assert!(matches!(
+        ask(&mut client, Request::CloseTerminal { terminal_id: id }).await,
+        Response::Ok
+    ));
+    assert!(client.shutdown_if_idle().await.unwrap());
+    let deadline = Instant::now() + Duration::from_secs(6);
+    while host.process.try_wait().unwrap().is_none() {
+        assert!(Instant::now() < deadline);
+        tokio::time::sleep(Duration::from_millis(30)).await;
+    }
+    assert!(
+        kill(pid, None).is_err(),
+        "terminal shell survived idle shutdown"
+    );
+}
+
+#[tokio::test]
+async fn agents_inherit_shell_exports_with_a_minimal_daemon_path() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let shell = dir.path().join("bash");
+    let tool = dir.path().join("latte-env-fixture");
+    std::fs::write(
+        &tool,
+        r#"#!/bin/sh
+printf '%s' "$LATTE_TEST_VALUE"
+"#,
+    )
+    .unwrap();
+    std::fs::write(&shell, format!("#!/bin/sh\nexport PATH='{}':/usr/bin:/bin\nexport LATTE_TEST_VALUE='shell-loaded'\necho startup-banner\nexec /bin/sh -c \"$2\"\n", dir.path().display())).unwrap();
+    for path in [&shell, &tool] {
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    let host = Host::start_with_environment(&[
+        ("SHELL", shell.as_os_str()),
+        ("PATH", std::ffi::OsStr::new("/usr/bin:/bin")),
+        ("LATTE_WORK_AGENT_ENV", std::ffi::OsStr::new("shell")),
+    ])
+    .await;
+    let mut client = host.client().await;
+    let project = tempfile::tempdir().unwrap();
+    let id = session(&mut client, project.path()).await;
+    assert!(matches!(
+        send(&mut client, &id, "env-request", "environment").await,
+        Response::Accepted { .. }
+    ));
+    let events = wait(&mut client, &id, Status::Completed).await;
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(&e.event, EventKind::Text {text} if text == "shell-loaded"))
     );
 }

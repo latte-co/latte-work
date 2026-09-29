@@ -41,7 +41,7 @@ build: ## Build server and native app
 	./scripts/desktop.sh build
 dev: ## Launch real desktop with development UI
 	./scripts/desktop.sh dev
-package: ## Build unsigned application bundle and standalone release server
+package: ## Build release app/server and verified drag-install DMG on macOS
 	./scripts/desktop.sh package
 server: ## Start host service in foreground
 	cargo run -p latte-work-server --locked -- serve
@@ -64,3 +64,7 @@ types-check: ## Check generated Rust/TypeScript protocol stays synchronized
 lint-ci: ## Validate GitHub workflow and shell scripts
 	actionlint
 	shellcheck scripts/*.sh
+
+.PHONY: package-dmg
+package-dmg: ## Repackage the existing signed release app without rebuilding
+	./scripts/package-dmg.sh

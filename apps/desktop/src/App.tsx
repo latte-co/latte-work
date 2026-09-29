@@ -1,3 +1,6 @@
+import { useAppLifecycle } from "./appLifecycle";
+import { useRef } from "react";
+import { DraftStore } from "./drafts";
 import {
   Folder,
   Monitor,
@@ -20,7 +23,9 @@ import { SshPasswordDialog } from "./SshPasswordDialog";
 import { useWorkbench } from "./useWorkbench";
 
 export default function App() {
+  useAppLifecycle();
   const workbench = useWorkbench();
+  const drafts = useRef(new DraftStore()).current;
   const {
     hostId,
     connected,
@@ -141,6 +146,7 @@ export default function App() {
             </div>
           )}
           <Conversation
+            drafts={drafts}
             agent={agent}
             key={workbench.viewRevision}
             session={session}
@@ -163,12 +169,18 @@ export default function App() {
             }}
             openProject={workbench.openProject}
             send={send}
-            cancel={() => {
-              if (session)
-                void request(hostId, {
+            cancel={async () => {
+              if (!session) return false;
+              try {
+                await request(hostId, {
                   method: "cancel",
                   session_id: session.id,
-                }).catch((e) => setError(message(e)));
+                });
+                return true;
+              } catch (e) {
+                setError(message(e));
+                return false;
+              }
             }}
             approve={async (id, allow) => {
               if (!session) return;
@@ -203,7 +215,12 @@ export default function App() {
         />
         <HostDialogs state={workbench} />
       </div>
-      {workbench.modal === "settings" && <SettingsPage state={workbench} />}
+      <div hidden={workbench.modal !== "settings"}>
+        <SettingsPage
+          state={workbench}
+          active={workbench.modal === "settings"}
+        />
+      </div>
       {workbench.passwordPrompt && (
         <SshPasswordDialog
           key={workbench.passwordPrompt.id}

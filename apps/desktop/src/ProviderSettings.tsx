@@ -1,7 +1,12 @@
 import { useEffect, useRef, useState } from "react";
-import { Plus } from "lucide-react";
+import { Plus, Trash2 } from "lucide-react";
 import { Select } from "./Select";
-import { message, providerRequest, type ProviderRequest } from "./api";
+import {
+  message,
+  providerRequest,
+  fetchProviderModels,
+  type ProviderRequest,
+} from "./api";
 import type {
   Provider,
   ProviderDraft,
@@ -21,7 +26,8 @@ const empty = (): ProviderDraft => ({
   base_url: "",
   model: "",
   models: [],
-  auth: "bearer",
+  model_labels: {},
+  auth: "none",
   credential: null,
 });
 export function ProviderSettings({
@@ -34,6 +40,9 @@ export function ProviderSettings({
   const [catalog, setCatalog] = useState<Catalog>();
   const [draft, setDraft] = useState<ProviderDraft | null>(null);
   const [error, setError] = useState("");
+  const baseline = useRef<string>("");
+  const [notice, setNotice] = useState("");
+  const dirty = !!draft && JSON.stringify(draft) !== baseline.current;
   const [busy, setBusy] = useState(false);
   const [remove, setRemove] = useState<string | null>(null);
   const generation = useRef(0);
@@ -72,6 +81,11 @@ export function ProviderSettings({
         setCatalog(result);
         setDraft(null);
         setRemove(null);
+        setNotice(
+          value.method === "save_provider"
+            ? "Provider 已保存；下次发送时生效。"
+            : "Provider 已移除。",
+        );
       }
     } catch (e) {
       if (current === generation.current) setError(message(e));
@@ -80,32 +94,70 @@ export function ProviderSettings({
       if (current === generation.current) setBusy(false);
     }
   }
+  async function fetchModels() {
+    if (!draft || busy) return;
+    const current = generation.current;
+    setBusy(true);
+    onBusy(true);
+    setError("");
+    setNotice("");
+    try {
+      const models = await fetchProviderModels(draft);
+      if (current !== generation.current) return;
+      const ids = Array.from(
+        new Set([
+          ...draft.models.filter((id) => id.trim()),
+          ...models.map((m) => m.id),
+        ]),
+      );
+      if (ids.length > 256) throw new Error("模型目录最多支持 256 个模型");
+      const labels = { ...draft.model_labels };
+      for (const model of models)
+        if (!labels[model.id]?.trim()) labels[model.id] = model.name;
+      setDraft({ ...draft, models: ids, model_labels: labels });
+      setNotice(
+        models.length
+          ? `已获取 ${models.length} 个模型，保存后生效。`
+          : "后端未返回可用模型。",
+      );
+    } catch (e) {
+      if (current === generation.current) setError(message(e));
+    } finally {
+      onBusy(false);
+      if (current === generation.current) setBusy(false);
+    }
+  }
   function edit(p: Provider) {
-    setDraft({
+    const next: ProviderDraft = {
       id: p.id,
       name: p.name,
       protocol: p.protocol,
       base_url: p.base_url,
       model: p.model,
-      models: p.models,
+      models: Array.from(new Set([p.model, ...p.models])),
+      model_labels: p.model_labels ?? {},
       auth: p.auth,
       credential: null,
-    });
+    };
+    baseline.current = JSON.stringify(next);
+    setDraft(next);
+    setNotice("");
     setRemove(null);
     setError("");
   }
   return (
-    <div className="settings-panel-content">
-      <h2>Provider</h2>
-      <p>统一管理模型服务，在 Code Agent 设置中关联使用。</p>
-      <p className="form-note">
-        配置保存在 App 中，无需连接主机。关联后，所选环境的 Agent
-        每轮使用最新配置。
-      </p>
+    <div className="settings-panel-content provider-settings">
+      <h2>模型服务</h2>
+      <p>配置模型服务，并在连接与 Agent 中关联使用。</p>
       {error && (
         <div className="form-error" role="alert">
           {error}
         </div>
+      )}
+      {notice && (
+        <p className="agent-notice" role="status">
+          {notice}
+        </p>
       )}
       {busy && !catalog && <p>正在加载…</p>}
       {catalog && (
@@ -129,16 +181,16 @@ export function ProviderSettings({
                 </div>
                 <div className="provider-entry-actions">
                   <button
-                    className="text-button"
-                    disabled={busy}
+                    className="secondary"
+                    disabled={busy || !!draft}
                     onClick={() => edit(p)}
                   >
                     编辑
                   </button>
                   {!catalog.bindings.some((b) => b.provider_id === p.id) && (
                     <button
-                      className="text-button"
-                      disabled={busy}
+                      className="text-button danger"
+                      disabled={busy || !!draft}
                       onClick={() =>
                         remove === p.id
                           ? void mutate({
@@ -160,7 +212,10 @@ export function ProviderSettings({
               className="secondary wide"
               disabled={busy}
               onClick={() => {
-                setDraft(empty());
+                const next = empty();
+                baseline.current = JSON.stringify(next);
+                setDraft(next);
+                setNotice("");
                 setError("");
               }}
             >
@@ -172,7 +227,20 @@ export function ProviderSettings({
               className="provider-form"
               onSubmit={(e) => {
                 e.preventDefault();
-                void mutate({ method: "save_provider", provider: draft });
+                if (dirty && !busy)
+                  void mutate({
+                    method: "save_provider",
+                    provider: {
+                      ...draft,
+                      model_labels: Object.fromEntries(
+                        Object.entries(draft.model_labels ?? {}).filter(
+                          ([id, label]) =>
+                            (id === draft.model || draft.models.includes(id)) &&
+                            label?.trim(),
+                        ),
+                      ),
+                    },
+                  });
               }}
             >
               <h3>{draft.id ? "编辑 Provider" : "添加 Provider"}</h3>
@@ -203,6 +271,12 @@ export function ProviderSettings({
                       setDraft({
                         ...draft,
                         protocol: value as ProviderProtocol,
+                        auth:
+                          draft.auth === "none"
+                            ? "none"
+                            : value === "anthropic_messages"
+                              ? "api_key"
+                              : "bearer",
                       })
                     }
                   />
@@ -235,64 +309,155 @@ export function ProviderSettings({
                     }
                   />
                 </label>
-                <label>
-                  认证方式
-                  <Select
-                    label="认证方式"
-                    value={draft.auth}
-                    options={[
-                      { value: "bearer", label: "Bearer Token" },
-                      { value: "api_key", label: "API Key（x-api-key）" },
-                    ]}
-                    disabled={busy}
-                    onChange={(value) =>
-                      setDraft({
-                        ...draft,
-                        auth: value as ProviderDraft["auth"],
-                      })
+                <section
+                  className="provider-models-field"
+                  aria-label="模型目录"
+                >
+                  <div className="provider-model-heading">
+                    <h4>模型目录</h4>
+                    <button
+                      className="secondary"
+                      type="button"
+                      disabled={busy || !draft.base_url.trim()}
+                      onClick={() => void fetchModels()}
+                    >
+                      {busy ? "正在获取…" : "获取可用模型"}
+                    </button>
+                  </div>
+                  <table className="provider-model-table">
+                    <thead>
+                      <tr>
+                        <th>模型 ID</th>
+                        <th>显示名称</th>
+                        <th>操作</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {draft.models.map((model, index) => (
+                        <tr key={index}>
+                          <td>
+                            <input
+                              aria-label={`模型 ID ${index + 1}`}
+                              maxLength={256}
+                              placeholder="服务端提供的完整模型 ID"
+                              value={model}
+                              onChange={(e) =>
+                                setDraft({
+                                  ...draft,
+                                  model_labels: {
+                                    ...draft.model_labels,
+                                    [e.target.value]:
+                                      draft.model_labels?.[model] ?? "",
+                                  },
+                                  models: draft.models.map((value, i) =>
+                                    i === index ? e.target.value : value,
+                                  ),
+                                })
+                              }
+                            />
+                          </td>
+                          <td>
+                            <input
+                              aria-label={`显示名称 ${index + 1}`}
+                              maxLength={80}
+                              placeholder="可选，默认显示模型 ID"
+                              value={draft.model_labels?.[model] ?? ""}
+                              onChange={(e) =>
+                                setDraft({
+                                  ...draft,
+                                  model_labels: {
+                                    ...draft.model_labels,
+                                    [model]: e.target.value,
+                                  },
+                                })
+                              }
+                            />
+                          </td>
+                          <td>
+                            <button
+                              type="button"
+                              className="icon-button"
+                              aria-label={`删除模型 ${index + 1}`}
+                              onClick={() =>
+                                setDraft({
+                                  ...draft,
+                                  models: draft.models.filter(
+                                    (_, i) => i !== index,
+                                  ),
+                                })
+                              }
+                            >
+                              <Trash2 size={16} />
+                            </button>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                  <button
+                    type="button"
+                    className="secondary"
+                    onClick={() =>
+                      setDraft({ ...draft, models: [...draft.models, ""] })
                     }
-                  />
-                </label>
-                <label className="provider-models-field">
-                  可选模型 ID（每行一个）
-                  <textarea
-                    aria-label="可选模型 ID"
-                    placeholder="例如：claude-sonnet-5\nclaude-opus-5"
-                    value={draft.models.join("\n")}
-                    onChange={(e) =>
-                      setDraft({ ...draft, models: e.target.value.split("\n") })
-                    }
-                    rows={3}
-                  />
-                  <small>
-                    默认模型自动包含在选择列表中。填写此服务实际支持的模型 ID。
-                  </small>
-                </label>
+                  >
+                    <Plus size={16} />
+                    添加模型
+                  </button>
+                  <small>默认模型自动包含在选择列表中。</small>
+                </section>
                 <label>
-                  凭据
+                  API Key
                   <input
                     type="password"
                     autoComplete="new-password"
                     spellCheck={false}
-                    required={!draft.id}
                     placeholder={
-                      draft.id
+                      draft.id && draft.auth !== "none"
                         ? "已保存，留空保持不变"
-                        : "输入 API Key 或 Token"
+                        : "留空则无需认证"
                     }
                     value={draft.credential ?? ""}
                     onChange={(e) =>
                       setDraft({
                         ...draft,
                         credential: e.target.value || null,
+                        auth: e.target.value
+                          ? draft.id && draft.auth !== "none"
+                            ? draft.auth
+                            : draft.protocol === "anthropic_messages"
+                              ? "api_key"
+                              : "bearer"
+                          : draft.id &&
+                              JSON.parse(baseline.current).auth !== "none"
+                            ? draft.auth
+                            : "none",
                       })
                     }
                   />
                 </label>
-                <p className="form-note">
-                  更改地址或认证方式时，请重新填写凭据。修改后的配置会在下一次发送消息时生效。
-                </p>
+                {draft.id && draft.auth !== "none" && (
+                  <button
+                    type="button"
+                    className="secondary provider-clear-key"
+                    onClick={() =>
+                      setDraft({ ...draft, auth: "none", credential: null })
+                    }
+                  >
+                    清除 API Key，改为无需认证
+                  </button>
+                )}
+
                 <div className="modal-actions">
+                  <span className="form-note" role="status">
+                    {busy
+                      ? "正在保存…"
+                      : dirty
+                        ? "有未保存的修改 · 离开设置后保留"
+                        : draft.id
+                          ? "已保存"
+                          : "填写服务信息"}
+                  </span>
                   <button
                     type="button"
                     className="secondary"
@@ -300,7 +465,11 @@ export function ProviderSettings({
                   >
                     取消
                   </button>
-                  <button className="primary" type="submit">
+                  <button
+                    className="primary"
+                    type="submit"
+                    disabled={!dirty || busy}
+                  >
                     {busy ? "正在保存…" : "保存 Provider"}
                   </button>
                 </div>

@@ -278,6 +278,7 @@ it("references a local file or folder chosen outside the project without sending
   );
   render(<Harness hostId="local" />);
   fireEvent.click(screen.getByRole("button", { name: "添加项目引用" }));
+  fireEvent.click(screen.getByRole("button", { name: "工作区外引用…" }));
   fireEvent.click(screen.getByRole("button", { name: "选择文件…" }));
   await screen.findByRole("button", {
     name: "移除引用 /outside/中文 file.txt",
@@ -289,6 +290,7 @@ it("references a local file or folder chosen outside the project without sending
     path: "/outside/中文 file.txt",
   });
   fireEvent.click(screen.getByRole("button", { name: "添加项目引用" }));
+  fireEvent.click(screen.getByRole("button", { name: "工作区外引用…" }));
   fireEvent.click(screen.getByRole("button", { name: "选择文件夹…" }));
   await screen.findByRole("button", { name: "移除引用 /outside/docs" });
   expect(mocks.choose).toHaveBeenCalledWith(true);
@@ -329,18 +331,19 @@ it("resolves remote paths on the selected host and never opens a local chooser",
 it("keeps references unchanged on cancellation and rejects invalid or inaccessible paths", async () => {
   render(<Harness hostId="local" />);
   fireEvent.click(screen.getByRole("button", { name: "添加项目引用" }));
+  fireEvent.click(screen.getByRole("button", { name: "工作区外引用…" }));
   fireEvent.click(screen.getByRole("button", { name: "选择文件…" }));
   await waitFor(() =>
     expect(
       (
         screen.getByRole("button", {
-          name: "输入绝对路径…",
+          name: "返回项目目录",
         }) as HTMLButtonElement
       ).disabled,
     ).toBe(false),
   );
   expect(screen.queryByLabelText("已添加项目引用")).toBeNull();
-  fireEvent.click(screen.getByRole("button", { name: "输入绝对路径…" }));
+
   const field = screen.getByRole("textbox", { name: "引用绝对路径" });
   fireEvent.change(field, { target: { value: "../secret" } });
   fireEvent.click(screen.getByRole("button", { name: "添加引用" }));
@@ -366,6 +369,7 @@ it("discards a late native selection after switching hosts", async () => {
   );
   const view = render(<Harness hostId="local" />);
   fireEvent.click(screen.getByRole("button", { name: "添加项目引用" }));
+  fireEvent.click(screen.getByRole("button", { name: "工作区外引用…" }));
   fireEvent.click(screen.getByRole("button", { name: "选择文件…" }));
   view.rerender(<Harness hostId="remote" />);
   await act(async () => finish("/private/local-file"));

@@ -143,7 +143,6 @@ export function useWorkbench() {
   const selectedSessionId = useRef(sessionId);
   selectedSessionId.current = sessionId;
   const [pinCache, setPinCache] = useState(readPinnedCache);
-  const [showArchived, setShowArchived] = useState(false);
   const pendingSession = useRef<{
     hostId: string;
     projectId: string;
@@ -193,7 +192,7 @@ export function useWorkbench() {
   const [error, setError] = useState("");
   const [modal, setModal] = useState<"project" | "settings" | null>(null);
   const [settingsTab, setSettingsTab] = useState<
-    "agents" | "providers" | "ssh" | "appearance"
+    "agents" | "providers" | "ssh" | "appearance" | "archived"
   >("agents");
   const [settingsReturnToProject, setSettingsReturnToProject] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -492,7 +491,6 @@ export function useWorkbench() {
       projectId: target.project_id,
       id: target.id,
     };
-    setShowArchived(target.archived);
     if (target.hostId === hostId && target.project_id === projectId) {
       pendingSession.current = null;
       if (target.id !== sessionId) {
@@ -521,7 +519,6 @@ export function useWorkbench() {
     selectedSessionId.current = "";
     setSessionId("");
     setEvents([]);
-    setShowArchived(false);
     setError("");
     if (target && (target.hostId !== hostId || target.id !== projectId)) {
       setSessions([]);
@@ -547,7 +544,6 @@ export function useWorkbench() {
     setSessionId("");
     setSessions([]);
     setEvents([]);
-    setShowArchived(false);
     setError("");
     if (targetHostId !== hostId) {
       setConnected(false);
@@ -579,7 +575,6 @@ export function useWorkbench() {
           copyWorkspace(workspaceId, workspaceKey(r.session.id));
           draft.current = false;
           selectedSessionId.current = r.session.id;
-          setShowArchived(false);
           setSessionId(r.session.id);
           setEvents([]);
         }
@@ -594,12 +589,18 @@ export function useWorkbench() {
       if (
         (event.metaKey || event.ctrlKey) &&
         event.key.toLowerCase() === "n" &&
-        !modal
+        !modal &&
+        !document.querySelector('[role="dialog"]')
       ) {
         event.preventDefault();
         void createSession().catch((e) => setError(message(e)));
       }
-      if (event.key === "Escape" && !busy && modal !== "settings")
+      if (
+        !event.defaultPrevented &&
+        event.key === "Escape" &&
+        !busy &&
+        modal !== "settings"
+      )
         setModal(null);
     };
     window.addEventListener("keydown", key);
@@ -743,7 +744,6 @@ export function useWorkbench() {
       setServerId("");
       setHostId(targetHostId);
     }
-    setShowArchived(false);
     setError("");
     setProjectId(id);
     setSessions([]);
@@ -784,7 +784,16 @@ export function useWorkbench() {
     setError("");
     setModal("project");
   }
+  const resizeCleanup = useRef<(() => void) | null>(null);
+  useEffect(() => () => resizeCleanup.current?.(), []);
   function resize(e: React.PointerEvent, side: "left" | "right") {
+    e.preventDefault();
+    resizeCleanup.current?.();
+    const selectionStyle = document.body.style.userSelect;
+    const webkitStyle = document.body.style.webkitUserSelect;
+    document.body.style.userSelect = "none";
+    document.body.style.webkitUserSelect = "none";
+    window.getSelection()?.removeAllRanges();
     const x = e.clientX;
     const width = side === "left" ? leftWidth : rightWidth;
     e.currentTarget.setPointerCapture(e.pointerId);
@@ -816,9 +825,15 @@ export function useWorkbench() {
     const stop = () => {
       window.removeEventListener("pointermove", move);
       window.removeEventListener("pointerup", stop);
+      window.removeEventListener("pointercancel", stop);
+      document.body.style.userSelect = selectionStyle;
+      document.body.style.webkitUserSelect = webkitStyle;
+      resizeCleanup.current = null;
     };
     window.addEventListener("pointermove", move);
+    resizeCleanup.current = stop;
     window.addEventListener("pointerup", stop);
+    window.addEventListener("pointercancel", stop);
   }
   return {
     hosts,
@@ -838,8 +853,6 @@ export function useWorkbench() {
     pinned,
     openSession,
     sessionAction,
-    showArchived,
-    setShowArchived,
     sessionId,
     workspaceId,
     viewRevision,

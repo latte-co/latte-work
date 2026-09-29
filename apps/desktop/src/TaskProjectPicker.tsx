@@ -160,6 +160,7 @@ export function TaskProjectPicker({
             type="button"
             className="task-project-add"
             onClick={() => {
+              trigger.current?.focus();
               setOpen(false);
               onAddProject();
             }}

@@ -41,7 +41,7 @@ and optional port. Leave the Server path empty to find an executable at
 `~/.local/bin/latte-work-server` or on the remote noninteractive SSH `PATH`;
 enter an absolute path if installed elsewhere. Detection does not install or
 upgrade the remote binary. Choose one authentication
-mode: **无身份验证** uses existing OpenSSH config/agent, **身份文件** selects a local
+mode: **默认身份验证** uses existing OpenSSH config/agent, **身份文件** selects a local
 private key, and **密码** asks for a password. Save verifies the connection. You
 can also reach this page from **创建项目 → 源文件夹 → 添加远程**. Then select the
 saved host in the project form. Use **添加** to browse its folders, or enter an
