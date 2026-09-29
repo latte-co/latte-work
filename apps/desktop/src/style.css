@@ -1117,17 +1117,25 @@ button svg {
   color: var(--color-danger);
   font-size: var(--text-xs);
 }
-.message-actions {
-  opacity: 0;
+.turn-process {
+  margin: 0 0 20px;
 }
-.assistant-message:hover .message-actions,
-.message-actions:focus-within {
-  opacity: 1;
+.turn-process > summary {
+  cursor: pointer;
+  color: var(--color-text-muted);
+  font-family: var(--font-ui);
+  font-size: var(--text-sm);
+  padding: 8px 0;
+  border-bottom: 1px solid var(--color-border-subtle);
 }
-@media (hover: none) {
-  .message-actions {
-    opacity: 1;
-  }
+.turn-process > summary:hover {
+  color: var(--color-text-secondary);
+}
+.turn-process > summary:focus-visible {
+  background: var(--color-focus-background);
+}
+.turn-process-content {
+  padding-top: 20px;
 }
 .markdown p {
   margin: 0 0 14px;

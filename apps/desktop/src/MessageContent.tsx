@@ -59,9 +59,6 @@ export function MessageContent({ text }: { text: string }) {
       >
         {text}
       </ReactMarkdown>
-      <div className="message-actions">
-        <CopyButton label="复制回复" text={text} />
-      </div>
     </>
   );
 }

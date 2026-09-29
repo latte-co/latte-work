@@ -18,7 +18,8 @@ import { useAgentPreferences } from "./useAgentPreferences";
 import { PermissionPicker } from "./PermissionPicker";
 import { ModelPicker } from "./ModelPicker";
 import { TaskProjectPicker } from "./TaskProjectPicker";
-import { activityTranscript, toolLabel } from "./activity";
+import { toolLabel } from "./activity";
+import { TurnTranscript } from "./TurnTranscript";
 import { ToolGroup, ToolRow } from "./ToolActivity";
 export const statusNames = {
   ready: "就绪",
@@ -218,98 +219,103 @@ export function Conversation({
           </div>
         ) : (
           <div className="messages">
-            {activityTranscript(events).map((item) =>
-              item.type === "user" ? (
-                <div className="user-message" key={item.key}>
-                  {item.text}
-                </div>
-              ) : item.type === "assistant" ? (
-                <article className="assistant-message markdown" key={item.key}>
-                  <MessageContent text={item.text} />
-                </article>
-              ) : item.type === "tool" ? (
-                <ToolRow key={item.key} tool={item} />
-              ) : item.type === "tools" ? (
-                <ToolGroup key={item.key} tools={item.tools} />
-              ) : (
-                (() => {
-                  const v = item.value;
-                  if (v.kind === "approval")
-                    return (
-                      <div
-                        className="approval-card"
-                        data-resolved={!!item.resolved}
-                        key={item.key}
-                      >
-                        <div>
-                          <ShieldCheck size={17} />
-                          <strong>
-                            {item.resolved
-                              ? item.decision === "allowed"
-                                ? "已允许此次操作"
-                                : item.decision === "denied"
-                                  ? "已拒绝此次操作"
-                                  : "审批已过期"
-                              : "需要你的确认"}
-                          </strong>
-                          <span>{v.tool}</span>
+            <TurnTranscript events={events}>
+              {(item) =>
+                item.type === "user" ? (
+                  <div className="user-message" key={item.key}>
+                    {item.text}
+                  </div>
+                ) : item.type === "assistant" ? (
+                  <article
+                    className="assistant-message markdown"
+                    key={item.key}
+                  >
+                    <MessageContent text={item.text} />
+                  </article>
+                ) : item.type === "tool" ? (
+                  <ToolRow key={item.key} tool={item} />
+                ) : item.type === "tools" ? (
+                  <ToolGroup key={item.key} tools={item.tools} />
+                ) : (
+                  (() => {
+                    const v = item.value;
+                    if (v.kind === "approval")
+                      return (
+                        <div
+                          className="approval-card"
+                          data-resolved={!!item.resolved}
+                          key={item.key}
+                        >
+                          <div>
+                            <ShieldCheck size={17} />
+                            <strong>
+                              {item.resolved
+                                ? item.decision === "allowed"
+                                  ? "已允许此次操作"
+                                  : item.decision === "denied"
+                                    ? "已拒绝此次操作"
+                                    : "审批已过期"
+                                : "需要你的确认"}
+                            </strong>
+                            <span>{v.tool}</span>
+                          </div>
+                          <p className="approval-summary">
+                            {toolLabel({
+                              key: item.key,
+                              type: "tool",
+                              name: v.tool,
+                              input: v.input,
+                              status: "waiting",
+                            })}
+                          </p>
+                          {!item.resolved && (
+                            <ApprovalOperation input={v.input} />
+                          )}
+                          <details>
+                            <summary>查看操作参数</summary>
+                            <pre>{JSON.stringify(v.input, null, 2)}</pre>
+                          </details>
+                          {!item.resolved && (
+                            <footer>
+                              <button
+                                disabled={!connected || !!approving}
+                                onClick={() => void decide(v.request_id, false)}
+                              >
+                                拒绝
+                              </button>
+                              <button
+                                className="primary"
+                                disabled={!connected || !!approving}
+                                onClick={() => void decide(v.request_id, true)}
+                              >
+                                {approving === v.request_id
+                                  ? "处理中…"
+                                  : "允许此次操作"}
+                              </button>
+                            </footer>
+                          )}
                         </div>
-                        <p className="approval-summary">
-                          {toolLabel({
-                            key: item.key,
-                            type: "tool",
-                            name: v.tool,
-                            input: v.input,
-                            status: "waiting",
-                          })}
-                        </p>
-                        {!item.resolved && (
-                          <ApprovalOperation input={v.input} />
-                        )}
-                        <details>
-                          <summary>查看操作参数</summary>
-                          <pre>{JSON.stringify(v.input, null, 2)}</pre>
-                        </details>
-                        {!item.resolved && (
-                          <footer>
-                            <button
-                              disabled={!connected || !!approving}
-                              onClick={() => void decide(v.request_id, false)}
-                            >
-                              拒绝
-                            </button>
-                            <button
-                              className="primary"
-                              disabled={!connected || !!approving}
-                              onClick={() => void decide(v.request_id, true)}
-                            >
-                              {approving === v.request_id
-                                ? "处理中…"
-                                : "允许此次操作"}
-                            </button>
-                          </footer>
-                        )}
-                      </div>
-                    );
-                  if (v.kind === "state" && v.message)
-                    return (
-                      <div
-                        className={`notice ${v.status === "failed" ? "failure" : ""}`}
-                        key={item.key}
-                      >
-                        {v.message}
-                      </div>
-                    );
-                  if (v.kind === "notice")
-                    return (
-                      <div className="notice" key={item.key}>
-                        {v.text}
-                      </div>
-                    );
-                  return null;
-                })()
-              ),
-            )}
+                      );
+                    if (v.kind === "state" && v.message)
+                      return (
+                        <div
+                          className={`notice ${v.status === "failed" ? "failure" : ""}`}
+                          key={item.key}
+                        >
+                          {v.message}
+                        </div>
+                      );
+                    if (v.kind === "notice")
+                      return (
+                        <div className="notice" key={item.key}>
+                          {v.text}
+                        </div>
+                      );
+                    return null;
+                  })()
+                )
+              }
+            </TurnTranscript>
             {active && (
               <div className="working">
                 <LoaderCircle size={14} className="spin" />
