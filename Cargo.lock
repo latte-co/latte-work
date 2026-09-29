@@ -1770,6 +1770,7 @@ name = "latte-work-desktop"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "cc",
  "latte-work-client",
  "latte-work-config",
  "latte-work-protocol",

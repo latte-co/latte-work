@@ -1,17 +1,36 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+mod lifecycle;
 mod paste;
 mod providers;
 use latte_work_client::{Client, SshAuthentication};
 use latte_work_protocol::{Request, Response};
 use serde::{Deserialize, Serialize};
-use std::{collections::HashMap, io::Read, os::unix::fs::PermissionsExt, path::PathBuf, sync::Arc};
+use std::{
+    collections::HashMap,
+    io::Read,
+    os::unix::fs::PermissionsExt,
+    path::PathBuf,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+};
 use tauri::{Manager, State};
 use tauri_plugin_dialog::DialogExt;
-use tokio::{io::AsyncWriteExt, net::UnixListener, sync::Mutex, task::JoinHandle};
+use tokio::{
+    io::AsyncWriteExt,
+    net::UnixListener,
+    sync::{Mutex, RwLock},
+    task::JoinHandle,
+};
 #[derive(Default)]
 struct Connections {
     clients: Mutex<HashMap<String, Arc<Mutex<Client>>>>,
     passwords: Mutex<HashMap<String, CachedPassword>>,
+    turns: Mutex<HashMap<(String, String), String>>,
+    admission: RwLock<()>,
+    quitting: AtomicBool,
+    exit_ready: AtomicBool,
 }
 struct CachedPassword {
     ssh: String,
@@ -100,6 +119,10 @@ async fn connect_host(
     host: Host,
     password: Option<String>,
 ) -> Result<Response, String> {
+    let _admission = state.admission.read().await;
+    if state.quitting.load(Ordering::SeqCst) {
+        return Err("正在停止任务并退出，请稍候".into());
+    }
     let client = if let Some(ssh) = &host.ssh {
         let secret = if matches!(host.auth, SshAuthMode::Password) {
             Some(match password.as_deref() {
@@ -213,6 +236,10 @@ async fn host_request(
     host_id: String,
     request: Request,
 ) -> Result<Response, String> {
+    let _admission = state.admission.read().await;
+    if state.quitting.load(Ordering::SeqCst) {
+        return Err("正在停止任务并退出，请稍候".into());
+    }
     if matches!(
         request,
         Request::Providers
@@ -235,6 +262,31 @@ async fn host_request(
         .get(&host_id)
         .cloned()
         .ok_or("Host 未连接")?;
+    if let Request::Send {
+        session_id,
+        request_id,
+        ..
+    } = &request
+    {
+        // Track before transport: an ambiguous send response may still mean it ran.
+        state
+            .turns
+            .lock()
+            .await
+            .insert((host_id.clone(), session_id.clone()), request_id.clone());
+    }
+    let observed_turn = if let Request::Poll { session_id, .. } = &request {
+        let key = (host_id.clone(), session_id.clone());
+        state
+            .turns
+            .lock()
+            .await
+            .get(&key)
+            .cloned()
+            .map(|request| (key, request))
+    } else {
+        None
+    };
     let response = if matches!(request, Request::Models { .. } | Request::Send { .. }) {
         latte_work_client::request_with_app_provider(&client, request, |agent| async move {
             providers::with_store(app, move |store| store.snapshot_for_host(&host_id, &agent))
@@ -246,6 +298,15 @@ async fn host_request(
         client.lock().await.request(request).await
     }
     .map_err(|e| format!("{e:#}"))?;
+    if let Response::Events { session, .. } = &response
+        && lifecycle::settled(&session.status)
+        && let Some((key, request)) = observed_turn
+    {
+        let mut turns = state.turns.lock().await;
+        if turns.get(&key) == Some(&request) {
+            turns.remove(&key);
+        }
+    }
     ui_response(response)
 }
 fn ui_response(response: Response) -> Result<Response, String> {
@@ -439,6 +500,42 @@ fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .manage(Connections::default())
+        .menu(|app| {
+            let menu = tauri::menu::Menu::default(app)?;
+            #[cfg(target_os = "macos")]
+            if let Some(tauri::menu::MenuItemKind::Submenu(application)) = menu.items()?.first() {
+                // Tauri's default macOS app submenu ends in native terminate:.
+                // Replace it with an event-backed item also invoked by macos_quit.m.
+                let position = application.items()?.len() - 1;
+                application.remove_at(position)?;
+                let quit = tauri::menu::MenuItem::with_id(
+                    app,
+                    "latte-quit",
+                    "退出 Latte Work",
+                    true,
+                    Some("CmdOrCtrl+Q"),
+                )?;
+                application.insert(&quit, position)?;
+            }
+            Ok(menu)
+        })
+        .on_menu_event(|app, event| {
+            if event.id().as_ref() == "latte-quit" {
+                app.exit(0);
+            }
+        })
+        .on_window_event(|window, event| {
+            #[cfg(target_os = "macos")]
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                // Closing the window must preserve its WebView and in-memory drafts.
+                // Explicit application Quit is deliberately not intercepted.
+                if window.hide().is_ok() {
+                    api.prevent_close();
+                }
+            }
+            #[cfg(not(target_os = "macos"))]
+            let _ = (window, event);
+        })
         .invoke_handler(tauri::generate_handler![
             connect_host,
             disconnect_host,
@@ -457,8 +554,29 @@ fn main() {
             choose_identity_file,
             reveal_project
         ])
-        .run(tauri::generate_context!())
-        .expect("failed to run Latte Work desktop");
+        .build(tauri::generate_context!())
+        .expect("failed to build Latte Work desktop")
+        .run(|app, event| {
+            if let tauri::RunEvent::ExitRequested { api, .. } = &event {
+                let state = app.state::<Connections>();
+                if !state.exit_ready.load(Ordering::SeqCst) {
+                    api.prevent_exit();
+                    if !state.quitting.swap(true, Ordering::SeqCst) {
+                        lifecycle::quit(app.clone());
+                    }
+                }
+            }
+            #[cfg(target_os = "macos")]
+            if let tauri::RunEvent::Reopen { .. } = event
+                && let Some(window) = app.get_webview_window("main")
+            {
+                let _ = window.unminimize();
+                let _ = window.show();
+                let _ = window.set_focus();
+            }
+            #[cfg(not(target_os = "macos"))]
+            let _ = (app, event);
+        });
 }
 
 #[cfg(test)]

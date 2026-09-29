@@ -207,3 +207,24 @@ It only links presentation to a known tool call. Authorization remains bound to
 the existing public approval request ID, session and single-use runtime decision.
 Histories without this metadata still display explicit approval outcomes, but do
 not guess which parallel tool an old decision belongs to.
+
+## macOS window and application lifetime
+
+The red close button hides the window and preserves its WebView and drafts. Dock
+reopening restores and focuses it. A small macOS Objective-C delegate hook routes Cocoa Dock termination through
+the event-backed Quit menu because Tao 0.35 does not expose a cancellable
+applicationShouldTerminate callback. It adds only that missing method and leaves
+Tao window/reopen handling intact; Rust contains no unsafe code.
+
+Dock Quit and Command-Q first stop turns sent
+by this App instance, including ambiguous send outcomes, through each host's normal
+Cancel protocol. New requests are blocked while quitting. Exit requires observing
+a terminal session state after cancellation; a 30-second overall deadline or an
+unreachable host keeps the App open and reports the failure for reconnection/retry.
+No force-quit fallback silently leaves a running Agent behind. OS force kill/crash
+cannot run this cleanup and remains outside this graceful-exit guarantee.
+
+Local and remote server daemons remain alive: they own persistent state and may
+serve other clients. The quit flow does not cancel unrelated sessions or close
+server-owned terminal shells. App transport pipes close on exit; connect-local and
+SSH bridges end on EOF. Reopening reconciles events without replaying prompts.

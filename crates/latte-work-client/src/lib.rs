@@ -96,6 +96,9 @@ impl Client {
         {
             bail!("此 Server 不支持权限设置，请更新 Server 后重新连接；任务未发送");
         }
+        // If this future is dropped (for example by a quit deadline), its response
+        // may still arrive. Never reuse a transport with an ambiguous frame boundary.
+        self.broken = true;
         let result = tokio::time::timeout(Duration::from_secs(25), async {
             let mut data = serde_json::to_vec(&request)?;
             if data.len() > MAX_FRAME {
@@ -109,7 +112,10 @@ impl Client {
         })
         .await;
         match result {
-            Ok(Ok(response)) => Ok(response),
+            Ok(Ok(response)) => {
+                self.broken = false;
+                Ok(response)
+            }
             other => {
                 self.broken = true;
                 let _ = self.child.start_kill();
@@ -403,6 +409,40 @@ for line in sys.stdin:
             client.request(Request::Projects).await.unwrap(),
             Response::Projects { .. }
         ));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cancelled_request_cannot_reuse_a_stale_response() {
+        let mut command = Command::new("python3");
+        command.args([
+            "-u",
+            "-c",
+            r#"
+import sys,json,time
+for line in sys.stdin:
+    req=json.loads(line)
+    if req['method']=='hello':
+        print(json.dumps({'kind':'hello','version':1,'server_id':'fixture','agents':[]}),flush=True)
+    else:
+        time.sleep(1)
+        print(json.dumps({'kind':'projects','projects':[]}),flush=True)
+"#,
+        ]);
+        let mut client = Client::spawn(command).await.unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), client.request(Request::Projects))
+                .await
+                .is_err()
+        );
+        assert!(
+            client
+                .request(Request::Projects)
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("连接已失效")
+        );
     }
 
     #[test]
