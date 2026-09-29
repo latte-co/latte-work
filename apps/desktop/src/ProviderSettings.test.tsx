@@ -47,7 +47,7 @@ it("manages App Providers while every Server is unavailable", async () => {
   fireEvent.change(screen.getByLabelText("默认模型 ID"), {
     target: { value: "model" },
   });
-  fireEvent.change(screen.getByLabelText("凭据"), {
+  fireEvent.change(screen.getByLabelText("API Key"), {
     target: { value: "test-key" },
   });
   fireEvent.click(screen.getByRole("button", { name: "添加模型" }));
@@ -157,7 +157,7 @@ it("retains an unsaved Provider form while settings are hidden, without saving c
   fireEvent.change(screen.getByLabelText("名称"), {
     target: { value: "unsaved" },
   });
-  fireEvent.change(screen.getByLabelText("凭据"), {
+  fireEvent.change(screen.getByLabelText("API Key"), {
     target: { value: "fixture-key" },
   });
   view.rerender(<ProviderSettings active={false} onBusy={() => {}} />);
@@ -167,7 +167,7 @@ it("retains an unsaved Provider form while settings are hidden, without saving c
       "unsaved",
     ),
   );
-  expect((screen.getByLabelText("凭据") as HTMLInputElement).value).toBe(
+  expect((screen.getByLabelText("API Key") as HTMLInputElement).value).toBe(
     "fixture-key",
   );
   expect(
@@ -176,4 +176,32 @@ it("retains an unsaved Provider form while settings are hidden, without saving c
         command === "provider_request" && args.request.method === "providers",
     ),
   ).toBe(true);
+});
+it("saves an empty API Key as no authentication without an auth selector", async () => {
+  invoke.mockResolvedValue({ kind: "providers", providers: [], bindings: [] });
+  render(<ProviderSettings active onBusy={() => {}} />);
+  fireEvent.click(await screen.findByRole("button", { name: "添加 Provider" }));
+  expect(screen.queryByLabelText("认证方式")).toBeNull();
+  fireEvent.change(screen.getByLabelText("名称"), {
+    target: { value: "Local" },
+  });
+  fireEvent.change(screen.getByLabelText("Base URL"), {
+    target: { value: "http://localhost:8000" },
+  });
+  fireEvent.change(screen.getByLabelText("默认模型 ID"), {
+    target: { value: "model" },
+  });
+  fireEvent.change(screen.getByLabelText("API Key"), {
+    target: { value: "temporary" },
+  });
+  fireEvent.change(screen.getByLabelText("API Key"), { target: { value: "" } });
+  fireEvent.click(screen.getByRole("button", { name: "保存 Provider" }));
+  await waitFor(() =>
+    expect(invoke).toHaveBeenCalledWith("provider_request", {
+      request: {
+        method: "save_provider",
+        provider: expect.objectContaining({ auth: "none", credential: null }),
+      },
+    }),
+  );
 });

@@ -321,11 +321,19 @@ impl AgentAdapter for Claude {
             if metadata.protocol != latte_work_protocol::ProviderProtocol::AnthropicMessages {
                 bail!("Claude Code 只支持 Anthropic Messages Provider");
             }
-            let key = match metadata.auth {
-                latte_work_protocol::ProviderAuth::Bearer => "ANTHROPIC_AUTH_TOKEN",
-                latte_work_protocol::ProviderAuth::ApiKey => "ANTHROPIC_API_KEY",
+            let (key, credential) = match metadata.auth {
+                latte_work_protocol::ProviderAuth::Bearer => {
+                    ("ANTHROPIC_AUTH_TOKEN", provider.credential.as_str())
+                }
+                latte_work_protocol::ProviderAuth::ApiKey => {
+                    ("ANTHROPIC_API_KEY", provider.credential.as_str())
+                }
+                // Claude requires a nonempty credential even for unauthenticated gateways.
+                latte_work_protocol::ProviderAuth::None => {
+                    ("ANTHROPIC_AUTH_TOKEN", "latte-work-no-auth")
+                }
             };
-            env[key] = json!(provider.credential);
+            env[key] = json!(credential);
             for (key, value) in env.as_object().expect("env object") {
                 command.env(key, value.as_str().expect("env string"));
             }
@@ -1054,6 +1062,25 @@ mod tests {
         let prepared = Claude::default()
             .command("claude", "/tmp", Some("native-session"), &config)
             .unwrap();
+        config.provider.as_mut().unwrap().metadata.auth = ProviderAuth::None;
+        let unauthenticated = Claude::default()
+            .command("claude", "/tmp", None, &config)
+            .unwrap();
+        let unauth_settings: Value = serde_json::from_slice(
+            &std::fs::read(unauthenticated._settings.as_ref().unwrap().path()).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            unauth_settings["env"]["ANTHROPIC_AUTH_TOKEN"],
+            "latte-work-no-auth"
+        );
+        assert_eq!(unauth_settings["env"]["ANTHROPIC_API_KEY"], "");
+        assert!(
+            !unauth_settings
+                .to_string()
+                .contains("only-in-private-settings")
+        );
+        config.provider.as_mut().unwrap().metadata.auth = ProviderAuth::Bearer;
         let path = prepared._settings.as_ref().unwrap().path().to_owned();
         assert_eq!(
             std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,

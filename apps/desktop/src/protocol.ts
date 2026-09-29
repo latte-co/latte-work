@@ -106,7 +106,7 @@ export type AgentSlashCommand = {
 };
 export type ProviderProtocol =
   "anthropic_messages" | "openai_chat" | "openai_responses";
-export type ProviderAuth = "bearer" | "api_key";
+export type ProviderAuth = "none" | "bearer" | "api_key";
 export type Provider = {
   id: string;
   name: string;

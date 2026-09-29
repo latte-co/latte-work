@@ -296,6 +296,7 @@ impl ProviderStore {
             None => None,
         };
         if let Some(old) = existing
+            && draft.auth != latte_work_protocol::ProviderAuth::None
             && draft.credential.is_none()
             && (old.metadata.base_url != draft.base_url || old.metadata.auth != draft.auth)
         {
@@ -307,11 +308,15 @@ impl ProviderStore {
         {
             bail!("请先解除 Provider 关联，再更改接口协议");
         }
-        let credential = draft
-            .credential
-            .take()
-            .or_else(|| existing.map(|r| r.credential.clone()))
-            .context("请填写 Provider 凭据")?;
+        let credential = if draft.auth == latte_work_protocol::ProviderAuth::None {
+            String::new()
+        } else {
+            draft
+                .credential
+                .take()
+                .or_else(|| existing.map(|r| r.credential.clone()))
+                .context("请填写 Provider 凭据")?
+        };
         let metadata = Provider {
             id: draft.id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
             name: draft.name,
@@ -320,7 +325,7 @@ impl ProviderStore {
             model: draft.model,
             models: draft.models,
             auth: draft.auth,
-            has_credential: true,
+            has_credential: !credential.is_empty(),
             revision: uuid::Uuid::new_v4().to_string(),
         };
         validate_provider(&metadata, &credential)?;

@@ -21,7 +21,7 @@ const empty = (): ProviderDraft => ({
   base_url: "",
   model: "",
   models: [],
-  auth: "bearer",
+  auth: "none",
   credential: null,
 });
 export function ProviderSettings({
@@ -219,6 +219,12 @@ export function ProviderSettings({
                       setDraft({
                         ...draft,
                         protocol: value as ProviderProtocol,
+                        auth:
+                          draft.auth === "none"
+                            ? "none"
+                            : value === "anthropic_messages"
+                              ? "api_key"
+                              : "bearer",
                       })
                     }
                   />
@@ -248,24 +254,6 @@ export function ProviderSettings({
                     value={draft.model}
                     onChange={(e) =>
                       setDraft({ ...draft, model: e.target.value })
-                    }
-                  />
-                </label>
-                <label>
-                  认证方式
-                  <Select
-                    label="认证方式"
-                    value={draft.auth}
-                    options={[
-                      { value: "bearer", label: "Authorization: Bearer" },
-                      { value: "api_key", label: "x-api-key" },
-                    ]}
-                    disabled={busy}
-                    onChange={(value) =>
-                      setDraft({
-                        ...draft,
-                        auth: value as ProviderDraft["auth"],
-                      })
                     }
                   />
                 </label>
@@ -334,29 +322,47 @@ export function ProviderSettings({
                   <small>默认模型自动包含在选择列表中。</small>
                 </section>
                 <label>
-                  凭据
+                  API Key
                   <input
                     type="password"
                     autoComplete="new-password"
                     spellCheck={false}
-                    required={!draft.id}
                     placeholder={
-                      draft.id
+                      draft.id && draft.auth !== "none"
                         ? "已保存，留空保持不变"
-                        : "输入 API Key 或 Token"
+                        : "留空则无需认证"
                     }
                     value={draft.credential ?? ""}
                     onChange={(e) =>
                       setDraft({
                         ...draft,
                         credential: e.target.value || null,
+                        auth: e.target.value
+                          ? draft.id && draft.auth !== "none"
+                            ? draft.auth
+                            : draft.protocol === "anthropic_messages"
+                              ? "api_key"
+                              : "bearer"
+                          : draft.id &&
+                              JSON.parse(baseline.current).auth !== "none"
+                            ? draft.auth
+                            : "none",
                       })
                     }
                   />
                 </label>
-                <p className="form-note">
-                  更改地址或认证方式时，请重新填写凭据。修改后的配置会在下一次发送消息时生效。
-                </p>
+                {draft.id && draft.auth !== "none" && (
+                  <button
+                    type="button"
+                    className="secondary provider-clear-key"
+                    onClick={() =>
+                      setDraft({ ...draft, auth: "none", credential: null })
+                    }
+                  >
+                    清除 API Key，改为无需认证
+                  </button>
+                )}
+
                 <div className="modal-actions">
                   <span className="form-note" role="status">
                     {busy

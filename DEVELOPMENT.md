@@ -321,3 +321,14 @@ Capture has a 3-second timeout, a 512 KiB output cap and process-group cleanup.
 Startup output is discarded using a unique NUL-delimited marker, not logged.
 Failure retains the inherited environment and adds a diagnostic to Agent details.
 Environment values, including credentials, are never persisted in the snapshot.
+
+Provider authentication defaults follow the selected protocol: Anthropic uses
+`x-api-key`; OpenAI uses `Authorization: Bearer`. A new blank API Key saves
+`ProviderAuth::None`. Existing hidden credentials are retained until explicitly
+cleared; switching to None removes the stored secret. Existing explicit auth
+choices remain compatible. Claude Code requires a nonempty credential before
+making a request, so the None adapter sends the public, non-secret token
+`latte-work-no-auth` rather than inheriting a real credential. Thus None needs no
+server-side authentication, but does not promise absence of the Authorization
+header for Claude Code. Gateways that reject any such header are not supported
+by this adapter.

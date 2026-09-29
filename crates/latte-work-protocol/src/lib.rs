@@ -194,6 +194,7 @@ pub enum ProviderProtocol {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "snake_case")]
 pub enum ProviderAuth {
+    None,
     Bearer,
     ApiKey,
 }
