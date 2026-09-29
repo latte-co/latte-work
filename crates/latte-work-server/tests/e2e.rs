@@ -2612,3 +2612,31 @@ async fn app_providers_and_native_defaults_only_contact_the_selected_host() {
             .any(|e| matches!(&e.event, EventKind::Text { text } if text == "resumed:default"))
     );
 }
+
+#[tokio::test]
+async fn usage_snapshot_survives_bridge_reconnect_without_billing_inflation() {
+    let host = Host::start().await;
+    let mut client = host.client().await;
+    let project = tempfile::tempdir().unwrap();
+    let id = session(&mut client, project.path()).await;
+    assert!(matches!(
+        send(&mut client, &id, "usage-request", "usage").await,
+        Response::Accepted { duplicate: false }
+    ));
+    let events = wait(&mut client, &id, Status::Completed).await;
+    let latest = events
+        .iter()
+        .rev()
+        .find(|e| matches!(e.event, EventKind::Usage { .. }))
+        .unwrap();
+    assert!(
+        matches!(&latest.event,EventKind::Usage {context:Some(c),totals:Some(t)} if c.used_tokens == 1000.0 && c.window_tokens == Some(200000.0) && t.input_tokens == Some(200.0) && t.cache_read_tokens == Some(1200.0))
+    );
+    drop(client);
+    let mut reconnected = host.client().await;
+    let replay = wait(&mut reconnected, &id, Status::Completed).await;
+    assert_eq!(
+        serde_json::to_value(&events).unwrap(),
+        serde_json::to_value(&replay).unwrap()
+    );
+}

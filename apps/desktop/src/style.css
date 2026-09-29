@@ -993,6 +993,96 @@ button svg {
 .composer-toolbar > .model-picker {
   margin-left: auto;
 }
+.composer-toolbar > .usage-indicator {
+  margin-left: auto;
+}
+.composer-toolbar > .usage-indicator + .model-picker {
+  margin-left: 0;
+}
+.usage-indicator {
+  flex: 0 0 auto;
+}
+.usage-trigger {
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 32px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--color-text-muted);
+  border-radius: var(--radius-control);
+}
+.usage-trigger:hover {
+  background: var(--color-hover);
+}
+.usage-panel {
+  position: fixed;
+  z-index: 1000;
+  overflow-y: auto;
+  box-sizing: border-box;
+  padding: 16px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-panel);
+  background: var(--color-elevated);
+  color: var(--color-text);
+  box-shadow: var(--shadow-popover);
+  font-size: 13px;
+  line-height: 1.5;
+}
+.usage-panel header,
+.usage-panel h3 {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.usage-panel header button {
+  display: grid;
+  place-items: center;
+  padding: 4px;
+  background: transparent;
+  border: 0;
+  color: var(--color-text-muted);
+}
+.usage-panel section {
+  border-top: 1px solid var(--color-border);
+  margin-top: 12px;
+  padding-top: 12px;
+}
+.usage-panel h3 {
+  margin: 0 0 10px;
+  font-size: 13px;
+  font-weight: 500;
+}
+.usage-panel h3 span,
+.usage-panel dt {
+  color: var(--color-text-secondary);
+  font-weight: 400;
+}
+.usage-panel dl {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 6px 12px;
+  margin: 0;
+}
+.usage-panel dd {
+  margin: 0;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+.usage-track {
+  height: 4px;
+  border-radius: 3px;
+  background: var(--color-border-strong);
+  margin-top: 10px;
+  overflow: hidden;
+}
+.usage-track i {
+  display: block;
+  height: 100%;
+  background: var(--color-text-secondary);
+}
 .agent-badge {
   display: flex;
   margin-left: auto;

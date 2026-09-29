@@ -9,6 +9,8 @@ fn main() {
         Status::decl(),
         Effort::decl(),
         Session::decl(),
+        ContextUsage::decl(),
+        TurnUsage::decl(),
         EventKind::decl(),
         Event::decl(),
         FileEntry::decl(),

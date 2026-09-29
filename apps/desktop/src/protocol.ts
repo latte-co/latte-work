@@ -40,7 +40,21 @@ export type Session = {
   unread: boolean;
   archived: boolean;
 };
+export type ContextUsage = {
+  model: string;
+  used_tokens: number;
+  window_tokens: number | null;
+};
+export type TurnUsage = {
+  input_tokens: number | null;
+  cache_read_tokens: number | null;
+  cache_write_tokens: number | null;
+  output_tokens: number | null;
+  model_time_ms: number | null;
+  steps: number | null;
+};
 export type EventKind =
+  | { kind: "usage"; context: ContextUsage | null; totals: TurnUsage | null }
   | { kind: "user"; text: string; request_id: string }
   | { kind: "text"; text: string }
   | { kind: "tool"; id: string; name: string; input: JsonValue }

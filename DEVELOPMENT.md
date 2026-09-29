@@ -260,3 +260,23 @@ Native Finder visual acceptance is separate from structural validation: double-c
 the resulting DMG and check the arrow and icon layout. Opening its directory in an
 existing Finder window can inherit that window's view settings. No Apple notarization
 or Developer ID signature is implied.
+
+## Context and usage telemetry
+
+The additive `usage` event is persisted and replayed with normal session events,
+shared by local/SSH transports; update the remote server to receive it. Old
+histories remain unknown. Presentation filters telemetry before merging streamed
+text. The composer exposes one neutral ring with a click/keyboard statistics panel.
+
+Claude assistant input + cache-read + cache-write tokens describe the latest
+main-agent request input snapshot, not a live tokenizer or cumulative context.
+Per-step output tokens are placeholders and are excluded. Result `modelUsage`
+provides contextWindow only for the exact reported model; its cumulative token
+counts and subagent totals are never used for context occupancy. Compaction/reset
+invalidates the snapshot until a subsequent request. Result usage and API duration
+are displayed for the latest submitted turn; sending clears those totals.
+Cache hit rate = cache-read / (uncached input + cache-read + cache-write).
+Missing capacity/counters remain unknown, including older CLI/provider responses.
+Context breakdown, tool duration, TTFT and generation TPS are not fabricated from
+wall time. Sources: [SDK cost tracking](https://code.claude.com/docs/en/agent-sdk/cost-tracking)
+and [SDK wire types](https://github.com/anthropics/claude-agent-sdk-python/blob/main/src/claude_agent_sdk/types.py).

@@ -3,7 +3,7 @@
 use super::{Action, AgentAdapter, AgentCommand, Input};
 use crate::providers::LaunchConfig;
 use anyhow::{Context, Result, bail};
-use latte_work_protocol::EventKind;
+use latte_work_protocol::{ContextUsage, EventKind, TurnUsage};
 use serde_json::{Value, json};
 use std::{io::Write, path::PathBuf, process::Stdio, time::Duration};
 use tokio::process::Command;
@@ -152,10 +152,19 @@ fn modes_from_help(help: &str) -> Result<Vec<latte_work_protocol::AgentPermissio
     Ok(modes)
 }
 
+// JSON counters must fit JavaScript's exact integer range on the shared wire.
+fn count(value: &Value, key: &str) -> Option<f64> {
+    value[key]
+        .as_u64()
+        .filter(|v| *v <= 9_007_199_254_740_991)
+        .map(|v| v as f64)
+}
+
 #[derive(Default)]
 pub struct Claude {
     streamed: bool,
     emitted_text: bool,
+    context: Option<ContextUsage>,
     phase: Phase,
 }
 #[derive(Default)]
@@ -405,6 +414,20 @@ impl Claude {
                     output.push(Action::NativeSession(id.into()));
                 }
             }
+            "system" if m["subtype"] == "compact_boundary" => {
+                self.context = None;
+                output.push(Action::Event(EventKind::Usage {
+                    context: None,
+                    totals: None,
+                }));
+            }
+            "conversation_reset" => {
+                self.context = None;
+                output.push(Action::Event(EventKind::Usage {
+                    context: None,
+                    totals: None,
+                }));
+            }
             "control_request" => {
                 let id = m["request_id"].as_str().unwrap_or_default().to_owned();
                 let request = &m["request"];
@@ -434,6 +457,33 @@ impl Claude {
                 }
             }
             "assistant" => {
+                if m["parent_tool_use_id"].is_null() {
+                    let message = &m["message"];
+                    let usage = &message["usage"];
+                    if let (Some(model), Some(input)) =
+                        (message["model"].as_str(), count(usage, "input_tokens"))
+                    {
+                        // Optional cache counters are zero only on a valid input usage report.
+                        let read = count(usage, "cache_read_input_tokens").unwrap_or(0.0);
+                        let write = count(usage, "cache_creation_input_tokens").unwrap_or(0.0);
+                        let context = ContextUsage {
+                            model: model.into(),
+                            used_tokens: input + read + write,
+                            window_tokens: self
+                                .context
+                                .as_ref()
+                                .filter(|c| c.model == model)
+                                .and_then(|c| c.window_tokens),
+                        };
+                        if self.context.as_ref() != Some(&context) {
+                            self.context = Some(context);
+                            output.push(Action::Event(EventKind::Usage {
+                                context: self.context.clone(),
+                                totals: None,
+                            }));
+                        }
+                    }
+                }
                 if let Some(blocks) = m["message"]["content"].as_array() {
                     for block in blocks {
                         match block["type"].as_str().unwrap_or_default() {
@@ -475,6 +525,25 @@ impl Claude {
                     bail!("Claude 在初始化完成前返回了任务结果");
                 }
                 self.phase = Phase::Finished;
+                if let Some(context) = &mut self.context {
+                    context.window_tokens =
+                        count(&m["modelUsage"][&context.model], "contextWindow")
+                            .filter(|v| *v > 0.0);
+                }
+                let usage = &m["usage"];
+                if self.context.is_some() || usage.is_object() {
+                    output.push(Action::Event(EventKind::Usage {
+                        context: self.context.clone(),
+                        totals: Some(TurnUsage {
+                            input_tokens: count(usage, "input_tokens"),
+                            cache_read_tokens: count(usage, "cache_read_input_tokens"),
+                            cache_write_tokens: count(usage, "cache_creation_input_tokens"),
+                            output_tokens: count(usage, "output_tokens"),
+                            model_time_ms: count(&m, "duration_api_ms"),
+                            steps: count(&m, "num_turns"),
+                        }),
+                    }));
+                }
                 let failed = m["is_error"].as_bool().unwrap_or(false)
                     || m["subtype"]
                         .as_str()
@@ -549,6 +618,54 @@ fn parse_commands(value: &Value) -> Result<Vec<latte_work_protocol::AgentSlashCo
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn usage_is_request_snapshot_not_cumulative_and_excludes_subagents() {
+        use super::*;
+        let mut agent = Claude {
+            phase: Phase::Running,
+            ..Default::default()
+        };
+        let message = json!({"type":"assistant", "message":{"model":"m", "usage":{
+            "input_tokens":100,"cache_read_input_tokens":600,"cache_creation_input_tokens":300,"output_tokens":1
+        },"content":[]}});
+        let first = agent.decode(message.clone()).unwrap();
+        assert!(
+            matches!(&first[0], Action::Event(EventKind::Usage { context:Some(c), .. }) if c.used_tokens == 1000.0)
+        );
+        assert!(agent.decode(message.clone()).unwrap().is_empty());
+        let mut child = message.clone();
+        child["parent_tool_use_id"] = json!("child");
+        child["message"]["usage"]["input_tokens"] = json!(9000);
+        assert!(agent.decode(child).unwrap().is_empty());
+        let result = agent.decode(json!({"type":"result","modelUsage":{"m":{"contextWindow":200000,"inputTokens":9999999}},"usage":{"input_tokens":200,"cache_read_input_tokens":1200,"cache_creation_input_tokens":600,"output_tokens":80},"duration_api_ms":52500,"num_turns":3})).unwrap();
+        assert!(
+            matches!(&result[0], Action::Event(EventKind::Usage {context:Some(c),totals:Some(t)}) if c.used_tokens == 1000.0 && c.window_tokens == Some(200000.0) && t.output_tokens == Some(80.0) && t.steps == Some(3.0))
+        );
+        agent
+            .decode(json!({"type":"system","subtype":"compact_boundary"}))
+            .unwrap();
+        assert!(agent.context.is_none());
+    }
+    #[test]
+    fn usage_missing_capacity_and_invalid_counters_are_not_guessed() {
+        use super::*;
+        assert_eq!(count(&json!({"n":-1}), "n"), None);
+        assert_eq!(count(&json!({"n":9007199254740992_u64}), "n"), None);
+        let mut agent = Claude {
+            phase: Phase::Running,
+            ..Default::default()
+        };
+        agent
+            .decode(json!({"type":"assistant","message":{"model":"m","usage":{"input_tokens":12}}}))
+            .unwrap();
+        let result = agent
+            .decode(json!({"type":"result","modelUsage":{"other":{"contextWindow":1000000}}}))
+            .unwrap();
+        assert!(
+            matches!(&result[0],Action::Event(EventKind::Usage {context:Some(c),..}) if c.window_tokens.is_none())
+        );
+    }
+
     #[test]
     fn permission_choices_follow_installed_cli_and_do_not_invent_modes() {
         let modes = super::modes_from_help(

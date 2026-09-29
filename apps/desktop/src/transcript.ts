@@ -32,6 +32,7 @@ export function transcript(events: Event[]): Item[] {
     )
     .map((e) => e.seq);
   for (const { seq, event } of events) {
+    if (event.kind === "usage") continue;
     if (event.kind === "user")
       items.push({ key: seq, type: "user", text: event.text });
     else if (event.kind === "text") {

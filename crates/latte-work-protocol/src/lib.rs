@@ -82,9 +82,30 @@ impl Effort {
         }
     }
 }
+/// Latest main-agent request input, never cumulative billing usage.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+pub struct ContextUsage {
+    pub model: String,
+    pub used_tokens: f64,
+    pub window_tokens: Option<f64>,
+}
+/// Main-agent totals for a single submitted turn. Missing telemetry stays unknown.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+pub struct TurnUsage {
+    pub input_tokens: Option<f64>,
+    pub cache_read_tokens: Option<f64>,
+    pub cache_write_tokens: Option<f64>,
+    pub output_tokens: Option<f64>,
+    pub model_time_ms: Option<f64>,
+    pub steps: Option<f64>,
+}
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum EventKind {
+    Usage {
+        context: Option<ContextUsage>,
+        totals: Option<TurnUsage>,
+    },
     User {
         text: String,
         request_id: String,

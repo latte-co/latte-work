@@ -10,6 +10,7 @@ import type { HostedProject } from "./projectCatalog";
 import { Composer } from "./Composer";
 import { useAgentPreferences } from "./useAgentPreferences";
 import { PermissionPicker } from "./PermissionPicker";
+import { UsageIndicator } from "./UsageIndicator";
 import { ModelPicker } from "./ModelPicker";
 import { TaskProjectPicker } from "./TaskProjectPicker";
 import { TurnTranscript } from "./TurnTranscript";
@@ -351,6 +352,12 @@ export function Conversation({
                 disabled={
                   !!active || sending || !projectName || !!session?.archived
                 }
+              />
+              <UsageIndicator
+                key={draftKey}
+                events={events}
+                sessionId={session?.id}
+                hidden={settingsOpen}
               />
               <ModelPicker
                 hostId={hostId}
