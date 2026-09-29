@@ -175,3 +175,32 @@ it("refreshes colors and fonts without recreating a live terminal or replaying i
     ),
   ).toBe(false);
 });
+
+it("closes a hidden terminal on App Quit and reports a failed close", async () => {
+  const { appClose } = await import("./appLifecycle");
+  let fail = true;
+  mocks.request.mockImplementation(async (_host: string, r: Request) => {
+    if (r.method === "close_terminal" && fail) throw new Error("offline");
+    return { kind: "ok" };
+  });
+  render(
+    <TerminalPane
+      hostId="remote"
+      terminal={terminal}
+      active={false}
+      connected={false}
+    />,
+  );
+  await act(async () => {
+    await expect(appClose.run()).rejects.toThrow("终端 sh · remote：offline");
+  });
+  fail = false;
+  await act(async () => {
+    appClose.resume();
+    await appClose.run();
+  });
+  expect(mocks.request).toHaveBeenCalledWith("remote", {
+    method: "close_terminal",
+    terminal_id: terminal.id,
+  });
+});

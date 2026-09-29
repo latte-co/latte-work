@@ -6,7 +6,7 @@ use latte_work_client::{Client, SshAuthentication};
 use latte_work_protocol::{Request, Response};
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     io::Read,
     os::unix::fs::PermissionsExt,
     path::PathBuf,
@@ -28,9 +28,11 @@ struct Connections {
     clients: Mutex<HashMap<String, Arc<Mutex<Client>>>>,
     passwords: Mutex<HashMap<String, CachedPassword>>,
     turns: Mutex<HashMap<(String, String), String>>,
+    terminals: Mutex<HashSet<(String, String)>>,
     admission: RwLock<()>,
     quitting: AtomicBool,
     exit_ready: AtomicBool,
+    close_ack: Mutex<Option<lifecycle::CloseAck>>,
 }
 struct CachedPassword {
     ssh: String,
@@ -237,7 +239,7 @@ async fn host_request(
     request: Request,
 ) -> Result<Response, String> {
     let _admission = state.admission.read().await;
-    if state.quitting.load(Ordering::SeqCst) {
+    if state.quitting.load(Ordering::SeqCst) && !matches!(request, Request::CloseTerminal { .. }) {
         return Err("正在停止任务并退出，请稍候".into());
     }
     if matches!(
@@ -275,6 +277,19 @@ async fn host_request(
             .await
             .insert((host_id.clone(), session_id.clone()), request_id.clone());
     }
+    // Keep ownership even if creation's transport response is lost.
+    let created_terminal = if let Request::CreateTerminal { terminal_id, .. } = &request {
+        let key = (host_id.clone(), terminal_id.clone());
+        let fresh = state.terminals.lock().await.insert(key.clone());
+        Some((key, fresh))
+    } else {
+        None
+    };
+    let closed_terminal = if let Request::CloseTerminal { terminal_id } = &request {
+        Some((host_id.clone(), terminal_id.clone()))
+    } else {
+        None
+    };
     let observed_turn = if let Request::Poll { session_id, .. } = &request {
         let key = (host_id.clone(), session_id.clone());
         state
@@ -298,6 +313,16 @@ async fn host_request(
         client.lock().await.request(request).await
     }
     .map_err(|e| format!("{e:#}"))?;
+    if matches!(response, Response::Error { .. })
+        && let Some((key, true)) = created_terminal
+    {
+        state.terminals.lock().await.remove(&key);
+    }
+    if matches!(response, Response::Ok)
+        && let Some(key) = closed_terminal
+    {
+        state.terminals.lock().await.remove(&key);
+    }
     if let Response::Events { session, .. } = &response
         && lifecycle::settled(&session.status)
         && let Some((key, request)) = observed_turn
@@ -537,6 +562,7 @@ fn main() {
             let _ = (window, event);
         })
         .invoke_handler(tauri::generate_handler![
+            lifecycle::app_close_ready,
             connect_host,
             disconnect_host,
             host_request,

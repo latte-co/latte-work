@@ -1,3 +1,4 @@
+import { useAppLifecycle } from "./appLifecycle";
 import { useRef } from "react";
 import { DraftStore } from "./drafts";
 import {
@@ -22,6 +23,7 @@ import { SshPasswordDialog } from "./SshPasswordDialog";
 import { useWorkbench } from "./useWorkbench";
 
 export default function App() {
+  useAppLifecycle();
   const workbench = useWorkbench();
   const drafts = useRef(new DraftStore()).current;
   const {

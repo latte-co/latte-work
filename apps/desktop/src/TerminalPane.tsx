@@ -1,3 +1,4 @@
+import { useAppClose } from "./appLifecycle";
 import { terminalTheme } from "./terminalTheme";
 import { useEffect, useRef, useState } from "react";
 import { Terminal } from "@xterm/xterm";
@@ -10,7 +11,7 @@ import type { TerminalInfo } from "./protocol";
 export function TerminalPane({
   hostId,
   terminal,
-  active,
+  active: visible,
   connected,
 }: {
   hostId: string;
@@ -31,8 +32,25 @@ export function TerminalPane({
   const [ready, setReady] = useState(false);
   const [finished, setFinished] = useState(false);
   const [lost, setLost] = useState(false);
+  const [closing, setClosing] = useState(false);
+  const active = visible && !closing;
+  useAppClose(
+    `终端 ${terminal.title} · ${hostId}`,
+    async () => {
+      setClosing(true);
+      writable.current = false;
+      await chain.current.catch(() => undefined);
+      await request(hostId, {
+        method: "close_terminal",
+        terminal_id: terminal.id,
+      });
+      exited.current = true;
+      setFinished(true);
+    },
+    () => setClosing(false),
+  );
   writable.current =
-    connected && !error && ready && !finished && !terminal.exited;
+    !closing && connected && !error && ready && !finished && !terminal.exited;
 
   useEffect(
     () => () => {

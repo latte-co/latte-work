@@ -1,3 +1,4 @@
+import { useAppClose } from "./appLifecycle";
 import { CodeView } from "./CodeView";
 import { useEffect, useState } from "react";
 import { FileText, Folder, ArrowLeft, RefreshCw } from "lucide-react";
@@ -9,7 +10,7 @@ export function WorkspaceFiles({
   hostId,
   project,
   tab,
-  active,
+  active: visible,
   path,
   file,
   navigate,
@@ -22,6 +23,15 @@ export function WorkspaceFiles({
   file: string;
   navigate: (value: { path?: string; file?: string }) => void;
 }) {
+  const [closing, setClosing] = useState(false);
+  const active = visible && !closing;
+  useAppClose(
+    `${tab === "diff" ? "改动" : "文件"} · ${project.name}`,
+    () => {
+      setClosing(true);
+    },
+    () => setClosing(false),
+  );
   const [entries, setEntries] = useState<FileEntry[]>([]);
   const [content, setContent] = useState("");
   const [error, setError] = useState("");

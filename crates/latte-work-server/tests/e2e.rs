@@ -2651,3 +2651,54 @@ async fn usage_snapshot_survives_bridge_reconnect_without_billing_inflation() {
         serde_json::to_value(&replay).unwrap()
     );
 }
+
+#[tokio::test]
+async fn native_idle_shutdown_preserves_busy_terminal_then_exits_after_close() {
+    let mut host = Host::start().await;
+    let mut client = host.client().await;
+    let project = tempfile::tempdir().unwrap();
+    let project_id = terminal_project(&mut client, project.path()).await;
+    let id = uuid::Uuid::new_v4().to_string();
+    assert!(matches!(
+        ask(
+            &mut client,
+            Request::CreateTerminal {
+                project_id,
+                terminal_id: id.clone(),
+                cols: 80,
+                rows: 24
+            }
+        )
+        .await,
+        Response::Terminal { .. }
+    ));
+    assert!(!client.shutdown_if_idle().await.unwrap());
+    terminal_write(
+        &mut client,
+        &id,
+        b"echo $$ > shell.pid; printf '\\nIDLE:%s\\n' alive\n",
+    )
+    .await;
+    terminal_until(&mut client, &id, &mut 0.0, "IDLE:alive\r\n").await;
+    let pid = Pid::from_raw(
+        std::fs::read_to_string(project.path().join("shell.pid"))
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap(),
+    );
+    assert!(matches!(
+        ask(&mut client, Request::CloseTerminal { terminal_id: id }).await,
+        Response::Ok
+    ));
+    assert!(client.shutdown_if_idle().await.unwrap());
+    let deadline = Instant::now() + Duration::from_secs(6);
+    while host.process.try_wait().unwrap().is_none() {
+        assert!(Instant::now() < deadline);
+        tokio::time::sleep(Duration::from_millis(30)).await;
+    }
+    assert!(
+        kill(pid, None).is_err(),
+        "terminal shell survived idle shutdown"
+    );
+}

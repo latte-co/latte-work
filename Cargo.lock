@@ -1747,6 +1747,7 @@ dependencies = [
  "anyhow",
  "futures-util",
  "latte-work-protocol",
+ "serde",
  "serde_json",
  "tokio",
  "tokio-util",

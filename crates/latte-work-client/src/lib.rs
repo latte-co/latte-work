@@ -15,6 +15,7 @@ pub struct Client {
     output: FramedRead<ChildStdout, LinesCodec>,
     broken: bool,
     permission_settings: bool,
+    server_id: String,
 }
 
 pub enum SshAuthentication<'a> {
@@ -65,13 +66,16 @@ impl Client {
             output,
             broken: false,
             permission_settings: false,
+            server_id: String::new(),
         };
         match client.request(Request::Hello { version: VERSION }).await? {
             Response::Hello {
                 version: VERSION,
                 permission_settings,
+                server_id,
                 ..
             } => {
+                client.server_id = server_id;
                 client.permission_settings = permission_settings;
                 Ok(client)
             }
@@ -96,11 +100,34 @@ impl Client {
         {
             bail!("此 Server 不支持权限设置，请更新 Server 后重新连接；任务未发送");
         }
+        self.exchange(&request).await
+    }
+    /// Native-only idle shutdown on the connected instance. Busy daemons are preserved.
+    pub async fn shutdown_if_idle(&mut self) -> Result<bool> {
+        use latte_work_protocol::lifecycle;
+        let response: lifecycle::Response = self
+            .exchange(&lifecycle::Request::PrepareUpgrade {
+                server_id: self.server_id.clone(),
+            })
+            .await?;
+        match response {
+            lifecycle::Response::UpgradeReady => Ok(true),
+            lifecycle::Response::Error { .. } => Ok(false),
+            _ => bail!("后台退出响应不兼容"),
+        }
+    }
+    async fn exchange<Q: serde::Serialize, R: serde::de::DeserializeOwned>(
+        &mut self,
+        request: &Q,
+    ) -> Result<R> {
+        if self.broken {
+            bail!("连接已失效，请重新连接；任务不会自动重发");
+        }
         // If this future is dropped (for example by a quit deadline), its response
         // may still arrive. Never reuse a transport with an ambiguous frame boundary.
         self.broken = true;
         let result = tokio::time::timeout(Duration::from_secs(25), async {
-            let mut data = serde_json::to_vec(&request)?;
+            let mut data = serde_json::to_vec(request)?;
             if data.len() > MAX_FRAME {
                 bail!("请求过大");
             }
@@ -108,7 +135,7 @@ impl Client {
             self.input.write_all(&data).await?;
             self.input.flush().await?;
             let line = self.output.next().await.context("Host 连接已关闭")??;
-            Ok::<_, anyhow::Error>(serde_json::from_str::<Response>(&line)?)
+            Ok::<_, anyhow::Error>(serde_json::from_str::<R>(&line)?)
         })
         .await;
         match result {

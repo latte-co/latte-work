@@ -225,10 +225,21 @@ unreachable host keeps the App open and reports the failure for reconnection/ret
 No force-quit fallback silently leaves a running Agent behind. OS force kill/crash
 cannot run this cleanup and remains outside this graceful-exit guarantee.
 
-Local and remote server daemons remain alive: they own persistent state and may
-serve other clients. The quit flow does not cancel unrelated sessions or close
-server-owned terminal shells. App transport pipes close on exit; connect-local and
-SSH bridges end on EOF. Reopening reconciles events without replaying prompts.
+Explicit Quit first emits a native `app-close-requested` transaction. Every mounted
+Tab registers `useAppClose`, including hidden tabs: terminal panes await PTY close;
+file/change panes pause refresh. Tabs own their cleanup; unmounting or hiding a
+window is not a shutdown signal. Failures are named and prevent exit, and an
+abort notification resumes tabs that can resume. Native code waits for the matching
+transaction acknowledgement (stale acknowledgements cannot approve a later Quit),
+blocks new work, and retains ownership tracking for ambiguous terminal creation.
+The native fallback closes any remaining App-owned terminals and stops owned Agent
+turns before dropping connections. The entire flow has a 30-second deadline.
+
+The local daemon receives the existing instance-bound idle/drain handshake after
+cleanup; busy/shared resources veto daemon exit without being killed. Remote daemons
+remain alive. No unrelated sessions or terminal IDs are enumerated and killed.
+App transport pipes close on exit; connect-local and SSH bridges end on EOF.
+Reopening reconciles events without replaying prompts.
 
 
 ## macOS drag-install packaging
