@@ -50,8 +50,26 @@ it("manages App Providers while every Server is unavailable", async () => {
   fireEvent.change(screen.getByLabelText("凭据"), {
     target: { value: "test-key" },
   });
+  fireEvent.click(screen.getByRole("button", { name: "添加模型" }));
+  fireEvent.change(screen.getByLabelText("模型 ID 1"), {
+    target: { value: "model-two" },
+  });
+  fireEvent.click(screen.getByRole("button", { name: "添加模型" }));
+  fireEvent.change(screen.getByLabelText("模型 ID 2"), {
+    target: { value: "remove-me" },
+  });
+  fireEvent.click(screen.getByRole("button", { name: "删除模型 2" }));
   fireEvent.click(screen.getByRole("button", { name: "保存 Provider" }));
   await screen.findByText("App-only");
+  expect(invoke).toHaveBeenCalledWith("provider_request", {
+    request: {
+      method: "save_provider",
+      provider: expect.objectContaining({
+        model: "model",
+        models: ["model-two"],
+      }),
+    },
+  });
   fireEvent.click(screen.getByRole("button", { name: "删除" }));
   fireEvent.click(screen.getByRole("button", { name: "确认删除" }));
   await waitFor(() => expect(screen.queryByText("App-only")).toBeNull());

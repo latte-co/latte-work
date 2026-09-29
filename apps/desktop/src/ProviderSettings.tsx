@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { Plus } from "lucide-react";
+import { Plus, Trash2 } from "lucide-react";
 import { Select } from "./Select";
 import { message, providerRequest, type ProviderRequest } from "./api";
 import type {
@@ -106,13 +106,9 @@ export function ProviderSettings({
     setError("");
   }
   return (
-    <div className="settings-panel-content">
-      <h2>Provider</h2>
-      <p>统一管理模型服务，在 Code Agent 设置中关联使用。</p>
-      <p className="form-note">
-        配置保存在 App 中，无需连接主机。关联后，所选环境的 Agent
-        每轮使用最新配置。
-      </p>
+    <div className="settings-panel-content provider-settings">
+      <h2>模型服务</h2>
+      <p>配置模型服务，并在连接与 Agent 中关联使用。</p>
       {error && (
         <div className="form-error" role="alert">
           {error}
@@ -145,7 +141,7 @@ export function ProviderSettings({
                 </div>
                 <div className="provider-entry-actions">
                   <button
-                    className="text-button"
+                    className="secondary"
                     disabled={busy || !!draft}
                     onClick={() => edit(p)}
                   >
@@ -153,7 +149,7 @@ export function ProviderSettings({
                   </button>
                   {!catalog.bindings.some((b) => b.provider_id === p.id) && (
                     <button
-                      className="text-button"
+                      className="text-button danger"
                       disabled={busy || !!draft}
                       onClick={() =>
                         remove === p.id
@@ -261,8 +257,8 @@ export function ProviderSettings({
                     label="认证方式"
                     value={draft.auth}
                     options={[
-                      { value: "bearer", label: "Bearer Token" },
-                      { value: "api_key", label: "API Key（x-api-key）" },
+                      { value: "bearer", label: "Authorization: Bearer" },
+                      { value: "api_key", label: "x-api-key" },
                     ]}
                     disabled={busy}
                     onChange={(value) =>
@@ -273,21 +269,70 @@ export function ProviderSettings({
                     }
                   />
                 </label>
-                <label className="provider-models-field">
-                  可选模型 ID（每行一个）
-                  <textarea
-                    aria-label="可选模型 ID"
-                    placeholder={"例如：claude-sonnet-5\nclaude-opus-5"}
-                    value={draft.models.join("\n")}
-                    onChange={(e) =>
-                      setDraft({ ...draft, models: e.target.value.split("\n") })
+                <section
+                  className="provider-models-field"
+                  aria-label="模型目录"
+                >
+                  <h4>模型目录</h4>
+                  <table className="provider-model-table">
+                    <thead>
+                      <tr>
+                        <th>模型 ID</th>
+                        <th>操作</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {draft.models.map((model, index) => (
+                        <tr key={index}>
+                          <td>
+                            <input
+                              aria-label={`模型 ID ${index + 1}`}
+                              maxLength={256}
+                              placeholder="服务端提供的完整模型 ID"
+                              value={model}
+                              onChange={(e) =>
+                                setDraft({
+                                  ...draft,
+                                  models: draft.models.map((value, i) =>
+                                    i === index ? e.target.value : value,
+                                  ),
+                                })
+                              }
+                            />
+                          </td>
+                          <td>
+                            <button
+                              type="button"
+                              className="icon-button"
+                              aria-label={`删除模型 ${index + 1}`}
+                              onClick={() =>
+                                setDraft({
+                                  ...draft,
+                                  models: draft.models.filter(
+                                    (_, i) => i !== index,
+                                  ),
+                                })
+                              }
+                            >
+                              <Trash2 size={16} />
+                            </button>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                  <button
+                    type="button"
+                    className="secondary"
+                    onClick={() =>
+                      setDraft({ ...draft, models: [...draft.models, ""] })
                     }
-                    rows={3}
-                  />
-                  <small>
-                    默认模型自动包含在选择列表中。填写此服务实际支持的模型 ID。
-                  </small>
-                </label>
+                  >
+                    <Plus size={16} />
+                    添加模型
+                  </button>
+                  <small>默认模型自动包含在选择列表中。</small>
+                </section>
                 <label>
                   凭据
                   <input

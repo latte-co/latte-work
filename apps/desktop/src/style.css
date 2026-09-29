@@ -3055,18 +3055,6 @@ button[aria-checked="true"] .model-option-check {
 .provider-form label:last-of-type {
   grid-column: 1 / -1;
 }
-.provider-models-field textarea {
-  width: 100%;
-  display: block;
-  resize: vertical;
-  min-height: 84px;
-  padding: var(--space-3);
-  margin-top: 9px;
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-control);
-  background: var(--color-input);
-  font-size: var(--text-sm);
-}
 .provider-models-field small {
   display: block;
   margin-top: var(--space-2);
@@ -3208,4 +3196,75 @@ button[aria-checked="true"] .model-option-check {
   padding: 0 12px;
   background: var(--color-hover);
   border-radius: 8px;
+}
+
+/* Shared settings surfaces: one spacing and surface treatment across tabs. */
+.settings-panel-content .agent-card,
+.settings-panel-content .provider-entry,
+.settings-panel-content .provider-form {
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-panel);
+  background: var(--color-surface);
+  padding: var(--space-5);
+}
+.settings-panel-content .agent-card,
+.settings-panel-content .provider-form {
+  margin: var(--space-5) 0;
+}
+.provider-entry {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+}
+.provider-entry .provider-choice {
+  padding: 0;
+  flex: 1;
+  min-width: 0;
+}
+.provider-entry-actions {
+  padding: 0;
+  flex-shrink: 0;
+  gap: var(--space-2);
+}
+.provider-settings > .secondary {
+  width: auto;
+}
+.provider-models-field h4 {
+  font-size: var(--text-md);
+  font-weight: 500;
+  margin: 0 0 var(--space-3);
+}
+.provider-model-table {
+  width: 100%;
+  border-collapse: collapse;
+  margin-bottom: var(--space-3);
+}
+.provider-model-table th {
+  text-align: left;
+  font-size: var(--text-sm);
+  color: var(--color-text-secondary);
+  font-weight: 400;
+  padding: 0 0 var(--space-2);
+}
+.provider-model-table td {
+  padding: var(--space-2) 0;
+  border-top: 1px solid var(--color-border-subtle);
+}
+.provider-model-table td:last-child {
+  width: 48px;
+  text-align: right;
+}
+.provider-model-table input {
+  margin: 0;
+}
+.provider-entry .danger {
+  color: var(--color-danger);
+}
+@media (max-width: 700px) {
+  .provider-entry {
+    flex-wrap: wrap;
+  }
+  .provider-form fieldset {
+    grid-template-columns: minmax(0, 1fr);
+  }
 }
