@@ -1,4 +1,4 @@
-/** Keep the label stable; only the small three-dot indicator moves. */
+/** Keep accessible text stable while the dots and label share one visual cycle. */
 export function WorkingStatus({
   label,
   animated,
@@ -13,7 +13,7 @@ export function WorkingStatus({
         <i />
         <i />
       </span>
-      <span>{label.replace(/…$/, "")}</span>
+      <span className="working-label">{label.replace(/…$/, "")}</span>
     </div>
   );
 }

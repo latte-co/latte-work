@@ -1581,7 +1581,8 @@ button svg {
   align-items: center;
   gap: var(--space-2);
   color: var(--color-text-secondary);
-  font-size: var(--text-xs);
+  font-size: var(--text-lg);
+  line-height: 1.65;
   padding-top: 18px;
 }
 .working-dots {
@@ -1599,27 +1600,57 @@ button svg {
   border-radius: 50%;
   background: currentColor;
   opacity: 0.5;
-  animation: working-dot 1.4s ease-in-out infinite;
 }
-.working-dots i:nth-child(2) {
-  animation-delay: 0.16s;
+.working[data-animated="true"] .working-dots i {
+  animation: working-dot 3s ease-in-out infinite;
 }
-.working-dots i:nth-child(3) {
-  animation-delay: 0.32s;
+.working[data-animated="true"] .working-dots i:nth-child(2) {
+  animation-delay: 0.2s;
 }
-.working[data-animated="false"] .working-dots i {
-  animation: none;
+.working[data-animated="true"] .working-dots i:nth-child(3) {
+  animation-delay: 0.4s;
+}
+.working[data-animated="true"] .working-label {
+  background: linear-gradient(
+    100deg,
+    var(--color-text-secondary) 42%,
+    var(--color-text) 50%,
+    var(--color-text-secondary) 58%
+  );
+  background-size: 300% 100%;
+  background-position: 100% 0;
+  background-clip: text;
+  -webkit-background-clip: text;
+  color: transparent;
+  animation: working-label 3s ease-in-out infinite;
 }
 @keyframes working-dot {
   0%,
-  60%,
+  16%,
   100% {
     transform: translateY(0);
     opacity: 0.4;
   }
-  30% {
+  8% {
     transform: translateY(-3px);
     opacity: 0.9;
+  }
+}
+/* The last dot lands at 0.88s; the label sweep starts at 0.96s. */
+@keyframes working-label {
+  0%,
+  32% {
+    background-position: 100% 0;
+  }
+  80%,
+  100% {
+    background-position: 0% 0;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .working[data-animated="true"] .working-label {
+    background: none;
+    color: var(--color-text-secondary);
   }
 }
 .spin {
