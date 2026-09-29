@@ -299,3 +299,25 @@ phase changes are deduplicated and subagent phase events ignored. See the
 The UI combines phases with current-turn pending tool IDs, explicit approval,
 connection and cancel state. Silence never implies thinking; terminal sessions
 remove the status line. Both progress and usage are excluded before text merging.
+
+## Agent Shell environment
+
+At daemon startup, the host Server captures exported variables from the user's
+default shell (`SHELL`, falling back to the account shell), using `-ilc` in the
+home directory. zsh, bash, sh/dash and fish are supported; each shell follows its
+own startup-file rules (Bash login profiles must source `.bashrc` if desired).
+The snapshot stays in memory and is reused for Agent discovery, permission probes,
+command discovery and execution. It does not mutate the daemon environment or
+Claude settings. Local and SSH Servers capture independently on their own hosts.
+
+Shell exports overlay inherited variables; host identity, cwd and `LATTE_WORK_*`
+controls remain authoritative. Adapter-specific environment removals/overrides and
+the explicit per-turn Provider settings apply afterwards. Shell aliases/functions
+and project-directory hooks are not imported. New shell configuration is loaded
+on Server restart. For service managers or curated environments, set
+`LATTE_WORK_AGENT_ENV=inherit` before starting Server to skip shell initialization.
+
+Capture has a 3-second timeout, a 512 KiB output cap and process-group cleanup.
+Startup output is discarded using a unique NUL-delimited marker, not logged.
+Failure retains the inherited environment and adds a diagnostic to Agent details.
+Environment values, including credentials, are never persisted in the snapshot.

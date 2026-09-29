@@ -14,6 +14,11 @@ for line in sys.stdin:
     elif value['type']=='user':
         text=value['message']['content']
         emit({'type':'system','subtype':'init','session_id':'11111111-1111-4111-8111-111111111111'})
+        if text=='environment':
+            output=subprocess.check_output(['latte-env-fixture'],text=True)
+            emit({'type':'assistant','message':{'content':[{'type':'text','text':output}]}})
+            emit({'type':'result','subtype':'success','is_error':False})
+            continue
         if text=='usage':
             emit({'type':'stream_event','event':{'type':'content_block_delta','delta':{'type':'thinking_delta','thinking':'private fixture reasoning'}}})
             emit({'type':'stream_event','event':{'type':'content_block_stop'}})

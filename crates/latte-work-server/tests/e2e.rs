@@ -16,17 +16,22 @@ struct Host {
 }
 impl Host {
     async fn start() -> Self {
+        Self::start_with_environment(&[]).await
+    }
+    async fn start_with_environment(env: &[(&str, &std::ffi::OsStr)]) -> Self {
         let directory = tempfile::Builder::new()
             .prefix("lw-")
             .tempdir_in("/tmp")
             .unwrap();
         let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/claude.py");
         let process = Command::new(env!("CARGO_BIN_EXE_latte-work-server"))
+            .env("LATTE_WORK_AGENT_ENV", "inherit")
             .arg("serve")
             .arg("--state-dir")
             .arg(directory.path())
             .env("LATTE_WORK_CLAUDE", fixture)
             .env("CLAUDE_CONFIG_DIR", directory.path().join("claude-config"))
+            .envs(env.iter().copied())
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -1805,6 +1810,7 @@ async fn terminal_daemon_shutdown_cleans_up_and_restart_never_replays() {
     );
     drop(client);
     host.process = Command::new(env!("CARGO_BIN_EXE_latte-work-server"))
+        .env("LATTE_WORK_AGENT_ENV", "inherit")
         .arg("serve")
         .arg("--state-dir")
         .arg(host.directory.path())
@@ -2700,5 +2706,43 @@ async fn native_idle_shutdown_preserves_busy_terminal_then_exits_after_close() {
     assert!(
         kill(pid, None).is_err(),
         "terminal shell survived idle shutdown"
+    );
+}
+
+#[tokio::test]
+async fn agents_inherit_shell_exports_with_a_minimal_daemon_path() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let shell = dir.path().join("bash");
+    let tool = dir.path().join("latte-env-fixture");
+    std::fs::write(
+        &tool,
+        r#"#!/bin/sh
+printf '%s' "$LATTE_TEST_VALUE"
+"#,
+    )
+    .unwrap();
+    std::fs::write(&shell, format!("#!/bin/sh\nexport PATH='{}':/usr/bin:/bin\nexport LATTE_TEST_VALUE='shell-loaded'\necho startup-banner\nexec /bin/sh -c \"$2\"\n", dir.path().display())).unwrap();
+    for path in [&shell, &tool] {
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    let host = Host::start_with_environment(&[
+        ("SHELL", shell.as_os_str()),
+        ("PATH", std::ffi::OsStr::new("/usr/bin:/bin")),
+        ("LATTE_WORK_AGENT_ENV", std::ffi::OsStr::new("shell")),
+    ])
+    .await;
+    let mut client = host.client().await;
+    let project = tempfile::tempdir().unwrap();
+    let id = session(&mut client, project.path()).await;
+    assert!(matches!(
+        send(&mut client, &id, "env-request", "environment").await,
+        Response::Accepted { .. }
+    ));
+    let events = wait(&mut client, &id, Status::Completed).await;
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(&e.event, EventKind::Text {text} if text == "shell-loaded"))
     );
 }

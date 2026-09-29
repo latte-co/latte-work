@@ -6,7 +6,6 @@ use anyhow::{Context, Result, bail};
 use latte_work_protocol::{ContextUsage, EventKind, ExecutionPhase, TurnUsage};
 use serde_json::{Value, json};
 use std::{io::Write, path::PathBuf, process::Stdio, time::Duration};
-use tokio::process::Command;
 
 pub const MODEL_ALIASES: &[&str] = &["sonnet", "opus", "haiku", "fable"];
 
@@ -39,7 +38,7 @@ pub(super) async fn permission_modes(
     binary: &str,
 ) -> Result<Vec<latte_work_protocol::AgentPermissionMode>> {
     use tokio::io::AsyncReadExt;
-    let mut child = Command::new(binary)
+    let mut child = crate::agent_environment::command(binary)
         .arg("--help")
         .env("NO_COLOR", "1")
         .stdin(Stdio::null())
@@ -218,7 +217,7 @@ pub(super) async fn discover() -> (String, latte_work_protocol::AgentInfo) {
     let binary = binary();
     let probe = tokio::time::timeout(
         Duration::from_secs(5),
-        Command::new(&binary)
+        crate::agent_environment::command(&binary)
             .arg("--version")
             .stdin(Stdio::null())
             .kill_on_drop(true)
@@ -272,7 +271,7 @@ impl AgentAdapter for Claude {
         resume: Option<&str>,
         config: &LaunchConfig,
     ) -> Result<AgentCommand> {
-        let mut command = Command::new(binary);
+        let mut command = crate::agent_environment::command(binary);
         command.args([
             "-p",
             "--input-format",

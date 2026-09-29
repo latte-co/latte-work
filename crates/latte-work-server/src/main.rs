@@ -1,4 +1,5 @@
 //! A single host daemon; `connect` is a disposable local/SSH byte bridge.
+mod agent_environment;
 mod agents;
 mod attachments;
 mod files;
@@ -153,7 +154,11 @@ async fn serve(dir: &Path) -> Result<()> {
         std::fs::remove_file(&socket)?;
     }
     let database = Arc::new(Mutex::new(store::Store::open(&dir.join("state.sqlite"))?));
-    let (agent_binary, agent) = agents::discover().await;
+    let environment_warning = agent_environment::initialize().await;
+    let (agent_binary, mut agent) = agents::discover().await;
+    if let Some(warning) = environment_warning {
+        agent.detail = format!("{} · {warning}", agent.detail);
+    }
     let service = Service {
         attachments: Arc::new(Mutex::new(attachments::Attachments::new(dir)?)),
         lifecycle: Arc::new(upgrade::Lifecycle::new()?),
