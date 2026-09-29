@@ -5,7 +5,8 @@ requires actionlint and ShellCheck (install with your package manager). Host ser
 and Linux; v0.1 desktop is validated on macOS. No Windows runtime claim.
 
 `make setup`, `make dev` starts the native application. `make ci` runs the local
-gate; `make package` builds an app without Developer ID signing and standalone release host server.
+gate; `make package` builds an app without Developer ID signing and standalone release host server,
+and on macOS also produces the verified drag-install DMG described below.
 Use `make build` for a debug native app bundle. On macOS, both build modes
 finish with project-owned ad-hoc signing and strict bundle verification. The CLI fixture never calls a model.
 
@@ -228,3 +229,34 @@ Local and remote server daemons remain alive: they own persistent state and may
 serve other clients. The quit flow does not cancel unrelated sessions or close
 server-owned terminal shells. App transport pipes close on exit; connect-local and
 SSH bridges end on EOF. Reopening reconciles events without replaying prompts.
+
+
+## macOS drag-install packaging
+
+- `make package`: build the release server and desktop, ad-hoc sign, then create the DMG.
+- `make package-dmg`: package the existing signed release app without rebuilding it.
+- Output: `$CARGO_TARGET_DIR/release/bundle/dmg/Latte-Work-<version>-<arch>.dmg`
+  and the adjacent `.dmg.sha256`. The default target directory is this checkout's `target/`.
+  Version and architecture come from the app bundle and Mach-O binary, not hardcoded release names.
+
+`scripts/package-dmg.sh` provisions a private Python venv in the target directory
+using `scripts/dmg-requirements.txt` (pinned versions). macOS, Python 3 with venv/pip,
+Command Line Tools and network access on first use are required. It never installs
+global Python packages; unchanged dependencies are reused offline.
+
+`scripts/package-dmg.py` owns the 600×400 white installation window, large app and
+Applications icons, and center arrow. All staging and alias paths are canonicalized
+before creating Finder metadata, avoiding the `/var` versus `/private/var` alias bug.
+It validates the background reference, arrow pixels, icon positions, hidden window
+chrome, Applications symlink, image checksum and strict bundle signature. It remounts
+the compressed image read-only at a different path, checks the layout again, and
+compares the desktop/server binary hashes with the source bundle.
+
+The existing output is replaced only after validation succeeds. Temporary mounts
+are detached on failure; failed staging directories are retained for diagnosis.
+Run packaging serially within a checkout: do not run `make prepare`, debug builds
+or another packaging process concurrently, since they share the bundled server.
+Native Finder visual acceptance is separate from structural validation: double-click
+the resulting DMG and check the arrow and icon layout. Opening its directory in an
+existing Finder window can inherit that window's view settings. No Apple notarization
+or Developer ID signature is implied.
