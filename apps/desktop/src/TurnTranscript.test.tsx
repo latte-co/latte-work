@@ -2,7 +2,11 @@
 import { cleanup, render, screen } from "@testing-library/react";
 import { afterEach, expect, it } from "vitest";
 import type { Event, EventKind, Status } from "./protocol";
-import { TurnTranscript, turnTranscript } from "./TurnTranscript";
+import {
+  TurnTranscript,
+  turnTranscript,
+  formatElapsed,
+} from "./TurnTranscript";
 import { MessageContent } from "./MessageContent";
 afterEach(cleanup);
 const user = (text: string): EventKind => ({
@@ -55,7 +59,7 @@ it("folds only the process of each completed turn and keeps its final answer out
       )}
     </TurnTranscript>,
   );
-  const details = screen.getByText("查看执行过程").closest("details")!;
+  const details = screen.getByText("用时 0秒").closest("details")!;
   expect(details.open).toBe(false);
   expect(details.contains(screen.getByText("progress"))).toBe(true);
   expect(details.contains(screen.getByText("final"))).toBe(false);
@@ -93,4 +97,49 @@ it("removes reply copying while retaining code copying", () => {
   render(<MessageContent text={"Answer\n\n```ts\nconst a = 1;\n```"} />);
   expect(screen.queryByRole("button", { name: "复制回复" })).toBeNull();
   expect(screen.getByRole("button", { name: "复制代码" })).toBeTruthy();
+});
+
+it("hides model metadata, preserves other notices and copies only the final answer", () => {
+  const rows = events(
+    user("q"),
+    { kind: "notice", text: "模型：fable" },
+    text("progress"),
+    tool,
+    result,
+    { kind: "notice", text: "Provider：Local · 模型：fable" },
+    { kind: "notice", text: "connection warning" },
+    text("final"),
+    state("completed"),
+  );
+  const turn = turnTranscript(rows)[0];
+  expect(turn.process.filter((i) => i.type === "event")).toEqual([
+    expect.objectContaining({
+      value: { kind: "notice", text: "connection warning" },
+    }),
+  ]);
+  render(
+    <TurnTranscript events={rows}>
+      {(item) => (
+        <div key={item.key}>{item.type === "assistant" ? item.text : null}</div>
+      )}
+    </TurnTranscript>,
+  );
+  expect(screen.getAllByRole("button", { name: "复制回复" })).toHaveLength(1);
+  expect(screen.getByRole("button", { name: "复制回复" }).textContent).toBe("");
+  expect(formatElapsed(285000)).toBe("用时 4分 45秒");
+  expect(formatElapsed(-1)).toBe("执行过程");
+});
+it("keeps copy for a completed direct answer without a process", () => {
+  render(
+    <TurnTranscript
+      events={events(user("q"), text("final"), state("completed"))}
+    >
+      {(item) => (
+        <span key={item.key}>
+          {item.type === "assistant" ? item.text : null}
+        </span>
+      )}
+    </TurnTranscript>,
+  );
+  expect(screen.getByRole("button", { name: "复制回复" })).toBeTruthy();
 });

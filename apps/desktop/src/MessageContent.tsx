@@ -11,14 +11,22 @@ import remarkGfm from "remark-gfm";
 import { Check, Copy } from "lucide-react";
 import { message } from "./api";
 
-export function CopyButton({ text, label }: { text: string; label: string }) {
+export function CopyButton({
+  text,
+  label,
+  iconOnly = false,
+}: {
+  text: string;
+  label: string;
+  iconOnly?: boolean;
+}) {
   const [state, setState] = useState("");
   useEffect(() => setState(""), [text]);
   return (
     <span className="copy-action">
       <button
-        aria-label={label}
-        title={label}
+        aria-label={state === "已复制" ? state : label}
+        title={state || label}
         onClick={() => {
           void copyText(text).then(
             () => setState("已复制"),
@@ -27,7 +35,7 @@ export function CopyButton({ text, label }: { text: string; label: string }) {
         }}
       >
         {state === "已复制" ? <Check size={14} /> : <Copy size={14} />}
-        {state === "已复制" ? state : label}
+        {!iconOnly && (state === "已复制" ? state : label)}
       </button>
       {state.startsWith("复制失败") && <span role="alert">{state}</span>}
     </span>

@@ -1118,15 +1118,34 @@ button svg {
   font-size: var(--text-xs);
 }
 .turn-process {
-  margin: 0 0 20px;
+  margin: 0 0 16px;
 }
 .turn-process > summary {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  list-style: none;
+  font-weight: 400;
   cursor: pointer;
   color: var(--color-text-muted);
   font-family: var(--font-ui);
   font-size: var(--text-sm);
   padding: 8px 0;
   border-bottom: 1px solid var(--color-border-subtle);
+}
+.turn-process > summary::-webkit-details-marker {
+  display: none;
+}
+.turn-process[open] > summary svg {
+  transform: rotate(90deg);
+}
+.final-reply-actions {
+  margin: -4px 0 24px;
+}
+.final-reply-actions button {
+  width: 28px;
+  padding: 6px;
+  color: var(--color-text-muted);
 }
 .turn-process > summary:hover {
   color: var(--color-text-secondary);
@@ -1135,7 +1154,7 @@ button svg {
   background: var(--color-focus-background);
 }
 .turn-process-content {
-  padding-top: 20px;
+  padding-top: 16px;
 }
 .markdown p {
   margin: 0 0 14px;
