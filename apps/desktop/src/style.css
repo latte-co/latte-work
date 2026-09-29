@@ -1160,24 +1160,41 @@ button svg {
 .turn-process-content {
   padding-top: 16px;
 }
+.markdown {
+  font-size: var(--text-lg);
+  line-height: 1.65;
+}
 .markdown p {
-  margin: 0 0 14px;
+  margin: 0 0 12px;
 }
 .markdown h1,
 .markdown h2,
-.markdown h3 {
+.markdown h3,
+.markdown h4,
+.markdown h5,
+.markdown h6 {
   color: var(--color-text);
-  margin: var(--space-5) 0 10px;
-  font-weight: 550;
+  margin: 16px 0 8px;
+  font-weight: 600;
+  line-height: 1.5;
 }
 .markdown h1 {
-  font-size: 22px;
+  font-size: var(--text-subheading);
 }
 .markdown h2 {
-  font-size: 19px;
+  font-size: var(--text-body);
 }
-.markdown h3 {
-  font-size: var(--text-subheading);
+.markdown h3,
+.markdown h4,
+.markdown h5,
+.markdown h6 {
+  font-size: inherit;
+}
+.markdown strong {
+  font-weight: 600;
+}
+.markdown > :first-child {
+  margin-top: 0;
 }
 .markdown ul,
 .markdown ol {
@@ -1222,6 +1239,9 @@ button svg {
 }
 .markdown table {
   color: inherit;
+  font-size: var(--text-md);
+  line-height: 1.6;
+  margin: 12px 0 16px;
   max-width: 100%;
   display: block;
   overflow: auto;
@@ -1229,8 +1249,23 @@ button svg {
 }
 .markdown td,
 .markdown th {
-  padding: 7px 10px;
-  border: 1px solid var(--color-border);
+  padding: 10px 12px;
+  border: 0;
+  border-bottom: 1px solid var(--color-border-subtle);
+}
+.markdown th {
+  font-weight: 600;
+  text-align: left;
+  border-bottom-color: var(--color-border);
+}
+.markdown tr > :first-child {
+  padding-left: 0;
+}
+.markdown tr > :last-child {
+  padding-right: 0;
+}
+.markdown tbody tr:last-child td {
+  border-bottom: 0;
 }
 .markdown blockquote {
   border-left: 2px solid var(--color-border-strong);
