@@ -1,4 +1,5 @@
 //! App-owned Provider configuration. No Server connection or Agent installation is required.
+pub mod discovery;
 mod validation;
 use anyhow::{Context, Result, bail};
 use latte_work_protocol::{
@@ -273,6 +274,27 @@ impl ProviderStore {
         self.config = config;
         Ok(self.list())
     }
+    pub fn model_endpoint(&self, draft: ProviderDraft) -> Result<discovery::ModelEndpoint> {
+        let old = draft
+            .id
+            .as_ref()
+            .and_then(|id| self.config.providers.iter().find(|p| &p.metadata.id == id));
+        let credential = if draft.auth == latte_work_protocol::ProviderAuth::None {
+            String::new()
+        } else if let Some(value) = draft.credential {
+            value
+        } else {
+            let old = old.context("请填写 API Key")?;
+            if old.metadata.base_url.trim_end_matches('/') != draft.base_url.trim_end_matches('/')
+                || old.metadata.auth != draft.auth
+                || old.metadata.protocol != draft.protocol
+            {
+                bail!("地址或协议已更改，请重新填写 API Key 后获取模型");
+            }
+            old.credential.clone()
+        };
+        discovery::ModelEndpoint::new(draft.base_url, draft.protocol, draft.auth, credential)
+    }
     pub fn save(&mut self, mut draft: ProviderDraft) -> Result<Response> {
         draft.name = draft.name.trim().to_owned();
         draft.base_url = draft.base_url.trim().trim_end_matches('/').to_owned();
@@ -324,6 +346,7 @@ impl ProviderStore {
             base_url: draft.base_url,
             model: draft.model,
             models: draft.models,
+            model_labels: draft.model_labels,
             auth: draft.auth,
             has_credential: !credential.is_empty(),
             revision: uuid::Uuid::new_v4().to_string(),

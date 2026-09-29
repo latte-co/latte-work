@@ -332,3 +332,13 @@ making a request, so the None adapter sends the public, non-secret token
 server-side authentication, but does not promise absence of the Authorization
 header for Claude Code. Gateways that reject any such header are not supported
 by this adapter.
+
+Provider model catalogs preserve ID-to-display-name mappings in `model_labels`;
+older files default to an empty map. Display names never replace IDs in Agent
+requests. The native `fetch_provider_models` command resolves a draft's saved
+credential only when its endpoint, auth and protocol still match, releases the
+configuration lock, then fetches the model catalog. Discovery uses `/v1/models`
+for a bare origin and preserves configured API prefixes, with Anthropic cursor
+pagination. Requests reject redirects, have a 15-second total deadline, and
+bound each response to 1 MiB, five pages and 256 unique models. A failure leaves
+the edited catalog unchanged; successful results remain an unsaved draft.

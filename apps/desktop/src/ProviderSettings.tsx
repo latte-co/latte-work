@@ -1,7 +1,12 @@
 import { useEffect, useRef, useState } from "react";
 import { Plus, Trash2 } from "lucide-react";
 import { Select } from "./Select";
-import { message, providerRequest, type ProviderRequest } from "./api";
+import {
+  message,
+  providerRequest,
+  fetchProviderModels,
+  type ProviderRequest,
+} from "./api";
 import type {
   Provider,
   ProviderDraft,
@@ -21,6 +26,7 @@ const empty = (): ProviderDraft => ({
   base_url: "",
   model: "",
   models: [],
+  model_labels: {},
   auth: "none",
   credential: null,
 });
@@ -88,6 +94,39 @@ export function ProviderSettings({
       if (current === generation.current) setBusy(false);
     }
   }
+  async function fetchModels() {
+    if (!draft || busy) return;
+    const current = generation.current;
+    setBusy(true);
+    onBusy(true);
+    setError("");
+    setNotice("");
+    try {
+      const models = await fetchProviderModels(draft);
+      if (current !== generation.current) return;
+      const ids = Array.from(
+        new Set([
+          ...draft.models.filter((id) => id.trim()),
+          ...models.map((m) => m.id),
+        ]),
+      );
+      if (ids.length > 256) throw new Error("模型目录最多支持 256 个模型");
+      const labels = { ...draft.model_labels };
+      for (const model of models)
+        if (!labels[model.id]?.trim()) labels[model.id] = model.name;
+      setDraft({ ...draft, models: ids, model_labels: labels });
+      setNotice(
+        models.length
+          ? `已获取 ${models.length} 个模型，保存后生效。`
+          : "后端未返回可用模型。",
+      );
+    } catch (e) {
+      if (current === generation.current) setError(message(e));
+    } finally {
+      onBusy(false);
+      if (current === generation.current) setBusy(false);
+    }
+  }
   function edit(p: Provider) {
     const next: ProviderDraft = {
       id: p.id,
@@ -95,7 +134,8 @@ export function ProviderSettings({
       protocol: p.protocol,
       base_url: p.base_url,
       model: p.model,
-      models: p.models,
+      models: Array.from(new Set([p.model, ...p.models])),
+      model_labels: p.model_labels ?? {},
       auth: p.auth,
       credential: null,
     };
@@ -188,7 +228,19 @@ export function ProviderSettings({
               onSubmit={(e) => {
                 e.preventDefault();
                 if (dirty && !busy)
-                  void mutate({ method: "save_provider", provider: draft });
+                  void mutate({
+                    method: "save_provider",
+                    provider: {
+                      ...draft,
+                      model_labels: Object.fromEntries(
+                        Object.entries(draft.model_labels ?? {}).filter(
+                          ([id, label]) =>
+                            (id === draft.model || draft.models.includes(id)) &&
+                            label?.trim(),
+                        ),
+                      ),
+                    },
+                  });
               }}
             >
               <h3>{draft.id ? "编辑 Provider" : "添加 Provider"}</h3>
@@ -261,11 +313,22 @@ export function ProviderSettings({
                   className="provider-models-field"
                   aria-label="模型目录"
                 >
-                  <h4>模型目录</h4>
+                  <div className="provider-model-heading">
+                    <h4>模型目录</h4>
+                    <button
+                      className="secondary"
+                      type="button"
+                      disabled={busy || !draft.base_url.trim()}
+                      onClick={() => void fetchModels()}
+                    >
+                      {busy ? "正在获取…" : "获取可用模型"}
+                    </button>
+                  </div>
                   <table className="provider-model-table">
                     <thead>
                       <tr>
                         <th>模型 ID</th>
+                        <th>显示名称</th>
                         <th>操作</th>
                       </tr>
                     </thead>
@@ -281,9 +344,31 @@ export function ProviderSettings({
                               onChange={(e) =>
                                 setDraft({
                                   ...draft,
+                                  model_labels: {
+                                    ...draft.model_labels,
+                                    [e.target.value]:
+                                      draft.model_labels?.[model] ?? "",
+                                  },
                                   models: draft.models.map((value, i) =>
                                     i === index ? e.target.value : value,
                                   ),
+                                })
+                              }
+                            />
+                          </td>
+                          <td>
+                            <input
+                              aria-label={`显示名称 ${index + 1}`}
+                              maxLength={80}
+                              placeholder="可选，默认显示模型 ID"
+                              value={draft.model_labels?.[model] ?? ""}
+                              onChange={(e) =>
+                                setDraft({
+                                  ...draft,
+                                  model_labels: {
+                                    ...draft.model_labels,
+                                    [model]: e.target.value,
+                                  },
                                 })
                               }
                             />

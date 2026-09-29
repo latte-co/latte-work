@@ -205,3 +205,67 @@ it("saves an empty API Key as no authentication without an auth selector", async
     }),
   );
 });
+it("merges fetched models without replacing custom names and saves ID/name mappings", async () => {
+  const provider = {
+    id: "p",
+    name: "Named",
+    protocol: "anthropic_messages",
+    base_url: "https://example.test",
+    model: "one",
+    models: ["one"],
+    model_labels: { one: "My name" },
+    auth: "api_key",
+  };
+  invoke.mockImplementation(async (command) =>
+    command === "fetch_provider_models"
+      ? [
+          { id: "one", name: "Backend name" },
+          { id: "two", name: "Second" },
+        ]
+      : { kind: "providers", providers: [provider], bindings: [] },
+  );
+  render(<ProviderSettings active onBusy={() => {}} />);
+  fireEvent.click(await screen.findByRole("button", { name: "编辑" }));
+  fireEvent.click(screen.getByRole("button", { name: "获取可用模型" }));
+  await waitFor(() =>
+    expect(
+      (screen.getByLabelText("显示名称 2") as HTMLInputElement).value,
+    ).toBe("Second"),
+  );
+  expect((screen.getByLabelText("显示名称 1") as HTMLInputElement).value).toBe(
+    "My name",
+  );
+  fireEvent.click(screen.getByRole("button", { name: "保存 Provider" }));
+  await waitFor(() =>
+    expect(invoke).toHaveBeenCalledWith("provider_request", {
+      request: {
+        method: "save_provider",
+        provider: expect.objectContaining({
+          models: ["one", "two"],
+          model_labels: { one: "My name", two: "Second" },
+          credential: null,
+        }),
+      },
+    }),
+  );
+});
+it("keeps the edited catalog after a model discovery failure", async () => {
+  invoke.mockImplementation(async (command) => {
+    if (command === "fetch_provider_models") throw new Error("HTTP 401");
+    return { kind: "providers", providers: [], bindings: [] };
+  });
+  render(<ProviderSettings active onBusy={() => {}} />);
+  fireEvent.click(await screen.findByRole("button", { name: "添加 Provider" }));
+  fireEvent.change(screen.getByLabelText("Base URL"), {
+    target: { value: "https://example.test" },
+  });
+  fireEvent.click(screen.getByRole("button", { name: "添加模型" }));
+  fireEvent.change(screen.getByLabelText("模型 ID 1"), {
+    target: { value: "manual" },
+  });
+  fireEvent.click(screen.getByRole("button", { name: "获取可用模型" }));
+  await screen.findByText("HTTP 401");
+  expect((screen.getByLabelText("模型 ID 1") as HTMLInputElement).value).toBe(
+    "manual",
+  );
+});

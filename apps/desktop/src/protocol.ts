@@ -114,6 +114,7 @@ export type Provider = {
   base_url: string;
   model: string;
   models: Array<string>;
+  model_labels: { [key in string]?: string };
   auth: ProviderAuth;
   has_credential: boolean;
   revision: string;
@@ -125,6 +126,7 @@ export type ProviderDraft = {
   base_url: string;
   model: string;
   models: Array<string>;
+  model_labels: { [key in string]?: string };
   auth: ProviderAuth;
   /**
    * None preserves a saved credential; plaintext is write-only over the private host transport.

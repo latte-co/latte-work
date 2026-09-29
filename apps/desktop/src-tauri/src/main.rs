@@ -567,6 +567,7 @@ fn main() {
             disconnect_host,
             host_request,
             providers::provider_request,
+            providers::fetch_provider_models,
             providers::bind_agent_provider,
             providers::agent_providers,
             load_hosts,

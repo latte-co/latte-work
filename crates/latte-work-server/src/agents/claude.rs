@@ -1053,6 +1053,7 @@ mod tests {
                 base_url: "https://example.test".into(),
                 model: "my-model".into(),
                 models: vec![],
+                model_labels: Default::default(),
                 auth: ProviderAuth::Bearer,
                 has_credential: true,
                 revision: "test".into(),

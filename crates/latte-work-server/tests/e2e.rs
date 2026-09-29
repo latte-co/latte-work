@@ -602,6 +602,7 @@ async fn provider_catalog_local_binding_and_remote_sync_use_host_protocol() {
         base_url: "https://example.test".into(),
         model: "first".into(),
         models: vec!["alternate".into()],
+        model_labels: Default::default(),
         auth: ProviderAuth::ApiKey,
         credential: Some("fixture-private-key".into()),
     };
@@ -709,6 +710,7 @@ async fn provider_catalog_local_binding_and_remote_sync_use_host_protocol() {
             base_url: "https://example.test/v1".into(),
             model: "model".into(),
             models: vec![],
+            model_labels: Default::default(),
             auth: ProviderAuth::Bearer,
             credential: Some("other-key".into()),
         };
@@ -867,6 +869,7 @@ async fn models_select_per_turn_validate_and_persist_without_changing_provider()
                 base_url: "https://example.test".into(),
                 model: "first".into(),
                 models: vec!["second".into(), "third".into()],
+                model_labels: Default::default(),
                 auth: ProviderAuth::ApiKey,
                 credential: Some("fixture-private-key".into()),
             },
@@ -1165,6 +1168,7 @@ async fn native_model_names_are_host_project_scoped_and_do_not_override_provider
                 base_url: "https://example.test".into(),
                 model: "sonnet".into(),
                 models: vec![],
+                model_labels: Default::default(),
                 auth: ProviderAuth::ApiKey,
                 credential: Some("fixture-only".into()),
             },
@@ -1203,6 +1207,7 @@ async fn remote_turns_use_latest_local_provider_without_persisting_snapshots() {
         base_url: "https://example.test".into(),
         model: "first".into(),
         models: vec!["alternate".into()],
+        model_labels: Default::default(),
         auth: ProviderAuth::ApiKey,
         credential: Some("fixture-private-key".into()),
     };
@@ -1429,6 +1434,7 @@ async fn remote_turns_use_latest_local_provider_without_persisting_snapshots() {
                 base_url: "https://example.test".into(),
                 model: "legacy".into(),
                 models: vec![],
+                model_labels: Default::default(),
                 auth: ProviderAuth::ApiKey,
                 credential: Some("legacy-secret".into()),
             },
@@ -2445,6 +2451,7 @@ async fn app_providers_and_native_defaults_only_contact_the_selected_host() {
         base_url: "https://example.test".into(),
         model: "first".into(),
         models: vec![],
+        model_labels: Default::default(),
         auth: ProviderAuth::ApiKey,
         credential: Some("fixture-private-key".into()),
     };

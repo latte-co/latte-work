@@ -109,3 +109,9 @@ export async function providerRequest(
   if (response.kind === "error") throw new Error(response.message);
   return response;
 }
+
+export async function fetchProviderModels(
+  provider: import("./protocol").ProviderDraft,
+): Promise<{ id: string; name: string }[]> {
+  return invoke("fetch_provider_models", { provider });
+}

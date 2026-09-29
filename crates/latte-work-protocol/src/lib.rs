@@ -207,6 +207,8 @@ pub struct Provider {
     pub model: String,
     #[serde(default)]
     pub models: Vec<String>,
+    #[serde(default)]
+    pub model_labels: std::collections::BTreeMap<String, String>,
     pub auth: ProviderAuth,
     pub has_credential: bool,
     #[serde(default)]
@@ -253,6 +255,8 @@ pub struct ProviderDraft {
     pub model: String,
     #[serde(default)]
     pub models: Vec<String>,
+    #[serde(default)]
+    pub model_labels: std::collections::BTreeMap<String, String>,
     pub auth: ProviderAuth,
     /// None preserves a saved credential; plaintext is write-only over the private host transport.
     pub credential: Option<String>,
