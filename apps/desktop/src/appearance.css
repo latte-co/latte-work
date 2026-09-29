@@ -122,6 +122,9 @@
   background: var(--color-canvas);
   color: var(--color-text);
 }
+.appearance-preview + .appearance-preview {
+  margin-top: var(--space-4);
+}
 .appearance-preview-copy {
   font-family: var(--font-content);
   font-weight: var(--weight-content);
@@ -369,6 +372,7 @@
 }
 
 .appearance-state-preview {
+  padding: var(--space-4);
   container-type: inline-size;
   container-name: composer;
   width: 100%;

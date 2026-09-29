@@ -3,14 +3,24 @@ import { Shield, Plus, ChevronDown } from "lucide-react";
 import { ApprovalCard } from "./ApprovalCard";
 import { ComposerAction } from "./ComposerAction";
 export function AppearancePreview() {
-  const [running, setRunning] = useState(false);
+  const [mode, setMode] = useState<"empty" | "editing" | "running">("editing");
+  const running = mode === "running";
   return (
     <div className="appearance-state-preview">
       <div className="preview-states" role="group" aria-label="预览状态">
-        <button aria-pressed={!running} onClick={() => setRunning(false)}>
+        <button
+          aria-pressed={mode === "empty"}
+          onClick={() => setMode("empty")}
+        >
+          空输入
+        </button>
+        <button
+          aria-pressed={mode === "editing"}
+          onClick={() => setMode("editing")}
+        >
           编辑
         </button>
-        <button aria-pressed={running} onClick={() => setRunning(true)}>
+        <button aria-pressed={running} onClick={() => setMode("running")}>
           运行中
         </button>
         <span>仅预览外观</span>
@@ -19,6 +29,7 @@ export function AppearancePreview() {
         <textarea
           readOnly
           placeholder="描述任务…"
+          value={mode === "empty" ? "" : "帮我完善 README"}
           aria-label="输入区外观预览"
           rows={1}
         />
@@ -41,9 +52,9 @@ export function AppearancePreview() {
           </div>
           <ComposerAction
             active={running}
-            onClick={() => setRunning(!running)}
+            disabled={mode === "empty"}
+            onClick={() => setMode(running ? "editing" : "running")}
           />
-          <ComposerAction disabled />
         </div>
       </div>
       <ApprovalCard
