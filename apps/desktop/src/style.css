@@ -1169,7 +1169,7 @@ button svg {
   width: 100%;
   max-width: calc(var(--content-width) + 2 * var(--content-gutter));
   margin: 0 auto;
-  padding: var(--space-8) var(--content-gutter) var(--space-5);
+  padding: var(--space-8) var(--content-gutter) var(--space-2);
   font-size: var(--text-body);
   line-height: 1.8;
 }
@@ -1257,8 +1257,14 @@ button svg {
 .turn-process[open] > summary svg {
   transform: rotate(90deg);
 }
+.assistant-message:has(+ .final-reply-actions) {
+  margin-bottom: var(--space-2);
+}
 .final-reply-actions {
-  margin: -4px 0 24px;
+  margin: 0 0 var(--space-6);
+}
+.conversation-turn:last-child > :last-child {
+  margin-bottom: 0;
 }
 .final-reply-actions button {
   width: 28px;
