@@ -166,7 +166,43 @@ pub struct Claude {
     emitted_text: bool,
     context: Option<ContextUsage>,
     progress: Option<ExecutionPhase>,
+    stream_model: Option<String>,
+    stream_usage: Value,
+    live_totals: [f64; 4],
+    live_steps: f64,
     phase: Phase,
+}
+// Gateways may return a provider-prefixed model while CLI accounting uses its
+// bare name plus a context suffix. Only match that same name, never any model.
+fn model_key(model: &str) -> &str {
+    model
+        .rsplit('/')
+        .next()
+        .unwrap_or(model)
+        .split('[')
+        .next()
+        .unwrap_or(model)
+}
+impl Claude {
+    fn update_context(&mut self, model: &str, usage: &Value) {
+        if let Some(input) = count(usage, "input_tokens") {
+            let used = input
+                + count(usage, "cache_read_input_tokens").unwrap_or(0.0)
+                + count(usage, "cache_creation_input_tokens").unwrap_or(0.0);
+            // Some gateways emit zero placeholders until message_delta.
+            if used > 0.0 {
+                self.context = Some(ContextUsage {
+                    model: model.into(),
+                    used_tokens: used,
+                    window_tokens: self
+                        .context
+                        .as_ref()
+                        .filter(|c| c.model == model)
+                        .and_then(|c| c.window_tokens),
+                });
+            }
+        }
+    }
 }
 #[derive(Default)]
 enum Phase {
@@ -449,6 +485,69 @@ impl Claude {
             "stream_event" => {
                 let event = &m["event"];
                 if m["parent_tool_use_id"].is_null() {
+                    match event["type"].as_str() {
+                        Some("message_start") => {
+                            self.stream_model =
+                                event["message"]["model"].as_str().map(str::to_owned);
+                            self.stream_usage = event["message"]["usage"].clone();
+                        }
+                        Some("message_delta") => {
+                            if let Some(model) = self.stream_model.clone()
+                                && let Some(delta) = event["usage"].as_object()
+                            {
+                                if !self.stream_usage.is_object() {
+                                    self.stream_usage = json!({});
+                                }
+                                self.stream_usage
+                                    .as_object_mut()
+                                    .unwrap()
+                                    .extend(delta.clone());
+                                let usage = self.stream_usage.clone();
+                                self.update_context(&model, &usage);
+                                let keys = [
+                                    "input_tokens",
+                                    "cache_read_input_tokens",
+                                    "cache_creation_input_tokens",
+                                    "output_tokens",
+                                ];
+                                let current = keys.map(|key| count(&usage, key).unwrap_or(0.0));
+                                if current[0] + current[1] + current[2] > 0.0 {
+                                    output.push(Action::Event(EventKind::Usage {
+                                        context: self.context.clone(),
+                                        totals: Some(TurnUsage {
+                                            input_tokens: Some(self.live_totals[0] + current[0]),
+                                            cache_read_tokens: Some(
+                                                self.live_totals[1] + current[1],
+                                            ),
+                                            cache_write_tokens: Some(
+                                                self.live_totals[2] + current[2],
+                                            ),
+                                            output_tokens: count(&usage, "output_tokens")
+                                                .map(|v| self.live_totals[3] + v),
+                                            model_time_ms: None,
+                                            steps: Some(self.live_steps + 1.0),
+                                        }),
+                                    }));
+                                }
+                            }
+                        }
+                        Some("message_stop") if self.stream_model.take().is_some() => {
+                            for (i, key) in [
+                                "input_tokens",
+                                "cache_read_input_tokens",
+                                "cache_creation_input_tokens",
+                                "output_tokens",
+                            ]
+                            .iter()
+                            .enumerate()
+                            {
+                                self.live_totals[i] +=
+                                    count(&self.stream_usage, key).unwrap_or(0.0);
+                            }
+                            self.live_steps += 1.0;
+                        }
+                        _ => {}
+                    }
                     let phase = match event["type"].as_str() {
                         Some("content_block_start") => {
                             match event["content_block"]["type"].as_str() {
@@ -490,28 +589,15 @@ impl Claude {
                 if m["parent_tool_use_id"].is_null() {
                     let message = &m["message"];
                     let usage = &message["usage"];
-                    if let (Some(model), Some(input)) =
-                        (message["model"].as_str(), count(usage, "input_tokens"))
-                    {
-                        // Optional cache counters are zero only on a valid input usage report.
-                        let read = count(usage, "cache_read_input_tokens").unwrap_or(0.0);
-                        let write = count(usage, "cache_creation_input_tokens").unwrap_or(0.0);
-                        let context = ContextUsage {
-                            model: model.into(),
-                            used_tokens: input + read + write,
-                            window_tokens: self
-                                .context
-                                .as_ref()
-                                .filter(|c| c.model == model)
-                                .and_then(|c| c.window_tokens),
-                        };
-                        if self.context.as_ref() != Some(&context) {
-                            self.context = Some(context);
-                            output.push(Action::Event(EventKind::Usage {
-                                context: self.context.clone(),
-                                totals: None,
-                            }));
-                        }
+                    let previous = self.context.clone();
+                    if let Some(model) = message["model"].as_str() {
+                        self.update_context(model, usage);
+                    }
+                    if self.context != previous {
+                        output.push(Action::Event(EventKind::Usage {
+                            context: self.context.clone(),
+                            totals: None,
+                        }));
                     }
                 }
                 if let Some(blocks) = m["message"]["content"].as_array() {
@@ -556,9 +642,18 @@ impl Claude {
                 }
                 self.phase = Phase::Finished;
                 if let Some(context) = &mut self.context {
-                    context.window_tokens =
-                        count(&m["modelUsage"][&context.model], "contextWindow")
-                            .filter(|v| *v > 0.0);
+                    let models = m["modelUsage"].as_object();
+                    let exact = m["modelUsage"].get(&context.model);
+                    let matching: Vec<_> = models
+                        .into_iter()
+                        .flat_map(|models| models.iter())
+                        .filter(|(name, _)| model_key(name) == model_key(&context.model))
+                        .map(|(_, usage)| usage)
+                        .collect();
+                    context.window_tokens = exact
+                        .or_else(|| (matching.len() == 1).then(|| matching[0]))
+                        .and_then(|usage| count(usage, "contextWindow"))
+                        .filter(|v| *v > 0.0);
                 }
                 let usage = &m["usage"];
                 if self.context.is_some() || usage.is_object() {
@@ -711,6 +806,34 @@ mod tests {
         assert!(agent.context.is_none());
     }
     #[test]
+    fn usage_reads_gateway_delta_and_matches_accounting_model() {
+        use super::*;
+        let mut agent = Claude {
+            phase: Phase::Running,
+            ..Default::default()
+        };
+        let start = json!({"type":"stream_event","event":{"type":"message_start","message":{"model":"ark/seed-evolving","usage":{"input_tokens":0,"output_tokens":0}}}});
+        agent.decode(start.clone()).unwrap();
+        agent.decode(json!({"type":"assistant","message":{"model":"ark/seed-evolving","usage":{"input_tokens":0,"output_tokens":0},"content":[]}})).unwrap();
+        assert!(agent.context.is_none());
+        let delta = json!({"type":"stream_event","event":{"type":"message_delta","usage":{"input_tokens":1784,"cache_read_input_tokens":72504,"output_tokens":1100}}});
+        for _ in 0..2 {
+            let events = agent.decode(delta.clone()).unwrap();
+            assert!(events.iter().any(|e| matches!(e, Action::Event(EventKind::Usage {context:Some(c),totals:Some(t)}) if c.used_tokens == 74288.0 && t.input_tokens == Some(1784.0) && t.steps == Some(1.0))));
+        }
+        agent
+            .decode(json!({"type":"stream_event","event":{"type":"message_stop"}}))
+            .unwrap();
+        agent.decode(start).unwrap();
+        let events = agent.decode(delta).unwrap();
+        assert!(events.iter().any(|e| matches!(e, Action::Event(EventKind::Usage {context:Some(c),totals:Some(t)}) if c.used_tokens == 74288.0 && t.input_tokens == Some(3568.0) && t.steps == Some(2.0))));
+        let result = agent.decode(json!({"type":"result","modelUsage":{"seed-evolving[1m]":{"contextWindow":1000000}},"usage":{"input_tokens":3568,"cache_read_input_tokens":145008,"cache_creation_input_tokens":0,"output_tokens":2200},"duration_api_ms":84356,"num_turns":2})).unwrap();
+        assert!(
+            matches!(&result[0],Action::Event(EventKind::Usage {context:Some(c),totals:Some(t)}) if c.window_tokens == Some(1000000.0) && c.used_tokens == 74288.0 && t.model_time_ms == Some(84356.0))
+        );
+    }
+
+    #[test]
     fn usage_missing_capacity_and_invalid_counters_are_not_guessed() {
         use super::*;
         assert_eq!(count(&json!({"n":-1}), "n"), None);
@@ -727,6 +850,35 @@ mod tests {
             .unwrap();
         assert!(
             matches!(&result[0],Action::Event(EventKind::Usage {context:Some(c),..}) if c.window_tokens.is_none())
+        );
+    }
+
+    #[test]
+    fn usage_does_not_use_subagent_deltas_or_ambiguous_capacity() {
+        use super::*;
+        let mut agent = Claude {
+            phase: Phase::Running,
+            ..Default::default()
+        };
+        agent
+            .decode(
+                json!({"type":"assistant","message":{"model":"ark/m","usage":{"input_tokens":12}}}),
+            )
+            .unwrap();
+        for event in [
+            json!({"type":"message_start","message":{"model":"child","usage":{"input_tokens":999}}}),
+            json!({"type":"message_delta","usage":{"input_tokens":999}}),
+            json!({"type":"message_stop"}),
+        ] {
+            agent
+                .decode(json!({"type":"stream_event","parent_tool_use_id":"child","event":event}))
+                .unwrap();
+        }
+        assert_eq!(agent.context.as_ref().unwrap().used_tokens, 12.0);
+        assert_eq!(agent.live_steps, 0.0);
+        let result = agent.decode(json!({"type":"result","modelUsage":{"m[1m]":{"contextWindow":1000000},"m":{"contextWindow":200000}}})).unwrap();
+        assert!(
+            matches!(&result[0], Action::Event(EventKind::Usage {context:Some(c),..}) if c.window_tokens.is_none())
         );
     }
 

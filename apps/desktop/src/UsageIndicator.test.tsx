@@ -78,3 +78,27 @@ it("unknown capacity is not displayed as zero and session change closes the pane
   view.rerender(<UsageIndicator events={[]} sessionId="other" />);
   expect(screen.queryByRole("dialog")).toBeNull();
 });
+
+it("retains live totals across context updates and rejects legacy zero placeholders", () => {
+  expect(
+    usageSnapshot(
+      [
+        event(1, usage),
+        event(2, { kind: "usage", context: usage.context, totals: null }),
+      ],
+      "s",
+    ).totals,
+  ).toEqual(totals);
+  expect(
+    usageSnapshot(
+      [
+        event(1, {
+          kind: "usage",
+          context: { model: "gateway", used_tokens: 0, window_tokens: null },
+          totals,
+        }),
+      ],
+      "s",
+    ),
+  ).toEqual({ context: null, totals });
+});

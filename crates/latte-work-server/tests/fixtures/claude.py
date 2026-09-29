@@ -17,7 +17,10 @@ for line in sys.stdin:
         if text=='usage':
             emit({'type':'stream_event','event':{'type':'content_block_delta','delta':{'type':'thinking_delta','thinking':'private fixture reasoning'}}})
             emit({'type':'stream_event','event':{'type':'content_block_stop'}})
-            emit({'type':'assistant','message':{'model':'fixture-model','usage':{'input_tokens':100,'cache_read_input_tokens':600,'cache_creation_input_tokens':300},'content':[{'type':'text','text':'usage fixture'}]}})
+            emit({'type':'stream_event','event':{'type':'message_start','message':{'model':'fixture-model','usage':{'input_tokens':0,'output_tokens':0}}}})
+            emit({'type':'assistant','message':{'model':'fixture-model','usage':{'input_tokens':0,'output_tokens':0},'content':[{'type':'text','text':'usage fixture'}]}})
+            emit({'type':'stream_event','event':{'type':'message_delta','usage':{'input_tokens':100,'cache_read_input_tokens':600,'cache_creation_input_tokens':300,'output_tokens':80}}})
+            emit({'type':'stream_event','event':{'type':'message_stop'}})
             emit({'type':'result','subtype':'success','is_error':False,'modelUsage':{'fixture-model':{'contextWindow':200000,'inputTokens':900000}},'usage':{'input_tokens':200,'cache_read_input_tokens':1200,'cache_creation_input_tokens':600,'output_tokens':80},'duration_api_ms':52500,'num_turns':2})
             continue
         if text=='malformed': print('this is not json',flush=True);sys.exit(0)

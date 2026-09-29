@@ -9,8 +9,10 @@ export function usageSnapshot(events: Event[], sessionId?: string) {
   for (const { event } of events.filter((e) => e.session_id === sessionId)) {
     if (event.kind === "user") totals = null;
     if (event.kind === "usage") {
-      context = event.context;
-      totals = event.totals;
+      // Null totals on a context-only update must not erase this turn's usage.
+      context =
+        event.context && event.context.used_tokens > 0 ? event.context : null;
+      if (event.totals || !event.context) totals = event.totals;
     }
   }
   return { context, totals };
@@ -239,8 +241,6 @@ export function UsageIndicator({
                 </dd>
                 <dt>模型调用步数</dt>
                 <dd>{number(totals?.steps)}</dd>
-                <dt>工具用时 / TTFT / TPS</dt>
-                <dd>未提供</dd>
               </dl>
             </section>
           </div>,
