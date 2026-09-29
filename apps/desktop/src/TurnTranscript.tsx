@@ -4,7 +4,7 @@ import { CopyButton } from "./MessageContent";
 import type { Event } from "./protocol";
 import { activityTranscript, type ActivityItem } from "./activity";
 
-/** User events delimit turns; only an explicit successful end permits folding. */
+/** Fold confirmed outcomes only; stopped turns retain their prose and approvals. */
 export function turnTranscript(events: Event[]) {
   const groups: Event[][] = [];
   for (const event of events) {
@@ -12,7 +12,7 @@ export function turnTranscript(events: Event[]) {
     groups.at(-1)!.push(event);
   }
   return groups.map((events) => {
-    const items = activityTranscript(events).filter(
+    let items = activityTranscript(events).filter(
       (item) =>
         !(
           item.type === "event" &&
@@ -25,6 +25,25 @@ export function turnTranscript(events: Event[]) {
     const end = [...events].reverse().find((e) => e.event.kind === "state");
     const completed =
       end?.event.kind === "state" && end.event.status === "completed";
+    const stopped =
+      end?.event.kind === "state" && end.event.status === "stopped";
+    if (stopped)
+      items = items.filter(
+        (item) =>
+          !(
+            item.type === "event" &&
+            item.value.kind === "state" &&
+            item.value.status === "stopped"
+          ),
+      );
+    const isTool = (item: ActivityItem) =>
+      item.type === "tool" || item.type === "tools";
+    const duration = end && user ? end.at - events[0].at : null;
+    const elapsed = stopped
+      ? `已停止${duration != null && duration >= 1000 ? ` · ${formatElapsed(duration)}` : ""}`
+      : duration != null
+        ? formatElapsed(duration)
+        : "执行过程";
     const lastAssistant = [...items]
       .reverse()
       .find((item) => item.type === "assistant");
@@ -53,9 +72,18 @@ export function turnTranscript(events: Event[]) {
       key: events[0].seq,
       user,
       finalKey: hasFinal ? lastAssistant?.key : undefined,
-      elapsed: end && user ? formatElapsed(end.at - events[0].at) : "执行过程",
-      process: hasFinal ? items.slice(0, finalIndex) : [],
-      visible: hasFinal ? items.slice(finalIndex) : items,
+      stopped,
+      elapsed,
+      process: stopped
+        ? items.filter(isTool)
+        : hasFinal
+          ? items.slice(0, finalIndex)
+          : [],
+      visible: stopped
+        ? items.filter((item) => !isTool(item))
+        : hasFinal
+          ? items.slice(finalIndex)
+          : items,
     };
   });
 }
@@ -72,7 +100,9 @@ export function TurnTranscript({
       {turn.user && children(turn.user)}
       {turn.process.length > 0 && (
         <details className="turn-process">
-          <summary>
+          <summary
+            title={turn.stopped ? "已执行的文件改动不会撤销。" : undefined}
+          >
             <span>{turn.elapsed}</span>
             <ChevronRight size={14} aria-hidden="true" />
           </summary>
@@ -80,6 +110,11 @@ export function TurnTranscript({
             {turn.process.map(children)}
           </div>
         </details>
+      )}
+      {turn.stopped && turn.process.length === 0 && (
+        <div className="turn-stop-summary" title="已执行的文件改动不会撤销。">
+          {turn.elapsed}
+        </div>
       )}
       {turn.visible.map((item) => (
         <Fragment key={item.key}>

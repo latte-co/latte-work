@@ -1238,7 +1238,8 @@ button svg {
 .turn-process {
   margin: 0 0 16px;
 }
-.turn-process > summary {
+.turn-process > summary,
+.turn-stop-summary {
   display: flex;
   align-items: center;
   gap: 6px;
@@ -1250,6 +1251,10 @@ button svg {
   font-size: var(--text-sm);
   padding: 8px 0;
   border-bottom: 1px solid var(--color-border-subtle);
+}
+.turn-stop-summary {
+  cursor: default;
+  margin-bottom: var(--space-4);
 }
 .turn-process > summary::-webkit-details-marker {
   display: none;

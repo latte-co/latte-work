@@ -66,7 +66,7 @@ it("folds only the process of each completed turn and keeps its final answer out
   details.open = true;
   expect(details.open).toBe(true);
 });
-it.each(["running", "waiting", "failed", "stopped", "unknown"] as Status[])(
+it.each(["running", "waiting", "failed", "unknown"] as Status[])(
   "does not collapse %s turns",
   (status) => {
     expect(
@@ -163,4 +163,66 @@ it("does not treat text before an approval-backed tool as a final answer", () =>
   );
   expect(turns[0].finalKey).toBeUndefined();
   expect(turns[0].process).toHaveLength(0);
+});
+
+it("summarizes confirmed stops, folds tools but preserves prose and rejected approvals", () => {
+  const rows = events(
+    user("q"),
+    text("已有输出"),
+    tool,
+    result,
+    {
+      kind: "approval",
+      request_id: "a",
+      tool: "Write",
+      input: {},
+    },
+    { kind: "approval_resolved", request_id: "a", allow: false },
+    {
+      kind: "state",
+      status: "stopped",
+      message: "已停止；已执行的文件改动不会撤销。",
+    },
+  );
+  rows.at(-1)!.at = 13000;
+  const turn = turnTranscript(rows)[0];
+  expect(turn.elapsed).toBe("已停止 · 用时 13秒");
+  expect(turn.finalKey).toBeUndefined();
+  expect(turn.process.map((i) => i.type)).toEqual(["tool"]);
+  expect(
+    turn.visible.some((i) => i.type === "assistant" && i.text === "已有输出"),
+  ).toBe(true);
+  expect(
+    turn.visible.some(
+      (i) =>
+        i.type === "event" &&
+        i.value.kind === "approval" &&
+        i.resolved &&
+        i.decision === "denied",
+    ),
+  ).toBe(true);
+  expect(
+    turn.visible.some((i) => i.type === "event" && i.value.kind === "state"),
+  ).toBe(false);
+  render(
+    <TurnTranscript events={rows}>
+      {(item) => (
+        <p key={item.key}>{item.type === "assistant" ? item.text : "记录"}</p>
+      )}
+    </TurnTranscript>,
+  );
+  expect(screen.getByText("已停止 · 用时 13秒").closest("details")!.open).toBe(
+    false,
+  );
+  expect(screen.getByText("已有输出").closest("details")).toBeNull();
+});
+it("shows only a non-expandable stopped summary when stopped immediately", () => {
+  render(
+    <TurnTranscript events={events(user("q"), state("stopped"))}>
+      {() => null}
+    </TurnTranscript>,
+  );
+  const summary = screen.getByText("已停止");
+  expect(summary.closest("details")).toBeNull();
+  expect(summary.querySelector("svg")).toBeNull();
 });
