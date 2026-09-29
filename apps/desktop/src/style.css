@@ -952,7 +952,11 @@ button svg {
   line-height: 1.5;
 }
 .composer textarea::placeholder {
-  color: var(--color-placeholder);
+  color: color-mix(
+    in srgb,
+    var(--color-placeholder) 45%,
+    var(--color-composer)
+  );
   font-weight: 400;
   opacity: 1;
 }
