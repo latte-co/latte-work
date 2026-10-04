@@ -80,8 +80,11 @@ impl Control {
             return;
         }
         self.closing = Some(Instant::now());
+        self.stop_foreground();
+    }
+    fn stop_foreground(&self) {
         let pid = self.child.process_id().map(|p| p as i32);
-        // Stop the foreground job, then let the shell hang up its own jobs.
+        // Let the shell reap the foreground job before asking it to exit.
         if let Some(group) = self
             .master
             .process_group_leader()
@@ -89,8 +92,23 @@ impl Control {
         {
             let _ = killpg(Pid::from_raw(group), Signal::SIGKILL);
         }
-        if let Some(pid) = pid {
-            let _ = killpg(Pid::from_raw(pid), Signal::SIGHUP);
+    }
+    fn advance_close(&self) {
+        let Some(at) = self.closing else { return };
+        // A just-started job can become foreground after close was requested.
+        self.stop_foreground();
+        if at.elapsed() < Duration::from_millis(100) {
+            return;
+        }
+        if let Some(pid) = self.child.process_id().filter(|pid| *pid > 1) {
+            let signal = if at.elapsed() < Duration::from_millis(500) {
+                Signal::SIGHUP
+            } else {
+                // Enforce the whole-group deadline without blocking this supervisor
+                // on portable-pty's per-child hangup grace period.
+                Signal::SIGKILL
+            };
+            let _ = killpg(Pid::from_raw(pid as i32), signal);
         }
     }
 }
@@ -226,7 +244,10 @@ impl Terminals {
         };
         // Bounded queues and one reader/writer per PTY. Blocking PTY I/O never holds
         // the host dispatcher or the control lock, so close can unblock a writer.
-        let read_stopped = stopped.clone();
+        // Keep draining until the child exits. Stopping reads on removal can leave
+        // a macOS shell stuck in tty teardown, even after SIGKILL was delivered.
+        let read_stopped = Arc::new(AtomicBool::new(false));
+        let read_done = read_stopped.clone();
         std::thread::spawn(move || {
             let mut buffer = [0; 8192];
             while !read_stopped.load(Ordering::Relaxed) {
@@ -282,6 +303,7 @@ impl Terminals {
         std::thread::spawn(move || {
             loop {
                 if let Ok(mut c) = control.lock() {
+                    c.advance_close();
                     match c.child.try_wait() {
                         Ok(Some(status)) => {
                             c.exited = true;
@@ -290,19 +312,15 @@ impl Terminals {
                             drop(c);
                             std::thread::sleep(Duration::from_millis(100));
                             stopped.store(true, Ordering::Relaxed);
+                            read_done.store(true, Ordering::Relaxed);
                             break;
                         }
-                        Ok(None) => {
-                            if c.closing
-                                .is_some_and(|at| at.elapsed() >= Duration::from_millis(500))
-                            {
-                                let _ = c.child.kill();
-                            }
-                        }
+                        Ok(None) => (),
                         Err(_) => {
                             c.stop();
                             c.exited = true;
                             stopped.store(true, Ordering::Relaxed);
+                            read_done.store(true, Ordering::Relaxed);
                             break;
                         }
                     }

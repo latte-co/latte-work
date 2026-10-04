@@ -1674,6 +1674,75 @@ async fn terminal_pty_cwd_resize_unicode_reconnect_interrupt_and_exit() {
         Response::Error { .. }
     ));
 }
+fn process_is_running(pid: Pid) -> bool {
+    if kill(pid, None).is_err() {
+        return false;
+    }
+    // kill(pid, 0) also succeeds for a terminated process awaiting reaping.
+    // In particular, macOS runners can retain an orphaned zombie temporarily.
+    let result = Command::new("/bin/ps")
+        .args(["-p", &pid.as_raw().to_string(), "-o", "stat="])
+        .output()
+        .unwrap();
+    let state = String::from_utf8(result.stdout).unwrap();
+    if state.trim().is_empty() {
+        assert_eq!(result.status.code(), Some(1), "process query failed");
+        return false;
+    }
+    assert!(result.status.success(), "process query failed");
+    !state.trim_start().starts_with('Z')
+}
+#[tokio::test]
+async fn terminal_close_kills_shell_that_ignores_hangup() {
+    let host = Host::start().await;
+    let mut client = host.client().await;
+    let project = tempfile::tempdir().unwrap();
+    let project_id = terminal_project(&mut client, project.path()).await;
+    let id = uuid::Uuid::new_v4().to_string();
+    assert!(matches!(
+        ask(
+            &mut client,
+            Request::CreateTerminal {
+                project_id,
+                terminal_id: id.clone(),
+                cols: 80,
+                rows: 24,
+            }
+        )
+        .await,
+        Response::Terminal { .. }
+    ));
+    terminal_write(
+        &mut client,
+        &id,
+        b"trap '' HUP; echo $$ > hangup.pid; while :; do sleep 1; done\n",
+    )
+    .await;
+    let pid_file = project.path().join("hangup.pid");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let pid = loop {
+        if let Ok(pid) = std::fs::read_to_string(&pid_file)
+            && let Ok(pid) = pid.trim().parse::<i32>()
+        {
+            break Pid::from_raw(pid);
+        }
+        assert!(Instant::now() < deadline, "shell readiness timeout");
+        tokio::time::sleep(Duration::from_millis(30)).await;
+    };
+    assert!(process_is_running(pid));
+    assert!(matches!(
+        ask(&mut client, Request::CloseTerminal { terminal_id: id }).await,
+        Response::Ok
+    ));
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while process_is_running(pid) {
+        assert!(
+            Instant::now() < deadline,
+            "hangup-ignoring shell survived close"
+        );
+        tokio::time::sleep(Duration::from_millis(30)).await;
+    }
+}
 #[tokio::test]
 async fn terminal_limits_project_isolation_and_close_foreground_process() {
     let host = Host::start().await;
@@ -1760,7 +1829,8 @@ async fn terminal_limits_project_isolation_and_close_foreground_process() {
     );
     assert!(kill(pid, None).is_ok());
     ask(&mut client, Request::CloseTerminal { terminal_id: id }).await;
-    while kill(pid, None).is_ok() {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while process_is_running(pid) {
         assert!(
             Instant::now() < deadline,
             "foreground process survived close"
