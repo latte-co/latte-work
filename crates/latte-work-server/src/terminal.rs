@@ -318,6 +318,8 @@ impl Terminals {
                         Ok(None) => (),
                         Err(_) => {
                             c.stop();
+                            // The timed close loop cannot continue after a wait error.
+                            let _ = c.child.kill();
                             c.exited = true;
                             stopped.store(true, Ordering::Relaxed);
                             read_done.store(true, Ordering::Relaxed);
