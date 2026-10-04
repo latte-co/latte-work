@@ -1,5 +1,6 @@
 import { copyText } from "./clipboard";
 import { AppearancePreview } from "./AppearancePreview";
+import { MessageContent } from "./MessageContent";
 import { useEffect, useRef, useState, type CSSProperties } from "react";
 import { Check, Copy, RotateCcw, Upload } from "lucide-react";
 import { Select } from "./Select";
@@ -176,12 +177,15 @@ export function AppearanceSettings() {
         style={themeTokens(theme) as CSSProperties}
         aria-label="主题预览"
       >
-        <div className="appearance-preview-copy">
-          <strong>让想法变成作品</strong>
-          <span>正文预览 · Latte Work</span>
-          <a href="#appearance-controls" onClick={(e) => e.preventDefault()}>
-            链接与强调色
-          </a>
+        <div className="appearance-preview-copy markdown">
+          <MessageContent
+            text={`### 让想法变成作品
+
+这是聊天正文的预览。中文、English 和 \`inline code\` 保持清晰，**重点信息**稍作强调。
+
+- 清晰的行距与段落留白，适合阅读较长的回复。
+- [链接与强调色](#appearance-controls)与正文保持同一阅读节奏。`}
+          />
         </div>
         <div className="appearance-preview-code">
           <div>

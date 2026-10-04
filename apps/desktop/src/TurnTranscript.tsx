@@ -1,4 +1,4 @@
-import { Fragment, type ReactNode } from "react";
+import { Fragment, useMemo, useState, type ReactNode } from "react";
 import { ChevronRight } from "lucide-react";
 import { CopyButton } from "./MessageContent";
 import type { Event } from "./protocol";
@@ -95,21 +95,24 @@ export function TurnTranscript({
   events: Event[];
   children: (item: ActivityItem) => ReactNode;
 }) {
-  return turnTranscript(events).map((turn) => (
+  const turns = useMemo(() => turnTranscript(events), [events]);
+  return turns.map((turn) => (
     <div className="conversation-turn" key={turn.key}>
       {turn.user && children(turn.user)}
       {turn.process.length > 0 && (
-        <details className="turn-process">
+        <LazyProcess>
           <summary
             title={turn.stopped ? "已执行的文件改动不会撤销。" : undefined}
           >
             <span>{turn.elapsed}</span>
             <ChevronRight size={14} aria-hidden="true" />
           </summary>
-          <div className="turn-process-content">
-            {turn.process.map(children)}
-          </div>
-        </details>
+          {() => (
+            <div className="turn-process-content">
+              {turn.process.map(children)}
+            </div>
+          )}
+        </LazyProcess>
       )}
       {turn.stopped && turn.process.length === 0 && (
         <div className="turn-stop-summary" title="已执行的文件改动不会撤销。">
@@ -128,6 +131,19 @@ export function TurnTranscript({
       ))}
     </div>
   ));
+}
+
+function LazyProcess({ children }: { children: [ReactNode, () => ReactNode] }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <details
+      className="turn-process"
+      onToggle={(e) => setOpen(e.currentTarget.open)}
+    >
+      {children[0]}
+      {open && children[1]()}
+    </details>
+  );
 }
 
 export function formatElapsed(milliseconds: number) {

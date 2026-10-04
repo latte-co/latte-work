@@ -9,12 +9,43 @@ import {
   X,
   PanelRight,
   Maximize2,
-  Minimize2,
+  MessageCircle,
+  PanelLeft,
 } from "lucide-react";
 import type { Project } from "./protocol";
 import { request, message } from "./api";
 import { WorkspaceFiles } from "./WorkspaceFiles";
 import { TerminalPane } from "./TerminalPane";
+
+function ConversationTab({
+  title,
+  active,
+  select,
+  onKeyDown,
+}: {
+  title: string;
+  active: boolean;
+  select: () => void;
+  onKeyDown?: (event: React.KeyboardEvent<HTMLButtonElement>) => void;
+}) {
+  return (
+    <div className={`workspace-tab conversation-tab${active ? " active" : ""}`}>
+      <button
+        role="tab"
+        id="conversation-workspace-tab"
+        aria-selected={active}
+        aria-controls="conversation-panel"
+        tabIndex={active ? 0 : -1}
+        title={title}
+        onClick={select}
+        onKeyDown={onKeyDown}
+      >
+        <MessageCircle size={16} />
+        <span>{title}</span>
+      </button>
+    </div>
+  );
+}
 
 type Kind = "terminal" | "files" | "diff";
 
@@ -27,6 +58,9 @@ const icons = {
 
 export function Workspace({
   workspaceId,
+  conversationTitle = "对话",
+  sidebarOpen = true,
+  toggleSidebar,
   hostId,
   hostName,
   project,
@@ -35,6 +69,9 @@ export function Workspace({
   close,
 }: {
   workspaceId: string;
+  conversationTitle?: string;
+  sidebarOpen?: boolean;
+  toggleSidebar?: () => void;
   hostId: string;
   hostName: string;
   project?: Project;
@@ -44,6 +81,7 @@ export function Workspace({
 }) {
   const [state, update] = useWorkspaceState(workspaceId);
   const expanded = state.expanded;
+  const conversationActive = expanded && state.conversationActive;
   // Keep each visited conversation mounted so switching preserves its emulator.
   const [pages, setPages] = useState<
     { key: string; hostId: string; hostName: string; project: Project }[]
@@ -60,7 +98,7 @@ export function Workspace({
   return (
     <aside
       id="project-workspace"
-      className={`workspace${expanded ? " expanded" : ""}`}
+      className={`workspace${expanded ? " expanded" : ""}${conversationActive ? " conversation-selected" : ""}`}
       hidden={!visible}
     >
       {pages.map((page) => {
@@ -69,6 +107,9 @@ export function Workspace({
           <WorkspacePage
             key={page.key}
             workspaceId={page.key}
+            conversationTitle={conversationTitle}
+            sidebarOpen={sidebarOpen}
+            toggleSidebar={toggleSidebar}
             hostId={selected ? hostId : page.hostId}
             hostName={selected ? hostName : page.hostName}
             project={selected ? project! : page.project}
@@ -84,16 +125,43 @@ export function Workspace({
       {!project && (
         <div className="workspace-page empty">
           <header data-tauri-drag-region="deep">
+            {expanded && !sidebarOpen && toggleSidebar && (
+              <button
+                className="icon-button"
+                aria-label="展开侧栏"
+                onClick={toggleSidebar}
+              >
+                <PanelLeft size={16} />
+              </button>
+            )}
+            {expanded && (
+              <div
+                className="workspace-tabs"
+                role="tablist"
+                aria-label="工作区标签"
+              >
+                <ConversationTab
+                  title={conversationTitle}
+                  active={conversationActive}
+                  select={() => update({ conversationActive: true })}
+                />
+              </div>
+            )}
             <div className="workspace-header-space" data-tauri-drag-region />
             <button
               className="icon-button"
-              aria-label="收起工作区"
+              aria-label={expanded ? "分离右侧栏" : "收起工作区"}
+              title={expanded ? "分离右侧栏" : "收起工作区"}
               onClick={close}
             >
               <PanelRight size={16} />
             </button>
           </header>
-          <div className="workspace-empty" aria-label="工作区入口">
+          <div
+            className="workspace-empty"
+            aria-label="工作区入口"
+            hidden={conversationActive}
+          >
             <div className="workspace-launchers">
               {(["diff", "terminal", "files"] as const).map((kind) => {
                 const Icon = icons[kind];
@@ -114,6 +182,9 @@ export function Workspace({
 
 function WorkspacePage({
   workspaceId,
+  conversationTitle,
+  sidebarOpen,
+  toggleSidebar,
   hostId,
   hostName,
   project,
@@ -127,6 +198,9 @@ function WorkspacePage({
   hostId: string;
   hostName: string;
   workspaceId: string;
+  conversationTitle: string;
+  sidebarOpen: boolean;
+  toggleSidebar?: () => void;
   project: Project;
   selected: boolean;
   active: boolean;
@@ -141,7 +215,31 @@ function WorkspacePage({
     update((state) => ({
       tabs: typeof value === "function" ? value(state.tabs) : value,
     }));
-  const select = (id: string) => update({ current: id });
+  const conversationActive = expanded && state.conversationActive;
+  const select = (id: string) =>
+    update({ current: id, conversationActive: false });
+  const selectConversation = () => update({ conversationActive: true });
+  const navigateTabs = (event: React.KeyboardEvent<HTMLButtonElement>) => {
+    if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
+    event.preventDefault();
+    const buttons = [
+      ...(tablist.current?.querySelectorAll<HTMLButtonElement>(
+        '[role="tab"]',
+      ) ?? []),
+    ];
+    const index = buttons.indexOf(event.currentTarget);
+    const next =
+      buttons[
+        event.key === "Home"
+          ? 0
+          : event.key === "End"
+            ? buttons.length - 1
+            : (index + (event.key === "ArrowRight" ? 1 : -1) + buttons.length) %
+              buttons.length
+      ];
+    next?.click();
+    next?.focus();
+  };
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [menu, setMenu] = useState(false);
@@ -155,7 +253,7 @@ function WorkspacePage({
         ?.querySelector<HTMLElement>('[aria-selected="true"]')
         ?.closest(".workspace-tab")
         ?.scrollIntoView({ block: "nearest", inline: "nearest" });
-  }, [active, current]);
+  }, [active, current, conversationActive]);
   useEffect(() => {
     if (!selected || !connected) return;
     let disposed = false;
@@ -250,6 +348,7 @@ function WorkspacePage({
         },
       ],
       current: terminalId,
+      conversationActive: false,
     }));
     try {
       const response = await request(hostId, {
@@ -301,53 +400,45 @@ function WorkspacePage({
       hidden={!selected}
     >
       <header data-tauri-drag-region="deep">
+        {expanded && !sidebarOpen && toggleSidebar && (
+          <button
+            className="icon-button"
+            aria-label="展开侧栏"
+            onClick={toggleSidebar}
+          >
+            <PanelLeft size={16} />
+          </button>
+        )}
         <div
           ref={tablist}
           className="workspace-tabs"
           role="tablist"
           aria-label="工作区标签"
         >
+          {expanded && selected && (
+            <ConversationTab
+              title={conversationTitle}
+              active={conversationActive}
+              select={selectConversation}
+              onKeyDown={navigateTabs}
+            />
+          )}
           {tabs.map((tab) => {
             const Icon = icons[tab.kind];
             return (
               <div
                 key={tab.id}
-                className={`workspace-tab${current === tab.id ? " active" : ""}`}
+                className={`workspace-tab${!conversationActive && current === tab.id ? " active" : ""}`}
               >
                 <button
                   role="tab"
                   id={`tab-${tabPrefix}-${tab.id}`}
-                  aria-selected={current === tab.id}
+                  aria-selected={!conversationActive && current === tab.id}
                   aria-controls={`pane-${tabPrefix}-${tab.id}`}
-                  tabIndex={current === tab.id ? 0 : -1}
+                  tabIndex={!conversationActive && current === tab.id ? 0 : -1}
                   title={title(tab)}
                   onClick={() => select(tab.id)}
-                  onKeyDown={(e) => {
-                    if (
-                      ["ArrowLeft", "ArrowRight", "Home", "End"].includes(e.key)
-                    ) {
-                      e.preventDefault();
-                      const index = tabs.indexOf(tab);
-                      const next =
-                        tabs[
-                          e.key === "Home"
-                            ? 0
-                            : e.key === "End"
-                              ? tabs.length - 1
-                              : (index +
-                                  (e.key === "ArrowRight" ? 1 : -1) +
-                                  tabs.length) %
-                                tabs.length
-                        ];
-                      select(next.id);
-                      e.currentTarget
-                        .closest('[role="tablist"]')
-                        ?.querySelector<HTMLButtonElement>(
-                          `[id="tab-${tabPrefix}-${next.id}"]`,
-                        )
-                        ?.focus();
-                    }
-                  }}
+                  onKeyDown={navigateTabs}
                 >
                   <Icon size={16} />
                   <span>{title(tab)}</span>
@@ -369,7 +460,7 @@ function WorkspacePage({
             );
           })}
         </div>
-        {tabs.length > 0 && (
+        {(expanded || tabs.length > 0) && (
           <button
             ref={trigger}
             className="icon-button workspace-add"
@@ -384,18 +475,20 @@ function WorkspacePage({
           </button>
         )}
         <div className="workspace-header-space" data-tauri-drag-region />
+        {!expanded && (
+          <button
+            className="icon-button"
+            aria-label="展开工作区到主区域"
+            title="展开"
+            onClick={expand}
+          >
+            <Maximize2 size={15} />
+          </button>
+        )}
         <button
           className="icon-button"
-          aria-label={expanded ? "还原工作区" : "展开工作区到主区域"}
-          title={expanded ? "还原" : "展开"}
-          onClick={expand}
-        >
-          {expanded ? <Minimize2 size={15} /> : <Maximize2 size={15} />}
-        </button>
-        <button
-          className="icon-button"
-          title="收起工作区"
-          aria-label="收起工作区"
+          title={expanded ? "分离右侧栏" : "收起工作区"}
+          aria-label={expanded ? "分离右侧栏" : "收起工作区"}
           onClick={close}
         >
           <PanelRight size={16} />
@@ -412,7 +505,7 @@ function WorkspacePage({
           choose={(kind) => void add(kind)}
         />
       )}
-      {error && (
+      {error && !conversationActive && (
         <div className="terminal-notice" role="alert">
           <span>{error}</span>
           <button
@@ -432,13 +525,15 @@ function WorkspacePage({
           role="tabpanel"
           aria-labelledby={`tab-${tabPrefix}-${tab.id}`}
           className="workspace-pane"
-          hidden={current !== tab.id}
+          hidden={conversationActive || current !== tab.id}
         >
           {tab.kind === "terminal" ? (
             <TerminalPane
               hostId={tab.hostId ?? hostId}
               terminal={tab.terminal}
-              active={active && current === tab.id && !busy}
+              active={
+                active && !conversationActive && current === tab.id && !busy
+              }
               connected={connected}
             />
           ) : (
@@ -453,12 +548,14 @@ function WorkspacePage({
                   tabs.map((t) => (t.id === tab.id ? { ...t, ...value } : t)),
                 )
               }
-              active={active && current === tab.id && connected}
+              active={
+                active && !conversationActive && current === tab.id && connected
+              }
             />
           )}
         </section>
       ))}
-      {!tabs.length && (
+      {!tabs.length && !conversationActive && (
         <div className="workspace-empty" aria-label="工作区入口">
           <div className="workspace-launchers">
             {(["diff", "terminal", "files"] as const).map((kind) => {

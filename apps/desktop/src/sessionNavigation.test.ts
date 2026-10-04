@@ -1,6 +1,8 @@
+// @vitest-environment jsdom
 import { describe, expect, it } from "vitest";
 import {
   pinnedSessions,
+  readPinnedCache,
   sessionKey,
   loadConversation,
   conversationMarkdown,
@@ -109,4 +111,16 @@ describe("conversation copy", () => {
     expect(result).toContain("## 助手\n\nanswer");
     expect(result).not.toContain("raw secret");
   });
+});
+
+it("does not restore live Agent session state from the persistent pinned cache", () => {
+  localStorage.setItem(
+    "latte-work.pinned-sessions.v1",
+    JSON.stringify({
+      local: [{ ...session("old"), agent_session_open: true }],
+    }),
+  );
+  expect(readPinnedCache().local[0].agent_session_open).toBeUndefined();
+  expect(readPinnedCache().local[0].title).toBe("old");
+  localStorage.clear();
 });

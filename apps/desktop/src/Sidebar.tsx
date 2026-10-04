@@ -3,6 +3,7 @@ import {
   Plus,
   Folder,
   FolderOpen,
+  Globe2,
   CirclePause,
   CircleAlert,
   CircleHelp,
@@ -18,6 +19,10 @@ import {
   PinOff,
   ArchiveRestore,
 } from "lucide-react";
+import { WorkingStatus } from "./WorkingStatus";
+import { SessionHoverCard, ProjectHoverCard } from "./SidebarHoverCard";
+import { agentSessionLabels, agentSessionState } from "./agentSessionState";
+import { useHistoryLoadingIndicator } from "./useHistoryLoadingIndicator";
 import { SessionActions } from "./SessionActions";
 import type { HostedSession } from "./sessionNavigation";
 import { ProjectActions } from "./ProjectActions";
@@ -26,7 +31,19 @@ import { message, request } from "./api";
 import { statusNames } from "./Conversation";
 import type { Session } from "./protocol";
 import type { Workbench } from "./useWorkbench";
-export function Sidebar({ state }: { state: Workbench }) {
+export function Sidebar({
+  state,
+  historyPending = state.historyLoading,
+}: {
+  state: Workbench;
+  historyPending?: boolean;
+}) {
+  const loadingScope = JSON.stringify([
+    state.hostId,
+    state.sessionId,
+    state.viewRevision,
+  ]);
+  const loading = useHistoryLoadingIndicator(!!historyPending, loadingScope);
   const [actionBusy, setActionBusy] = useState<string | null>(null);
   const [sessionContext, setSessionContext] = useState<{
     session: HostedSession;
@@ -170,6 +187,12 @@ export function Sidebar({ state }: { state: Workbench }) {
       setLoadingProjects((old) => ({ ...old, [key]: false }));
     }
   }
+  const liveSessionState = (s: HostedSession) =>
+    state.agentSessionState?.(s) ??
+    agentSessionState(
+      s,
+      state.isHostConnected?.(s.hostId) ?? (s.hostId === hostId && connected),
+    );
   const sessionRow = (s: HostedSession, shortcut = false) => {
     const sourceProject = projects.find(
       (p) => p.hostId === s.hostId && p.id === s.project_id,
@@ -181,83 +204,109 @@ export function Sidebar({ state }: { state: Workbench }) {
       setContext(null);
       setSessionContext({ session: s, point });
     };
+    const loadingHistory =
+      s.id === sessionId && s.hostId === hostId && loading.visible;
+    const liveState = liveSessionState(s);
+    const liveLabel = agentSessionLabels[liveState];
+    const pendingAgent = liveState === "opening" || liveState === "restoring";
+    const loadingLabel = loadingHistory
+      ? "正在加载对话"
+      : pendingAgent
+        ? liveLabel
+        : null;
     const row = (
-      <button
-        className={`session-row ${shortcut ? "pinned-session" : ""} ${s.id === sessionId && s.hostId === hostId ? "active" : ""}`}
-        title={`${sourceProject?.name ?? "项目"} · ${sourceHost?.name ?? s.hostId} · ${statusNames[s.status]}`}
-        onClick={() => {
-          setExpandedProjects((old) => ({
-            ...old,
-            [`${s.hostId}:${s.project_id}`]: true,
-          }));
-          state.openSession(s);
-        }}
-        onContextMenu={(e) => {
-          e.preventDefault();
-          e.currentTarget.focus();
-          showMenu({ x: e.clientX, y: e.clientY });
-        }}
-        onKeyDown={(e) => {
-          if (e.key === "ContextMenu" || (e.shiftKey && e.key === "F10")) {
-            e.preventDefault();
-            const rect = e.currentTarget.getBoundingClientRect();
-            showMenu({ x: rect.left + 16, y: rect.bottom });
-          }
-        }}
+      <SessionHoverCard
+        title={s.title}
+        project={sourceProject?.name ?? "项目"}
+        host={sourceHost?.name ?? s.hostId}
+        taskStatus={statusNames[s.status]}
+        agentState={liveState}
       >
-        {shortcut && <Pin size={13} />}
-        <span className="session-label">
-          {s.title}
-          {duplicateTitle && (
-            <small>
-              {sourceProject?.name} · {sourceHost?.name}
-            </small>
-          )}
-        </span>
-        <span className="row-status">
-          {s.status === "running" ? (
-            <span
-              className="session-progress"
-              role="img"
-              aria-label="执行中"
-              title="执行中"
-            >
-              <i />
-              <i />
-              <i />
-            </span>
-          ) : s.status === "waiting" ? (
-            <CirclePause
-              className="session-waiting"
-              size={14}
-              role="img"
-              aria-label="等待确认"
-            >
-              <title>等待确认</title>
-            </CirclePause>
-          ) : s.status === "failed" ? (
-            <CircleAlert
-              size={14}
-              className="failure"
-              role="img"
-              aria-label="执行失败"
-            >
-              <title>执行失败</title>
-            </CircleAlert>
-          ) : s.status === "unknown" ? (
-            <CircleHelp size={14} role="img" aria-label="状态待确认">
-              <title>状态待确认</title>
-            </CircleHelp>
-          ) : s.unread ? (
-            <span
-              className="unread-dot"
-              role="img"
-              aria-label="未读"
-              title="未读"
-            />
-          ) : null}
-        </span>
-      </button>
+        <button
+          className={`session-row ${shortcut ? "pinned-session" : ""} ${s.id === sessionId && s.hostId === hostId ? "active" : ""}`}
+          aria-label={s.title}
+          aria-description={`${sourceProject?.name ?? "项目"} · ${sourceHost?.name ?? s.hostId} · ${statusNames[s.status]}${liveState === "closed" ? "" : ` · ${liveLabel}`}`}
+          onClick={() => {
+            setExpandedProjects((old) => ({
+              ...old,
+              [`${s.hostId}:${s.project_id}`]: true,
+            }));
+            state.openSession(s);
+          }}
+          onContextMenu={(e) => {
+            e.preventDefault();
+            e.currentTarget.focus();
+            showMenu({ x: e.clientX, y: e.clientY });
+          }}
+          onKeyDown={(e) => {
+            if (e.key === "ContextMenu" || (e.shiftKey && e.key === "F10")) {
+              e.preventDefault();
+              const rect = e.currentTarget.getBoundingClientRect();
+              showMenu({ x: rect.left + 16, y: rect.bottom });
+            }
+          }}
+        >
+          <span className="session-label">
+            {s.title}
+            {duplicateTitle && (
+              <small>
+                {sourceProject?.name} · {sourceHost?.name}
+              </small>
+            )}
+          </span>
+          <span className="row-status">
+            {loadingLabel ? (
+              <span
+                className="session-history-loading"
+                aria-label={loadingLabel}
+                title={loadingLabel}
+              >
+                <WorkingStatus label="" animated />
+              </span>
+            ) : s.status === "running" ? (
+              <span
+                className="session-progress"
+                role="img"
+                aria-label="执行中"
+                title="执行中"
+              >
+                <i />
+                <i />
+                <i />
+              </span>
+            ) : s.status === "waiting" ? (
+              <CirclePause
+                className="session-waiting"
+                size={14}
+                role="img"
+                aria-label="等待确认"
+              >
+                <title>等待确认</title>
+              </CirclePause>
+            ) : s.status === "failed" ? (
+              <CircleAlert
+                size={14}
+                className="failure"
+                role="img"
+                aria-label="执行失败"
+              >
+                <title>执行失败</title>
+              </CircleAlert>
+            ) : s.status === "unknown" ? (
+              <CircleHelp size={14} role="img" aria-label="状态待确认">
+                <title>状态待确认</title>
+              </CircleHelp>
+            ) : s.unread ? (
+              <span
+                className="unread-dot"
+                role="img"
+                aria-label="未读"
+                title="未读"
+              />
+            ) : null}
+          </span>
+        </button>
+      </SessionHoverCard>
     );
     const menuOpen =
       sessionContext?.session.id === s.id &&
@@ -295,7 +344,7 @@ export function Sidebar({ state }: { state: Workbench }) {
               showMenu({ x: rect.left, y: rect.bottom });
             }}
           >
-            <MoreHorizontal size={15} />
+            <MoreHorizontal size={14} />
           </button>
           <button
             className="icon-button"
@@ -410,6 +459,42 @@ export function Sidebar({ state }: { state: Workbench }) {
           const projectSessions = selected
             ? sessions
             : (sessionCache[key] ?? []);
+          const allSessions = Array.from(
+            new Map(
+              [
+                ...state.pinned.filter(
+                  (s) => s.hostId === p.hostId && s.project_id === p.id,
+                ),
+                ...projectSessions.map((s) => ({ ...s, hostId: p.hostId })),
+              ].map((s) => [s.id, s]),
+            ).values(),
+          ).filter((s) => !s.archived);
+          const hasSnapshot =
+            (selected && connected) || sessionCache[key] !== undefined;
+          const hostConnected =
+            state.isHostConnected?.(p.hostId) ??
+            (p.hostId === hostId && connected);
+          const openStates = allSessions.map((s) => liveSessionState(s));
+          const opened =
+            hasSnapshot &&
+            hostConnected &&
+            allSessions.every((s) => s.agent_session_open !== undefined) &&
+            openStates.every((s) => s === "open" || s === "closed")
+              ? openStates.filter((s) => s === "open").length
+              : null;
+          const projectHost =
+            hosts.find((h) => h.id === p.hostId)?.name ?? p.hostId;
+          const noSessions =
+            !projectSessions.some((s) => !s.archived) &&
+            !state.pinned.some(
+              (s) =>
+                s.hostId === p.hostId && s.project_id === p.id && !s.archived,
+            );
+          const empty =
+            (selected ? connected : sessionCache[key] !== undefined) &&
+            !loadingProjects[key] &&
+            !projectErrors[key] &&
+            noSessions;
           const running = projectSessions.some((s) => s.status === "running");
           const waiting = projectSessions.some((s) => s.status === "waiting");
           const toggle = () => {
@@ -423,7 +508,7 @@ export function Sidebar({ state }: { state: Workbench }) {
           return (
             <div className="project-group" key={key}>
               <div
-                className={`project-heading ${selected ? "selected" : ""}`}
+                className={`project-heading ${selected ? "selected" : ""} ${empty ? "empty" : ""}`}
                 data-menu-open={
                   context?.project.id === p.id &&
                   context.project.hostId === p.hostId
@@ -453,48 +538,68 @@ export function Sidebar({ state }: { state: Workbench }) {
                   }
                 }}
               >
-                <button
-                  className="project-row"
-                  onClick={toggle}
-                  aria-expanded={expanded}
-                  aria-controls={`sessions-${key}`}
-                  title={`${p.path} · ${hosts.find((h) => h.id === p.hostId)?.name ?? ""}`}
+                <ProjectHoverCard
+                  title={p.name}
+                  path={p.path}
+                  host={projectHost}
+                  total={hasSnapshot ? allSessions.length : null}
+                  opened={opened}
                 >
-                  <span className="project-folder">
-                    {expanded ? <FolderOpen size={15} /> : <Folder size={15} />}
-                    {p.hostId !== "local" && (
-                      <span className="project-remote-mark" />
-                    )}
-                  </span>
-                  <span className="project-name">{p.name}</span>
-                  {p.hostId !== "local" && (
-                    <small className="project-host">
-                      {hosts.find((h) => h.id === p.hostId)?.name}
-                    </small>
-                  )}
-                  <span className="row-status">
-                    {!expanded &&
-                      (running ? (
+                  <button
+                    className="project-row"
+                    onClick={toggle}
+                    aria-label={p.name}
+                    aria-expanded={expanded}
+                    aria-controls={`sessions-${key}`}
+                    aria-description={`${p.path} · ${projectHost}`}
+                  >
+                    <span className="project-folder">
+                      {expanded ? (
+                        <FolderOpen size={15} />
+                      ) : (
+                        <Folder size={15} />
+                      )}
+                      {p.hostId !== "local" && (
                         <span
-                          className="session-progress project-activity"
+                          className="project-remote-mark"
                           role="img"
-                          aria-label="项目中有对话执行中"
-                          title="有对话执行中"
+                          aria-label="远程项目"
+                          title="远程项目"
                         >
-                          <i />
-                          <i />
-                          <i />
+                          <Globe2 size={8} aria-hidden="true" />
                         </span>
-                      ) : waiting ? (
-                        <CirclePause
-                          className="session-waiting project-activity"
-                          size={14}
-                          role="img"
-                          aria-label="项目中有对话等待确认"
-                        />
-                      ) : null)}
-                  </span>
-                </button>
+                      )}
+                    </span>
+                    <span className="project-name">{p.name}</span>
+                    {p.hostId !== "local" && (
+                      <small className="project-host">
+                        {hosts.find((h) => h.id === p.hostId)?.name}
+                      </small>
+                    )}
+                    <span className="row-status">
+                      {!expanded &&
+                        (running ? (
+                          <span
+                            className="session-progress project-activity"
+                            role="img"
+                            aria-label="项目中有对话执行中"
+                            title="有对话执行中"
+                          >
+                            <i />
+                            <i />
+                            <i />
+                          </span>
+                        ) : waiting ? (
+                          <CirclePause
+                            className="session-waiting project-activity"
+                            size={14}
+                            role="img"
+                            aria-label="项目中有对话等待确认"
+                          />
+                        ) : null)}
+                    </span>
+                  </button>
+                </ProjectHoverCard>
                 <div className="project-row-actions">
                   <button
                     className="icon-button"
@@ -511,7 +616,7 @@ export function Sidebar({ state }: { state: Workbench }) {
                       showProjectMenu({ x: rect.left, y: rect.bottom });
                     }}
                   >
-                    <MoreHorizontal size={15} />
+                    <MoreHorizontal size={14} />
                   </button>
                   <button
                     className="project-new-task icon-button"
@@ -522,7 +627,7 @@ export function Sidebar({ state }: { state: Workbench }) {
                       void createSession(p).catch((e) => setError(message(e)));
                     }}
                   >
-                    <SquarePen size={15} />
+                    <SquarePen size={14} />
                   </button>
                 </div>
               </div>
@@ -530,9 +635,17 @@ export function Sidebar({ state }: { state: Workbench }) {
                 {expanded && (
                   <div className="session-list">
                     {projectSessions
-                      .filter((s) => !s.archived)
+                      .filter(
+                        (s) =>
+                          !s.archived &&
+                          s.pinned_at === null &&
+                          !state.pinned.some(
+                            (pinned) =>
+                              pinned.hostId === p.hostId && pinned.id === s.id,
+                          ),
+                      )
                       .map((s) => sessionRow({ ...s, hostId: p.hostId }))}
-                    {projectSessions.filter((s) => !s.archived).length === 0 &&
+                    {noSessions &&
                       (projectErrors[key] ? (
                         <button
                           className="no-sessions"
@@ -583,7 +696,6 @@ export function Sidebar({ state }: { state: Workbench }) {
         <button onClick={() => setModal("settings")}>
           <Settings2 size={16} />
           设置
-          <span className={`connection-dot ${connected ? "online" : ""}`} />
         </button>
       </div>
       {sessionContext && (

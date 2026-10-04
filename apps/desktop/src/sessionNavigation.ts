@@ -67,7 +67,14 @@ export function readPinnedCache(): Record<string, Session[]> {
                   "unknown",
                 ].includes(s.status),
             ),
-        ),
+        )
+        .map(([host, rows]) => [
+          host,
+          (rows as Session[]).map((session) => ({
+            ...session,
+            agent_session_open: undefined,
+          })),
+        ]),
     );
   } catch {
     return {};

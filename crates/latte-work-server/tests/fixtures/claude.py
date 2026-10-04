@@ -1,18 +1,34 @@
 #!/usr/bin/env python3
 """Deterministic native-protocol fixture. Never connects to a model."""
-import sys,json,time,os,subprocess
+import sys,json,time,os,subprocess,threading
 if '--version' in sys.argv:
     print('fixture-claude 1.0');sys.exit(0)
 if '--help' in sys.argv:
     print('--permission-mode <mode> (choices: "default", "acceptEdits", "plan", "dontAsk", "bypassPermissions")');sys.exit(0)
-def emit(value): print(json.dumps(value),flush=True)
+output_lock=threading.Lock()
+def emit(value):
+    with output_lock: print(json.dumps(value),flush=True)
+turns=0
+child=None
+background=None
 resumed=any(arg.startswith('--resume=') for arg in sys.argv)
 for line in sys.stdin:
     value=json.loads(line)
     if value['type']=='control_request':
+        if value['request']['subtype']=='interrupt':
+            if child is not None:
+                child.terminate();child.wait();child=None
+            # Result and control acknowledgement may arrive in either order.
+            emit({'type':'result','subtype':'success','is_error':False})
+            emit({'type':'control_response','response':{'subtype':'success','request_id':value['request_id']}})
+            continue
+        if '--no-session-persistence' not in sys.argv:
+            with open('fixture-agent-pid','w') as f:f.write(str(os.getpid()))
         emit({'type':'control_response','response':{'subtype':'success','request_id':value['request_id'],'response':{'commands':[{'name':'compact','description':'Compact history','argumentHint':'[instructions]'},{'name':'project:check','description':os.path.basename(os.getcwd()),'argumentHint':'<target>'}]}}})
     elif value['type']=='user':
         text=value['message']['content']
+        resumed=resumed or turns>0
+        turns+=1
         emit({'type':'system','subtype':'init','session_id':'11111111-1111-4111-8111-111111111111'})
         if text=='environment':
             output=subprocess.check_output(['latte-env-fixture'],text=True)
@@ -33,8 +49,25 @@ for line in sys.stdin:
         if text=='hang':
             child=subprocess.Popen(['sleep','120'])
             emit({'type':'assistant','message':{'content':[{'type':'text','text':f'child:{child.pid}'}]}})
-            time.sleep(120)
-        if text.startswith('/'):
+            continue
+        if text=='identity':
+            emit({'type':'assistant','message':{'content':[{'type':'text','text':json.dumps({'pid':os.getpid(),'turns':turns,'background_pid':background.pid if background else None})}]}})
+            emit({'type':'result','subtype':'success','is_error':False})
+        elif text in ('background','background-report'):
+            background=subprocess.Popen(['sleep','120' if text=='background' else '0.5'])
+            emit({'type':'system','subtype':'task_started','task_id':'bg-task','task_type':'local_agent'})
+            emit({'type':'assistant','message':{'content':[{'type':'text','text':f'background:{background.pid}'}]}})
+            emit({'type':'result','subtype':'success','is_error':False})
+            if text=='background-report':
+                def report():
+                    background.wait()
+                    emit({'type':'system','subtype':'task_notification','task_id':'bg-task','status':'completed'})
+                    emit({'type':'assistant','message':{'content':[{'type':'text','text':'BACKGROUND_REPORT_OK'}]}})
+                    emit({'type':'result','subtype':'success','is_error':False})
+                    emit({'type':'system','subtype':'session_state_changed','state':'idle'})
+                threading.Thread(target=report,daemon=True).start()
+        elif text.startswith('/'):
+
             emit({'type':'result','subtype':'success','is_error':False,'result':('resumed:' if resumed else 'fresh:')+text})
         elif text=='permission':
             mode=next((a.split('=',1)[1] for a in sys.argv if a.startswith('--permission-mode=')), None)

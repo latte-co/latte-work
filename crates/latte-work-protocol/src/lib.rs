@@ -61,6 +61,14 @@ pub struct Session {
     pub unread: bool,
     #[serde(default)]
     pub archived: bool,
+    /// Live server projection only; absent on older servers and in durable history.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub agent_session_open: Option<bool>,
+    /// Active turn, pending approval or background work; live evidence only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub agent_session_busy: Option<bool>,
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "snake_case")]
@@ -405,6 +413,21 @@ pub enum Request {
         project_id: String,
         agent: String,
     },
+    /// Open/resume the native Agent without sending a prompt. Idempotent.
+    OpenAgentSession {
+        session_id: String,
+        #[serde(default)]
+        #[ts(optional)]
+        provider: Option<TurnProvider>,
+    },
+    /// Explicitly release this session's native process and all its background work.
+    CloseAgentSession {
+        session_id: String,
+        /// Idle bulk close must recheck atomically in the session actor.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        only_if_idle: Option<bool>,
+    },
     Send {
         #[serde(default)]
         #[ts(optional)]
@@ -418,6 +441,11 @@ pub enum Request {
         effort: Option<Effort>,
         #[serde(default)]
         permission_mode: Option<String>,
+    },
+    /// Bounded history window, newest first when before is absent.
+    History {
+        session_id: String,
+        before: Option<f64>,
     },
     Poll {
         session_id: String,
@@ -538,6 +566,8 @@ pub enum Response {
         agents: Vec<AgentInfo>,
         #[serde(default)]
         permission_settings: bool,
+        #[serde(default)]
+        history_window: bool,
     },
     Projects {
         projects: Vec<Project>,
@@ -553,6 +583,16 @@ pub enum Response {
     },
     Accepted {
         duplicate: bool,
+    },
+    History {
+        events: Vec<Event>,
+        session: Session,
+        /// More earlier events exist. Events are returned in ascending order.
+        has_more: bool,
+        /// Fetch an earlier window before revealing a split text or pending approval.
+        needs_earlier: bool,
+        /// Exclusive raw-event cursor, independent of compacted text event IDs.
+        before: Option<f64>,
     },
     Events {
         events: Vec<Event>,
@@ -615,6 +655,22 @@ mod model_metadata_compatibility {
         let response: Response = serde_json::from_str(r#"{"kind":"models","models":["sonnet"],"provider":null,"default_model":null,"effort_levels":[]}"#).unwrap();
         assert!(
             matches!(response, Response::Models { model_labels, .. } if model_labels.is_empty())
+        );
+    }
+}
+
+#[cfg(test)]
+mod session_projection_compatibility {
+    use super::*;
+    #[test]
+    fn old_sessions_have_no_live_state_and_do_not_persist_it() {
+        let session: Session = serde_json::from_str(r#"{"id":"s","project_id":"p","title":"old","agent":"claude","native_id":"old-native","status":"completed","created_at":1}"#).unwrap();
+        assert_eq!(session.agent_session_open, None);
+        assert!(
+            serde_json::to_value(&session)
+                .unwrap()
+                .get("agent_session_open")
+                .is_none()
         );
     }
 }

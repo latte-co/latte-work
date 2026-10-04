@@ -6,6 +6,7 @@
   --font-code: ui-monospace, "SFMono-Regular", Menlo, monospace;
   --weight-ui: 400;
   --weight-content: 400;
+  --weight-content-emphasis: 500;
   --weight-code: 400;
   --text-xs: 11px;
   --text-sm: 12px;
@@ -16,6 +17,7 @@
   --text-heading: 20px;
   --text-page-title: 24px;
   --leading-ui: 1.5;
+  --leading-content: 1.75;
 
   --space-1: 4px;
   --space-2: 8px;
@@ -75,6 +77,7 @@
   /* Native macOS controls and all top bars share this center line. */
   --titlebar-height: 44px;
   --content-width: 780px;
+  --conversation-min-width: 240px;
   --content-gutter: clamp(24px, 4vw, 48px);
 
   /* Existing layout and transcript components use these semantic aliases. */

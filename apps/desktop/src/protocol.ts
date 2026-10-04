@@ -39,6 +39,14 @@ export type Session = {
   pinned_at: number | null;
   unread: boolean;
   archived: boolean;
+  /**
+   * Live server projection only; absent on older servers and in durable history.
+   */
+  agent_session_open?: boolean;
+  /**
+   * Active turn, pending approval or background work; live evidence only.
+   */
+  agent_session_busy?: boolean;
 };
 export type ExecutionPhase = "waiting" | "thinking" | "replying";
 export type ContextUsage = {
@@ -213,6 +221,19 @@ export type Request =
   | { method: "archive_session"; session_id: string; archived: boolean }
   | { method: "create_session"; project_id: string; agent: string }
   | {
+      method: "open_agent_session";
+      session_id: string;
+      provider?: TurnProvider;
+    }
+  | {
+      method: "close_agent_session";
+      session_id: string;
+      /**
+       * Idle bulk close must recheck atomically in the session actor.
+       */
+      only_if_idle?: boolean;
+    }
+  | {
       method: "send";
       provider?: TurnProvider;
       session_id: string;
@@ -222,6 +243,7 @@ export type Request =
       effort: Effort | null;
       permission_mode: string | null;
     }
+  | { method: "history"; session_id: string; before: number | null }
   | { method: "poll"; session_id: string; after: number }
   | {
       method: "approve";
@@ -291,12 +313,30 @@ export type Response =
       server_id: string;
       agents: Array<AgentInfo>;
       permission_settings: boolean;
+      history_window: boolean;
     }
   | { kind: "projects"; projects: Array<Project> }
   | { kind: "project"; project: Project }
   | { kind: "sessions"; sessions: Array<Session> }
   | { kind: "session"; session: Session }
   | { kind: "accepted"; duplicate: boolean }
+  | {
+      kind: "history";
+      events: Array<Event>;
+      session: Session;
+      /**
+       * More earlier events exist. Events are returned in ascending order.
+       */
+      has_more: boolean;
+      /**
+       * Fetch an earlier window before revealing a split text or pending approval.
+       */
+      needs_earlier: boolean;
+      /**
+       * Exclusive raw-event cursor, independent of compacted text event IDs.
+       */
+      before: number | null;
+    }
   | {
       kind: "events";
       events: Array<Event>;

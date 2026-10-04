@@ -7,6 +7,7 @@ import {
   screen,
 } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
+import { HostConnectionError } from "./connectionErrors";
 import { PermissionPicker } from "./PermissionPicker";
 const mocks = vi.hoisted(() => ({ request: vi.fn() }));
 vi.mock("./api", () => ({ request: mocks.request, message: String }));
@@ -96,7 +97,34 @@ it("offers retry and explicit inheritance after discovery failure", async () => 
   expect(
     screen.getByRole("button", { name: "重新加载权限选项" }).title,
   ).toContain("Host 旧版本");
-  fireEvent.click(screen.getByRole("button", { name: "重新加载权限选项" }));
+  const retry = screen.getByRole("button", { name: "重新加载权限选项" });
+  expect(retry.textContent).toBe("");
+  expect(retry.title).toContain("权限加载失败，点击重试");
+  fireEvent.click(retry);
   await act(async () => {});
+  expect(screen.queryByRole("button", { name: "重新加载权限选项" })).toBeNull();
+});
+
+it("does not offer a permission retry when the underlying connection is lost", async () => {
+  mocks.request.mockRejectedValue(
+    new HostConnectionError("local", "连接已失效"),
+  );
+  const view = render(<PermissionPicker {...props} value="unrestricted" />);
+  await act(async () => {});
+  expect(screen.queryByRole("button", { name: "重新加载权限选项" })).toBeNull();
+  view.rerender(
+    <PermissionPicker {...props} value="unrestricted" connected={false} />,
+  );
+  expect((screen.getByRole("combobox") as HTMLButtonElement).disabled).toBe(
+    true,
+  );
+  expect(props.onChange).not.toHaveBeenCalled();
+});
+it("hides an old permission error while disconnected", async () => {
+  mocks.request.mockRejectedValue(new Error("权限发现失败"));
+  const view = render(<PermissionPicker {...props} />);
+  await act(async () => {});
+  expect(screen.getByRole("button", { name: "重新加载权限选项" })).toBeTruthy();
+  view.rerender(<PermissionPicker {...props} connected={false} />);
   expect(screen.queryByRole("button", { name: "重新加载权限选项" })).toBeNull();
 });

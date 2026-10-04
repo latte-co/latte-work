@@ -430,6 +430,28 @@ impl ProviderStore {
         config.model = model.map(str::to_owned);
         Ok(config)
     }
+    pub fn open_config(
+        &self,
+        agent: &str,
+        historical_model: Option<&str>,
+        provider: Option<TurnProvider>,
+    ) -> Result<LaunchConfig> {
+        let metadata = match &provider {
+            Some(TurnProvider::Snapshot(snapshot)) => Some(snapshot.provider.clone()),
+            Some(TurnProvider::Cli) => None,
+            None => self.launch_config(agent).provider.map(|p| p.metadata),
+        };
+        let Response::Models {
+            models,
+            default_model,
+            ..
+        } = Self::models_for_provider(agent, historical_model, metadata)?
+        else {
+            unreachable!()
+        };
+        let model = historical_model.filter(|model| models.iter().any(|value| value == model));
+        self.turn_config(agent, model.or(default_model.as_deref()), provider)
+    }
     pub fn turn_config(
         &self,
         agent: &str,
@@ -566,6 +588,35 @@ mod tests {
         assert_eq!(models, vec!["real-id", "other"]);
         assert_eq!(default_model.as_deref(), Some("real-id"));
         assert_eq!(model_labels["real-id"], "Friendly");
+    }
+    #[test]
+    fn opening_history_uses_current_provider_without_relaxing_send_validation() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = ProviderStore::open(dir.path()).unwrap();
+        let id = saved(&mut store, draft(ProviderProtocol::AnthropicMessages));
+        store.bind("claude", Some(id.clone())).unwrap();
+        let snapshot = Some(store.snapshot("claude", &id).unwrap());
+        let open = store
+            .open_config(
+                "claude",
+                Some("opus"),
+                snapshot.clone().map(TurnProvider::Snapshot),
+            )
+            .unwrap();
+        assert_eq!(open.model.as_deref(), Some("first"));
+        assert!(
+            store
+                .turn_config("claude", Some("opus"), snapshot.map(TurnProvider::Snapshot))
+                .is_err()
+        );
+        assert_eq!(
+            store
+                .open_config("claude", Some("first"), None)
+                .unwrap()
+                .model
+                .as_deref(),
+            Some("first")
+        );
     }
     fn draft(protocol: ProviderProtocol) -> ProviderDraft {
         ProviderDraft {

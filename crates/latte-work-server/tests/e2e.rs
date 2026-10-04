@@ -361,6 +361,17 @@ async fn denies_permissions_and_bounds_paths_and_failures() {
         Response::Error { .. }
     ));
     for text in ["malformed", "exit"] {
+        assert!(matches!(
+            ask(
+                &mut c,
+                Request::OpenAgentSession {
+                    session_id: id.clone(),
+                    provider: None
+                }
+            )
+            .await,
+            Response::Ok
+        ));
         send(&mut c, &id, text, text).await;
         let events = wait(&mut c, &id, Status::Failed).await;
         assert!(events.iter().any(|e| matches!(
@@ -2752,4 +2763,542 @@ printf '%s' "$LATTE_TEST_VALUE"
             .iter()
             .any(|e| matches!(&e.event, EventKind::Text {text} if text == "shell-loaded"))
     );
+}
+
+fn agent_pid(project: &Path) -> i32 {
+    std::fs::read_to_string(project.join("fixture-agent-pid"))
+        .unwrap()
+        .parse()
+        .unwrap()
+}
+async fn assert_gone(pid: i32) {
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while kill(Pid::from_raw(pid), None).is_ok() {
+        assert!(
+            Instant::now() < deadline,
+            "owned process {pid} survived close"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+#[tokio::test]
+async fn persistent_sessions_survive_turns_transport_and_interrupt_until_explicit_close() {
+    let host = Host::start().await;
+    let mut client = host.client().await;
+    let project = tempfile::tempdir().unwrap();
+    let other_project = tempfile::tempdir().unwrap();
+    let id = session(&mut client, project.path()).await;
+    let other = session(&mut client, other_project.path()).await;
+    for id in [&id, &other] {
+        assert!(matches!(
+            ask(
+                &mut client,
+                Request::OpenAgentSession {
+                    session_id: id.clone(),
+                    provider: None
+                }
+            )
+            .await,
+            Response::Ok
+        ));
+        assert!(
+            matches!(ask(&mut client, Request::Poll { session_id: id.clone(), after: 0.0 }).await, Response::Events { session, events, .. } if session.status == Status::Ready && events.is_empty() && session.agent_session_open == Some(true))
+        );
+    }
+    let pid = agent_pid(project.path());
+    let other_pid = agent_pid(other_project.path());
+    send(&mut client, &id, "background", "background").await;
+    let events = wait(&mut client, &id, Status::Completed).await;
+    let background = events
+        .iter()
+        .find_map(|e| {
+            if let EventKind::Text { text } = &e.event {
+                text.strip_prefix("background:")
+                    .and_then(|s| s.parse::<i32>().ok())
+            } else {
+                None
+            }
+        })
+        .unwrap();
+    assert!(kill(Pid::from_raw(background), None).is_ok());
+    assert!(
+        matches!(ask(&mut client, Request::Poll { session_id: id.clone(), after: 0.0 }).await, Response::Events { session, .. } if session.agent_session_open == Some(true) && session.agent_session_busy == Some(true))
+    );
+    assert!(
+        matches!(ask(&mut client, Request::CloseAgentSession { session_id: id.clone(), only_if_idle: Some(true) }).await, Response::Error { message, .. } if message.contains("确认后关闭"))
+    );
+    assert!(kill(Pid::from_raw(background), None).is_ok());
+    assert!(kill(Pid::from_raw(pid), None).is_ok());
+    drop(client);
+    let mut client = host.client().await;
+    assert!(matches!(
+        ask(
+            &mut client,
+            Request::OpenAgentSession {
+                session_id: id.clone(),
+                provider: None
+            }
+        )
+        .await,
+        Response::Ok
+    ));
+    send(&mut client, &id, "identity", "identity").await;
+    let events = wait(&mut client, &id, Status::Completed).await;
+    let identity: serde_json::Value = events
+        .iter()
+        .rev()
+        .find_map(|e| {
+            if let EventKind::Text { text } = &e.event {
+                serde_json::from_str(text).ok()
+            } else {
+                None
+            }
+        })
+        .unwrap();
+    assert_eq!(identity["pid"], pid);
+    assert_eq!(identity["turns"], 2);
+    assert_eq!(identity["background_pid"], background);
+    assert!(matches!(
+        send(&mut client, &id, "identity", "identity").await,
+        Response::Accepted { duplicate: true }
+    ));
+    let result = ask(
+        &mut client,
+        Request::Send {
+            session_id: id.clone(),
+            request_id: "changed".into(),
+            text: "identity".into(),
+            model: Some("opus".into()),
+            effort: None,
+            permission_mode: None,
+            provider: None,
+        },
+    )
+    .await;
+    assert!(matches!(result, Response::Error { message, .. } if message.contains("后台")));
+    assert_eq!(agent_pid(project.path()), pid);
+    assert!(kill(Pid::from_raw(background), None).is_ok());
+    send(&mut client, &id, "hang", "hang").await;
+    assert!(matches!(
+        ask(
+            &mut client,
+            Request::Cancel {
+                session_id: id.clone()
+            }
+        )
+        .await,
+        Response::Ok
+    ));
+    wait(&mut client, &id, Status::Stopped).await;
+    assert!(kill(Pid::from_raw(pid), None).is_ok());
+    assert!(kill(Pid::from_raw(background), None).is_ok());
+    assert!(
+        matches!(ask(&mut client, Request::Session { session_id: id.clone() }).await, Response::Session { session } if session.agent_session_open == Some(true))
+    );
+    send(&mut client, &id, "after-stop", "identity").await;
+    wait(&mut client, &id, Status::Completed).await;
+    assert_eq!(agent_pid(project.path()), pid);
+    send(&mut client, &id, "pending-approval", "approve").await;
+    let events = wait(&mut client, &id, Status::Waiting).await;
+    let approval = events
+        .iter()
+        .rev()
+        .find_map(|event| match &event.event {
+            EventKind::Approval { request_id, .. } => Some(request_id.clone()),
+            _ => None,
+        })
+        .unwrap();
+    assert!(matches!(
+        ask(
+            &mut client,
+            Request::Cancel {
+                session_id: id.clone()
+            }
+        )
+        .await,
+        Response::Ok
+    ));
+    wait(&mut client, &id, Status::Stopped).await;
+    assert!(matches!(
+        ask(
+            &mut client,
+            Request::Approve {
+                session_id: id.clone(),
+                request_id: approval,
+                allow: true
+            }
+        )
+        .await,
+        Response::Error { .. }
+    ));
+    assert!(!project.path().join("approved.txt").exists());
+    assert_eq!(agent_pid(project.path()), pid);
+    for _ in 0..2 {
+        assert!(matches!(
+            ask(
+                &mut client,
+                Request::CloseAgentSession {
+                    session_id: id.clone(),
+                    only_if_idle: None
+                }
+            )
+            .await,
+            Response::Ok
+        ));
+    }
+    assert!(
+        matches!(ask(&mut client, Request::Session { session_id: id.clone() }).await, Response::Session { session } if session.agent_session_open == Some(false))
+    );
+    assert!(
+        matches!(ask(&mut client, Request::Session { session_id: other.clone() }).await, Response::Session { session } if session.agent_session_open == Some(true))
+    );
+    assert_gone(pid).await;
+    assert_gone(background).await;
+    assert!(kill(Pid::from_raw(other_pid), None).is_ok());
+    assert!(matches!(
+        ask(
+            &mut client,
+            Request::OpenAgentSession {
+                session_id: id.clone(),
+                provider: None
+            }
+        )
+        .await,
+        Response::Ok
+    ));
+    assert_ne!(agent_pid(project.path()), pid);
+    assert!(
+        matches!(ask(&mut client, Request::Poll { session_id: id, after: 0.0 }).await, Response::Events { events, session, .. } if session.agent_session_open == Some(true) && session.native_id.is_some() && events.iter().filter(|e| matches!(e.event, EventKind::User { .. })).count() == 5)
+    );
+}
+#[tokio::test]
+async fn persistent_background_completion_delivers_autonomous_followup_without_new_prompt() {
+    let host = Host::start().await;
+    let mut client = host.client().await;
+    let project = tempfile::tempdir().unwrap();
+    let id = session(&mut client, project.path()).await;
+    send(&mut client, &id, "background-report", "background-report").await;
+    wait(&mut client, &id, Status::Completed).await;
+    let pid = agent_pid(project.path());
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let events = wait(&mut client, &id, Status::Completed).await;
+        if events
+            .iter()
+            .any(|e| matches!(&e.event, EventKind::Text { text } if text == "BACKGROUND_REPORT_OK"))
+        {
+            assert_eq!(
+                events
+                    .iter()
+                    .filter(|e| matches!(e.event, EventKind::User { .. }))
+                    .count(),
+                1
+            );
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "background report lost after result"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(agent_pid(project.path()), pid);
+}
+
+#[tokio::test]
+async fn agent_session_projection_waits_for_initialization_and_never_persists() {
+    use std::os::unix::fs::PermissionsExt;
+    let directory = tempfile::tempdir().unwrap();
+    let fixture = directory.path().join("claude");
+    std::fs::write(&fixture, r#"#!/usr/bin/env python3
+import json,sys,time,os
+if '--version' in sys.argv:
+    print('fixture 1.0');sys.exit(0)
+for line in sys.stdin:
+    value=json.loads(line)
+    open('initializing','w').close()
+    if os.path.exists('fail-init'): sys.exit(1)
+    time.sleep(0.4)
+    print(json.dumps({'type':'control_response','response':{'subtype':'success','request_id':value['request_id'],'response':{}}}),flush=True)
+"#).unwrap();
+    std::fs::set_permissions(&fixture, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let host = Host::start_with_environment(&[("LATTE_WORK_CLAUDE", fixture.as_os_str())]).await;
+    let mut client = host.client().await;
+    let project = tempfile::tempdir().unwrap();
+    let id = session(&mut client, project.path()).await;
+    let mut opener = host.client().await;
+    let target = id.clone();
+    let opening = tokio::spawn(async move {
+        ask(
+            &mut opener,
+            Request::OpenAgentSession {
+                session_id: target,
+                provider: None,
+            },
+        )
+        .await
+    });
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while !project.path().join("initializing").exists() {
+        assert!(Instant::now() < deadline);
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(
+        matches!(ask(&mut client, Request::Session { session_id: id.clone() }).await, Response::Session { session } if session.agent_session_open == Some(false))
+    );
+    let history = tokio::time::timeout(
+        Duration::from_millis(200),
+        ask(
+            &mut client,
+            Request::History {
+                session_id: id.clone(),
+                before: None,
+            },
+        ),
+    )
+    .await
+    .unwrap();
+    assert!(
+        matches!(history, Response::History { session, .. } if session.agent_session_open == Some(false))
+    );
+    assert!(matches!(opening.await.unwrap(), Response::Ok));
+    let Response::Session { session } = ask(
+        &mut client,
+        Request::PinSession {
+            session_id: id.clone(),
+            pinned: true,
+        },
+    )
+    .await
+    else {
+        panic!("missing session")
+    };
+    assert_eq!(session.agent_session_open, Some(true));
+    assert!(
+        matches!(ask(&mut client, Request::Sessions { project_id: session.project_id }).await, Response::Sessions { sessions } if sessions[0].agent_session_open == Some(true))
+    );
+    assert!(
+        matches!(ask(&mut client, Request::PinnedSessions).await, Response::Sessions { sessions } if sessions[0].agent_session_open == Some(true))
+    );
+    let database = rusqlite::Connection::open(host.directory.path().join("state.sqlite")).unwrap();
+    let stored: String = database
+        .query_row("SELECT data FROM sessions WHERE id=?1", [&id], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert!(
+        serde_json::from_str::<serde_json::Value>(&stored)
+            .unwrap()
+            .get("agent_session_open")
+            .is_none()
+    );
+    assert!(matches!(
+        ask(
+            &mut client,
+            Request::CloseAgentSession {
+                session_id: id.clone(),
+                only_if_idle: None
+            }
+        )
+        .await,
+        Response::Ok
+    ));
+    assert!(
+        matches!(ask(&mut client, Request::PinnedSessions).await, Response::Sessions { sessions } if sessions[0].agent_session_open == Some(false))
+    );
+    std::fs::write(project.path().join("fail-init"), "").unwrap();
+    assert!(matches!(
+        ask(
+            &mut client,
+            Request::OpenAgentSession {
+                session_id: id.clone(),
+                provider: None
+            }
+        )
+        .await,
+        Response::Error { .. }
+    ));
+    assert!(
+        matches!(ask(&mut client, Request::Session { session_id: id }).await, Response::Session { session } if session.agent_session_open == Some(false))
+    );
+}
+
+#[tokio::test]
+async fn opening_old_provider_history_resolves_model_without_replaying_prompt() {
+    use latte_work_protocol::{Provider, ProviderSnapshot, TurnProvider};
+    let host = Host::start().await;
+    let mut client = host.client().await;
+    let project = tempfile::tempdir().unwrap();
+    let id = session(&mut client, project.path()).await;
+    assert!(matches!(
+        ask(
+            &mut client,
+            Request::Send {
+                provider: Some(TurnProvider::Cli),
+                session_id: id.clone(),
+                request_id: "old-alias".into(),
+                text: "identity".into(),
+                model: Some("opus".into()),
+                effort: None,
+                permission_mode: None,
+            }
+        )
+        .await,
+        Response::Accepted { .. }
+    ));
+    wait(&mut client, &id, Status::Completed).await;
+    ask(
+        &mut client,
+        Request::CloseAgentSession {
+            session_id: id.clone(),
+            only_if_idle: Some(true),
+        },
+    )
+    .await;
+    let provider: Provider = serde_json::from_value(serde_json::json!({
+        "id":"dev", "name":"Dev", "protocol":"anthropic_messages", "base_url":"http://localhost:8000", "model":"real-id", "models":["other-id"], "model_labels":{}, "auth":"none", "has_credential":false,
+    })).unwrap();
+    let snapshot = ProviderSnapshot {
+        provider,
+        credential: String::new(),
+    };
+    assert!(matches!(
+        ask(
+            &mut client,
+            Request::OpenAgentSession {
+                session_id: id.clone(),
+                provider: Some(TurnProvider::Snapshot(snapshot))
+            }
+        )
+        .await,
+        Response::Ok
+    ));
+    let Response::Events {
+        session, events, ..
+    } = ask(
+        &mut client,
+        Request::Poll {
+            session_id: id.clone(),
+            after: 0.0,
+        },
+    )
+    .await
+    else {
+        panic!()
+    };
+    assert_eq!(session.agent_session_open, Some(true));
+    assert_eq!(session.agent_session_busy, Some(false));
+    assert_eq!(session.model.as_deref(), Some("opus"));
+    assert_eq!(
+        events
+            .iter()
+            .filter(|e| matches!(e.event, EventKind::User { .. }))
+            .count(),
+        1
+    );
+    assert!(matches!(
+        ask(
+            &mut client,
+            Request::CloseAgentSession {
+                session_id: id.clone(),
+                only_if_idle: Some(true)
+            }
+        )
+        .await,
+        Response::Ok
+    ));
+}
+
+#[tokio::test]
+async fn disconnected_app_quit_preserves_remote_execution_and_reattaches_without_replay() {
+    use latte_work_protocol::lifecycle::Resource;
+    let host = Host::start().await;
+    let mut client = host.client().await;
+    let project = tempfile::tempdir().unwrap();
+    let id = session(&mut client, project.path()).await;
+    let resource = Resource::AgentSession(id.clone());
+    let server_id = client.server_id().to_owned();
+    client
+        .claim_resources("old-app".into(), vec![resource.clone()])
+        .await
+        .unwrap();
+    assert!(matches!(
+        ask(
+            &mut client,
+            Request::OpenAgentSession {
+                session_id: id.clone(),
+                provider: None
+            }
+        )
+        .await,
+        Response::Ok
+    ));
+    let pid = agent_pid(project.path());
+    assert!(matches!(
+        send(&mut client, &id, "remote-task", "hang").await,
+        Response::Accepted { .. }
+    ));
+    wait(&mut client, &id, Status::Running).await;
+    // EOF is only a lost transport. No synthetic quit/close or lease expiry.
+    drop(client);
+    assert!(kill(Pid::from_raw(pid), None).is_ok());
+    let mut restored = host.client().await;
+    assert_eq!(restored.server_id(), server_id);
+    for _ in 0..2 {
+        assert_eq!(
+            restored
+                .adopt_resources(
+                    server_id.clone(),
+                    "old-app".into(),
+                    "new-app".into(),
+                    vec![resource.clone()]
+                )
+                .await
+                .unwrap(),
+            vec![resource.clone()]
+        );
+    }
+    assert_eq!(
+        agent_pid(project.path()),
+        pid,
+        "reattach must not respawn the Agent"
+    );
+    assert!(
+        matches!(ask(&mut restored, Request::Poll { session_id: id.clone(), after: 0.0 }).await,
+        Response::Events { session, events, .. } if session.status == Status::Running && session.agent_session_open == Some(true) && session.agent_session_busy == Some(true)
+        && events.iter().filter(|e| matches!(&e.event, EventKind::User { .. })).count() == 1)
+    );
+    // A delayed close from the old App cannot kill the newly attached resource.
+    restored
+        .close_owned_resources(server_id.clone(), "old-app".into(), vec![resource.clone()])
+        .await
+        .unwrap();
+    assert!(kill(Pid::from_raw(pid), None).is_ok());
+    assert!(
+        restored
+            .adopt_resources(
+                server_id.clone(),
+                "unrelated-owner".into(),
+                "other-app".into(),
+                vec![resource.clone()]
+            )
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    restored
+        .close_owned_resources(
+            "old-daemon".into(),
+            "new-app".into(),
+            vec![resource.clone()],
+        )
+        .await
+        .unwrap();
+    assert!(kill(Pid::from_raw(pid), None).is_ok());
+    restored
+        .close_owned_resources(server_id, "new-app".into(), vec![resource])
+        .await
+        .unwrap();
+    assert_gone(pid).await;
+    wait(&mut restored, &id, Status::Stopped).await;
 }

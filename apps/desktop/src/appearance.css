@@ -1,4 +1,4 @@
-.appearance-settings h3 {
+.appearance-settings > h3 {
   font-size: var(--text-md);
   margin: var(--space-8) 0 var(--space-4);
   font-weight: 500;
@@ -126,23 +126,7 @@
   margin-top: var(--space-4);
 }
 .appearance-preview-copy {
-  font-family: var(--font-content);
-  font-weight: var(--weight-content);
-  display: flex;
-  flex-wrap: wrap;
-  align-items: baseline;
-  gap: 12px;
-  padding: 20px;
-}
-.appearance-preview-copy strong {
-  font-size: var(--text-body);
-}
-.appearance-preview-copy span {
-  color: var(--color-text-secondary);
-}
-.appearance-preview-copy a {
-  color: var(--color-primary);
-  margin-left: auto;
+  padding: var(--space-5);
 }
 .appearance-preview-code {
   display: grid;

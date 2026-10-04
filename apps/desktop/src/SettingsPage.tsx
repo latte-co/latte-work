@@ -18,7 +18,7 @@ import { AppearanceSettings } from "./AppearanceSettings";
 const tabs = [
   { id: "appearance", label: "外观", icon: Palette },
   { id: "agents", label: "连接与 Agent", icon: MessageSquare },
-  { id: "providers", label: "模型服务", icon: Settings2 },
+  { id: "providers", label: "模型", icon: Settings2 },
   { id: "ssh", label: "SSH 连接", icon: Globe2 },
   { id: "archived", label: "已归档的聊天", icon: Archive },
 ] as const;

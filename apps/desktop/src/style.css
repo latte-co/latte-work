@@ -174,18 +174,6 @@ button svg {
 .host-picker option {
   background: var(--color-surface);
 }
-.connection-dot {
-  display: inline-block;
-  background: var(--color-warning);
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  flex-shrink: 0;
-}
-.connection-dot.online {
-  background: var(--color-success);
-  box-shadow: 0 0 8px #90baa520;
-}
 .new-task {
   border-radius: var(--radius-control);
   height: var(--button-height);
@@ -282,13 +270,19 @@ button svg {
 }
 .project-remote-mark {
   position: absolute;
-  width: 5px;
-  height: 5px;
+  display: flex;
+  width: var(--space-2);
+  height: var(--space-2);
   right: -1px;
   bottom: -1px;
   border-radius: 50%;
-  background: var(--color-success);
-  border: 1px solid var(--color-sidebar);
+  color: var(--color-success);
+  background: var(--color-sidebar);
+}
+.project-remote-mark svg {
+  width: 100%;
+  height: 100%;
+  stroke-width: 2;
 }
 .project-name {
   min-width: 0;
@@ -299,6 +293,9 @@ button svg {
 }
 .project-heading.selected .project-name {
   color: var(--color-text);
+}
+.project-heading.empty .project-name {
+  color: var(--color-text-muted);
 }
 .project-row-actions,
 .session-row-actions {
@@ -317,6 +314,11 @@ button svg {
   height: 28px;
   min-height: 28px;
   padding: 5px;
+}
+.project-row-actions svg,
+.session-row-actions svg {
+  width: 14px;
+  height: 14px;
 }
 :is(.project-heading, .session-item):is(
     :hover,
@@ -364,7 +366,7 @@ button svg {
 }
 .session-list {
   margin: 0 0 3px;
-  padding-left: 21px;
+  padding-left: 0;
 }
 .session-item {
   position: relative;
@@ -379,6 +381,70 @@ button svg {
   gap: 7px;
   color: var(--color-text-secondary);
   font-size: var(--text-md);
+}
+.session-list .session-row {
+  padding-left: calc(25px + var(--space-2));
+}
+.sidebar-hover-anchor {
+  width: 100%;
+  min-width: 0;
+  border-radius: inherit;
+}
+.sidebar-hover-card {
+  position: fixed;
+  z-index: 12;
+  width: 340px;
+  max-width: calc(100vw - 16px);
+  max-height: calc(100dvh - 16px);
+  overflow-y: auto;
+  padding: var(--space-3);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-dialog);
+  background: var(--color-elevated);
+  color: var(--color-text);
+  box-shadow: var(--shadow-popover);
+  font-size: var(--text-md);
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+.sidebar-hover-title {
+  font-weight: 500;
+  margin-bottom: var(--space-2);
+}
+.sidebar-hover-project {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  color: var(--color-text-secondary);
+}
+.sidebar-hover-summary {
+  color: var(--color-text-secondary);
+  margin-bottom: var(--space-2);
+}
+.sidebar-hover-details {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-3);
+  margin-top: var(--space-2);
+  color: var(--color-text-muted);
+}
+.sidebar-hover-status {
+  flex: none;
+  color: var(--color-text-secondary);
+}
+.agent-session-feedback {
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 8px;
+  color: var(--color-text-muted);
+  font-size: var(--text-sm);
+  min-height: 28px;
+}
+.agent-session-feedback button {
+  min-height: 28px;
+  padding: 2px 8px;
 }
 .session-row.active {
   background: var(--color-selected);
@@ -437,7 +503,7 @@ button svg {
 }
 .no-sessions {
   display: block;
-  padding: 6px 4px;
+  padding: 6px 4px 6px calc(25px + var(--space-2));
   font-size: var(--text-xs);
   color: var(--color-text-muted);
 }
@@ -478,7 +544,7 @@ button svg {
   flex-shrink: 0;
   background: var(--line);
   position: relative;
-  z-index: 5;
+  z-index: 6;
   cursor: col-resize;
 }
 .resize-handle:after {
@@ -488,12 +554,13 @@ button svg {
   right: -3px;
   inset-block: 0;
 }
-.resize-handle:hover {
-  background: var(--accent);
+.resize-handle:hover,
+.resize-handle[data-resizing="true"] {
+  background: var(--color-border-strong);
 }
 .main {
   flex: 1;
-  min-width: 360px;
+  min-width: var(--conversation-min-width);
   background: var(--color-sidebar);
   display: flex;
   flex-direction: column;
@@ -562,6 +629,11 @@ button svg {
   border-radius: var(--radius-panel);
   overflow: hidden;
 }
+.workspace-visible:not(.workspace-merged) .conversation {
+  margin-right: 0;
+  border-top-right-radius: 0;
+  border-bottom-right-radius: 0;
+}
 .sidebar-collapsed .conversation {
   container-type: inline-size;
   container-name: conversation;
@@ -625,6 +697,7 @@ button svg {
   max-width: calc(var(--content-width) + 2 * var(--content-gutter));
   width: 100%;
   margin: 0 auto;
+  flex: none;
 }
 .composer-context {
   position: relative;
@@ -1134,9 +1207,15 @@ button svg {
   white-space: nowrap;
 }
 .permission-retry {
-  padding: 4px;
-  font-size: var(--text-xs);
-  color: var(--color-danger);
+  flex-shrink: 0;
+  width: 28px;
+  height: 28px;
+  min-height: 28px;
+  padding: 6px;
+  color: var(--color-text-muted);
+}
+.permission-picker > svg {
+  flex-shrink: 0;
 }
 .send {
   flex-shrink: 0;
@@ -1167,6 +1246,8 @@ button svg {
 .messages {
   font-family: var(--font-content);
   font-weight: var(--weight-content);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
   width: 100%;
   max-width: calc(var(--content-width) + 2 * var(--content-gutter));
   margin: 0 auto;
@@ -1174,16 +1255,70 @@ button svg {
   font-size: var(--text-body);
   line-height: 1.8;
 }
+.conversation-turn {
+  display: flow-root;
+}
+.conversation-turn + .conversation-turn {
+  margin-top: var(--space-6);
+}
+.user-message-group {
+  position: relative;
+  width: fit-content;
+  max-width: 85%;
+  margin: 0 0 var(--space-4) auto;
+  padding-bottom: var(--space-8);
+}
 .user-message {
   overflow-wrap: anywhere;
-  margin: 0 0 28px auto;
-  padding: 13px 18px;
+  margin: 0;
+  padding: var(--space-3) var(--space-4);
   background: var(--color-surface);
-  border-radius: 14px 14px 3px 14px;
-  max-width: 90%;
+  border-radius: var(--radius-dialog);
+  max-width: 100%;
   width: fit-content;
   white-space: pre-wrap;
   color: var(--color-text);
+  font-size: var(--text-lg);
+  line-height: 1.65;
+}
+.user-message-meta {
+  position: absolute;
+  bottom: 0;
+  right: 0;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--space-2);
+  height: 28px;
+  width: max-content;
+  color: var(--color-text-muted);
+  font-size: var(--text-xs);
+  white-space: nowrap;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity var(--duration-fast);
+}
+.user-message-meta button {
+  width: 28px;
+  height: 28px;
+  min-height: 28px;
+  padding: 6px;
+  color: var(--color-text-muted);
+}
+.user-message-group:is(:hover, :focus-within) .user-message-meta {
+  opacity: 1;
+  pointer-events: auto;
+}
+@media (hover: none) {
+  .user-message-meta {
+    opacity: 1;
+    pointer-events: auto;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .user-message-meta {
+    transition: none;
+  }
 }
 .message-label {
   display: flex;
@@ -1200,19 +1335,37 @@ button svg {
   margin-bottom: var(--space-6);
   color: var(--color-text);
 }
-.return-latest {
+.return-latest,
+.agent-session-opening {
   position: absolute;
   left: 50%;
   bottom: 0;
   transform: translateX(-50%);
+}
+.return-latest,
+.agent-session-opening,
+.earlier-history > button {
   white-space: nowrap;
   padding: 6px 12px;
   margin: 0;
   border: 1px solid var(--color-border);
   background: var(--color-elevated);
+  font-family: var(--font-ui);
+  font-weight: var(--weight-ui);
   font-size: var(--text-sm);
+  line-height: var(--leading-ui);
+  border-radius: var(--radius-control);
 }
-.return-latest ~ .agent-badge {
+.agent-session-opening .working,
+.earlier-history > button .working {
+  padding: 0;
+  margin: 0;
+  font-size: inherit;
+  line-height: inherit;
+  min-height: calc(var(--text-sm) * var(--leading-ui));
+}
+.return-latest ~ .agent-badge,
+.agent-session-opening ~ .agent-badge {
   max-width: calc(50% - 100px);
 }
 .code-block {
@@ -1275,7 +1428,7 @@ button svg {
 .final-reply-actions {
   margin: 0 0 var(--space-6);
 }
-.conversation-turn:last-child > :last-child {
+.conversation-turn > :last-child {
   margin-bottom: 0;
 }
 .final-reply-actions button {
@@ -1293,11 +1446,15 @@ button svg {
   padding-top: 16px;
 }
 .markdown {
+  font-family: var(--font-content);
+  font-weight: var(--weight-content);
   font-size: var(--text-lg);
-  line-height: 1.65;
+  line-height: var(--leading-content);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
 }
 .markdown p {
-  margin: 0 0 12px;
+  margin: 0 0 var(--space-4);
 }
 .markdown h1,
 .markdown h2,
@@ -1306,7 +1463,7 @@ button svg {
 .markdown h5,
 .markdown h6 {
   color: var(--color-text);
-  margin: 16px 0 8px;
+  margin: var(--space-6) 0 var(--space-2);
   font-weight: 600;
   line-height: 1.5;
 }
@@ -1323,17 +1480,31 @@ button svg {
   font-size: inherit;
 }
 .markdown strong {
-  font-weight: 600;
+  font-weight: var(--weight-content-emphasis);
 }
 .markdown > :first-child {
   margin-top: 0;
 }
+.markdown > :last-child {
+  margin-bottom: 0;
+}
 .markdown ul,
 .markdown ol {
+  margin: 0 0 var(--space-4);
   padding-left: var(--space-6);
 }
 .markdown li {
-  margin: 5px 0;
+  margin: var(--space-1) 0;
+}
+.markdown li > p {
+  margin-bottom: var(--space-2);
+}
+.markdown li > :last-child {
+  margin-bottom: 0;
+}
+.markdown li > ul,
+.markdown li > ol {
+  margin-top: var(--space-2);
 }
 .markdown pre,
 .approval-card pre {
@@ -1386,7 +1557,7 @@ button svg {
   border-bottom: 1px solid var(--color-border-subtle);
 }
 .markdown th {
-  font-weight: 600;
+  font-weight: var(--weight-content-emphasis);
   text-align: left;
   border-bottom-color: var(--color-border);
 }
@@ -1496,6 +1667,24 @@ button svg {
   background: var(--color-surface);
   padding: 16px;
   margin: 16px 0;
+}
+.approval-dock {
+  display: grid;
+  gap: var(--space-2);
+  max-height: min(36vh, 320px);
+  overflow: auto;
+  overscroll-behavior: contain;
+  margin-bottom: var(--space-2);
+}
+.approval-dock .approval-card {
+  min-width: 0;
+  margin: 0;
+  border-radius: var(--radius-dialog);
+}
+.approval-dock-count {
+  margin: 0;
+  color: var(--color-text-muted);
+  font-size: var(--text-sm);
 }
 .approval-card header {
   display: flex;
@@ -1689,8 +1878,21 @@ button svg {
 .workspace.expanded {
   position: absolute;
   inset: 0 0 0 auto;
-  width: calc(100% - var(--sidebar-width) - 4px);
+  width: calc(100% - var(--sidebar-width) - 1px);
   z-index: 5;
+}
+.workspace.expanded.conversation-selected {
+  bottom: auto;
+  height: var(--titlebar-height);
+}
+.workspace-merged .topbar {
+  visibility: hidden;
+}
+.main.conversation-hidden {
+  visibility: hidden;
+}
+.workspace-empty[hidden] {
+  display: none;
 }
 .sidebar-collapsed .workspace.expanded {
   width: 100%;
@@ -1749,6 +1951,18 @@ button svg {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+.workspace-tab.conversation-tab {
+  position: sticky;
+  left: 0;
+  z-index: 1;
+  background: var(--color-sidebar);
+}
+.workspace-tab.conversation-tab.active {
+  background: var(--color-selected);
+}
+.workspace-tab.conversation-tab > [role="tab"] {
+  padding-right: 10px;
 }
 .workspace-tab .tab-close {
   width: 28px;
@@ -2049,14 +2263,14 @@ button svg {
   color: var(--accent);
   margin-bottom: var(--space-5);
 }
-:is(.modal, .settings-panel-content) h2 {
+:is(.modal, .settings-panel-content) h2:not(:where(.markdown *)) {
   font-size: var(--text-heading);
   font-weight: 600;
   letter-spacing: 0.3px;
   margin: 0 0 14px;
   line-height: 1.4;
 }
-:is(.modal, .settings-panel-content) p {
+:is(.modal, .settings-panel-content) p:not(:where(.markdown *)) {
   font-size: var(--text-sm);
   color: var(--color-text-muted);
   line-height: 1.8;
@@ -2940,9 +3154,17 @@ button svg {
   max-width: min(320px, 60%);
   min-width: 0;
 }
+@container conversation (max-width: 320px) {
+  .messages,
+  .welcome,
+  .composer-wrap {
+    --content-gutter: var(--space-2);
+  }
+}
 /* One model trigger, with Agent-native effort values in a nested menu. */
 @container composer (max-width: 480px) {
-  .return-latest ~ .agent-badge {
+  .return-latest ~ .agent-badge,
+  .agent-session-opening ~ .agent-badge {
     max-width: calc(50% - 28px);
   }
   .return-latest > span {
@@ -3267,4 +3489,72 @@ button[aria-checked="true"] .model-option-check {
   .provider-form fieldset {
     grid-template-columns: minmax(0, 1fr);
   }
+}
+
+.composer-connection-error {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+  color: var(--color-text-secondary);
+  font-size: 13px;
+  margin-bottom: var(--space-2);
+}
+.composer-connection-error button {
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+
+.conversation[data-preparing="true"] .composer textarea::placeholder {
+  animation: prepare-label 1.8s ease-in-out infinite;
+}
+@keyframes prepare-label {
+  0%,
+  100% {
+    color: var(--color-text-muted);
+  }
+  50% {
+    color: var(--color-text-secondary);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .conversation[data-preparing="true"] .composer textarea::placeholder {
+    animation: none;
+  }
+}
+
+.conversation-history {
+  position: relative;
+  display: flex;
+  flex: 1;
+  min-height: 0;
+}
+.conversation-scroll[data-history-loading="true"] > .messages,
+.conversation-scroll[data-history-loading="true"] > .welcome {
+  visibility: hidden;
+  pointer-events: none;
+}
+
+.conversation-scroll[data-history-loading="true"] {
+  overflow: hidden;
+}
+
+.session-history-loading {
+  flex: none;
+}
+.session-history-loading .working {
+  padding: 0;
+  margin: 0;
+  font-size: var(--text-sm);
+  gap: 0;
+  white-space: nowrap;
+}
+
+.conversation-scroll {
+  overflow-anchor: none;
+}
+.earlier-history {
+  display: flex;
+  justify-content: center;
+  padding-bottom: 12px;
 }

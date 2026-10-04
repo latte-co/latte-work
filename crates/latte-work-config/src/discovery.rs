@@ -65,9 +65,11 @@ impl ModelEndpoint {
         let deadline = Instant::now() + Duration::from_secs(15);
         let mut models = BTreeMap::new();
         let mut cursor = String::new();
-        for _ in 0..5 {
+        let mut versioned = false;
+        let mut pages = 0;
+        while pages < 5 {
             let mut url = self.url.clone();
-            if self.protocol == ProviderProtocol::AnthropicMessages {
+            if versioned {
                 url.query_pairs_mut().append_pair("limit", "1000");
             }
             if !cursor.is_empty() {
@@ -82,12 +84,23 @@ impl ModelEndpoint {
                 ProviderAuth::Bearer => request.bearer_auth(&self.credential),
                 ProviderAuth::ApiKey => request.header("x-api-key", &self.credential),
             };
-            if self.protocol == ProviderProtocol::AnthropicMessages {
+            if versioned {
                 request = request.header("anthropic-version", "2023-06-01");
             }
             let response = request
                 .send()
                 .map_err(|_| anyhow::anyhow!("无法获取模型，请检查地址、连接或证书"))?;
+            // Some gateways expose their canonical catalog without a version header,
+            // but rewrite IDs for Anthropic compatibility when it is present.
+            // Official Anthropic endpoints require the header and reject its absence.
+            if response.status() == reqwest::StatusCode::BAD_REQUEST
+                && self.protocol == ProviderProtocol::AnthropicMessages
+                && !versioned
+            {
+                versioned = true;
+                continue;
+            }
+            pages += 1;
             if !response.status().is_success() {
                 bail!(
                     "获取模型失败（HTTP {}），请检查 API Key 或模型目录接口",
@@ -202,6 +215,7 @@ mod tests {
             assert_eq!(models[0].name, "Friendly");
             let request = thread.join().unwrap();
             assert!(request.starts_with("GET /v1/models"));
+            assert!(!request.contains("anthropic-version:"));
             if header.is_empty() {
                 assert!(!request.contains("authorization:"));
                 assert!(!request.contains("x-api-key:"));
@@ -209,6 +223,55 @@ mod tests {
                 assert!(request.contains(header));
             }
         }
+    }
+    #[test]
+    fn retries_version_required_catalog_without_changing_ids() {
+        let socket = TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", socket.local_addr().unwrap());
+        let thread = std::thread::spawn(move || {
+            for versioned in [false, true] {
+                let (mut stream, _) = socket.accept().unwrap();
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(3)))
+                    .unwrap();
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut request = String::new();
+                loop {
+                    let mut line = String::new();
+                    reader.read_line(&mut line).unwrap();
+                    if line == "\r\n" {
+                        break;
+                    }
+                    request.push_str(&line);
+                }
+                assert_eq!(request.contains("anthropic-version: 2023-06-01"), versioned);
+                assert!(request.contains("x-api-key: fixture"));
+                let (status, body) = if versioned {
+                    (
+                        "200 OK",
+                        r#"{"data":[{"id":"canonical-id","display_name":"Friendly"}]}"#,
+                    )
+                } else {
+                    ("400 Bad Request", "{}")
+                };
+                write!(
+                    stream,
+                    "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                )
+                .unwrap();
+            }
+        });
+        let endpoint = ModelEndpoint::new(
+            base,
+            ProviderProtocol::AnthropicMessages,
+            ProviderAuth::ApiKey,
+            "fixture".into(),
+        )
+        .unwrap();
+        let models = endpoint.fetch().unwrap();
+        assert_eq!(models[0].id, "canonical-id");
+        thread.join().unwrap();
     }
     #[test]
     fn preserves_gateway_prefix_and_rejects_invalid_response() {

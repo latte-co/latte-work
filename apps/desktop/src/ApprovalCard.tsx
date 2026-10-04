@@ -19,6 +19,7 @@ export function ApprovalCard({
   tool,
   disabled,
   busy,
+  presentation = "request",
   onDecision,
 }: {
   request: Request;
@@ -27,6 +28,7 @@ export function ApprovalCard({
   tool?: ToolActivity;
   disabled?: boolean;
   busy?: boolean;
+  presentation?: "request" | "record";
   onDecision: (allow: boolean) => void;
 }) {
   const label = toolLabel({
@@ -51,8 +53,9 @@ export function ApprovalCard({
               : ([Wrench, request.tool] as const);
   const question =
     kind === "bash" ? "是否允许运行以下命令？" : `是否允许${label}？`;
-  const status =
-    decision === "denied"
+  const status = !resolved
+    ? "等待审批"
+    : decision === "denied"
       ? "已拒绝"
       : decision !== "allowed"
         ? "审批已过期"
@@ -74,7 +77,7 @@ export function ApprovalCard({
       <pre>{JSON.stringify(request.input, null, 2)}</pre>
     </details>
   );
-  if (resolved)
+  if (resolved || presentation === "record")
     return (
       <details
         className={`approval-result activity-row ${tool?.status === "failed" ? "failure" : ""}`}

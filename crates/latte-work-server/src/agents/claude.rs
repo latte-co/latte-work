@@ -5,7 +5,7 @@ use crate::providers::LaunchConfig;
 use anyhow::{Context, Result, bail};
 use latte_work_protocol::{ContextUsage, EventKind, ExecutionPhase, TurnUsage};
 use serde_json::{Value, json};
-use std::{io::Write, path::PathBuf, process::Stdio, time::Duration};
+use std::{collections::HashSet, io::Write, path::PathBuf, process::Stdio, time::Duration};
 
 pub const MODEL_ALIASES: &[&str] = &["sonnet", "opus", "haiku", "fable"];
 
@@ -170,6 +170,10 @@ pub struct Claude {
     live_totals: [f64; 4],
     live_steps: f64,
     phase: Phase,
+    commands: HashSet<String>,
+    tasks: HashSet<String>,
+    session_state: Option<String>,
+    delegated: bool,
 }
 // Gateways may return a provider-prefixed model while CLI accounting uses its
 // bare name plus a context suffix. Only match that same name, never any model.
@@ -208,8 +212,10 @@ enum Phase {
     #[default]
     Idle,
     Initializing(String),
+    Opening,
     Discovering,
     Running,
+    BetweenTurns,
     Finished,
 }
 
@@ -264,6 +270,12 @@ fn write_action(value: Value) -> Result<Action> {
 }
 
 impl AgentAdapter for Claude {
+    fn can_reconfigure(&self) -> bool {
+        matches!(self.phase, Phase::BetweenTurns)
+            && self.tasks.is_empty()
+            && (self.session_state.as_deref() == Some("idle")
+                || (self.session_state.is_none() && !self.delegated))
+    }
     fn command(
         &mut self,
         binary: &str,
@@ -289,7 +301,10 @@ impl AgentAdapter for Claude {
         if let Some(id) = resume {
             command.arg(format!("--resume={id}"));
         }
-        command.current_dir(cwd).env_remove("CLAUDECODE");
+        command
+            .current_dir(cwd)
+            .env_remove("CLAUDECODE")
+            .env("CLAUDE_CODE_SDK_READS_SESSION_STATE", "1");
         if let Some(mode) = &config.permission_mode {
             command.arg(format!("--permission-mode={mode}"));
         }
@@ -367,6 +382,21 @@ impl AgentAdapter for Claude {
     }
     fn advance(&mut self, input: Input<'_>) -> Result<Vec<Action>> {
         match input {
+            Input::Open => {
+                if !matches!(self.phase, Phase::Idle) {
+                    bail!("Claude 已经启动");
+                }
+                self.phase = Phase::Opening;
+                Ok(vec![write_action(self.initialize())?])
+            }
+            Input::Interrupt => {
+                if !matches!(self.phase, Phase::Running) {
+                    return Ok(vec![Action::Interrupted]);
+                }
+                Ok(vec![write_action(
+                    json!({"type":"control_request","request_id":"latte-interrupt","request":{"subtype":"interrupt"}}),
+                )?])
+            }
             Input::DiscoverCommands => {
                 if !matches!(self.phase, Phase::Idle) {
                     bail!("Claude 已经启动");
@@ -376,6 +406,12 @@ impl AgentAdapter for Claude {
             }
 
             Input::Start { prompt } => {
+                if matches!(self.phase, Phase::BetweenTurns) {
+                    self.check_command(prompt)?;
+                    self.reset_turn();
+                    self.phase = Phase::Running;
+                    return Ok(vec![write_action(self.prompt(prompt))?]);
+                }
                 if !matches!(self.phase, Phase::Idle) {
                     bail!("Claude 本轮已经启动");
                 }
@@ -389,7 +425,7 @@ impl AgentAdapter for Claude {
                 self.decode(serde_json::from_str(line).context("Claude 返回无效 JSON")?)
             }
             Input::Approval { id, input, allow } => {
-                if !matches!(self.phase, Phase::Running) {
+                if !matches!(self.phase, Phase::Running | Phase::BetweenTurns) {
                     bail!("Claude 当前不可处理审批");
                 }
                 Ok(vec![write_action(self.approval(id, input, allow))?])
@@ -398,6 +434,26 @@ impl AgentAdapter for Claude {
     }
 }
 impl Claude {
+    fn reset_turn(&mut self) {
+        self.streamed = false;
+        self.emitted_text = false;
+        self.progress = None;
+        self.stream_model = None;
+        self.stream_usage = Value::Null;
+        self.live_totals = [0.0; 4];
+        self.live_steps = 0.0;
+    }
+    fn check_command(&self, prompt: &str) -> Result<()> {
+        if let Some(name) = prompt
+            .trim_start()
+            .strip_prefix('/')
+            .and_then(|s| s.split_whitespace().next())
+            && !self.commands.contains(name)
+        {
+            bail!("当前 Claude 不支持命令 /{name}；输入 / 查看可用命令");
+        }
+        Ok(())
+    }
     fn initialize(&self) -> Value {
         json!({"type":"control_request","request_id":"latte-init","request":{"subtype":"initialize"}})
     }
@@ -414,7 +470,21 @@ impl Claude {
     }
     fn decode(&mut self, m: Value) -> Result<Vec<Action>> {
         let mut output = Vec::new();
+        if matches!(self.phase, Phase::BetweenTurns)
+            && matches!(m["type"].as_str(), Some("assistant" | "stream_event"))
+            && m["parent_tool_use_id"].is_null()
+        {
+            self.reset_turn();
+            self.phase = Phase::Running;
+            output.push(Action::TurnStarted);
+        }
         match m["type"].as_str().unwrap_or_default() {
+            "control_response" if m["response"]["request_id"] == "latte-interrupt" => {
+                if m["response"]["subtype"] != "success" {
+                    bail!("Claude 停止请求失败");
+                }
+                output.push(Action::Interrupted);
+            }
             "control_response" if m["response"]["request_id"] == "latte-init" => {
                 if m["response"]["subtype"] != "success" {
                     bail!("Claude 初始化失败: {}", m["response"]["error"]);
@@ -424,38 +494,68 @@ impl Claude {
                     self.phase = Phase::Finished;
                     return Ok(vec![Action::Commands(commands)]);
                 }
-                if matches!(self.phase, Phase::Initializing(_)) {
-                    let Phase::Initializing(prompt) =
-                        std::mem::replace(&mut self.phase, Phase::Running)
-                    else {
-                        unreachable!()
+                if matches!(self.phase, Phase::Initializing(_) | Phase::Opening) {
+                    let phase = std::mem::replace(&mut self.phase, Phase::Running);
+                    let prompt = match phase {
+                        Phase::Initializing(prompt) => Some(prompt),
+                        Phase::Opening => None,
+                        _ => unreachable!(),
                     };
-                    if let Some(name) = prompt
-                        .trim_start()
-                        .strip_prefix('/')
-                        .and_then(|s| s.split_whitespace().next())
+                    if prompt
+                        .as_deref()
+                        .is_some_and(|p| p.trim_start().starts_with('/'))
                     {
                         let commands = parse_commands(&m["response"]["response"]["commands"])?;
-                        let alias = m["response"]["response"]["commands"]
-                            .as_array()
-                            .is_some_and(|items| {
-                                items.iter().any(|item| {
-                                    item["aliases"].as_array().is_some_and(|aliases| {
-                                        aliases.iter().any(|alias| alias.as_str() == Some(name))
-                                    })
-                                })
-                            });
-                        if !commands.iter().any(|command| command.name == name) && !alias {
-                            bail!("当前 Claude 不支持命令 /{name}；输入 / 查看可用命令");
+                        self.commands.extend(commands.into_iter().map(|c| c.name));
+                    }
+                    // Cache the catalog for subsequent turns; old CLIs without a
+                    // catalog can still accept ordinary prompts, never unknown commands.
+                    if let Some(commands) = m["response"]["response"]["commands"].as_array() {
+                        for command in commands {
+                            if let Some(name) = command["name"].as_str() {
+                                self.commands.insert(name.into());
+                            }
+                            if let Some(aliases) = command["aliases"].as_array() {
+                                self.commands.extend(
+                                    aliases.iter().filter_map(|a| a.as_str().map(str::to_owned)),
+                                );
+                            }
                         }
                     }
                     output.push(Action::Ready);
-                    output.push(write_action(self.prompt(&prompt))?);
+                    if let Some(prompt) = prompt {
+                        self.check_command(&prompt)?;
+                        output.push(write_action(self.prompt(&prompt))?);
+                    } else {
+                        self.phase = Phase::BetweenTurns;
+                    }
                 }
             }
             "system" if m["subtype"] == "init" => {
                 if let Some(id) = m["session_id"].as_str() {
                     output.push(Action::NativeSession(id.into()));
+                }
+            }
+            "system" if m["subtype"] == "session_state_changed" => {
+                self.session_state = m["state"].as_str().map(str::to_owned);
+            }
+            "system" if m["subtype"] == "task_started" => {
+                let id = m["task_id"]
+                    .as_str()
+                    .filter(|s| !s.is_empty() && s.len() <= 256)
+                    .context("无效的 Claude 后台任务标识")?;
+                if self.tasks.len() >= 256 && !self.tasks.contains(id) {
+                    bail!("Claude 后台任务数量超出限制");
+                }
+                self.tasks.insert(id.into());
+            }
+            "system" if m["subtype"] == "task_notification" || m["subtype"] == "task_updated" => {
+                if matches!(
+                    m["status"].as_str(),
+                    Some("completed" | "failed" | "stopped")
+                ) && let Some(id) = m["task_id"].as_str()
+                {
+                    self.tasks.remove(id);
                 }
             }
             "system" if m["subtype"] == "compact_boundary" => {
@@ -582,7 +682,8 @@ impl Claude {
                         output.push(Action::Event(EventKind::Progress { phase }));
                     }
                 }
-                if event["type"] == "content_block_delta"
+                if m["parent_tool_use_id"].is_null()
+                    && event["type"] == "content_block_delta"
                     && event["delta"]["type"] == "text_delta"
                     && let Some(text) = event["delta"]["text"].as_str()
                 {
@@ -610,7 +711,7 @@ impl Claude {
                 if let Some(blocks) = m["message"]["content"].as_array() {
                     for block in blocks {
                         match block["type"].as_str().unwrap_or_default() {
-                            "text" if !self.streamed => {
+                            "text" if !self.streamed && m["parent_tool_use_id"].is_null() => {
                                 if let Some(text) = block["text"].as_str() {
                                     self.emitted_text = true;
                                     output
@@ -618,6 +719,9 @@ impl Claude {
                                 }
                             }
                             "tool_use" => {
+                                if matches!(block["name"].as_str(), Some("Agent" | "Task")) {
+                                    self.delegated = true;
+                                }
                                 output.push(Action::Event(EventKind::Tool {
                                     id: block["id"].as_str().unwrap_or_default().into(),
                                     name: block["name"].as_str().unwrap_or("Tool").into(),
@@ -647,7 +751,7 @@ impl Claude {
                 if !matches!(self.phase, Phase::Running) {
                     bail!("Claude 在初始化完成前返回了任务结果");
                 }
-                self.phase = Phase::Finished;
+                self.phase = Phase::BetweenTurns;
                 if let Some(context) = &mut self.context {
                     let models = m["modelUsage"].as_object();
                     let exact = m["modelUsage"].get(&context.model);
@@ -1210,7 +1314,7 @@ mod tests {
         );
         let result = message(&mut adapter, json!({"type":"result","is_error":false})).unwrap();
         assert!(matches!(result[0], Action::Finished { failed: false, .. }));
-        assert!(message(&mut adapter, initialized()).is_err());
+        assert!(message(&mut adapter, initialized()).unwrap().is_empty());
         assert!(
             adapter
                 .advance(Input::Approval {
@@ -1218,7 +1322,7 @@ mod tests {
                     input: json!({}),
                     allow: true
                 })
-                .is_err()
+                .is_ok()
         );
     }
     #[test]

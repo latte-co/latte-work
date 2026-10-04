@@ -81,15 +81,30 @@ spawning. Repeating the same ID and body returns an accepted duplicate, without
 launching another process. Conflicting reuse fails. Each session has at most one
 active turn; different sessions can run concurrently.
 
-A CLI process is launched per turn, and resumed with its persisted native session
-ID on subsequent turns. It is a supervised process group, not a shell command.
-An initialization acknowledgment is required before sending input. Stdout frames
-are bounded to 1 MiB and stderr is drained. Initialization, writes, turns and
-shutdown have deadlines. Cancellation terminates the entire process group; it
-does not roll back changes. First version closes the process after the turn
-result; detached agent jobs are not preserved beyond that boundary.
+Each opened conversation owns a persistent, supervised CLI process group. Opening
+initializes or resumes its native session without sending a prompt. Subsequent
+turns share the same input/output stream; a native result ends one turn and never
+closes stdin or background subagents. Background completion can start an autonomous
+follow-up, which is persisted without inventing or replaying a user message.
+Cancellation interrupts the current turn through the adapter's native control
+protocol. Only explicit Close or graceful App exit releases the process group;
+transport loss and conversation switching do not. Unexpected native process loss
+reopens its persisted native ID without replaying the interrupted prompt. This
+restores history, not lost background execution; failure remains explicit.
 
-Events have monotonic sequence numbers and are stored on the host. Desktop polls
+Configuration changes can replace an idle process and resume its native history.
+Native task/session lifecycle evidence must establish that no background work will
+be discarded; otherwise the change is rejected before accepting a prompt. Older
+CLIs without lifecycle evidence are treated conservatively after delegation.
+An initialization acknowledgment is required before sending input. Stdout frames
+are bounded to 1 MiB, stderr is drained, and initialization, writes, active turns
+and shutdown have deadlines. Per-host retained sessions are bounded to 64; reaching
+that limit rejects opening another session, never evicts an existing one.
+
+Events have monotonic sequence numbers and are stored on the host. First display
+uses bounded reverse history windows with adjacent text chunks compacted in transit;
+exclusive raw cursors retain complete ordering when older windows are loaded.
+Desktop polls
 incrementally and deduplicates replay after reconnect. A completed turn requires
 the native result event; malformed output or premature exit fails. On daemon
 restart, previously active sessions become Unknown, never Completed. Host crashes
@@ -160,7 +175,6 @@ snapshot. Session JSON retains the selection; the requests table migration adds
 a nullable model column so duplicate detection includes model identity while old
 requests remain valid. Legacy Provider records default to an empty extra-model
 list, with their existing model still available as the default.
-
 
 ## Session organization
 
@@ -238,8 +252,9 @@ server; version mismatch remains an explicit connection failure.
 
 The Host marks a session unread atomically with its transition from active to
 completed, failed or stopped. Read acknowledgement is explicit and durable.
-The desktop acknowledges the selected conversation only after polling all of its
-available events while the window is visible and focused. Background completions
+The desktop acknowledges the selected conversation after reading its latest window
+and catching up with incremental polling while the window is visible and focused.
+Older compatible servers replay all available events before acknowledgement. Background completions
 remain unread. The sidebar distinguishes running, waiting for approval and unread
 states; collapsed projects aggregate running/waiting state. Other project lists
 are refreshed serially every five seconds without launching agents or reconnect
@@ -271,3 +286,7 @@ a changed snapshot, including changed credentials, fails. Reconnect does not rep
 send automatically. Daemon failure still produces Unknown state. Existing request rows
 have a null digest and preserve their original deduplication behavior. Deploy desktop
 and host server from the same source revision so both implement the turn override.
+
+UI history reads use a persistent transport independent of slow Agent control and
+CLI metadata. Local and SSH hosts share the same request routing and connection
+lifetime; only bridge creation and network latency differ.

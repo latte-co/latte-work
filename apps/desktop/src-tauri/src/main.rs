@@ -1,7 +1,9 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 mod lifecycle;
 mod paste;
+mod pending_close;
 mod providers;
+mod request_channels;
 use latte_work_client::{Client, SshAuthentication};
 use latte_work_protocol::{Request, Response};
 use serde::{Deserialize, Serialize};
@@ -26,13 +28,25 @@ use tokio::{
 #[derive(Default)]
 struct Connections {
     clients: Mutex<HashMap<String, Arc<Mutex<Client>>>>,
+    host_targets: Mutex<HashMap<String, Host>>,
+    request_channels: Mutex<HashMap<String, Arc<request_channels::Channels<Client>>>>,
+    cleanup_admission: Mutex<()>,
+    owner: std::sync::OnceLock<String>,
+    server_ids: Mutex<HashMap<String, String>>,
+    owned_instances: Mutex<HashMap<(String, latte_work_protocol::lifecycle::Resource), String>>,
     passwords: Mutex<HashMap<String, CachedPassword>>,
     turns: Mutex<HashMap<(String, String), String>>,
     terminals: Mutex<HashSet<(String, String)>>,
     admission: RwLock<()>,
+    agent_admission: Mutex<()>,
     quitting: AtomicBool,
     exit_ready: AtomicBool,
     close_ack: Mutex<Option<lifecycle::CloseAck>>,
+}
+impl Connections {
+    fn owner_id(&self) -> &str {
+        self.owner.get_or_init(|| uuid::Uuid::new_v4().to_string())
+    }
 }
 struct CachedPassword {
     ssh: String,
@@ -93,7 +107,7 @@ impl Drop for Askpass {
         let _ = std::fs::remove_dir(&self.directory);
     }
 }
-#[derive(Clone, Copy, Default, Serialize, Deserialize)]
+#[derive(Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum SshAuthMode {
     #[default]
@@ -125,9 +139,138 @@ async fn connect_host(
     if state.quitting.load(Ordering::SeqCst) {
         return Err("正在停止任务并退出，请稍候".into());
     }
+    let client = open_host_client(&app, &state, &host, password.as_deref()).await?;
+    let mut client = client;
+    state
+        .host_targets
+        .lock()
+        .await
+        .insert(host.id.clone(), host.clone());
+    let adopted = pending_close::drain(&app, &state, &host, &mut client).await?;
+    state
+        .server_ids
+        .lock()
+        .await
+        .insert(host.id.clone(), client.server_id().to_owned());
+    let response = client
+        .request(Request::Hello {
+            version: latte_work_protocol::VERSION,
+        })
+        .await
+        .map_err(|e| e.to_string())?;
+    state
+        .host_targets
+        .lock()
+        .await
+        .insert(host.id.clone(), host.clone());
+    let client = Arc::new(Mutex::new(client));
+    state.request_channels.lock().await.remove(&host.id);
+    state
+        .clients
+        .lock()
+        .await
+        .insert(host.id.clone(), client.clone());
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let state = app.state::<Connections>();
+        let sessions: Vec<_> = state
+            .turns
+            .lock()
+            .await
+            .keys()
+            .filter(|(id, _)| id == &host.id)
+            .cloned()
+            .collect();
+        let primary = client.clone();
+        let (control, _) = tokio::join!(
+            request_client(
+                &app,
+                &state,
+                &host.id,
+                client.clone(),
+                request_channels::Lane::Control
+            ),
+            request_client(
+                &app,
+                &state,
+                &host.id,
+                client,
+                request_channels::Lane::Metadata
+            )
+        );
+        if sessions.is_empty() {
+            return;
+        }
+        let client = match control {
+            Ok(client) => client,
+            Err(_) => return,
+        };
+        for key in sessions {
+            if adopted.contains(&latte_work_protocol::lifecycle::Resource::AgentSession(
+                key.1.clone(),
+            )) {
+                continue;
+            }
+            let _admission = state.admission.read().await;
+            if state.quitting.load(Ordering::SeqCst) {
+                break;
+            }
+            let _agents = state.agent_admission.lock().await;
+            if !state
+                .clients
+                .lock()
+                .await
+                .get(&host.id)
+                .is_some_and(|current| Arc::ptr_eq(current, &primary))
+            {
+                break;
+            }
+            if !state.turns.lock().await.contains_key(&key) {
+                continue;
+            }
+            if claim_resource(
+                &state,
+                &host.id,
+                &client,
+                latte_work_protocol::lifecycle::Resource::AgentSession(key.1.clone()),
+            )
+            .await
+            .is_err()
+            {
+                continue;
+            }
+            let target = host.id.clone();
+            // Open is idempotent and contains no prompt. A surviving daemon keeps
+            // the exact process; a restarted daemon resumes the persisted native ID.
+            let _ = latte_work_client::request_with_app_provider(
+                &client,
+                Request::OpenAgentSession {
+                    session_id: key.1,
+                    provider: None,
+                },
+                |agent| async {
+                    providers::with_store(app.clone(), move |store| {
+                        store.snapshot_for_host(&target, &agent)
+                    })
+                    .await
+                    .map_err(anyhow::Error::msg)
+                },
+            )
+            .await;
+        }
+    });
+    Ok(response)
+}
+// Establish transport only. Exit cleanup must never restore an Agent or replay input.
+async fn open_host_client(
+    app: &tauri::AppHandle,
+    state: &Connections,
+    host: &Host,
+    password: Option<&str>,
+) -> Result<Client, String> {
     let client = if let Some(ssh) = &host.ssh {
         let secret = if matches!(host.auth, SshAuthMode::Password) {
-            Some(match password.as_deref() {
+            Some(match password {
                 Some(value) if !value.is_empty() => value.to_owned(),
                 _ => state
                     .passwords
@@ -182,23 +325,34 @@ async fn connect_host(
         }
         result.map_err(|e| format!("{e:#}"))
     } else {
-        connect_local(&app).await
+        connect_local(app).await
     }?;
-    let mut client = client;
-    let response = client
-        .request(Request::Hello {
-            version: latte_work_protocol::VERSION,
-        })
-        .await
-        .map_err(|e| e.to_string())?;
-    state
-        .clients
-        .lock()
-        .await
-        .insert(host.id, Arc::new(Mutex::new(client)));
-    Ok(response)
+    Ok(client)
 }
-async fn connect_local(app: &tauri::AppHandle) -> Result<Client, String> {
+async fn reconnect_for_cleanup(
+    app: &tauri::AppHandle,
+    state: &Connections,
+    host_id: &str,
+) -> Result<Client, String> {
+    tokio::time::timeout(std::time::Duration::from_secs(8), async {
+        if host_id == "local" {
+            return Client::local_cleanup(&local_binary(app)?, None)
+                .await
+                .map_err(|e| format!("{e:#}"));
+        }
+        let host = state
+            .host_targets
+            .lock()
+            .await
+            .get(host_id)
+            .cloned()
+            .ok_or_else(|| format!("{host_id} 的连接信息不可用"))?;
+        open_host_client(app, state, &host, None).await
+    })
+    .await
+    .map_err(|_| format!("{host_id} 重连超时"))?
+}
+fn local_binary(app: &tauri::AppHandle) -> Result<PathBuf, String> {
     let mut binary = std::env::current_exe()
         .map_err(|e| e.to_string())?
         .with_file_name("latte-work-server");
@@ -211,7 +365,10 @@ async fn connect_local(app: &tauri::AppHandle) -> Result<Client, String> {
     {
         binary = PathBuf::from(path);
     }
-    Client::local(&binary, None)
+    Ok(binary)
+}
+async fn connect_local(app: &tauri::AppHandle) -> Result<Client, String> {
+    Client::local(&local_binary(app)?, None)
         .await
         .map_err(|e| format!("{e:#}"))
 }
@@ -231,6 +388,82 @@ async fn local_client(
         .or_insert(client)
         .clone())
 }
+async fn claim_resource(
+    state: &Connections,
+    host: &str,
+    client: &Arc<Mutex<Client>>,
+    resource: latte_work_protocol::lifecycle::Resource,
+) -> Result<(), String> {
+    let server_id = state
+        .server_ids
+        .lock()
+        .await
+        .get(host)
+        .cloned()
+        .ok_or("缺少 Server 实例信息")?;
+    state
+        .owned_instances
+        .lock()
+        .await
+        .insert((host.to_owned(), resource.clone()), server_id);
+    let mut client = client.lock().await;
+    client
+        .claim_resources(state.owner_id().to_owned(), vec![resource])
+        .await
+        .map_err(|e| format!("{e:#}"))
+}
+// Extra lanes connect to the existing daemon only. They do not initialize projects,
+// restore sessions or upgrade a local daemon, and survive ordinary navigation.
+async fn request_client(
+    app: &tauri::AppHandle,
+    state: &Connections,
+    host_id: &str,
+    primary: Arc<Mutex<Client>>,
+    lane: request_channels::Lane,
+) -> Result<Arc<Mutex<Client>>, String> {
+    if !state
+        .clients
+        .lock()
+        .await
+        .get(host_id)
+        .is_some_and(|current| Arc::ptr_eq(current, &primary))
+    {
+        return Err("HOST_CONNECTION_LOST:连接已更新，请重试".into());
+    }
+    let channels = {
+        let mut hosts = state.request_channels.lock().await;
+        if !hosts
+            .get(host_id)
+            .is_some_and(|c| Arc::ptr_eq(&c.primary, &primary))
+        {
+            hosts.insert(
+                host_id.to_owned(),
+                Arc::new(request_channels::Channels::new(primary.clone())),
+            );
+        }
+        hosts.get(host_id).unwrap().clone()
+    };
+    let expected = state.server_ids.lock().await.get(host_id).cloned();
+    let client = channels
+        .client(lane, || async {
+            let client = reconnect_for_cleanup(app, state, host_id).await?;
+            if expected.as_deref() != Some(client.server_id()) {
+                return Err("HOST_CONNECTION_LOST:后台实例已变化，请重新连接".to_owned());
+            }
+            Ok(client)
+        })
+        .await?;
+    if !state
+        .clients
+        .lock()
+        .await
+        .get(host_id)
+        .is_some_and(|current| Arc::ptr_eq(current, &primary))
+    {
+        return Err("HOST_CONNECTION_LOST:连接已更新，请重试".into());
+    }
+    Ok(client)
+}
 #[tauri::command]
 async fn host_request(
     app: tauri::AppHandle,
@@ -241,6 +474,27 @@ async fn host_request(
     let _admission = state.admission.read().await;
     if state.quitting.load(Ordering::SeqCst) && !matches!(request, Request::CloseTerminal { .. }) {
         return Err("正在停止任务并退出，请稍候".into());
+    }
+    if state.quitting.load(Ordering::SeqCst)
+        && let Request::CloseTerminal { terminal_id } = &request
+    {
+        let terminal_id = terminal_id.clone();
+        lifecycle::close_resource(&state, &host_id, request, &|host| {
+            let app = app.clone();
+            let state = &*state;
+            async move { reconnect_for_cleanup(&app, state, &host).await }
+        })
+        .await?;
+        state
+            .terminals
+            .lock()
+            .await
+            .remove(&(host_id.clone(), terminal_id.clone()));
+        state.owned_instances.lock().await.remove(&(
+            host_id,
+            latte_work_protocol::lifecycle::Resource::Terminal(terminal_id),
+        ));
+        return Ok(Response::Ok);
     }
     if matches!(
         request,
@@ -263,7 +517,40 @@ async fn host_request(
         .await
         .get(&host_id)
         .cloned()
-        .ok_or("Host 未连接")?;
+        .ok_or("HOST_CONNECTION_LOST:Host 未连接")?;
+    let primary = client.clone();
+    let client = request_client(
+        &app,
+        &state,
+        &host_id,
+        client,
+        request_channels::lane(&request),
+    )
+    .await?;
+    let _agents = if matches!(
+        request,
+        Request::Send { .. } | Request::OpenAgentSession { .. } | Request::CloseAgentSession { .. }
+    ) {
+        Some(state.agent_admission.lock().await)
+    } else {
+        None
+    };
+    if state.quitting.load(Ordering::SeqCst) {
+        return Err("正在退出，任务未发送".into());
+    }
+    if let Request::OpenAgentSession { session_id, .. } = &request {
+        state
+            .turns
+            .lock()
+            .await
+            .entry((host_id.clone(), session_id.clone()))
+            .or_insert_with(|| "open".into());
+    }
+    let closed_agent = if let Request::CloseAgentSession { session_id, .. } = &request {
+        Some((host_id.clone(), session_id.clone()))
+    } else {
+        None
+    };
     if let Request::Send {
         session_id,
         request_id,
@@ -290,47 +577,83 @@ async fn host_request(
     } else {
         None
     };
-    let observed_turn = if let Request::Poll { session_id, .. } = &request {
-        let key = (host_id.clone(), session_id.clone());
-        state
-            .turns
-            .lock()
-            .await
-            .get(&key)
-            .cloned()
-            .map(|request| (key, request))
-    } else {
-        None
+    let resource = match &request {
+        Request::OpenAgentSession { session_id, .. } | Request::Send { session_id, .. } => Some(
+            latte_work_protocol::lifecycle::Resource::AgentSession(session_id.clone()),
+        ),
+        Request::CreateTerminal { terminal_id, .. } => Some(
+            latte_work_protocol::lifecycle::Resource::Terminal(terminal_id.clone()),
+        ),
+        _ => None,
     };
-    let response = if matches!(request, Request::Models { .. } | Request::Send { .. }) {
+    if let Some(resource) = resource {
+        claim_resource(&state, &host_id, &client, resource).await?;
+        if state.quitting.load(Ordering::SeqCst) {
+            return Err("正在退出，任务未发送".into());
+        }
+    }
+    let response = if matches!(
+        request,
+        Request::Models { .. } | Request::Send { .. } | Request::OpenAgentSession { .. }
+    ) {
+        let provider_host = host_id.clone();
         latte_work_client::request_with_app_provider(&client, request, |agent| async move {
-            providers::with_store(app, move |store| store.snapshot_for_host(&host_id, &agent))
-                .await
-                .map_err(anyhow::Error::msg)
+            providers::with_store(app, move |store| {
+                store.snapshot_for_host(&provider_host, &agent)
+            })
+            .await
+            .map_err(anyhow::Error::msg)
         })
         .await
     } else {
         client.lock().await.request(request).await
+    };
+    let response = match response {
+        Ok(response) => response,
+        Err(error) => {
+            let detail = format!("{error:#}");
+            return Err(if client.lock().await.is_broken() {
+                format!("HOST_CONNECTION_LOST:{detail}")
+            } else {
+                detail
+            });
+        }
+    };
+    if !state
+        .clients
+        .lock()
+        .await
+        .get(&host_id)
+        .is_some_and(|current| Arc::ptr_eq(current, &primary))
+    {
+        return Err("HOST_CONNECTION_LOST:连接已更新；请求结果待确认，任务不会自动重发".into());
     }
-    .map_err(|e| format!("{e:#}"))?;
     if matches!(response, Response::Error { .. })
         && let Some((key, true)) = created_terminal
     {
         state.terminals.lock().await.remove(&key);
+        state.owned_instances.lock().await.remove(&(
+            key.0,
+            latte_work_protocol::lifecycle::Resource::Terminal(key.1),
+        ));
     }
     if matches!(response, Response::Ok)
         && let Some(key) = closed_terminal
     {
         state.terminals.lock().await.remove(&key);
+        state.owned_instances.lock().await.remove(&(
+            key.0,
+            latte_work_protocol::lifecycle::Resource::Terminal(key.1),
+        ));
     }
-    if let Response::Events { session, .. } = &response
-        && lifecycle::settled(&session.status)
-        && let Some((key, request)) = observed_turn
+    if matches!(response, Response::Ok)
+        && let Some(key) = closed_agent
     {
-        let mut turns = state.turns.lock().await;
-        if turns.get(&key) == Some(&request) {
-            turns.remove(&key);
-        }
+        state.turns.lock().await.remove(&key);
+        state.owned_instances.lock().await.remove(&(
+            key.0,
+            latte_work_protocol::lifecycle::Resource::AgentSession(key.1),
+        ));
     }
     ui_response(response)
 }
@@ -343,6 +666,7 @@ fn ui_response(response: Response) -> Result<Response, String> {
 #[tauri::command]
 async fn disconnect_host(state: State<'_, Connections>, host_id: String) -> Result<(), String> {
     state.clients.lock().await.remove(&host_id);
+    state.request_channels.lock().await.remove(&host_id);
     state.passwords.lock().await.remove(&host_id);
     Ok(())
 }

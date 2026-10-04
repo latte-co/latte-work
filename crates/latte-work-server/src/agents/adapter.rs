@@ -1,4 +1,4 @@
-//! Internal contract for one agent turn over bounded, UTF-8 line-framed stdio.
+//! Internal contract for a persistent agent session over bounded line-framed stdio.
 //! Adapters own wire encoding and protocol order, never process supervision or storage.
 use crate::providers::LaunchConfig;
 use anyhow::Result;
@@ -15,7 +15,11 @@ pub struct AgentCommand {
 pub enum Input<'a> {
     /// Initialize for metadata only. Must never send a user prompt.
     DiscoverCommands,
-    /// Delivered exactly once after spawning; the adapter decides when to send the prompt.
+    /// Open the bidirectional session without sending a user prompt.
+    Open,
+    /// Interrupt the active turn while retaining the session's process.
+    Interrupt,
+    /// Start a turn. The first turn initializes; later turns reuse the same transport.
     Start { prompt: &'a str },
     /// One complete line without its delimiter. Only the adapter interprets its payload.
     Message(&'a str),
@@ -33,6 +37,9 @@ pub enum Action {
     Write(Vec<u8>),
     /// Stop the startup deadline; this does not implicitly send any message.
     Ready,
+    /// Native evidence that the main agent started an autonomous follow-up turn.
+    TurnStarted,
+    Interrupted,
     Event(EventKind),
     NativeSession(String),
     Approval {
@@ -49,6 +56,8 @@ pub enum Action {
 }
 
 pub trait AgentAdapter: Send {
+    /// Only true between turns when replacing the process cannot discard live work.
+    fn can_reconfigure(&self) -> bool;
     /// Prepare launch resources; may retain resume/config context for later protocol steps.
     fn command(
         &mut self,

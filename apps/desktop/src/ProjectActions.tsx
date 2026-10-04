@@ -3,6 +3,13 @@ import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { Folder, Pencil, X } from "lucide-react";
 import { message, revealProject } from "./api";
+import {
+  openProjectSessions,
+  needsCloseConfirmation,
+  closeProjectSessions,
+  type CloseProjectResult,
+} from "./projectSessions";
+import type { Session } from "./protocol";
 import type { HostedProject } from "./projectCatalog";
 import type { Workbench } from "./useWorkbench";
 export function ProjectActions({
@@ -16,13 +23,103 @@ export function ProjectActions({
   close: () => void;
   state: Workbench;
 }) {
-  const [view, setView] = useState<"menu" | "edit" | "remove">("menu");
+  const [view, setView] = useState<
+    "menu" | "edit" | "remove" | "close" | "close-result"
+  >("menu");
+  const [opened, setOpened] = useState<Session[]>();
+  const [closeTargets, setCloseTargets] = useState<Session[]>([]);
+  const [closeResult, setCloseResult] = useState<CloseProjectResult>({
+    closed: [],
+    failed: [],
+  });
   const [name, setName] = useState(project.name);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [position, setPosition] = useState(point);
   const menu = useRef<HTMLDivElement>(null);
   const opener = useRef(document.activeElement as HTMLElement | null);
+  useEffect(() => {
+    if (view !== "menu") return;
+    let disposed = false;
+    let timer: ReturnType<typeof setTimeout>;
+    const load = async () => {
+      try {
+        const rows = await openProjectSessions(project.hostId, project.id);
+        if (!disposed) {
+          setOpened(rows);
+          setError("");
+        }
+      } catch (cause) {
+        if (!disposed) setError(message(cause));
+      }
+      if (!disposed) timer = setTimeout(() => void load(), 5000);
+    };
+    void load();
+    return () => {
+      disposed = true;
+      clearTimeout(timer);
+    };
+  }, [project.hostId, project.id, view]);
+  async function performClose(targets: Session[], confirmed = false) {
+    setBusy(true);
+    setError("");
+    try {
+      const result = await closeProjectSessions(
+        project.hostId,
+        project.id,
+        targets,
+        (host, id) =>
+          state.sessionAction(host, {
+            method: "close_agent_session",
+            session_id: id,
+            only_if_idle: !confirmed,
+          }),
+      );
+      setCloseResult((old) => ({
+        closed: [...old.closed, ...result.closed],
+        failed: result.failed,
+      }));
+      if (!result.failed.length) close();
+      else setView("close-result");
+    } catch (cause) {
+      setError(message(cause));
+    } finally {
+      setBusy(false);
+    }
+  }
+  async function retryFailed() {
+    setBusy(true);
+    setError("");
+    try {
+      const opened = await openProjectSessions(project.hostId, project.id);
+      const targets = closeResult.failed.map(
+        (item) => opened.find((s) => s.id === item.session.id) ?? item.session,
+      );
+      setCloseTargets(targets);
+      if (needsCloseConfirmation(targets)) setView("close");
+      else await performClose(targets);
+    } catch (cause) {
+      setError(message(cause));
+    } finally {
+      setBusy(false);
+    }
+  }
+  async function closeAll() {
+    setBusy(true);
+    setError("");
+    try {
+      const targets = await openProjectSessions(project.hostId, project.id);
+      setOpened(targets);
+      setCloseTargets(targets);
+      if (!targets.length) return;
+      if (needsCloseConfirmation(targets)) setView("close");
+      else await performClose(targets);
+    } catch (cause) {
+      setError(message(cause));
+    } finally {
+      setBusy(false);
+    }
+  }
   useEffect(
     () => () => {
       if (opener.current?.isConnected) opener.current.focus();
@@ -73,7 +170,8 @@ export function ProjectActions({
       }
     };
     const outside = (e: PointerEvent) => {
-      if (view === "menu" && !menu.current?.contains(e.target as Node)) close();
+      if (view === "menu" && !busy && !menu.current?.contains(e.target as Node))
+        close();
     };
     const resize = () => {
       if (view === "menu") close();
@@ -131,10 +229,33 @@ export function ProjectActions({
           </>
         )}
         <div role="separator" />
-        <button role="menuitem" onClick={() => setView("remove")}>
+        <button
+          role="menuitem"
+          disabled={busy || !opened?.length}
+          title={error || "关闭此项目已打开的 Agent 会话，保留聊天记录"}
+          onClick={() => void closeAll()}
+        >
+          <X size={17} />
+          <span>
+            {opened === undefined
+              ? "关闭全部对话"
+              : `关闭全部对话（${opened.length}）`}
+          </span>
+        </button>
+        <div role="separator" />
+        <button
+          role="menuitem"
+          disabled={busy}
+          onClick={() => setView("remove")}
+        >
           <X size={17} />
           <span>移除项目</span>
         </button>
+        {error && (
+          <div className="form-error" role="alert">
+            {error}
+          </div>
+        )}
       </div>,
       document.body,
     );
@@ -149,7 +270,13 @@ export function ProjectActions({
         className="modal"
         role="dialog"
         aria-modal="true"
-        aria-label={view === "edit" ? "编辑项目" : "移除项目"}
+        aria-label={
+          view === "edit"
+            ? "编辑项目"
+            : view === "remove"
+              ? "移除项目"
+              : "关闭全部对话"
+        }
       >
         <button
           className="modal-close icon-button"
@@ -159,11 +286,19 @@ export function ProjectActions({
         >
           <X size={18} />
         </button>
-        <h2>{view === "edit" ? "编辑项目" : "移除项目"}</h2>
+        <h2>
+          {view === "edit"
+            ? "编辑项目"
+            : view === "remove"
+              ? "移除项目"
+              : "关闭全部对话"}
+        </h2>
         <form
           onSubmit={(e) => {
             e.preventDefault();
-            void save();
+            if (view === "close") void performClose(closeTargets, true);
+            else if (view === "close-result") void retryFailed();
+            else void save();
           }}
         >
           {view === "edit" ? (
@@ -181,6 +316,23 @@ export function ProjectActions({
               </label>
               <p className="form-note project-path-note">{project.path}</p>
             </>
+          ) : view === "close" ? (
+            <p>
+              将关闭「{project.name}」的 {closeTargets.length} 个 Agent
+              会话，其中有运行任务、待审批操作、后台任务或待确认状态。关闭会停止这些任务，聊天记录、草稿和置顶状态保留。
+            </p>
+          ) : view === "close-result" ? (
+            <div role="status">
+              <p>
+                已关闭 {closeResult.closed.length} 个，
+                {closeResult.failed.length} 个关闭失败。
+              </p>
+              {closeResult.failed.map((item) => (
+                <p key={item.session.id}>
+                  {item.session.title}：{item.error}
+                </p>
+              ))}
+            </div>
           ) : (
             <p>
               将「{project.name}
@@ -202,7 +354,17 @@ export function ProjectActions({
               取消
             </button>
             <button className="primary" disabled={busy}>
-              {busy ? "正在保存…" : view === "edit" ? "保存" : "移除项目"}
+              {busy
+                ? view === "close" || view === "close-result"
+                  ? "正在关闭…"
+                  : "正在保存…"
+                : view === "edit"
+                  ? "保存"
+                  : view === "remove"
+                    ? "移除项目"
+                    : view === "close"
+                      ? "关闭全部"
+                      : "重试失败项"}
             </button>
           </div>
         </form>

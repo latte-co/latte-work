@@ -205,6 +205,8 @@ impl Store {
             pinned_at: None,
             unread: false,
             archived: false,
+            agent_session_open: None,
+            agent_session_busy: None,
         };
         self.db.execute(
             "INSERT INTO sessions VALUES (?1,?2,?3)",
@@ -431,6 +433,103 @@ impl Store {
         tx.commit()?;
         Ok(true)
     }
+    /// Reverse pages avoid replaying every historical tool output to show the latest reply.
+    pub fn history(
+        &self,
+        id: &str,
+        before: Option<f64>,
+    ) -> Result<(Vec<Event>, bool, bool, Option<f64>)> {
+        if before.is_some_and(|v| !v.is_finite() || v < 0.0) {
+            bail!("事件游标无效");
+        }
+        let mut statement = self.db.prepare(
+            "SELECT seq,at,data FROM events WHERE session_id=?1 AND seq<?2 ORDER BY seq DESC LIMIT 16385"
+        )?;
+        let mut rows = statement.query(params![id, before.unwrap_or(f64::MAX)])?;
+        let mut events: Vec<Event> = Vec::new();
+        let mut text_fragments: Vec<String> = Vec::new();
+        let mut bytes = 0;
+        let mut oldest = None;
+        let mut count = 0;
+        let mut turns = 0;
+        let mut has_more = false;
+        let mut split_text = false;
+        while let Some(row) = rows.next()? {
+            let data: String = row.get(2)?;
+            let event: EventKind = serde_json::from_str(&data)?;
+            let text = match &event {
+                EventKind::Text { text } => Some(text),
+                _ => None,
+            };
+            let joins = text.is_some()
+                && events
+                    .last()
+                    .is_some_and(|e| matches!(e.event, EventKind::Text { .. }));
+            let size = text.map_or(data.len() + id.len() + 96, |t| {
+                t.len() + if joins { 0 } else { id.len() + 96 }
+            });
+            if turns == 2
+                || count == 16384
+                || (!joins && events.len() == 128)
+                || (bytes + size > 256 * 1024 && !events.is_empty())
+            {
+                has_more = true;
+                split_text = joins;
+                break;
+            }
+            if !joins {
+                flush_history_text(&mut events, &mut text_fragments);
+            }
+            oldest = Some(row.get::<_, i64>(0)? as f64);
+            if matches!(event, EventKind::User { .. }) {
+                turns += 1;
+            }
+            let event = match event {
+                EventKind::Text { text } => {
+                    text_fragments.push(text);
+                    EventKind::Text {
+                        text: String::new(),
+                    }
+                }
+                other => other,
+            };
+            if !joins {
+                events.push(Event {
+                    seq: oldest.unwrap(),
+                    session_id: id.into(),
+                    at: row.get(1)?,
+                    event,
+                });
+            }
+            count += 1;
+            bytes += size;
+        }
+        flush_history_text(&mut events, &mut text_fragments);
+        events.reverse();
+        let mut needs_earlier = has_more && split_text;
+        if has_more && let Some(first) = oldest {
+            // Only unresolved approvals in the current live turn force an earlier window.
+            let pending: bool = self.db.query_row(
+                "SELECT EXISTS(SELECT 1 FROM events a WHERE a.session_id=?1 AND a.seq<?2
+                 AND json_extract(a.data,'$.kind')='approval'
+                 AND a.seq>COALESCE((SELECT MAX(u.seq) FROM events u WHERE u.session_id=a.session_id
+                 AND json_extract(u.data,'$.kind')='user'),0)
+                 AND NOT EXISTS(SELECT 1 FROM events e WHERE e.session_id=a.session_id AND e.seq>a.seq
+                 AND json_extract(e.data,'$.kind')='state' AND json_extract(e.data,'$.status') NOT IN ('running','waiting'))
+                 AND NOT EXISTS(SELECT 1 FROM events r WHERE r.session_id=a.session_id AND r.seq>a.seq
+                 AND json_extract(r.data,'$.kind')='approval_resolved'
+                 AND json_extract(r.data,'$.request_id')=json_extract(a.data,'$.request_id')))",
+                params![id, first], |r| r.get(0)
+            )?;
+            needs_earlier |= pending;
+        }
+        Ok((
+            events,
+            has_more,
+            needs_earlier,
+            if has_more { oldest } else { None },
+        ))
+    }
     pub fn events(&self, id: &str, after: f64) -> Result<(Vec<Event>, bool)> {
         if !after.is_finite() || after < 0.0 {
             bail!("事件游标无效");
@@ -453,8 +552,208 @@ impl Store {
         Ok((events, false))
     }
 }
+fn flush_history_text(events: &mut [Event], fragments: &mut Vec<String>) {
+    if let Some(Event {
+        event: EventKind::Text { text },
+        ..
+    }) = events.last_mut()
+    {
+        *text = fragments.drain(..).rev().collect();
+    }
+}
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn history_compacts_stream_chunks_and_pages_with_raw_cursors_without_gaps() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = super::Store::open(&dir.path().join("history.db")).unwrap();
+        let project = store.add_project(dir.path()).unwrap();
+        let session = store.create_session(project.id, "claude".into()).unwrap();
+        // Large older tool output must not delay the latest compact reply.
+        for i in 0..300 {
+            store
+                .event(
+                    &session.id,
+                    super::EventKind::Notice {
+                        text: format!("old-{i}"),
+                    },
+                )
+                .unwrap();
+        }
+        store
+            .event(
+                &session.id,
+                super::EventKind::User {
+                    text: "latest".into(),
+                    request_id: "latest".into(),
+                },
+            )
+            .unwrap();
+        for _ in 0..3000 {
+            store
+                .event(
+                    &session.id,
+                    super::EventKind::Text {
+                        text: "你好".into(),
+                    },
+                )
+                .unwrap();
+        }
+        store
+            .event(
+                &session.id,
+                super::EventKind::State {
+                    status: super::Status::Completed,
+                    message: None,
+                },
+            )
+            .unwrap();
+        let raw = store
+            .db
+            .query_row(
+                "SELECT COUNT(*) FROM events WHERE session_id=?1",
+                [&session.id],
+                |r| r.get::<_, i64>(0),
+            )
+            .unwrap();
+        let (latest, more, needs, mut cursor) = store.history(&session.id, None).unwrap();
+        assert!(more);
+        assert!(!needs);
+        assert!(latest.len() <= 128);
+        assert_eq!(
+            latest
+                .iter()
+                .filter_map(|e| match &e.event {
+                    super::EventKind::Text { text } => Some(text.as_str()),
+                    _ => None,
+                })
+                .collect::<String>(),
+            "你好".repeat(3000)
+        );
+        let newest = latest.last().unwrap().seq;
+        assert!(store.events(&session.id, newest).unwrap().0.is_empty());
+        let mut merged = latest;
+        while more && cursor.is_some() {
+            let (page, has_more, _, next) = store.history(&session.id, cursor).unwrap();
+            assert!(page.last().unwrap().seq < cursor.unwrap());
+            assert!(next.is_none_or(|n| n < cursor.unwrap()));
+            merged.splice(0..0, page);
+            cursor = if has_more { next } else { None };
+        }
+        assert_eq!(
+            merged
+                .iter()
+                .filter(|e| matches!(e.event, super::EventKind::Notice { .. }))
+                .count(),
+            300
+        );
+        assert_eq!(
+            store
+                .db
+                .query_row(
+                    "SELECT COUNT(*) FROM events WHERE session_id=?1",
+                    [&session.id],
+                    |r| r.get::<_, i64>(0)
+                )
+                .unwrap(),
+            raw
+        );
+        assert!(store.history(&session.id, Some(-1.0)).is_err());
+    }
+    #[test]
+    fn bounded_history_preserves_split_text_and_pending_approvals_until_resolved_or_expired() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = super::Store::open(&dir.path().join("history.db")).unwrap();
+        let p = store.add_project(dir.path()).unwrap();
+        let s = store.create_session(p.id, "claude".into()).unwrap();
+        store
+            .event(
+                &s.id,
+                super::EventKind::Approval {
+                    request_id: "a".into(),
+                    tool_use_id: None,
+                    tool: "Write".into(),
+                    input: serde_json::json!({}),
+                },
+            )
+            .unwrap();
+        for _ in 0..300 {
+            store
+                .event(
+                    &s.id,
+                    super::EventKind::Notice {
+                        text: "background".into(),
+                    },
+                )
+                .unwrap();
+        }
+        assert!(store.history(&s.id, None).unwrap().2);
+        store
+            .event(
+                &s.id,
+                super::EventKind::ApprovalResolved {
+                    request_id: "a".into(),
+                    allow: true,
+                },
+            )
+            .unwrap();
+        assert!(!store.history(&s.id, None).unwrap().2);
+        store
+            .event(
+                &s.id,
+                super::EventKind::Approval {
+                    request_id: "b".into(),
+                    tool_use_id: None,
+                    tool: "Read".into(),
+                    input: serde_json::json!({}),
+                },
+            )
+            .unwrap();
+        for _ in 0..300 {
+            store
+                .event(
+                    &s.id,
+                    super::EventKind::Notice {
+                        text: "background".into(),
+                    },
+                )
+                .unwrap();
+        }
+        store
+            .event(
+                &s.id,
+                super::EventKind::State {
+                    status: super::Status::Failed,
+                    message: None,
+                },
+            )
+            .unwrap();
+        assert!(!store.history(&s.id, None).unwrap().2);
+        for _ in 0..400 {
+            store
+                .event(
+                    &s.id,
+                    super::EventKind::Text {
+                        text: "x".repeat(1024),
+                    },
+                )
+                .unwrap();
+        }
+        let (tail, more, split, cursor) = store.history(&s.id, None).unwrap();
+        assert!(more && split);
+        assert!(serde_json::to_vec(&tail).unwrap().len() < 270 * 1024);
+        let (head, _, split, _) = store.history(&s.id, cursor).unwrap();
+        assert!(!split);
+        let text = head
+            .iter()
+            .chain(&tail)
+            .filter_map(|e| match &e.event {
+                super::EventKind::Text { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<String>();
+        assert_eq!(text.len(), 400 * 1024);
+    }
     #[test]
     fn permission_survives_restart_and_conflicting_request_reuse_is_rejected() {
         let dir = tempfile::tempdir().unwrap();

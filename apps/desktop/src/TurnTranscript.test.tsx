@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, expect, it } from "vitest";
 import type { Event, EventKind, Status } from "./protocol";
 import {
@@ -61,10 +61,12 @@ it("folds only the process of each completed turn and keeps its final answer out
   );
   const details = screen.getByText("用时 0秒").closest("details")!;
   expect(details.open).toBe(false);
-  expect(details.contains(screen.getByText("progress"))).toBe(true);
+  expect(screen.queryByText("progress")).toBeNull();
   expect(details.contains(screen.getByText("final"))).toBe(false);
   details.open = true;
+  fireEvent(details, new window.Event("toggle"));
   expect(details.open).toBe(true);
+  expect(details.contains(screen.getByText("progress"))).toBe(true);
 });
 it.each(["running", "waiting", "failed", "unknown"] as Status[])(
   "does not collapse %s turns",

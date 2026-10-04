@@ -260,6 +260,7 @@ export function themeTokens(theme: ThemeConfig): Record<string, string> {
     "--font-code": codeFonts[theme.codeFont],
     "--weight-ui": theme.uiWeight,
     "--weight-content": theme.contentWeight,
+    "--weight-content-emphasis": theme.contentWeight === "400" ? "500" : "600",
     "--weight-code": theme.codeWeight,
   };
 }

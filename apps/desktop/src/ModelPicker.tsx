@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { request, message } from "./api";
 import { modelOptions } from "./modelOptions";
+import { modelSelectionScope } from "./modelSelectionScope";
 import { ModelSelector } from "./ModelSelector";
 import type { Effort, Response } from "./protocol";
 
@@ -17,6 +18,7 @@ export function ModelPicker({
   onEffortChange,
   onEffortInvalid,
   disabled,
+  onReadyChange,
 }: {
   hostId: string;
   projectId?: string;
@@ -29,6 +31,7 @@ export function ModelPicker({
   onEffortChange: (effort: Effort | null) => void;
   onEffortInvalid?: () => void;
   disabled: boolean;
+  onReadyChange?: (state: { scope: string; ready: boolean }) => void;
 }) {
   const scope = JSON.stringify([hostId, projectId, agent, value]);
   const [loaded, setCatalog] = useState<{ scope: string; catalog: Catalog }>();
@@ -61,8 +64,43 @@ export function ModelPicker({
     if (catalog && effort && !catalog.effort_levels.includes(effort))
       onEffortInvalid?.();
   }, [catalog, effort, onEffortInvalid]);
-  const options = modelOptions(catalog?.models ?? [], catalog?.model_labels);
-  if (value && catalog && !catalog.models.includes(value))
+  const providerFallback =
+    catalog?.provider != null && (!value || !catalog.models.includes(value))
+      ? catalog.models.includes(catalog.default_model ?? "")
+        ? catalog.default_model
+        : (catalog.models[0] ?? null)
+      : undefined;
+  useEffect(() => {
+    if (providerFallback !== undefined && providerFallback !== value)
+      onChange(providerFallback);
+  }, [providerFallback, value, onChange]);
+  const readyScope = modelSelectionScope(
+    hostId,
+    projectId,
+    agent,
+    value,
+    effort,
+  );
+  const ready =
+    !!catalog &&
+    providerFallback === undefined &&
+    (!value || catalog.models.includes(value)) &&
+    (!effort || catalog.effort_levels.includes(effort)) &&
+    connected &&
+    !settingsOpen;
+  useEffect(() => {
+    onReadyChange?.({ scope: readyScope, ready });
+  }, [readyScope, ready, onReadyChange]);
+  const options = modelOptions(
+    catalog?.models ?? [],
+    catalog?.model_labels,
+  ).filter((option) => catalog?.provider == null || option.value !== "");
+  if (
+    value &&
+    catalog &&
+    catalog.provider == null &&
+    !catalog.models.includes(value)
+  )
     options.push({
       value,
       label: `${value} (unavailable)`,
@@ -79,7 +117,7 @@ export function ModelPicker({
         </button>
       ) : (
         <ModelSelector
-          value={value ?? ""}
+          value={providerFallback ?? value ?? ""}
           options={options}
           onChange={(id) => onChange(id || null)}
           effort={effort}

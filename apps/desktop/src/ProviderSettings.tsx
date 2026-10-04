@@ -110,7 +110,7 @@ export function ProviderSettings({
           ...models.map((m) => m.id),
         ]),
       );
-      if (ids.length > 256) throw new Error("模型目录最多支持 256 个模型");
+      if (ids.length > 256) throw new Error("模型配置最多支持 256 个模型");
       const labels = { ...draft.model_labels };
       for (const model of models)
         if (!labels[model.id]?.trim()) labels[model.id] = model.name;
@@ -147,7 +147,7 @@ export function ProviderSettings({
   }
   return (
     <div className="settings-panel-content provider-settings">
-      <h2>模型服务</h2>
+      <h2>模型</h2>
       <p>配置模型服务，并在连接与 Agent 中关联使用。</p>
       {error && (
         <div className="form-error" role="alert">
@@ -177,6 +177,9 @@ export function ProviderSettings({
                       {protocols[p.protocol]} · {p.model}
                     </small>
                     <small>{p.base_url}</small>
+                    {remove === p.id && (
+                      <small role="status">删除后将解除所有 Agent 关联。</small>
+                    )}
                   </span>
                 </div>
                 <div className="provider-entry-actions">
@@ -187,20 +190,27 @@ export function ProviderSettings({
                   >
                     编辑
                   </button>
-                  {!catalog.bindings.some((b) => b.provider_id === p.id) && (
+                  <button
+                    className="text-button danger"
+                    disabled={busy || !!draft}
+                    onClick={() =>
+                      remove === p.id
+                        ? void mutate({
+                            method: "delete_provider",
+                            id: p.id,
+                          })
+                        : setRemove(p.id)
+                    }
+                  >
+                    {remove === p.id ? "确认删除" : "删除"}
+                  </button>
+                  {remove === p.id && (
                     <button
-                      className="text-button danger"
-                      disabled={busy || !!draft}
-                      onClick={() =>
-                        remove === p.id
-                          ? void mutate({
-                              method: "delete_provider",
-                              id: p.id,
-                            })
-                          : setRemove(p.id)
-                      }
+                      className="text-button"
+                      disabled={busy}
+                      onClick={() => setRemove(null)}
                     >
-                      {remove === p.id ? "确认删除" : "删除"}
+                      取消
                     </button>
                   )}
                 </div>
@@ -227,16 +237,25 @@ export function ProviderSettings({
               className="provider-form"
               onSubmit={(e) => {
                 e.preventDefault();
+                const models = Array.from(
+                  new Set(draft.models.map((id) => id.trim()).filter(Boolean)),
+                );
+                if (!models.length) {
+                  setError("请至少添加一个模型");
+                  return;
+                }
                 if (dirty && !busy)
                   void mutate({
                     method: "save_provider",
                     provider: {
                       ...draft,
+                      models,
+                      model: models.includes(draft.model)
+                        ? draft.model
+                        : models[0],
                       model_labels: Object.fromEntries(
                         Object.entries(draft.model_labels ?? {}).filter(
-                          ([id, label]) =>
-                            (id === draft.model || draft.models.includes(id)) &&
-                            label?.trim(),
+                          ([id, label]) => models.includes(id) && label?.trim(),
                         ),
                       ),
                     },
@@ -298,23 +317,53 @@ export function ProviderSettings({
                   />
                 </label>
                 <label>
-                  默认模型 ID
+                  API Key
                   <input
-                    required
-                    maxLength={256}
-                    placeholder="服务端提供的完整模型 ID"
-                    value={draft.model}
+                    type="password"
+                    autoComplete="new-password"
+                    spellCheck={false}
+                    placeholder={
+                      draft.id && draft.auth !== "none"
+                        ? "已保存，留空保持不变"
+                        : "留空则无需认证"
+                    }
+                    value={draft.credential ?? ""}
                     onChange={(e) =>
-                      setDraft({ ...draft, model: e.target.value })
+                      setDraft({
+                        ...draft,
+                        credential: e.target.value || null,
+                        auth: e.target.value
+                          ? draft.id && draft.auth !== "none"
+                            ? draft.auth
+                            : draft.protocol === "anthropic_messages"
+                              ? "api_key"
+                              : "bearer"
+                          : draft.id &&
+                              JSON.parse(baseline.current).auth !== "none"
+                            ? draft.auth
+                            : "none",
+                      })
                     }
                   />
                 </label>
+                {draft.id && draft.auth !== "none" && (
+                  <button
+                    type="button"
+                    className="secondary provider-clear-key"
+                    onClick={() =>
+                      setDraft({ ...draft, auth: "none", credential: null })
+                    }
+                  >
+                    清除 API Key，改为无需认证
+                  </button>
+                )}
+
                 <section
                   className="provider-models-field"
-                  aria-label="模型目录"
+                  aria-label="模型配置"
                 >
                   <div className="provider-model-heading">
-                    <h4>模型目录</h4>
+                    <h4>模型配置</h4>
                     <button
                       className="secondary"
                       type="button"
@@ -404,49 +453,7 @@ export function ProviderSettings({
                     <Plus size={16} />
                     添加模型
                   </button>
-                  <small>默认模型自动包含在选择列表中。</small>
                 </section>
-                <label>
-                  API Key
-                  <input
-                    type="password"
-                    autoComplete="new-password"
-                    spellCheck={false}
-                    placeholder={
-                      draft.id && draft.auth !== "none"
-                        ? "已保存，留空保持不变"
-                        : "留空则无需认证"
-                    }
-                    value={draft.credential ?? ""}
-                    onChange={(e) =>
-                      setDraft({
-                        ...draft,
-                        credential: e.target.value || null,
-                        auth: e.target.value
-                          ? draft.id && draft.auth !== "none"
-                            ? draft.auth
-                            : draft.protocol === "anthropic_messages"
-                              ? "api_key"
-                              : "bearer"
-                          : draft.id &&
-                              JSON.parse(baseline.current).auth !== "none"
-                            ? draft.auth
-                            : "none",
-                      })
-                    }
-                  />
-                </label>
-                {draft.id && draft.auth !== "none" && (
-                  <button
-                    type="button"
-                    className="secondary provider-clear-key"
-                    onClick={() =>
-                      setDraft({ ...draft, auth: "none", credential: null })
-                    }
-                  >
-                    清除 API Key，改为无需认证
-                  </button>
-                )}
 
                 <div className="modal-actions">
                   <span className="form-note" role="status">

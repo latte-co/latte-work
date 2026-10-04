@@ -135,6 +135,11 @@ impl Drop for Terminal {
     }
 }
 impl Terminals {
+    pub fn is_open(&self, id: &str) -> bool {
+        self.entries
+            .get(id)
+            .is_some_and(|t| t.control.lock().is_ok_and(|c| !c.exited))
+    }
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }

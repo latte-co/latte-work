@@ -249,11 +249,17 @@ impl ProviderStore {
             .any(|value| value == id)
     }
     pub fn delete(&mut self, id: &str) -> Result<Response> {
-        if self.bound(id) {
-            bail!("请先解除所有主机的 Agent 关联，再删除 Provider");
-        }
         let mut next = self.config.clone();
         next.providers.retain(|r| r.metadata.id != id);
+        next.bindings.retain(|_, provider| provider != id);
+        for bindings in next.host_bindings.values_mut() {
+            bindings.retain(|_, provider| provider != id);
+        }
+        next.host_bindings
+            .retain(|_, bindings| !bindings.is_empty());
+        if next.active_id.as_deref() == Some(id) {
+            next.active_id = None;
+        }
         self.persist(next)
     }
     fn persist(&mut self, config: Config) -> Result<Response> {

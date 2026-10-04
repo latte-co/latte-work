@@ -55,3 +55,14 @@ it("does not reactivate an interrupted approval when a later turn starts", () =>
     ])[0],
   ).toMatchObject({ resolved: true, decision: "expired" });
 });
+
+it("preserves each user message's original send time through replay", () => {
+  const at = 1790760900000;
+  const event = {
+    ...e(1, { kind: "user", text: "继续", request_id: "r" }),
+    at,
+  };
+  expect(transcript(appendEvents([event], [event]))).toEqual([
+    { key: 1, type: "user", text: "继续", at },
+  ]);
+});

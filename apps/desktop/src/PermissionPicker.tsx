@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
-import { Shield, ShieldAlert } from "lucide-react";
+import { HostConnectionError } from "./connectionErrors";
+import { Shield, ShieldAlert, RefreshCw } from "lucide-react";
 import { request, message } from "./api";
 import { Select, type SelectOption } from "./Select";
 import type { AgentPermissionMode } from "./protocol";
@@ -26,14 +27,15 @@ export function PermissionPicker({
     scope: string;
     modes: AgentPermissionMode[];
   }>();
-  const [error, setError] = useState("");
+  const [failure, setFailure] = useState<{ scope: string; message: string }>();
+  const error = failure?.scope === scope ? failure.message : "";
   const [retry, setRetry] = useState(0);
   const modes = loaded?.scope === scope ? loaded.modes : undefined;
   useEffect(() => {
     if (!connected || hidden) return;
     let disposed = false;
     setLoaded(undefined);
-    setError("");
+    setFailure(undefined);
     void request(hostId, { method: "agent_permissions", agent })
       .then((result) => {
         if (result.kind !== "agent_permissions")
@@ -41,7 +43,8 @@ export function PermissionPicker({
         if (!disposed) setLoaded({ scope, modes: result.modes });
       })
       .catch((e) => {
-        if (!disposed) setError(message(e));
+        if (!disposed && !(e instanceof HostConnectionError))
+          setFailure({ scope, message: message(e) });
       });
     return () => {
       disposed = true;
@@ -82,16 +85,16 @@ export function PermissionPicker({
         minMenuWidth={340}
         menuTitle="如何批准 Agent 的操作？"
       />
-      {error && (
+      {error && connected && !hidden && (
         <button
-          className="permission-retry"
+          className="icon-button permission-retry"
           type="button"
-          title={error}
+          title={`权限加载失败，点击重试\n${error}`}
           aria-label="重新加载权限选项"
           disabled={disabled || !connected || hidden}
           onClick={() => setRetry((v) => v + 1)}
         >
-          重试
+          <RefreshCw size={14} aria-hidden="true" />
         </button>
       )}
     </div>

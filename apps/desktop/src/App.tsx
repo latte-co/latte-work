@@ -1,5 +1,5 @@
 import { useAppLifecycle } from "./appLifecycle";
-import { useRef } from "react";
+import { useCallback, useRef, useState } from "react";
 import { DraftStore } from "./drafts";
 import {
   Folder,
@@ -10,7 +10,6 @@ import {
   X,
   RefreshCw,
   Circle,
-  LoaderCircle,
   Globe,
 } from "lucide-react";
 import { request, message } from "./api";
@@ -21,11 +20,28 @@ import { SettingsPage } from "./SettingsPage";
 import { HostDialogs } from "./HostDialogs";
 import { SshPasswordDialog } from "./SshPasswordDialog";
 import { useWorkbench } from "./useWorkbench";
+import { CONVERSATION_MIN_WIDTH } from "./workspaceState";
 
 export default function App() {
   useAppLifecycle();
   const workbench = useWorkbench();
   const drafts = useRef(new DraftStore()).current;
+  const historyScope = JSON.stringify([
+    workbench.hostId,
+    workbench.sessionId,
+    workbench.viewRevision,
+  ]);
+  const [readyHistoryScope, setReadyHistoryScope] = useState<string | null>(
+    null,
+  );
+  const historyReady = useCallback(
+    () => setReadyHistoryScope(historyScope),
+    [historyScope],
+  );
+  const historyPending =
+    !!workbench.sessionId &&
+    (workbench.connected || workbench.connecting) &&
+    (workbench.historyLoading || readyHistoryScope !== historyScope);
   const {
     hostId,
     connected,
@@ -48,19 +64,22 @@ export default function App() {
     resize,
     setRetry,
   } = workbench;
+  const merged = panel && workbench.workspace.expanded;
+  const conversationHidden = merged && !workbench.workspace.conversationActive;
   return (
     <>
       <div
         hidden={workbench.modal === "settings"}
-        className={`app ${sidebarOpen ? "" : "sidebar-collapsed"}`}
+        className={`app ${sidebarOpen ? "" : "sidebar-collapsed"}${panel ? " workspace-visible" : ""}${merged ? " workspace-merged" : ""}`}
         style={
           {
             "--sidebar-width": `${leftWidth}px`,
+            "--conversation-min-width": `${CONVERSATION_MIN_WIDTH}px`,
             "--workspace-width": `${rightWidth}px`,
           } as React.CSSProperties
         }
       >
-        <Sidebar state={workbench} />
+        <Sidebar state={workbench} historyPending={historyPending} />
         <div
           className="resize-handle"
           role="separator"
@@ -68,8 +87,20 @@ export default function App() {
           aria-label="调整侧栏宽度"
           onPointerDown={(e) => resize(e, "left")}
         />
-        <main className="main">
-          <header className="topbar" data-tauri-drag-region="deep">
+        <main
+          id="conversation-panel"
+          className={`main${conversationHidden ? " conversation-hidden" : ""}`}
+          role={merged ? "tabpanel" : undefined}
+          aria-labelledby={merged ? "conversation-workspace-tab" : undefined}
+          aria-hidden={conversationHidden || undefined}
+          inert={conversationHidden}
+        >
+          <header
+            className="topbar"
+            data-tauri-drag-region="deep"
+            inert={merged}
+            aria-hidden={merged || undefined}
+          >
             <div className="topbar-project">
               {!sidebarOpen && (
                 <div className="topbar-controls">
@@ -119,26 +150,14 @@ export default function App() {
               </button>
             </div>
           </header>
-          {(!connected || error || agent?.available === false) && (
+          {connected && (error || agent?.available === false) && (
             <div className="connection-banner">
-              {connecting ? (
-                <LoaderCircle size={14} className="spin" />
-              ) : (
-                <Circle size={10} />
-              )}
-              <span>
-                {connecting
-                  ? `正在连接 ${host.name}…`
-                  : error ||
-                    agent?.detail ||
-                    "连接中断，正在重连。已启动的任务保留在 Host 上。"}
-              </span>
-              {!connecting && (
-                <button title="重新连接" onClick={() => setRetry((v) => v + 1)}>
-                  <RefreshCw size={13} />
-                </button>
-              )}
-              {error && connected && (
+              <Circle size={10} />
+              <span>{error || agent?.detail}</span>
+              <button title="重新连接" onClick={() => setRetry((v) => v + 1)}>
+                <RefreshCw size={13} />
+              </button>
+              {error && (
                 <button title="关闭提示" onClick={() => setError("")}>
                   <X size={13} />
                 </button>
@@ -148,12 +167,37 @@ export default function App() {
           <Conversation
             drafts={drafts}
             agent={agent}
-            key={workbench.viewRevision}
             session={session}
             hostId={hostId}
-            settingsOpen={workbench.modal === "settings"}
+            agentSessionState={
+              session
+                ? workbench.agentSessionState({ ...session, hostId })
+                : undefined
+            }
+            agentSessionError={
+              session
+                ? workbench.agentSessionTransitions[
+                    JSON.stringify([hostId, session.id])
+                  ]?.error
+                : undefined
+            }
+            onModelReady={() =>
+              setError((old) => (old.startsWith("模型不在当前") ? "" : old))
+            }
+            settingsOpen={workbench.modal === "settings" || conversationHidden}
             events={events}
+            historyLoading={workbench.historyLoading}
+            hasEarlierHistory={workbench.hasEarlierHistory}
+            earlierHistoryLoading={workbench.earlierHistoryLoading}
+            loadEarlierHistory={workbench.loadEarlierHistory}
+            readingScope={workbench.readingScope}
+            readingPositions={workbench.readingPositions}
+            onHistoryReady={historyReady}
             connected={connected}
+            connecting={connecting}
+            connectionError={error}
+            connectionLost={workbench.connectionLost}
+            reconnect={() => setRetry((v) => v + 1)}
             available={agent?.available ?? false}
             projectName={project?.name}
             projectId={project?.id}
@@ -198,20 +242,25 @@ export default function App() {
           />
         </main>
         <div
-          className="resize-handle"
-          hidden={!panel}
+          className="resize-handle workspace-resize"
+          hidden={!panel || merged}
           role="separator"
           aria-label="调整工作区宽度"
           onPointerDown={(e) => resize(e, "right")}
         />
         <Workspace
           workspaceId={workbench.workspaceId}
+          conversationTitle={session?.title ?? "新任务"}
+          sidebarOpen={sidebarOpen}
+          toggleSidebar={toggleSidebar}
           hostId={hostId}
           hostName={host.name}
           project={project}
           visible={panel && workbench.modal !== "settings"}
           connected={connected}
-          close={() => setPanel(false)}
+          close={() =>
+            merged ? workbench.restoreWorkspace() : setPanel(false)
+          }
         />
         <HostDialogs state={workbench} />
       </div>

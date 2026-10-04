@@ -1,6 +1,6 @@
 import type { Event } from "./protocol";
 export type Item =
-  | { key: number; type: "user"; text: string }
+  | { key: number; type: "user"; text: string; at: number }
   | { key: number; type: "assistant"; text: string }
   | {
       key: number;
@@ -31,10 +31,10 @@ export function transcript(events: Event[]): Item[] {
         !["running", "waiting"].includes(e.event.status),
     )
     .map((e) => e.seq);
-  for (const { seq, event } of events) {
+  for (const { seq, event, at } of events) {
     if (event.kind === "usage" || event.kind === "progress") continue;
     if (event.kind === "user")
-      items.push({ key: seq, type: "user", text: event.text });
+      items.push({ key: seq, type: "user", text: event.text, at });
     else if (event.kind === "text") {
       const last = items.at(-1);
       if (last?.type === "assistant") last.text += event.text;

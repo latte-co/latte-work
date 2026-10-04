@@ -42,6 +42,12 @@ one daemon holds an exclusive file lock per canonical state directory (the
 standard user state directory is the default). Clients use a private Unix socket;
 SSH runs the same binary's `connect` bridge. The bridge starts the daemon when
 absent, then forwards bytes. Disconnecting a bridge does not stop the daemon.
+Native `host_request` failures from a broken client carry the private
+`HOST_CONNECTION_LOST:` prefix (not a wire-protocol change). The WebView reports
+that host as disconnected even for metadata requests, while Server/application
+errors remain scoped to their controls. Reconnecting replaces the transport;
+late failures from an older connection cannot invalidate its replacement. User
+messages are never automatically replayed.
 Explicit state-directory overrides exist for tests and separate installations.
 
 The desktop's local transport uses `connect-local`: it compares the running server's
@@ -54,7 +60,6 @@ Local coordinators serialize via `upgrade.lock` and time out after 20 seconds.
 SSH still uses `connect`, with no automatic remote replacement. Legacy daemons
 without the lifecycle handshake require a one-time manual restart after tasks
 finish and terminals close. Restarting only the desktop leaves them running.
-
 
 Wire protocol changes: edit latte-work-protocol then run `make types` and
 `make fmt`. Desktop presentation must not import or reproduce Claude wire types.
@@ -88,7 +93,13 @@ multiple shells, resizing, shell exit, and keyboard copy/paste.
 `agents/mod.rs` registers implementations, and `agents/claude.rs` implements the
 only supported Agent. Keep protocol order and wire messages in the implementation.
 Runtime consumes common actions and retains approval authorization, process
-supervision and persistence. `Ready` must never implicitly send a prompt.
+supervision and persistence. Each opened conversation has a persistent actor and
+native process. The additive `open_agent_session` and `close_agent_session`
+requests do not send prompts; they share the local/SSH implementation. Runtime
+serializes native output, durable turn admission, interruption and close. Native
+results finish turns without closing stdin. Task lifecycle and session-state
+messages stay in the Claude adapter. Configuration changes are rejected before
+admission when background work cannot safely be released. `Ready` must never implicitly send a prompt.
 
 Focused checks: `cargo test -p latte-work-server --bin latte-work-server --locked`
 for contract/adapter/runtime UT, followed by `make test-e2e` for real server/bridge
@@ -217,30 +228,46 @@ the event-backed Quit menu because Tao 0.35 does not expose a cancellable
 applicationShouldTerminate callback. It adds only that missing method and leaves
 Tao window/reopen handling intact; Rust contains no unsafe code.
 
-Dock Quit and Command-Q first stop turns sent
-by this App instance, including ambiguous send outcomes, through each host's normal
-Cancel protocol. New requests are blocked while quitting. Exit requires observing
-a terminal session state after cancellation; a 30-second overall deadline or an
-unreachable host keeps the App open and reports the failure for reconnection/retry.
-No force-quit fallback silently leaves a running Agent behind. OS force kill/crash
-cannot run this cleanup and remains outside this graceful-exit guarantee.
+Dock Quit and Command-Q silently close resources opened or sent by this App
+instance. A dedicated transport bypasses local upgrade checks and UI polling;
+cleanup batches are idempotent and bound to both the daemon ID and App owner ID.
+The host closes and reaps the Agent process group before acknowledging. An App
+reclaim fences stale closes from an earlier App instance. New requests are blocked
+while quitting; admitted requests cannot send new work after claiming a resource
+if Quit has begun. Prompt input is never replayed.
+
+Quit persists a private, atomic resource record before closing. The UI is never
+blocked by a quit-failure dialog: cleanup has an 8-second overall deadline, then
+the App exits. Unconfirmed work is not reported as stopped. Tab cleanup is advisory,
+with a one-second budget; native resource ownership remains authoritative. Local
+unconfirmed closes are resolved before the next local connection is exposed.
+A disconnected remote server keeps executing and retains its Agent sessions:
+it cannot infer App Quit from SSH EOF. On the next connection, the App reattaches
+to surviving remote resources and fetches their actual state; it never replays an
+old remote close, Open or Send. If the daemon has restarted or a resource belongs
+to a newer App instance, the old record is discarded without touching that resource.
+Records contain host targets and resource IDs, never SSH passwords, prompts or
+Provider credentials. This lifecycle requires an updated server supporting native
+resource ownership. Busy/shared daemons are not force-killed. OS force kill/crash
+cannot run explicit cleanup and remains outside this graceful-exit guarantee.
 
 Explicit Quit first emits a native `app-close-requested` transaction. Every mounted
 Tab registers `useAppClose`, including hidden tabs: terminal panes await PTY close;
 file/change panes pause refresh. Tabs own their cleanup; unmounting or hiding a
-window is not a shutdown signal. Failures are named and prevent exit, and an
-abort notification resumes tabs that can resume. Native code waits for the matching
-transaction acknowledgement (stale acknowledgements cannot approve a later Quit),
-blocks new work, and retains ownership tracking for ambiguous terminal creation.
-The native fallback closes any remaining App-owned terminals and stops owned Agent
-turns before dropping connections. The entire flow has a 30-second deadline.
+window is not a shutdown signal. Tab callbacks have a one-second advisory budget;
+stale acknowledgements cannot approve a later Quit. Native ownership tracking
+remains authoritative, blocks new work, and retains ambiguous terminal creation
+records. Cleanup failures are diagnostic only and retain unconfirmed resource
+records without opening a dialog. Within the eight-second overall budget, native
+cleanup closes any remaining App-owned terminals and Agent sessions before
+dropping connections; unreachable remote resources remain available for adoption
+on the next connection.
 
 The local daemon receives the existing instance-bound idle/drain handshake after
 cleanup; busy/shared resources veto daemon exit without being killed. Remote daemons
 remain alive. No unrelated sessions or terminal IDs are enumerated and killed.
 App transport pipes close on exit; connect-local and SSH bridges end on EOF.
 Reopening reconciles events without replaying prompts.
-
 
 ## macOS drag-install packaging
 
@@ -342,3 +369,62 @@ for a bare origin and preserves configured API prefixes, with Anthropic cursor
 pagination. Requests reject redirects, have a 15-second total deadline, and
 bound each response to 1 MiB, five pages and 256 unique models. A failure leaves
 the edited catalog unchanged; successful results remain an unsaved draft.
+
+Model discovery first requests the unversioned catalog to retain canonical IDs from
+compatible gateways. For Anthropic providers, an HTTP 400 response retries with
+`anthropic-version`; the existing timeout and pagination bounds still apply.
+
+Local lifecycle checks retry a failed read-only `server_status` exchange up to three
+attempts inside the existing 20-second coordinator deadline. Upgrade admission and
+application requests are never retried by this helper. Desktop startup progress
+lives in the composer; disconnected errors use a concise retry control with the
+original diagnostic available on hover.
+
+Opening historical sessions reads a bounded latest `history` window (up to two
+turns, 128 compacted events / 256 KiB, with a 16,384 raw-event scan cap). Consecutive
+text fragments are joined for transfer only; original persisted events remain
+unchanged. A raw `before` cursor supports older pages without gaps or duplicate
+text. Split final text and older unresolved approvals in the current live turn
+must be assembled before reveal. Older records load on upward scrolling or explicit
+request, preserving the viewport anchor. Older servers without `history_window`
+still use the compatible full Poll replay. The conversation reveals the latest
+window after positioning at the bottom across two animation frames; later live
+updates retain normal follow behavior and manual reading positions. A scope change cancels
+pending reveal work so a stale session cannot reveal the new conversation.
+
+## Conversation lifetime and reading position
+
+Opening an unarchived conversation also opens its native Agent session, even without
+sending a message. Switching conversations preserves all opened sessions. The
+conversation menu's Close releases the native runtime and returns the selected
+conversation to a draft; history remains on the host. Stop interrupts one turn
+and keeps the native session open. Native reconnect restores every App-owned
+session, including conversations not currently selected, without replaying prompts.
+An actual process/daemon restart cannot recover in-flight subagents; interrupted
+execution stays failed/unknown while native history is reopened. Busy/background
+sessions veto an automatic local daemon upgrade. Both desktop and remote Server
+need this revision for the additive lifecycle requests.
+
+The transcript stores its scroll offset and follow-latest preference in App memory
+per host/session. Switching back restores that position after concealed layout;
+newly opened/explicitly closed-and-reopened conversations and recovered host
+connections use a fresh reading scope and reveal the latest position. Settings
+navigation does not discard reading positions. No scroll preferences persist across
+App exit.
+
+Local and SSH hosts share one initialization and connection-reuse flow. Concurrent
+startup consumers share the same handshake and project snapshot; switching to an
+already connected host does neither again. A deliberate reconnect or a transport
+failure replaces the connection and reconciles the owned sessions without sending
+prompts. Disconnected hosts retry independently, including hosts whose conversations
+are not selected; healthy hosts are never reinitialized by those retries.
+Returning to an opened conversation reuses its completed history and polls
+after the last sequence number. The in-memory history cache is bounded to 12
+conversations and 16 MiB; a changed daemon identity invalidates that host's cache.
+Reading-position restoration is independent of transport and cache availability.
+
+Each host keeps independent persistent request lanes for history/UI reads, Agent
+control and slower CLI metadata. Local and SSH use identical routing. Additional
+lanes attach to the existing daemon during initial connection and are coalesced;
+navigation does not create transports. A reconnect replaces all lanes and fences
+stale responses by connection identity and daemon ID. No Send is retried.

@@ -270,6 +270,17 @@ export function SessionActions({
             )}
             <button
               role="menuitem"
+              disabled={busy}
+              title="关闭 Agent session，保留对话历史"
+              onClick={() =>
+                run({ method: "close_agent_session", session_id: id })
+              }
+            >
+              <X size={17} />
+              关闭
+            </button>
+            <button
+              role="menuitem"
               disabled={busy || active}
               title={active ? "请先停止任务，再归档" : undefined}
               onClick={() =>

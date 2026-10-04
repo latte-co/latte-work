@@ -14,7 +14,26 @@ export interface WorkspaceState {
   current: string;
   visible: boolean;
   expanded: boolean;
+  conversationActive: boolean;
   width: number;
+}
+export const CONVERSATION_MIN_WIDTH = 240;
+export const WORKSPACE_MIN_WIDTH = 280;
+const RESIZE_HANDLE_WIDTH = 1;
+export function clampWorkspaceWidth(
+  width: number,
+  windowWidth: number,
+  sidebarWidth: number,
+) {
+  const handles = sidebarWidth > 0 ? 2 : 1;
+  const maximum = Math.max(
+    WORKSPACE_MIN_WIDTH,
+    windowWidth -
+      sidebarWidth -
+      CONVERSATION_MIN_WIDTH -
+      handles * RESIZE_HANDLE_WIDTH,
+  );
+  return Math.max(WORKSPACE_MIN_WIDTH, Math.min(width, maximum));
 }
 const prefix = "latte-work.conversation-workspace.v1:";
 const cache = new Map<string, WorkspaceState>();
@@ -30,6 +49,7 @@ export function readWorkspace(key: string): WorkspaceState {
     current: "",
     visible: false,
     expanded: false,
+    conversationActive: false,
     width: 350,
   };
   try {
@@ -75,9 +95,12 @@ export function readWorkspace(key: string): WorkspaceState {
           : (tabs.at(-1)?.id ?? ""),
         visible: saved.visible !== false,
         expanded: saved.expanded === true,
+        conversationActive:
+          saved.conversationActive === true ||
+          (saved.expanded === true && !tabs.length),
         width:
           typeof saved.width === "number" && Number.isFinite(saved.width)
-            ? Math.max(280, Math.min(600, saved.width))
+            ? Math.max(WORKSPACE_MIN_WIDTH, saved.width)
             : 350,
       };
     }
@@ -100,6 +123,7 @@ export function updateWorkspace(
   };
   if (!next.tabs.some((tab) => tab.id === next.current))
     next.current = next.tabs.at(-1)?.id ?? "";
+  if (next.expanded && !next.tabs.length) next.conversationActive = true;
   cache.set(key, next);
   try {
     localStorage.setItem(prefix + key, JSON.stringify(next));

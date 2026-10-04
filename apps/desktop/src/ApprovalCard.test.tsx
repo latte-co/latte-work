@@ -26,6 +26,18 @@ it("disables both decisions during submission or disconnection", () => {
   for (const button of screen.getAllByRole("button")) fireEvent.click(button);
   expect(decide).not.toHaveBeenCalled();
 });
+it("renders pending history as a collapsed record without actionable buttons", () => {
+  render(
+    <ApprovalCard
+      request={request}
+      presentation="record"
+      onDecision={vi.fn()}
+    />,
+  );
+  expect(screen.getByText("等待审批").closest("details")?.open).toBe(false);
+  expect(screen.queryByRole("button")).toBeNull();
+  expect(screen.queryByText("审批已过期")).toBeNull();
+});
 it("collapses resolved approvals without hiding an execution failure behind allowed status", () => {
   render(
     <ApprovalCard

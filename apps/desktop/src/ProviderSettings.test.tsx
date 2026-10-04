@@ -44,9 +44,6 @@ it("manages App Providers while every Server is unavailable", async () => {
   fireEvent.change(screen.getByLabelText("Base URL"), {
     target: { value: "https://example.test" },
   });
-  fireEvent.change(screen.getByLabelText("默认模型 ID"), {
-    target: { value: "model" },
-  });
   fireEvent.change(screen.getByLabelText("API Key"), {
     target: { value: "test-key" },
   });
@@ -65,7 +62,7 @@ it("manages App Providers while every Server is unavailable", async () => {
     request: {
       method: "save_provider",
       provider: expect.objectContaining({
-        model: "model",
+        model: "model-two",
         models: ["model-two"],
       }),
     },
@@ -188,7 +185,9 @@ it("saves an empty API Key as no authentication without an auth selector", async
   fireEvent.change(screen.getByLabelText("Base URL"), {
     target: { value: "http://localhost:8000" },
   });
-  fireEvent.change(screen.getByLabelText("默认模型 ID"), {
+  expect(screen.queryByLabelText("默认模型 ID")).toBeNull();
+  fireEvent.click(screen.getByRole("button", { name: "添加模型" }));
+  fireEvent.change(screen.getByLabelText("模型 ID 1"), {
     target: { value: "model" },
   });
   fireEvent.change(screen.getByLabelText("API Key"), {
@@ -267,5 +266,38 @@ it("keeps the edited catalog after a model discovery failure", async () => {
   await screen.findByText("HTTP 401");
   expect((screen.getByLabelText("模型 ID 1") as HTMLInputElement).value).toBe(
     "manual",
+  );
+});
+
+it("shows deletion for a bound provider and requires confirmation", async () => {
+  invoke.mockResolvedValue({
+    kind: "providers",
+    providers: [
+      {
+        id: "bound",
+        name: "Bound provider",
+        protocol: "anthropic_messages",
+        base_url: "http://localhost",
+        model: "one",
+        models: ["one"],
+        model_labels: {},
+        auth: "none",
+        has_credential: false,
+        revision: "1",
+      },
+    ],
+    bindings: [{ agent: "claude", provider_id: "bound" }],
+  });
+  render(<ProviderSettings active onBusy={() => {}} />);
+  fireEvent.click(await screen.findByRole("button", { name: "删除" }));
+  expect(screen.getByText("删除后将解除所有 Agent 关联。")).toBeTruthy();
+  expect(invoke).not.toHaveBeenCalledWith("provider_request", {
+    request: { method: "delete_provider", id: "bound" },
+  });
+  fireEvent.click(screen.getByRole("button", { name: "确认删除" }));
+  await waitFor(() =>
+    expect(invoke).toHaveBeenCalledWith("provider_request", {
+      request: { method: "delete_provider", id: "bound" },
+    }),
   );
 });

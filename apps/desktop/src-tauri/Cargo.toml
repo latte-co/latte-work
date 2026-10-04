@@ -10,6 +10,7 @@ cc = "1"
 tauri-build = { version = "2", features = [] }
 [dependencies]
 anyhow.workspace = true
+uuid.workspace = true
 latte-work-config.workspace = true
 tauri = { version = "2", features = [] }
 tauri-plugin-dialog = "2"
