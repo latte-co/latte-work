@@ -5,7 +5,8 @@ requires actionlint and ShellCheck (install with your package manager). Host ser
 and Linux; v0.1 desktop is validated on macOS. No Windows runtime claim.
 
 `make setup`, `make dev` starts the native application. `make ci` runs the local
-gate; `make package` builds an app without Developer ID signing and standalone release host server.
+gate; `make package` builds an app without Developer ID signing and standalone release host server,
+and on macOS also produces the verified drag-install DMG described below.
 Use `make build` for a debug native app bundle. On macOS, both build modes
 finish with project-owned ad-hoc signing and strict bundle verification. The CLI fixture never calls a model.
 
@@ -41,6 +42,12 @@ one daemon holds an exclusive file lock per canonical state directory (the
 standard user state directory is the default). Clients use a private Unix socket;
 SSH runs the same binary's `connect` bridge. The bridge starts the daemon when
 absent, then forwards bytes. Disconnecting a bridge does not stop the daemon.
+Native `host_request` failures from a broken client carry the private
+`HOST_CONNECTION_LOST:` prefix (not a wire-protocol change). The WebView reports
+that host as disconnected even for metadata requests, while Server/application
+errors remain scoped to their controls. Reconnecting replaces the transport;
+late failures from an older connection cannot invalidate its replacement. User
+messages are never automatically replayed.
 Explicit state-directory overrides exist for tests and separate installations.
 
 The desktop's local transport uses `connect-local`: it compares the running server's
@@ -53,7 +60,6 @@ Local coordinators serialize via `upgrade.lock` and time out after 20 seconds.
 SSH still uses `connect`, with no automatic remote replacement. Legacy daemons
 without the lifecycle handshake require a one-time manual restart after tasks
 finish and terminals close. Restarting only the desktop leaves them running.
-
 
 Wire protocol changes: edit latte-work-protocol then run `make types` and
 `make fmt`. Desktop presentation must not import or reproduce Claude wire types.
@@ -87,7 +93,13 @@ multiple shells, resizing, shell exit, and keyboard copy/paste.
 `agents/mod.rs` registers implementations, and `agents/claude.rs` implements the
 only supported Agent. Keep protocol order and wire messages in the implementation.
 Runtime consumes common actions and retains approval authorization, process
-supervision and persistence. `Ready` must never implicitly send a prompt.
+supervision and persistence. Each opened conversation has a persistent actor and
+native process. The additive `open_agent_session` and `close_agent_session`
+requests do not send prompts; they share the local/SSH implementation. Runtime
+serializes native output, durable turn admission, interruption and close. Native
+results finish turns without closing stdin. Task lifecycle and session-state
+messages stay in the Claude adapter. Configuration changes are rejected before
+admission when background work cannot safely be released. `Ready` must never implicitly send a prompt.
 
 Focused checks: `cargo test -p latte-work-server --bin latte-work-server --locked`
 for contract/adapter/runtime UT, followed by `make test-e2e` for real server/bridge
@@ -191,3 +203,228 @@ a short-lived OS file lock. UI Provider CRUD must use `provider_request`, never
 contact the selected host. Each desktop send chooses an explicit snapshot or CLI
 configuration, including for the local host. See `docs/providers.md` for read-only
 legacy migration, paths and confidentiality requirements.
+
+## Read-only change inspection and presentation metadata
+
+`changes` returns bounded, project-relative `GitChange` entries grouped by staged,
+unstaged and untracked status. `change_diff` returns one file's bounded content;
+tracked files use literal Git pathspecs with external diff and textconv disabled,
+and untracked previews use the existing canonical project containment checks.
+The legacy `diff` request remains available, with status scoped to the same project
+as its patches. New clients explicitly report unsupported requests on older
+servers; use a matching remote Server revision for the structured view.
+
+Approval events may include optional `tool_use_id` metadata from the adapter.
+It only links presentation to a known tool call. Authorization remains bound to
+the existing public approval request ID, session and single-use runtime decision.
+Histories without this metadata still display explicit approval outcomes, but do
+not guess which parallel tool an old decision belongs to.
+
+## macOS window and application lifetime
+
+The red close button hides the window and preserves its WebView and drafts. Dock
+reopening restores and focuses it. A small macOS Objective-C delegate hook routes Cocoa Dock termination through
+the event-backed Quit menu because Tao 0.35 does not expose a cancellable
+applicationShouldTerminate callback. It adds only that missing method and leaves
+Tao window/reopen handling intact; Rust contains no unsafe code.
+
+Dock Quit and Command-Q silently close resources opened or sent by this App
+instance. A dedicated transport bypasses local upgrade checks and UI polling;
+cleanup batches are idempotent and bound to both the daemon ID and App owner ID.
+The host closes and reaps the Agent process group before acknowledging. An App
+reclaim fences stale closes from an earlier App instance. New requests are blocked
+while quitting; admitted requests cannot send new work after claiming a resource
+if Quit has begun. Prompt input is never replayed.
+
+Quit persists a private, atomic resource record before closing. The UI is never
+blocked by a quit-failure dialog: cleanup has an 8-second overall deadline, then
+the App exits. Unconfirmed work is not reported as stopped. Tab cleanup is advisory,
+with a one-second budget; native resource ownership remains authoritative. Local
+unconfirmed closes are resolved before the next local connection is exposed.
+A disconnected remote server keeps executing and retains its Agent sessions:
+it cannot infer App Quit from SSH EOF. On the next connection, the App reattaches
+to surviving remote resources and fetches their actual state; it never replays an
+old remote close, Open or Send. If the daemon has restarted or a resource belongs
+to a newer App instance, the old record is discarded without touching that resource.
+Records contain host targets and resource IDs, never SSH passwords, prompts or
+Provider credentials. This lifecycle requires an updated server supporting native
+resource ownership. Busy/shared daemons are not force-killed. OS force kill/crash
+cannot run explicit cleanup and remains outside this graceful-exit guarantee.
+
+Explicit Quit first emits a native `app-close-requested` transaction. Every mounted
+Tab registers `useAppClose`, including hidden tabs: terminal panes await PTY close;
+file/change panes pause refresh. Tabs own their cleanup; unmounting or hiding a
+window is not a shutdown signal. Tab callbacks have a one-second advisory budget;
+stale acknowledgements cannot approve a later Quit. Native ownership tracking
+remains authoritative, blocks new work, and retains ambiguous terminal creation
+records. Cleanup failures are diagnostic only and retain unconfirmed resource
+records without opening a dialog. Within the eight-second overall budget, native
+cleanup closes any remaining App-owned terminals and Agent sessions before
+dropping connections; unreachable remote resources remain available for adoption
+on the next connection.
+
+The local daemon receives the existing instance-bound idle/drain handshake after
+cleanup; busy/shared resources veto daemon exit without being killed. Remote daemons
+remain alive. No unrelated sessions or terminal IDs are enumerated and killed.
+App transport pipes close on exit; connect-local and SSH bridges end on EOF.
+Reopening reconciles events without replaying prompts.
+
+## macOS drag-install packaging
+
+- `make package`: build the release server and desktop, ad-hoc sign, then create the DMG.
+- `make package-dmg`: package the existing signed release app without rebuilding it.
+- Output: `$CARGO_TARGET_DIR/release/bundle/dmg/Latte-Work-<version>-<arch>.dmg`
+  and the adjacent `.dmg.sha256`. The default target directory is this checkout's `target/`.
+  Version and architecture come from the app bundle and Mach-O binary, not hardcoded release names.
+
+`scripts/package-dmg.sh` provisions a private Python venv in the target directory
+using `scripts/dmg-requirements.txt` (pinned versions). macOS, Python 3 with venv/pip,
+Command Line Tools and network access on first use are required. It never installs
+global Python packages; unchanged dependencies are reused offline.
+
+`scripts/package-dmg.py` owns the 600×400 white installation window, large app and
+Applications icons, and center arrow. All staging and alias paths are canonicalized
+before creating Finder metadata, avoiding the `/var` versus `/private/var` alias bug.
+It validates the background reference, arrow pixels, icon positions, hidden window
+chrome, Applications symlink, image checksum and strict bundle signature. It remounts
+the compressed image read-only at a different path, checks the layout again, and
+compares the desktop/server binary hashes with the source bundle.
+
+The existing output is replaced only after validation succeeds. Temporary mounts
+are detached on failure; failed staging directories are retained for diagnosis.
+Run packaging serially within a checkout: do not run `make prepare`, debug builds
+or another packaging process concurrently, since they share the bundled server.
+Native Finder visual acceptance is separate from structural validation: double-click
+the resulting DMG and check the arrow and icon layout. Opening its directory in an
+existing Finder window can inherit that window's view settings. No Apple notarization
+or Developer ID signature is implied.
+
+## Context and usage telemetry
+
+The additive `usage` event is persisted and replayed with normal session events,
+shared by local/SSH transports; update the remote server to receive it. Old
+histories remain unknown. Presentation filters telemetry before merging streamed
+text. The composer exposes one neutral ring with a click/keyboard statistics panel.
+
+Claude assistant input + cache-read + cache-write tokens describe the latest
+main-agent request input snapshot, not a live tokenizer or cumulative context.
+Per-step output tokens are placeholders and are excluded. Result `modelUsage`
+provides contextWindow only for the exact reported model; its cumulative token
+counts and subagent totals are never used for context occupancy. Compaction/reset
+invalidates the snapshot until a subsequent request. Result usage and API duration
+are displayed for the latest submitted turn; sending clears those totals.
+Cache hit rate = cache-read / (uncached input + cache-read + cache-write).
+Missing capacity/counters remain unknown, including older CLI/provider responses.
+Context breakdown, tool duration, TTFT and generation TPS are not fabricated from
+wall time. Sources: [SDK cost tracking](https://code.claude.com/docs/en/agent-sdk/cost-tracking)
+and [SDK wire types](https://github.com/anthropics/claude-agent-sdk-python/blob/main/src/claude_agent_sdk/types.py).
+
+The additive `progress` event carries only waiting/thinking/replying phases.
+Claude thinking block/delta events map to thinking without storing their text;
+phase changes are deduplicated and subagent phase events ignored. See the
+[streaming event contract](https://platform.claude.com/docs/en/build-with-claude/streaming).
+The UI combines phases with current-turn pending tool IDs, explicit approval,
+connection and cancel state. Silence never implies thinking; terminal sessions
+remove the status line. Both progress and usage are excluded before text merging.
+
+## Agent Shell environment
+
+At daemon startup, the host Server captures exported variables from the user's
+default shell (`SHELL`, falling back to the account shell), using `-ilc` in the
+home directory. zsh, bash, sh/dash and fish are supported; each shell follows its
+own startup-file rules (Bash login profiles must source `.bashrc` if desired).
+The snapshot stays in memory and is reused for Agent discovery, permission probes,
+command discovery and execution. It does not mutate the daemon environment or
+Claude settings. Local and SSH Servers capture independently on their own hosts.
+
+Shell exports overlay inherited variables; host identity, cwd and `LATTE_WORK_*`
+controls remain authoritative. Adapter-specific environment removals/overrides and
+the explicit per-turn Provider settings apply afterwards. Shell aliases/functions
+and project-directory hooks are not imported. New shell configuration is loaded
+on Server restart. For service managers or curated environments, set
+`LATTE_WORK_AGENT_ENV=inherit` before starting Server to skip shell initialization.
+
+Capture has a 3-second timeout, a 512 KiB output cap and process-group cleanup.
+Startup output is discarded using a unique NUL-delimited marker, not logged.
+Failure retains the inherited environment and adds a diagnostic to Agent details.
+Environment values, including credentials, are never persisted in the snapshot.
+
+Provider authentication defaults follow the selected protocol: Anthropic uses
+`x-api-key`; OpenAI uses `Authorization: Bearer`. A new blank API Key saves
+`ProviderAuth::None`. Existing hidden credentials are retained until explicitly
+cleared; switching to None removes the stored secret. Existing explicit auth
+choices remain compatible. Claude Code requires a nonempty credential before
+making a request, so the None adapter sends the public, non-secret token
+`latte-work-no-auth` rather than inheriting a real credential. Thus None needs no
+server-side authentication, but does not promise absence of the Authorization
+header for Claude Code. Gateways that reject any such header are not supported
+by this adapter.
+
+Provider model catalogs preserve ID-to-display-name mappings in `model_labels`;
+older files default to an empty map. Display names never replace IDs in Agent
+requests. The native `fetch_provider_models` command resolves a draft's saved
+credential only when its endpoint, auth and protocol still match, releases the
+configuration lock, then fetches the model catalog. Discovery uses `/v1/models`
+for a bare origin and preserves configured API prefixes, with Anthropic cursor
+pagination. Requests reject redirects, have a 15-second total deadline, and
+bound each response to 1 MiB, five pages and 256 unique models. A failure leaves
+the edited catalog unchanged; successful results remain an unsaved draft.
+
+Model discovery first requests the unversioned catalog to retain canonical IDs from
+compatible gateways. For Anthropic providers, an HTTP 400 response retries with
+`anthropic-version`; the existing timeout and pagination bounds still apply.
+
+Local lifecycle checks retry a failed read-only `server_status` exchange up to three
+attempts inside the existing 20-second coordinator deadline. Upgrade admission and
+application requests are never retried by this helper. Desktop startup progress
+lives in the composer; disconnected errors use a concise retry control with the
+original diagnostic available on hover.
+
+Opening historical sessions reads a bounded latest `history` window (up to two
+turns, 128 compacted events / 256 KiB, with a 16,384 raw-event scan cap). Consecutive
+text fragments are joined for transfer only; original persisted events remain
+unchanged. A raw `before` cursor supports older pages without gaps or duplicate
+text. Split final text and older unresolved approvals in the current live turn
+must be assembled before reveal. Older records load on upward scrolling or explicit
+request, preserving the viewport anchor. Older servers without `history_window`
+still use the compatible full Poll replay. The conversation reveals the latest
+window after positioning at the bottom across two animation frames; later live
+updates retain normal follow behavior and manual reading positions. A scope change cancels
+pending reveal work so a stale session cannot reveal the new conversation.
+
+## Conversation lifetime and reading position
+
+Opening an unarchived conversation also opens its native Agent session, even without
+sending a message. Switching conversations preserves all opened sessions. The
+conversation menu's Close releases the native runtime and returns the selected
+conversation to a draft; history remains on the host. Stop interrupts one turn
+and keeps the native session open. Native reconnect restores every App-owned
+session, including conversations not currently selected, without replaying prompts.
+An actual process/daemon restart cannot recover in-flight subagents; interrupted
+execution stays failed/unknown while native history is reopened. Busy/background
+sessions veto an automatic local daemon upgrade. Both desktop and remote Server
+need this revision for the additive lifecycle requests.
+
+The transcript stores its scroll offset and follow-latest preference in App memory
+per host/session. Switching back restores that position after concealed layout;
+newly opened/explicitly closed-and-reopened conversations and recovered host
+connections use a fresh reading scope and reveal the latest position. Settings
+navigation does not discard reading positions. No scroll preferences persist across
+App exit.
+
+Local and SSH hosts share one initialization and connection-reuse flow. Concurrent
+startup consumers share the same handshake and project snapshot; switching to an
+already connected host does neither again. A deliberate reconnect or a transport
+failure replaces the connection and reconciles the owned sessions without sending
+prompts. Disconnected hosts retry independently, including hosts whose conversations
+are not selected; healthy hosts are never reinitialized by those retries.
+Returning to an opened conversation reuses its completed history and polls
+after the last sequence number. The in-memory history cache is bounded to 12
+conversations and 16 MiB; a changed daemon identity invalidates that host's cache.
+Reading-position restoration is independent of transport and cache availability.
+
+Each host keeps independent persistent request lanes for history/UI reads, Agent
+control and slower CLI metadata. Local and SSH use identical routing. Additional
+lanes attach to the existing daemon during initial connection and are coalesced;
+navigation does not create transports. A reconnect replaces all lanes and fences
+stale responses by connection identity and daemon ID. No Send is retried.

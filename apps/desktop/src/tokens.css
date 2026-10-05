@@ -6,6 +6,7 @@
   --font-code: ui-monospace, "SFMono-Regular", Menlo, monospace;
   --weight-ui: 400;
   --weight-content: 400;
+  --weight-content-emphasis: 500;
   --weight-code: 400;
   --text-xs: 11px;
   --text-sm: 12px;
@@ -16,6 +17,7 @@
   --text-heading: 20px;
   --text-page-title: 24px;
   --leading-ui: 1.5;
+  --leading-content: 1.75;
 
   --space-1: 4px;
   --space-2: 8px;
@@ -31,7 +33,7 @@
   --radius-pill: 999px;
 
   --color-canvas: #111111;
-  --color-sidebar: #141414;
+  --color-sidebar: #1a1a1a;
   --color-surface: #232323;
   --color-elevated: #232323;
   --color-input: #151515;
@@ -44,8 +46,8 @@
   --color-border: #2c2c2c;
   --color-border-strong: #303030;
   --color-hover: #eeeeee12;
-  --color-selected: #eeeeee12;
-  --color-focus-background: #eeeeee18;
+  --color-selected: #eeeeee20;
+  --color-focus-background: #eeeeee29;
   --color-primary: #f1f1f1;
   --color-primary-hover: #f2f2f2;
   --color-on-primary: #111111;
@@ -53,7 +55,10 @@
   --color-action-hover: #eaeaea;
   --color-on-action: #222222;
   --color-disabled-bg: #1d1d1d;
-  --color-disabled-text: #696969;
+  --color-disabled-text: #9a9a9a;
+  --color-stop: #424242;
+  --color-stop-hover: #535353;
+  --color-on-stop: #eeeeee;
   --color-brand: #f1f1f1;
   --color-success: #75c99a;
   --color-warning: #e4b66a;
@@ -72,6 +77,7 @@
   /* Native macOS controls and all top bars share this center line. */
   --titlebar-height: 44px;
   --content-width: 780px;
+  --conversation-min-width: 240px;
   --content-gutter: clamp(24px, 4vw, 48px);
 
   /* Existing layout and transcript components use these semantic aliases. */

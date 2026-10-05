@@ -149,6 +149,7 @@ export function Select({
         className="select-trigger"
         role="combobox"
         aria-label={label}
+        title={options.find((option) => option.value === value)?.label}
         aria-expanded={open}
         aria-controls={open ? id : undefined}
         aria-activedescendant={open ? `${id}-${active}` : undefined}
@@ -171,6 +172,7 @@ export function Select({
             id={id}
             role="listbox"
             aria-label={label}
+            title={options.find((option) => option.value === value)?.label}
             className={`select-popover${compact ? " compact" : ""}`}
             style={position}
             onMouseDown={(e) => e.preventDefault()}
@@ -203,7 +205,8 @@ export function Select({
               </button>
             ))}
           </div>,
-          document.body,
+          trigger.current?.closest<HTMLElement>('[role="dialog"]') ??
+            document.body,
         )}
     </>
   );

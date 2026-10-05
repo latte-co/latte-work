@@ -8,6 +8,7 @@ fn draft(name: &str) -> ProviderDraft {
         base_url: "https://example.test".into(),
         model: "first".into(),
         models: vec![],
+        model_labels: Default::default(),
         auth: ProviderAuth::ApiKey,
         credential: Some("fixture-private-key".into()),
     }
@@ -47,7 +48,6 @@ fn offline_catalog_and_host_choices_survive_restart_without_credentials_in_respo
                 .unwrap()
                 .contains("fixture-private-key")
         );
-        assert!(store.delete(&id).is_err());
         let before = std::fs::read(directory.path().join("providers.json")).unwrap();
         let mut edit = draft("Changed");
         edit.id = Some(id.clone());
@@ -233,4 +233,89 @@ fn symlinked_app_or_legacy_config_is_rejected() {
     std::os::unix::fs::symlink(&private, &link).unwrap();
     assert!(ProviderStore::open(app.path(), None).is_err());
     assert_eq!(std::fs::read_to_string(private).unwrap(), "unchanged");
+}
+
+#[test]
+fn no_auth_clears_credentials_and_survives_reload() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut store = ProviderStore::open(directory.path(), None).unwrap();
+    let id = save(&mut store, draft("Team"));
+    let mut edit = draft("Team");
+    edit.id = Some(id);
+    edit.auth = ProviderAuth::None;
+    edit.credential = None;
+    let response = store.save(edit).unwrap();
+    let Response::Providers { providers, .. } = response else {
+        panic!()
+    };
+    assert!(!providers[0].has_credential);
+    assert_eq!(providers[0].auth, ProviderAuth::None);
+    let contents = std::fs::read_to_string(directory.path().join("providers.json")).unwrap();
+    assert!(!contents.contains("fixture-private-key"));
+    drop(store);
+    assert!(ProviderStore::open(directory.path(), None).is_ok());
+}
+
+#[test]
+fn model_labels_survive_reload_and_discovery_cannot_reuse_secret_at_new_url() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut store = ProviderStore::open(directory.path(), None).unwrap();
+    let mut value = draft("Named");
+    value.model_labels.insert("first".into(), "Friendly".into());
+    let id = save(&mut store, value.clone());
+    drop(store);
+    let store = ProviderStore::open(directory.path(), None).unwrap();
+    let Response::Providers { providers, .. } = store.list() else {
+        panic!()
+    };
+    assert_eq!(providers[0].model_labels["first"], "Friendly");
+    value.id = Some(id);
+    value.credential = None;
+    assert!(store.model_endpoint(value.clone()).is_ok());
+    value.base_url = "https://other.test".into();
+    assert!(store.model_endpoint(value).is_err());
+}
+
+#[test]
+fn deleting_provider_removes_only_its_bindings_and_persists() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut store = ProviderStore::open(directory.path(), None).unwrap();
+    let removed = save(&mut store, draft("Remove"));
+    let kept = save(&mut store, draft("Keep"));
+    store
+        .bind("local", "claude", Some(removed.clone()))
+        .unwrap();
+    store
+        .bind("devbox", "claude", Some(removed.clone()))
+        .unwrap();
+    store.bind("devbox", "other", Some(kept.clone())).unwrap();
+    store.delete(&removed).unwrap();
+    drop(store);
+    let store = ProviderStore::open(directory.path(), None).unwrap();
+    assert!(
+        store
+            .snapshot_for_host("local", "claude")
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        store
+            .snapshot_for_host("devbox", "claude")
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        store
+            .snapshot_for_host("devbox", "other")
+            .unwrap()
+            .unwrap()
+            .provider
+            .id,
+        kept
+    );
+    assert!(
+        !std::fs::read_to_string(directory.path().join("providers.json"))
+            .unwrap()
+            .contains(&removed)
+    );
 }

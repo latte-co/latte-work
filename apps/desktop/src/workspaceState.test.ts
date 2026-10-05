@@ -14,7 +14,8 @@ it("persists layout, selection and file navigation across a fresh module load", 
     current: "files",
     visible: false,
     expanded: true,
-    width: 480,
+    conversationActive: true,
+    width: 1180,
   });
   vi.resetModules();
   const reloaded = await import("./workspaceState");
@@ -84,4 +85,20 @@ it("keeps a new task focused on conversation while restoring explicit panel pref
   vi.resetModules();
   const reloaded = await import("./workspaceState");
   expect(reloaded.readWorkspace(fresh).visible).toBe(true);
+});
+
+it("selects conversation when the last resource closes in merged mode", () => {
+  const key = crypto.randomUUID();
+  updateWorkspace(key, {
+    expanded: true,
+    tabs: [{ id: "files", kind: "files" }],
+    current: "files",
+    conversationActive: false,
+  });
+  updateWorkspace(key, { tabs: [] });
+  expect(readWorkspace(key)).toMatchObject({
+    expanded: true,
+    conversationActive: true,
+    current: "",
+  });
 });

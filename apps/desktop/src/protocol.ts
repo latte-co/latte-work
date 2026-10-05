@@ -39,13 +39,43 @@ export type Session = {
   pinned_at: number | null;
   unread: boolean;
   archived: boolean;
+  /**
+   * Live server projection only; absent on older servers and in durable history.
+   */
+  agent_session_open?: boolean;
+  /**
+   * Active turn, pending approval or background work; live evidence only.
+   */
+  agent_session_busy?: boolean;
+};
+export type ExecutionPhase = "waiting" | "thinking" | "replying";
+export type ContextUsage = {
+  model: string;
+  used_tokens: number;
+  window_tokens: number | null;
+};
+export type TurnUsage = {
+  input_tokens: number | null;
+  cache_read_tokens: number | null;
+  cache_write_tokens: number | null;
+  output_tokens: number | null;
+  model_time_ms: number | null;
+  steps: number | null;
 };
 export type EventKind =
+  | { kind: "progress"; phase: ExecutionPhase }
+  | { kind: "usage"; context: ContextUsage | null; totals: TurnUsage | null }
   | { kind: "user"; text: string; request_id: string }
   | { kind: "text"; text: string }
   | { kind: "tool"; id: string; name: string; input: JsonValue }
   | { kind: "tool_result"; id: string; content: JsonValue; is_error: boolean }
-  | { kind: "approval"; request_id: string; tool: string; input: JsonValue }
+  | {
+      kind: "approval";
+      request_id: string;
+      tool_use_id?: string;
+      tool: string;
+      input: JsonValue;
+    }
   | { kind: "approval_resolved"; request_id: string; allow: boolean }
   | { kind: "state"; status: Status; message: string | null }
   | { kind: "notice"; text: string };
@@ -56,6 +86,13 @@ export type Event = {
   event: EventKind;
 };
 export type FileEntry = { name: string; path: string; directory: boolean };
+export type ChangeSection = "unstaged" | "staged" | "untracked";
+export type GitChange = {
+  path: string;
+  previous_path: string | null;
+  section: ChangeSection;
+  status: string;
+};
 export type AgentInfo = {
   id: string;
   name: string;
@@ -77,7 +114,7 @@ export type AgentSlashCommand = {
 };
 export type ProviderProtocol =
   "anthropic_messages" | "openai_chat" | "openai_responses";
-export type ProviderAuth = "bearer" | "api_key";
+export type ProviderAuth = "none" | "bearer" | "api_key";
 export type Provider = {
   id: string;
   name: string;
@@ -85,6 +122,7 @@ export type Provider = {
   base_url: string;
   model: string;
   models: Array<string>;
+  model_labels: { [key in string]?: string };
   auth: ProviderAuth;
   has_credential: boolean;
   revision: string;
@@ -96,6 +134,7 @@ export type ProviderDraft = {
   base_url: string;
   model: string;
   models: Array<string>;
+  model_labels: { [key in string]?: string };
   auth: ProviderAuth;
   /**
    * None preserves a saved credential; plaintext is write-only over the private host transport.
@@ -182,6 +221,19 @@ export type Request =
   | { method: "archive_session"; session_id: string; archived: boolean }
   | { method: "create_session"; project_id: string; agent: string }
   | {
+      method: "open_agent_session";
+      session_id: string;
+      provider?: TurnProvider;
+    }
+  | {
+      method: "close_agent_session";
+      session_id: string;
+      /**
+       * Idle bulk close must recheck atomically in the session actor.
+       */
+      only_if_idle?: boolean;
+    }
+  | {
       method: "send";
       provider?: TurnProvider;
       session_id: string;
@@ -191,6 +243,7 @@ export type Request =
       effort: Effort | null;
       permission_mode: string | null;
     }
+  | { method: "history"; session_id: string; before: number | null }
   | { method: "poll"; session_id: string; after: number }
   | {
       method: "approve";
@@ -211,8 +264,16 @@ export type Request =
   | { method: "abort_attachment"; id: string }
   | { method: "resolve_reference"; project_id: string; path: string }
   | { method: "read_file"; project_id: string; path: string }
-  | { method: "diff"; project_id: string };
+  | { method: "diff"; project_id: string }
+  | { method: "changes"; project_id: string }
+  | {
+      method: "change_diff";
+      project_id: string;
+      path: string;
+      section: ChangeSection;
+    };
 export type Response =
+  | { kind: "changes"; entries: Array<GitChange>; truncated: boolean }
   | { kind: "agent_permissions"; modes: Array<AgentPermissionMode> }
   | { kind: "agent_commands"; commands: Array<AgentSlashCommand> }
   | { kind: "terminals"; terminals: Array<TerminalInfo> }
@@ -252,12 +313,30 @@ export type Response =
       server_id: string;
       agents: Array<AgentInfo>;
       permission_settings: boolean;
+      history_window: boolean;
     }
   | { kind: "projects"; projects: Array<Project> }
   | { kind: "project"; project: Project }
   | { kind: "sessions"; sessions: Array<Session> }
   | { kind: "session"; session: Session }
   | { kind: "accepted"; duplicate: boolean }
+  | {
+      kind: "history";
+      events: Array<Event>;
+      session: Session;
+      /**
+       * More earlier events exist. Events are returned in ascending order.
+       */
+      has_more: boolean;
+      /**
+       * Fetch an earlier window before revealing a split text or pending approval.
+       */
+      needs_earlier: boolean;
+      /**
+       * Exclusive raw-event cursor, independent of compacted text event IDs.
+       */
+      before: number | null;
+    }
   | {
       kind: "events";
       events: Array<Event>;

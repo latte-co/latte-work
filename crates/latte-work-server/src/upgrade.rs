@@ -3,7 +3,7 @@
 use crate::{Service, connect_socket, db, lock};
 use anyhow::{Context, Result, bail};
 use futures_util::StreamExt;
-pub use latte_work_protocol::lifecycle::{Request, Response};
+pub use latte_work_protocol::lifecycle::{Request, Resource, Response};
 use sha2::{Digest, Sha256};
 use std::{fs::OpenOptions, io::Read, path::Path, time::Duration};
 use tokio::{
@@ -16,6 +16,7 @@ use tokio_util::codec::{FramedRead, LinesCodec};
 pub struct Lifecycle {
     build_id: String,
     pub draining: RwLock<bool>,
+    owners: std::sync::Mutex<std::collections::HashMap<Resource, String>>,
     pub shutdown: Notify,
 }
 impl Lifecycle {
@@ -23,8 +24,18 @@ impl Lifecycle {
         Ok(Self {
             build_id: executable_id()?,
             draining: RwLock::new(false),
+            owners: std::sync::Mutex::new(std::collections::HashMap::new()),
             shutdown: Notify::new(),
         })
+    }
+}
+impl Lifecycle {
+    pub fn forget(&self, resource: &Resource) -> Result<()> {
+        self.owners
+            .lock()
+            .map_err(|_| anyhow::anyhow!("资源归属锁异常"))?
+            .remove(resource);
+        Ok(())
     }
 }
 fn executable_id() -> Result<String> {
@@ -51,6 +62,135 @@ pub async fn handle(service: &Service, request: Request) -> Response {
 }
 async fn handle_inner(service: &Service, request: Request) -> Result<Response> {
     match request {
+        Request::ClaimResources {
+            owner_id,
+            resources,
+        } => {
+            validate_resources(&owner_id, &resources)?;
+            let draining = service.lifecycle.draining.read().await;
+            if *draining {
+                bail!("后台正在停止，请重新连接");
+            }
+            let mut owners = service
+                .lifecycle
+                .owners
+                .lock()
+                .map_err(|_| anyhow::anyhow!("资源归属锁异常"))?;
+            let new = resources
+                .iter()
+                .filter(|r| !owners.contains_key(*r))
+                .count();
+            if owners.len() + new > 4096 {
+                bail!("会话资源归属数量已达上限");
+            }
+            for resource in resources {
+                owners.insert(resource, owner_id.clone());
+            }
+            Ok(Response::ResourcesClaimed)
+        }
+        Request::AdoptResources {
+            server_id,
+            previous_owner_id,
+            owner_id,
+            resources,
+        } => {
+            validate_resources(&owner_id, &resources)?;
+            if previous_owner_id.is_empty() || previous_owner_id.len() > 128 {
+                bail!("无效的资源归属");
+            }
+            if server_id != service.server_id {
+                return Ok(Response::ResourcesAdopted { resources: vec![] });
+            }
+            let _admission = service.lifecycle.draining.read().await;
+            let runs = service
+                .runs
+                .lock()
+                .map_err(|_| anyhow::anyhow!("执行状态锁异常"))?;
+            let terminals = service
+                .terminals
+                .lock()
+                .map_err(|_| anyhow::anyhow!("终端锁异常"))?;
+            let mut owners = service
+                .lifecycle
+                .owners
+                .lock()
+                .map_err(|_| anyhow::anyhow!("资源归属锁异常"))?;
+            let mut adopted = Vec::new();
+            for resource in resources {
+                let live = match &resource {
+                    Resource::AgentSession(id) => runs.get(id).is_some_and(|r| {
+                        !r.control.is_closed()
+                            && (r.session_open.load(std::sync::atomic::Ordering::SeqCst)
+                                || !r.safe_to_close.load(std::sync::atomic::Ordering::SeqCst))
+                    }),
+                    Resource::Terminal(id) => terminals.is_open(id),
+                };
+                if live
+                    && owners
+                        .get(&resource)
+                        .is_some_and(|id| id == &previous_owner_id || id == &owner_id)
+                {
+                    owners.insert(resource.clone(), owner_id.clone());
+                    adopted.push(resource);
+                }
+            }
+            Ok(Response::ResourcesAdopted { resources: adopted })
+        }
+        Request::CloseOwnedResources {
+            server_id,
+            owner_id,
+            resources,
+        } => {
+            validate_resources(&owner_id, &resources)?;
+            // A restarted daemon has already lost these ephemeral resources. Never
+            // apply an old close to a new server or a resource reclaimed by another App.
+            if server_id != service.server_id {
+                return Ok(Response::ResourcesClosed);
+            }
+            let _admission =
+                tokio::time::timeout(Duration::from_secs(2), service.lifecycle.draining.write())
+                    .await
+                    .context("后台正在处理请求")?;
+            for resource in resources {
+                let owned = service
+                    .lifecycle
+                    .owners
+                    .lock()
+                    .map_err(|_| anyhow::anyhow!("资源归属锁异常"))?
+                    .get(&resource)
+                    .is_some_and(|id| id == &owner_id);
+                if !owned {
+                    continue;
+                }
+                match &resource {
+                    Resource::AgentSession(id) => {
+                        let exists = service
+                            .runs
+                            .lock()
+                            .map_err(|_| anyhow::anyhow!("执行状态锁异常"))?
+                            .contains_key(id);
+                        if exists {
+                            crate::runtime::close(&service.database, &service.runs, id, false)
+                                .await?;
+                        }
+                    }
+                    Resource::Terminal(id) => {
+                        service
+                            .terminals
+                            .lock()
+                            .map_err(|_| anyhow::anyhow!("终端锁异常"))?
+                            .close(id);
+                    }
+                }
+                service
+                    .lifecycle
+                    .owners
+                    .lock()
+                    .map_err(|_| anyhow::anyhow!("资源归属锁异常"))?
+                    .remove(&resource);
+            }
+            Ok(Response::ResourcesClosed)
+        }
         Request::ServerStatus => Ok(Response::ServerStatus {
             server_id: service.server_id.clone(),
             build_id: service.lifecycle.build_id.clone(),
@@ -64,11 +204,12 @@ async fn handle_inner(service: &Service, request: Request) -> Result<Response> {
                 tokio::time::timeout(Duration::from_secs(2), service.lifecycle.draining.write())
                     .await
                     .context("后台正在处理请求，请稍后重新连接以更新")?;
-            let running = !service
+            let running = service
                 .runs
                 .lock()
                 .map_err(|_| anyhow::anyhow!("run lock poisoned"))?
-                .is_empty();
+                .values()
+                .any(|run| !run.safe_to_close.load(std::sync::atomic::Ordering::SeqCst));
             let terminals = !service
                 .terminals
                 .lock()
@@ -84,6 +225,18 @@ async fn handle_inner(service: &Service, request: Request) -> Result<Response> {
         }
     }
 }
+fn validate_resources(owner: &str, resources: &[Resource]) -> Result<()> {
+    if owner.is_empty()
+        || owner.len() > 128
+        || resources.len() > 128
+        || resources
+            .iter()
+            .any(|r| r.id().is_empty() || r.id().len() > 256)
+    {
+        bail!("无效的资源关闭请求");
+    }
+    Ok(())
+}
 async fn exchange(stream: UnixStream, request: &Request) -> Result<Response> {
     tokio::time::timeout(Duration::from_secs(3), async {
         let (reader, mut writer) = stream.into_split();
@@ -96,6 +249,20 @@ async fn exchange(stream: UnixStream, request: &Request) -> Result<Response> {
     })
     .await
     .context("后台升级检查超时")?
+}
+// A daemon can close the first control connection while a desktop is reopening.
+// Retry only the read-only status query; never retry upgrade admission or user work.
+async fn server_status(dir: &Path) -> Result<Response> {
+    for attempt in 0..3 {
+        let result =
+            async { exchange(connect_socket(dir).await?, &Request::ServerStatus).await }.await;
+        match result {
+            Ok(response) => return Ok(response),
+            Err(error) if attempt == 2 => return Err(error),
+            Err(_) => tokio::time::sleep(Duration::from_millis(150)).await,
+        }
+    }
+    unreachable!("bounded status attempts return on the last iteration")
 }
 const LEGACY: &str = "检测到旧版本机后台，无法安全确认其任务状态；请先在旧版应用中完成任务并关闭终端，再手动重启本机 Server，然后重新连接。仅重启桌面应用不会停止后台";
 
@@ -123,8 +290,7 @@ async fn connect_local_inner(dir: &Path) -> Result<UnixStream> {
         }
     }
     let build_id = executable_id()?;
-    let stream = connect_socket(dir).await?;
-    match exchange(stream, &Request::ServerStatus)
+    match server_status(dir)
         .await
         .context("无法确认本机后台版本，请稍后重新连接；后台未被停止")?
     {
@@ -192,5 +358,56 @@ async fn connect_local_inner(dir: &Path) -> Result<UnixStream> {
             ..
         } if current == build_id => Ok(stream),
         _ => bail!("后台实例已变化，请重新连接"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::{io::AsyncReadExt, net::UnixListener};
+    #[tokio::test]
+    async fn status_retries_a_closed_connection_without_requesting_upgrade() {
+        let directory = tempfile::tempdir().unwrap();
+        let listener = UnixListener::bind(directory.path().join("control.sock")).unwrap();
+        let service = tokio::spawn(async move {
+            for attempt in 0..2 {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut bytes = vec![];
+                loop {
+                    let byte = stream.read_u8().await.unwrap();
+                    if byte == b'\n' {
+                        break;
+                    }
+                    bytes.push(byte);
+                }
+                assert!(matches!(
+                    serde_json::from_slice::<Request>(&bytes).unwrap(),
+                    Request::ServerStatus
+                ));
+                if attempt == 1 {
+                    let mut response = serde_json::to_vec(&Response::ServerStatus {
+                        server_id: "fixture".into(),
+                        build_id: "build".into(),
+                        draining: false,
+                    })
+                    .unwrap();
+                    response.push(b'\n');
+                    stream.write_all(&response).await.unwrap();
+                }
+            }
+        });
+        let response =
+            tokio::time::timeout(Duration::from_secs(2), server_status(directory.path()))
+                .await
+                .unwrap()
+                .unwrap();
+        assert!(matches!(
+            response,
+            Response::ServerStatus {
+                draining: false,
+                ..
+            }
+        ));
+        service.await.unwrap();
     }
 }

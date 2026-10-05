@@ -11,5 +11,6 @@ serde_json.workspace = true
 uuid.workspace = true
 url = "2"
 tempfile = "3"
+reqwest = { version = "0.13", default-features = false, features = ["blocking", "rustls"] }
 [lints]
 workspace = true

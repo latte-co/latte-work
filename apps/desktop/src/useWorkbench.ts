@@ -1,4 +1,10 @@
 import {
+  HOST_DISCONNECTED_EVENT,
+  HostConnectionError,
+} from "./connectionErrors";
+import {
+  clampWorkspaceWidth,
+  CONVERSATION_MIN_WIDTH,
   copyWorkspace,
   useWorkspaceState,
   workspaceKey,
@@ -25,6 +31,12 @@ import type {
   Response,
 } from "./protocol";
 import { appendEvents } from "./transcript";
+import { HistoryCache } from "./historyCache";
+import {
+  agentSessionKey,
+  agentSessionState,
+  type AgentSessionTransition,
+} from "./agentSessionState";
 import { sessionAfterRefresh } from "./sessionSelection";
 import {
   hostedProjects,
@@ -44,6 +56,12 @@ type PasswordChallenge = {
   promise: Promise<Response>;
   resolve: (response: Response) => void;
   reject: (error: Error) => void;
+};
+
+type HostInitialization = {
+  hello: Extract<Response, { kind: "hello" }>;
+  projects: Project[];
+  reused: boolean;
 };
 
 function readSidebarPreference(): { open: boolean; width: number } {
@@ -102,19 +120,58 @@ export function useWorkbench() {
     finishPasswordPrompt();
     challenge.reject(new Error("已取消 SSH 密码输入"));
   }
-  async function connectWithPrompt(target: Host): Promise<Response> {
+  function cachedHello(target: Host) {
+    return liveHosts.current.has(target.id) &&
+      helloTargets.current.get(target.id) === JSON.stringify(target)
+      ? hostHellos.current.get(target.id)
+      : undefined;
+  }
+  async function connectWithPrompt(
+    target: Host,
+    reuse = false,
+    password?: string,
+  ): Promise<Response> {
+    const existing = reuse ? cachedHello(target) : undefined;
+    if (existing) return existing;
+    let result: Response;
     try {
-      return await connect(target);
+      result = await connect(target, password);
     } catch (error) {
       const raw = error instanceof Error ? error.message : String(error);
       if (target.auth === "password" && raw === "SSH_PASSWORD_REQUIRED")
-        return requestPassword(target);
-      throw error;
+        result = await requestPassword(target);
+      else throw error;
     }
+    if (result.kind === "hello") {
+      hostHellos.current.set(target.id, result);
+      helloTargets.current.set(target.id, JSON.stringify(target));
+    }
+    return result;
   }
   const [hostId, setHostId] = useState("local");
   const [retry, setRetry] = useState(0);
+  const lastConnectionRetry = useRef(retry);
+  const hostHellos = useRef(
+    new Map<string, Extract<Response, { kind: "hello" }>>(),
+  );
+  const helloTargets = useRef(new Map<string, string>());
+  const initializingHosts = useRef(
+    new Map<string, Promise<HostInitialization>>(),
+  );
+  const refreshedHosts = useRef(new Set<string>());
+  const historyCache = useRef(new HistoryCache()).current;
   const [connected, setConnected] = useState(false);
+  const connectedHosts = useRef(new Set<string>());
+  const liveHosts = useRef(new Set<string>());
+  const lostHosts = useRef(new Set<string>());
+  const seenServers = useRef(new Map<string, string>());
+  const [restoreVersions, setRestoreVersions] = useState<
+    Record<string, number>
+  >({});
+  const closedVersions = useRef(new Map<string, number>());
+  const readingPositions = useRef(
+    new Map<string, { top: number; follow: boolean }>(),
+  );
   const [connecting, setConnecting] = useState(false);
   const [serverId, setServerId] = useState("");
   const [agent, setAgent] = useState<AgentInfo>();
@@ -132,7 +189,7 @@ export function useWorkbench() {
   );
   const workspaceId = workspaceKey(sessionId || `draft:${draftWorkspaceId}`);
   const [workspace, setWorkspace] = useWorkspaceState(workspaceId);
-  const draft = useRef(false);
+  const draft = useRef(true);
   const navigationRevision = useRef(0);
   const [viewRevision, setViewRevision] = useState(0);
   const sending = useRef(false);
@@ -143,7 +200,6 @@ export function useWorkbench() {
   const selectedSessionId = useRef(sessionId);
   selectedSessionId.current = sessionId;
   const [pinCache, setPinCache] = useState(readPinnedCache);
-  const [showArchived, setShowArchived] = useState(false);
   const pendingSession = useRef<{
     hostId: string;
     projectId: string;
@@ -190,10 +246,20 @@ export function useWorkbench() {
     };
   }, [hosts]);
   const [events, setEvents] = useState<Event[]>([]);
+  const [hasEarlierHistory, setHasEarlierHistory] = useState(false);
+  const [earlierHistoryLoading, setEarlierHistoryLoading] = useState(false);
+  const earlierLoads = useRef(new Set<string>());
+  const [historyReadyScope, setHistoryReadyScope] = useState<string | null>(
+    null,
+  );
   const [error, setError] = useState("");
+  const [agentSessionTransitions, setAgentSessionTransitions] = useState<
+    Record<string, AgentSessionTransition>
+  >({});
+  const openedEvidence = useRef(new Map<string, number>());
   const [modal, setModal] = useState<"project" | "settings" | null>(null);
   const [settingsTab, setSettingsTab] = useState<
-    "agents" | "providers" | "ssh" | "appearance"
+    "agents" | "providers" | "ssh" | "appearance" | "archived"
   >("agents");
   const [settingsReturnToProject, setSettingsReturnToProject] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -222,17 +288,31 @@ export function useWorkbench() {
     }
   }, [sidebarOpen, leftWidth]);
   function toggleSidebar() {
-    if (!sidebarOpen)
-      setRightWidth((width) =>
-        Math.min(width, Math.max(280, window.innerWidth - leftWidth - 362)),
-      );
     setSidebarOpen((open) => !open);
   }
-  const rightWidth = workspace.width;
-  const setRightWidth = (value: number | ((current: number) => number)) =>
-    setWorkspace((state) => ({
-      width: typeof value === "function" ? value(state.width) : value,
-    }));
+  const [windowWidth, setWindowWidth] = useState(() => window.innerWidth);
+  useEffect(() => {
+    const update = () => setWindowWidth(window.innerWidth);
+    window.addEventListener("resize", update);
+    return () => window.removeEventListener("resize", update);
+  }, []);
+  const rightWidth = clampWorkspaceWidth(
+    workspace.width,
+    windowWidth,
+    sidebarOpen ? leftWidth : 0,
+  );
+  function restoreWorkspace() {
+    const sidebarWidth = sidebarOpen ? leftWidth : 0;
+    setWorkspace({
+      visible: true,
+      expanded: false,
+      width: clampWorkspaceWidth(
+        window.innerWidth - sidebarWidth - 320 - (sidebarOpen ? 2 : 1),
+        window.innerWidth,
+        sidebarWidth,
+      ),
+    });
+  }
   const host = hosts.find((h) => h.id === hostId) ?? localHost;
   const project = projects.find(
     (p) => p.id === projectId && p.hostId === hostId,
@@ -240,6 +320,28 @@ export function useWorkbench() {
   const session = sessions.find((s) => s.id === sessionId);
   const selection = useRef({ hostId, projectId });
   selection.current = { hostId, projectId };
+  useEffect(() => {
+    const disconnected = (event: globalThis.Event) => {
+      const failure = (event as unknown as CustomEvent<HostConnectionError>)
+        .detail;
+      lostHosts.current.add(failure.hostId);
+      liveHosts.current.delete(failure.hostId);
+      setHostErrors((old) => ({ ...old, [failure.hostId]: failure.message }));
+      if (selection.current.hostId === failure.hostId) {
+        setError(failure.message);
+        setConnected(false);
+      }
+    };
+    window.addEventListener(
+      HOST_DISCONNECTED_EVENT,
+      disconnected as EventListener,
+    );
+    return () =>
+      window.removeEventListener(
+        HOST_DISCONNECTED_EVENT,
+        disconnected as EventListener,
+      );
+  }, []);
   const pendingSend = useRef<
     | {
         id: string;
@@ -262,16 +364,42 @@ export function useWorkbench() {
   function updateProjects(id: string, values: Project[]) {
     setCatalog((old) => ({ ...old, [id]: values }));
   }
-  async function refreshHost(target: Host) {
-    try {
-      const hello = await connectWithPrompt(target);
+  function initializeHost(target: Host, force = false, password?: string) {
+    const hello = !force && cachedHello(target);
+    if (hello)
+      return Promise.resolve({
+        hello,
+        projects: catalog[target.id] ?? [],
+        reused: true,
+      });
+    const key = JSON.stringify(target);
+    const pending = initializingHosts.current.get(key);
+    if (pending && !force) return pending;
+    const promise = (async (): Promise<HostInitialization> => {
+      const hello = await connectWithPrompt(target, !force, password);
       if (hello.kind !== "hello")
         throw new Error(hello.kind === "error" ? hello.message : "连接失败");
       const result = await request(target.id, { method: "projects" });
-      if (result.kind === "projects")
-        updateProjects(target.id, result.projects);
+      if (result.kind !== "projects") throw new Error("无法加载主机项目");
+      return { hello, projects: result.projects, reused: false };
+    })().finally(() => {
+      if (initializingHosts.current.get(key) === promise)
+        initializingHosts.current.delete(key);
+    });
+    initializingHosts.current.set(key, promise);
+    return promise;
+  }
+  async function refreshHost(target: Host, force = true) {
+    try {
+      const result = await initializeHost(target, force);
+      connectedHosts.current.add(target.id);
+      liveHosts.current.add(target.id);
+      updateProjects(target.id, result.projects);
       setHostErrors((old) => ({ ...old, [target.id]: "" }));
-      if (target.id === selection.current.hostId) setRetry((v) => v + 1);
+      if (target.id === selection.current.hostId) {
+        refreshedHosts.current.add(target.id);
+        setRetry((v) => v + 1);
+      }
     } catch (e) {
       setHostErrors((old) => ({ ...old, [target.id]: message(e) }));
     }
@@ -281,14 +409,12 @@ export function useWorkbench() {
     if (!native) return;
     let disposed = false;
     for (const target of hosts) {
-      void connectWithPrompt(target)
-        .then(async (hello) => {
-          if (hello.kind !== "hello")
-            throw new Error(
-              hello.kind === "error" ? hello.message : "连接失败",
-            );
-          const result = await request(target.id, { method: "projects" });
-          if (!disposed && result.kind === "projects") {
+      if (cachedHello(target)) continue;
+      void initializeHost(target)
+        .then((result) => {
+          if (!disposed) {
+            connectedHosts.current.add(target.id);
+            liveHosts.current.add(target.id);
             updateProjects(target.id, result.projects);
             setHostErrors((old) => ({ ...old, [target.id]: "" }));
           }
@@ -308,32 +434,46 @@ export function useWorkbench() {
       return;
     }
     let disposed = false;
-    setConnecting(true);
-    setConnected(false);
-    void connectWithPrompt(host)
-      .then(async (r) => {
+    const force =
+      lastConnectionRetry.current !== retry &&
+      !refreshedHosts.current.delete(hostId);
+    lastConnectionRetry.current = retry;
+    const reuseConnection = !force && !!cachedHello(host);
+    setConnecting(!reuseConnection);
+    setConnected(reuseConnection);
+    void initializeHost(host, force)
+      .then(({ hello: r, projects: hostProjects, reused }) => {
         if (disposed) return;
-        if (r.kind !== "hello")
-          throw new Error(r.kind === "error" ? r.message : "Server 握手失败");
+        const oldServer = seenServers.current.get(host.id);
+        if (oldServer && oldServer !== r.server_id)
+          historyCache.clearHost(host.id);
+        if (
+          lostHosts.current.delete(host.id) ||
+          (oldServer && oldServer !== r.server_id)
+        ) {
+          setRestoreVersions((old) => ({
+            ...old,
+            [host.id]: (old[host.id] ?? 0) + 1,
+          }));
+        }
+        seenServers.current.set(host.id, r.server_id);
         setServerId(r.server_id);
         setAgent(r.agents.find((a) => a.id === "claude"));
-        const result = await request(host.id, { method: "projects" });
-        if (disposed) return;
         let missingProject = false;
-        if (result.kind === "projects") {
-          updateProjects(host.id, result.projects);
-          missingProject =
-            selection.current.hostId === host.id &&
-            !!selection.current.projectId &&
-            !result.projects.some((p) => p.id === selection.current.projectId);
-          setProjectId((id) =>
-            id
-              ? result.projects.some((p) => p.id === id)
-                ? id
-                : ""
-              : (result.projects[0]?.id ?? ""),
-          );
-        }
+        if (!reused) updateProjects(host.id, hostProjects);
+        missingProject =
+          selection.current.hostId === host.id &&
+          !!selection.current.projectId &&
+          !hostProjects.some((p) => p.id === selection.current.projectId);
+        setProjectId((id) =>
+          id
+            ? hostProjects.some((p) => p.id === id)
+              ? id
+              : ""
+            : (hostProjects[0]?.id ?? ""),
+        );
+        connectedHosts.current.add(host.id);
+        liveHosts.current.add(host.id);
         setConnected(true);
         setHostErrors((old) => ({ ...old, [host.id]: "" }));
         setError(
@@ -352,10 +492,33 @@ export function useWorkbench() {
     // Host changes are keyed by immutable id; retry reconnects without dropping history.
   }, [hostId, retry]);
   useEffect(() => {
-    if (connected || connecting || !native) return;
-    const timer = setTimeout(() => setRetry((v) => v + 1), 5000);
-    return () => clearTimeout(timer);
-  }, [connected, connecting]);
+    if (!native) return;
+    let disposed = false;
+    const timers = new Map<string, ReturnType<typeof setTimeout>>();
+    for (const target of hosts) {
+      const recover = async () => {
+        if (disposed) return;
+        if (
+          !cachedHello(target) &&
+          !initializingHosts.current.has(JSON.stringify(target))
+        )
+          await refreshHost(target, false);
+        if (!disposed)
+          timers.set(
+            target.id,
+            setTimeout(() => void recover(), 5000),
+          );
+      };
+      timers.set(
+        target.id,
+        setTimeout(() => void recover(), 5000),
+      );
+    }
+    return () => {
+      disposed = true;
+      timers.forEach((timer) => clearTimeout(timer));
+    };
+  }, [hosts]);
   useEffect(() => {
     if (!projectId || !connected) return;
     let disposed = false;
@@ -394,12 +557,11 @@ export function useWorkbench() {
               ? [...r.sessions, selected]
               : r.sessions;
           });
-          setSessionId((id) =>
-            sessionAfterRefresh(id, desired, r.sessions, draft.current),
-          );
+          setSessionId((id) => sessionAfterRefresh(id, desired, draft.current));
         }
       } catch (e) {
-        if (!disposed) setError(message(e));
+        if (!disposed && !(e instanceof HostConnectionError))
+          setError(message(e));
       }
       if (!disposed) timer = setTimeout(() => void refresh(), 5000);
     };
@@ -413,19 +575,85 @@ export function useWorkbench() {
     if (!sessionId || !connected) return;
     let disposed = false;
     let timer: ReturnType<typeof setTimeout>;
-    let cursor = 0;
-    setEvents([]);
+    const scope = JSON.stringify([hostId, sessionId]);
+    const cached = historyCache.get(scope);
+    let cursor = cached?.at(-1)?.seq ?? 0;
+    let replaying = cached === undefined;
+    let replay: Event[] = [];
+    setHistoryReadyScope(cached ? scope : null);
+    setEvents(cached ?? []);
+    setHasEarlierHistory(historyCache.hasEarlier(scope));
+    setEarlierHistoryLoading(false);
+    const windowed = cachedHello(host)?.history_window === true;
+    let initialWindow = replaying && windowed;
+    let before: number | null = null;
     const poll = async () => {
       try {
-        const r = await request(hostId, {
-          method: "poll",
-          session_id: sessionId,
-          after: cursor,
-        });
+        const r = await request(
+          hostId,
+          initialWindow
+            ? {
+                method: "history",
+                session_id: sessionId,
+                before,
+              }
+            : {
+                method: "poll",
+                session_id: sessionId,
+                after: cursor,
+              },
+        );
         if (disposed) return;
+        if (r.kind === "history") {
+          const next = r.before;
+          if (
+            r.has_more &&
+            (next === null || (before !== null && next >= before))
+          )
+            throw new Error("对话分页未前进，请重试");
+          before = next ?? before;
+          replay = appendEvents(r.events, replay);
+          if (r.needs_earlier && r.has_more) {
+            timer = setTimeout(() => void poll(), 0);
+            return;
+          }
+          cursor = replay.at(-1)?.seq ?? 0;
+          historyCache.set(scope, replay, r.has_more, r.before);
+          setEvents(replay);
+          setHasEarlierHistory(r.has_more);
+          setHistoryReadyScope(scope);
+          setSessions((previous) =>
+            previous.map((s) => (s.id === r.session.id ? r.session : s)),
+          );
+          replay = [];
+          initialWindow = false;
+          replaying = false;
+          timer = setTimeout(() => void poll(), 650);
+          return;
+        }
         if (r.kind === "events") {
           cursor = r.events.at(-1)?.seq ?? cursor;
-          setEvents((previous) => appendEvents(previous, r.events));
+          if (replaying) {
+            replay = appendEvents(replay, r.events);
+            if (!r.has_more) {
+              setEvents(replay);
+              historyCache.set(scope, replay);
+              replay = [];
+              replaying = false;
+              setHistoryReadyScope(scope);
+            }
+          } else if (r.events.length > 0) {
+            setEvents((previous) => {
+              const updated = appendEvents(previous, r.events);
+              historyCache.set(
+                scope,
+                updated,
+                historyCache.hasEarlier(scope),
+                historyCache.before(scope),
+              );
+              return updated;
+            });
+          }
           if (
             r.session.unread &&
             !r.has_more &&
@@ -442,7 +670,7 @@ export function useWorkbench() {
               if (disposed) return;
               if (read.kind === "session") r.session = read.session;
             } catch {
-              // Retry on the next poll; a read acknowledgement must not disconnect.
+              // Retry ordinary acknowledgement errors; transport failures notify the host owner.
             }
           }
           if (disposed) return;
@@ -452,9 +680,9 @@ export function useWorkbench() {
           timer = setTimeout(() => void poll(), r.has_more ? 0 : 650);
         }
       } catch (e) {
-        if (!disposed) {
+        if (!disposed && !(e instanceof HostConnectionError)) {
           setError(message(e));
-          setConnected(false);
+          timer = setTimeout(() => void poll(), 5000);
         }
       }
     };
@@ -464,6 +692,73 @@ export function useWorkbench() {
       clearTimeout(timer);
     };
   }, [sessionId, hostId, connected]);
+  useEffect(() => {
+    if (!native || !connected || !sessionId || !session || session.archived)
+      return;
+    const targetHost = hostId,
+      targetId = sessionId;
+    const key = agentSessionKey(targetHost, targetId);
+    const closeVersion = closedVersions.current.get(key) ?? 0;
+    const restoreVersion = restoreVersions[targetHost] ?? 0;
+    if (
+      session.agent_session_open === true &&
+      openedEvidence.current.get(key) === restoreVersion
+    )
+      return;
+    const needsRestore =
+      openedEvidence.current.has(key) &&
+      openedEvidence.current.get(key) !== restoreVersion;
+    if (session.agent_session_open !== true || needsRestore)
+      setAgentSessionTransitions((old) => ({
+        ...old,
+        [key]: {
+          phase: openedEvidence.current.has(key) ? "restoring" : "opening",
+        },
+      }));
+    void request(targetHost, {
+      method: "open_agent_session",
+      session_id: targetId,
+    })
+      .then(async () => {
+        if ((closedVersions.current.get(key) ?? 0) !== closeVersion) return;
+        const result = await request(targetHost, {
+          method: "poll",
+          session_id: targetId,
+          after: Number.MAX_SAFE_INTEGER,
+        });
+        if ((closedVersions.current.get(key) ?? 0) !== closeVersion) return;
+        if (
+          result.kind !== "events" ||
+          result.session.agent_session_open !== true
+        )
+          throw new Error(
+            result.kind === "events" &&
+              result.session.agent_session_open === undefined
+              ? "当前 Server 未提供会话状态，请更新 Server"
+              : "Agent 会话尚未打开，请重试",
+          );
+        openedEvidence.current.set(key, restoreVersion);
+        updateSession(targetHost, result.session);
+        setAgentSessionTransitions((old) => {
+          const next = { ...old };
+          delete next[key];
+          return next;
+        });
+      })
+      .catch((e) => {
+        if ((closedVersions.current.get(key) ?? 0) !== closeVersion) return;
+        setAgentSessionTransitions((old) => ({
+          ...old,
+          [key]: { phase: "error", error: message(e) },
+        }));
+      });
+  }, [
+    hostId,
+    sessionId,
+    connected,
+    session?.archived,
+    restoreVersions[hostId],
+  ]);
   function updateSession(targetHostId: string, value: Session) {
     setPinCache((old) => ({
       ...old,
@@ -480,10 +775,58 @@ export function useWorkbench() {
   }
   async function sessionAction(targetHostId: string, action: Request) {
     const result = await request(targetHostId, action);
+    if (action.method === "close_agent_session" && result.kind === "ok") {
+      const key = JSON.stringify([targetHostId, action.session_id]);
+      openedEvidence.current.delete(key);
+      setAgentSessionTransitions((old) => {
+        const next = { ...old };
+        delete next[key];
+        return next;
+      });
+      setSessions((old) =>
+        selection.current.hostId === targetHostId
+          ? old.map((s) =>
+              s.id === action.session_id
+                ? { ...s, agent_session_open: false, agent_session_busy: false }
+                : s,
+            )
+          : old,
+      );
+      setPinCache((old) => ({
+        ...old,
+        [targetHostId]: (old[targetHostId] ?? []).map((s) =>
+          s.id === action.session_id
+            ? { ...s, agent_session_open: false, agent_session_busy: false }
+            : s,
+        ),
+      }));
+      closedVersions.current.set(
+        key,
+        (closedVersions.current.get(key) ?? 0) + 1,
+      );
+      if (
+        selection.current.hostId === targetHostId &&
+        selectedSessionId.current === action.session_id
+      ) {
+        draft.current = true;
+        resetConversationView();
+        setSessionId("");
+        setEvents([]);
+      }
+    }
     if (result.kind === "session") updateSession(targetHostId, result.session);
     else if (result.kind !== "ok") throw new Error("会话操作失败");
   }
   function openSession(target: HostedSession) {
+    if (target.hostId === hostId && target.id === sessionId) {
+      if (target.unread && connected)
+        void sessionAction(target.hostId, {
+          method: "mark_session_unread",
+          session_id: target.id,
+          unread: false,
+        }).catch((e) => setError(message(e)));
+      return;
+    }
     selectProject(target.hostId, target.project_id);
     draft.current = false;
     if (target.id !== sessionId) resetConversationView();
@@ -492,25 +835,70 @@ export function useWorkbench() {
       projectId: target.project_id,
       id: target.id,
     };
-    setShowArchived(target.archived);
-    if (target.hostId === hostId && target.project_id === projectId) {
+    if (target.hostId === hostId && target.project_id === projectId)
       pendingSession.current = null;
-      if (target.id !== sessionId) {
-        setEvents([]);
-        setSessionId(target.id);
-      }
-    }
+    else setSessions([target]);
+    const scope = JSON.stringify([target.hostId, target.id]);
+    const cached = historyCache.get(scope);
+    setHasEarlierHistory(historyCache.hasEarlier(scope));
+    setEarlierHistoryLoading(false);
+    setHistoryReadyScope(cached ? scope : null);
+    setEvents(cached ?? []);
+    setSessionId(target.id);
+  }
+  async function loadEarlierHistory(): Promise<void> {
+    const targetHost = hostId,
+      targetSession = sessionId;
+    const scope = JSON.stringify([targetHost, targetSession]);
+    const cached = historyCache.get(scope);
+    const before = historyCache.before(scope);
+    const server = hostHellos.current.get(targetHost)?.server_id;
     if (
-      target.unread &&
-      target.hostId === hostId &&
-      target.id === sessionId &&
-      connected
+      !cached ||
+      !before ||
+      !historyCache.hasEarlier(scope) ||
+      earlierLoads.current.has(scope)
     )
-      void sessionAction(target.hostId, {
-        method: "mark_session_unread",
-        session_id: target.id,
-        unread: false,
-      }).catch((e) => setError(message(e)));
+      return;
+    earlierLoads.current.add(scope);
+    setEarlierHistoryLoading(true);
+    try {
+      const r = await request(targetHost, {
+        method: "history",
+        session_id: targetSession,
+        before,
+      });
+      if (hostHellos.current.get(targetHost)?.server_id !== server) return;
+      if (r.kind !== "history") throw new Error("无法读取之前的对话记录");
+      if (
+        r.has_more &&
+        (!r.events.length || r.before === null || r.before >= before)
+      )
+        throw new Error("对话分页未前进，请重试");
+      const updated = appendEvents(r.events, historyCache.get(scope) ?? cached);
+      historyCache.set(scope, updated, r.has_more, r.before);
+      if (
+        selection.current.hostId === targetHost &&
+        selectedSessionId.current === targetSession
+      ) {
+        setEvents(updated);
+        setHasEarlierHistory(r.has_more);
+      }
+    } catch (e) {
+      if (
+        selection.current.hostId === targetHost &&
+        selectedSessionId.current === targetSession &&
+        !(e instanceof HostConnectionError)
+      )
+        setError(message(e));
+    } finally {
+      earlierLoads.current.delete(scope);
+      if (
+        selection.current.hostId === targetHost &&
+        selectedSessionId.current === targetSession
+      )
+        setEarlierHistoryLoading(false);
+    }
   }
   async function createSession(target?: HostedProject): Promise<void> {
     if (target && !hosts.some((h) => h.id === target.hostId))
@@ -521,15 +909,11 @@ export function useWorkbench() {
     selectedSessionId.current = "";
     setSessionId("");
     setEvents([]);
-    setShowArchived(false);
     setError("");
     if (target && (target.hostId !== hostId || target.id !== projectId)) {
       setSessions([]);
       if (target.hostId !== hostId) {
-        setConnected(false);
-        setAgent(undefined);
-        setServerId("");
-        setHostId(target.hostId);
+        activateHost(target.hostId);
       }
       setProjectId(target.id);
     }
@@ -547,13 +931,9 @@ export function useWorkbench() {
     setSessionId("");
     setSessions([]);
     setEvents([]);
-    setShowArchived(false);
     setError("");
     if (targetHostId !== hostId) {
-      setConnected(false);
-      setAgent(undefined);
-      setServerId("");
-      setHostId(targetHostId);
+      activateHost(targetHostId);
     }
     setProjectId(id);
   }
@@ -579,7 +959,6 @@ export function useWorkbench() {
           copyWorkspace(workspaceId, workspaceKey(r.session.id));
           draft.current = false;
           selectedSessionId.current = r.session.id;
-          setShowArchived(false);
           setSessionId(r.session.id);
           setEvents([]);
         }
@@ -594,12 +973,18 @@ export function useWorkbench() {
       if (
         (event.metaKey || event.ctrlKey) &&
         event.key.toLowerCase() === "n" &&
-        !modal
+        !modal &&
+        !document.querySelector('[role="dialog"]')
       ) {
         event.preventDefault();
         void createSession().catch((e) => setError(message(e)));
       }
-      if (event.key === "Escape" && !busy && modal !== "settings")
+      if (
+        !event.defaultPrevented &&
+        event.key === "Escape" &&
+        !busy &&
+        modal !== "settings"
+      )
         setModal(null);
     };
     window.addEventListener("keydown", key);
@@ -661,7 +1046,7 @@ export function useWorkbench() {
       setError("");
       return true;
     } catch (e) {
-      setError(message(e));
+      if (!(e instanceof HostConnectionError)) setError(message(e));
       return false;
     } finally {
       sending.current = false;
@@ -673,9 +1058,10 @@ export function useWorkbench() {
     try {
       const target = hosts.find((h) => h.id === projectHostId);
       if (!target) throw new Error("请选择项目所在主机");
-      const hello = await connectWithPrompt(target);
-      if (hello.kind !== "hello")
-        throw new Error(hello.kind === "error" ? hello.message : "连接失败");
+      const initialization = await initializeHost(target);
+      connectedHosts.current.add(target.id);
+      liveHosts.current.add(target.id);
+      updateProjects(target.id, initialization.projects);
       const r = await request(target.id, {
         method: "add_project",
         path: projectPath.trim(),
@@ -692,7 +1078,10 @@ export function useWorkbench() {
         if (draft.current)
           selectTaskProject({ ...r.project, hostId: target.id });
         else selectProject(target.id, r.project.id);
-        if (target.id === hostId && !connected) setRetry((v) => v + 1);
+        if (target.id === hostId && !connected) {
+          refreshedHosts.current.add(target.id);
+          setRetry((v) => v + 1);
+        }
         setModal(null);
         setProjectPath("");
         setError("");
@@ -704,21 +1093,34 @@ export function useWorkbench() {
     }
   }
   async function saveSshHost(value: Host, password?: string) {
-    const result = await connect(value, password);
-    if (result.kind !== "hello") throw new Error("远程 Server 握手失败");
+    const result = await initializeHost(value, true, password);
     const updated = hosts.some((host) => host.id === value.id)
       ? hosts.map((host) => (host.id === value.id ? value : host))
       : [...hosts, value];
     await saveHosts(updated);
+    connectedHosts.current.add(value.id);
+    liveHosts.current.add(value.id);
+    updateProjects(value.id, result.projects);
     setHosts(updated);
     setHostErrors((old) => ({ ...old, [value.id]: "" }));
     setProjectHostId(value.id);
-    if (value.id === hostId) setRetry((count) => count + 1);
+    if (value.id === hostId) {
+      refreshedHosts.current.add(value.id);
+      setRetry((count) => count + 1);
+    }
   }
   async function removeSshHost(id: string) {
     const updated = hosts.filter((host) => host.id !== id);
     await saveHosts(updated);
     await disconnect(id);
+    liveHosts.current.delete(id);
+    connectedHosts.current.delete(id);
+    hostHellos.current.delete(id);
+    helloTargets.current.delete(id);
+    seenServers.current.delete(id);
+    lostHosts.current.delete(id);
+    refreshedHosts.current.delete(id);
+    historyCache.clearHost(id);
     setHosts(updated);
     setHostErrors((old) => {
       const next = { ...old };
@@ -727,10 +1129,17 @@ export function useWorkbench() {
     });
     if (projectHostId === id) setProjectHostId("local");
     if (hostId === id) {
-      setHostId("local");
+      activateHost("local");
       setProjectId("");
-      setRetry((count) => count + 1);
     }
+  }
+  function activateHost(id: string) {
+    const target = hosts.find((value) => value.id === id);
+    const hello = target ? cachedHello(target) : undefined;
+    setConnected(!!hello);
+    setAgent(hello?.agents.find((value) => value.id === "claude"));
+    setServerId(hello?.server_id ?? "");
+    setHostId(id);
   }
   function selectProject(targetHostId: string, id: string) {
     pendingSession.current = null;
@@ -738,12 +1147,8 @@ export function useWorkbench() {
     draft.current = false;
     resetConversationView();
     if (targetHostId !== hostId) {
-      setConnected(false);
-      setAgent(undefined);
-      setServerId("");
-      setHostId(targetHostId);
+      activateHost(targetHostId);
     }
-    setShowArchived(false);
     setError("");
     setProjectId(id);
     setSessions([]);
@@ -784,9 +1189,24 @@ export function useWorkbench() {
     setError("");
     setModal("project");
   }
-  function resize(e: React.PointerEvent, side: "left" | "right") {
+  const resizeCleanup = useRef<(() => void) | null>(null);
+  useEffect(() => () => resizeCleanup.current?.(), []);
+  function resize(e: React.PointerEvent<HTMLElement>, side: "left" | "right") {
+    e.preventDefault();
+    if (side === "right" && panel && workspace.expanded) return;
+    resizeCleanup.current?.();
+    const handle = e.currentTarget;
+    handle.dataset.resizing = "true";
+    const selectionStyle = document.body.style.userSelect;
+    const webkitStyle = document.body.style.webkitUserSelect;
+    document.body.style.userSelect = "none";
+    document.body.style.webkitUserSelect = "none";
+    window.getSelection()?.removeAllRanges();
     const x = e.clientX;
+    const sidebarWidth = sidebarOpen ? leftWidth : 0;
+    const merged = panel && workspace.expanded;
     const width = side === "left" ? leftWidth : rightWidth;
+    let mergedDuringDrag = merged;
     e.currentTarget.setPointerCapture(e.pointerId);
     const move = (event: PointerEvent) => {
       const value = width + (event.clientX - x) * (side === "left" ? 1 : -1);
@@ -796,29 +1216,42 @@ export function useWorkbench() {
             200,
             Math.min(
               320,
-              window.innerWidth - (panel ? rightWidth : 0) - 362,
+              window.innerWidth -
+                (panel && !merged ? rightWidth : 0) -
+                CONVERSATION_MIN_WIDTH -
+                (panel ? 2 : 1),
               value,
             ),
           ),
         );
-      else
-        setRightWidth(
-          Math.max(
-            280,
-            Math.min(
-              600,
-              window.innerWidth - (sidebarOpen ? leftWidth : 0) - 362,
-              value,
-            ),
-          ),
+      else {
+        if (mergedDuringDrag) return;
+        const splitWidth = clampWorkspaceWidth(
+          value,
+          window.innerWidth,
+          sidebarWidth,
         );
+        if (event.clientX <= sidebarWidth + 24) {
+          mergedDuringDrag = true;
+          setWorkspace({ expanded: true, conversationActive: true });
+        } else {
+          setWorkspace({ width: splitWidth });
+        }
+      }
     };
     const stop = () => {
+      delete handle.dataset.resizing;
       window.removeEventListener("pointermove", move);
       window.removeEventListener("pointerup", stop);
+      window.removeEventListener("pointercancel", stop);
+      document.body.style.userSelect = selectionStyle;
+      document.body.style.webkitUserSelect = webkitStyle;
+      resizeCleanup.current = null;
     };
     window.addEventListener("pointermove", move);
+    resizeCleanup.current = stop;
     window.addEventListener("pointerup", stop);
+    window.addEventListener("pointercancel", stop);
   }
   return {
     hosts,
@@ -828,6 +1261,21 @@ export function useWorkbench() {
     hostId,
     setHostId,
     connected,
+    connectionLost: connectedHosts.current.has(hostId),
+    agentSessionTransitions,
+    agentSessionState: (target: HostedSession) =>
+      agentSessionState(
+        target,
+        (target.hostId === hostId
+          ? connected
+          : liveHosts.current.has(target.hostId)) && !hostErrors[target.hostId],
+        agentSessionTransitions[agentSessionKey(target.hostId, target.id)],
+        target.hostId === hostId && target.id === sessionId,
+      ),
+    retryAgentSession: () => setRetry((v) => v + 1),
+    isHostConnected: (id: string) =>
+      (id === hostId ? connected : liveHosts.current.has(id)) &&
+      !hostErrors[id],
     connecting,
     serverId,
     agent,
@@ -838,13 +1286,24 @@ export function useWorkbench() {
     pinned,
     openSession,
     sessionAction,
-    showArchived,
-    setShowArchived,
     sessionId,
     workspaceId,
+    workspace,
     viewRevision,
+    readingPositions: readingPositions.current,
+    readingScope: JSON.stringify([
+      hostId,
+      sessionId,
+      closedVersions.current.get(JSON.stringify([hostId, sessionId])) ?? 0,
+      restoreVersions[hostId] ?? 0,
+    ]),
     setSessionId,
     events,
+    hasEarlierHistory,
+    earlierHistoryLoading,
+    loadEarlierHistory,
+    historyLoading:
+      !!sessionId && historyReadyScope !== JSON.stringify([hostId, sessionId]),
     setEvents,
     error,
     setError,
@@ -869,6 +1328,7 @@ export function useWorkbench() {
     removeSshHost,
     panel,
     setPanel,
+    restoreWorkspace,
     sidebarOpen,
     toggleSidebar,
     leftWidth,

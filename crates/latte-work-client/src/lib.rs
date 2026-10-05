@@ -15,6 +15,7 @@ pub struct Client {
     output: FramedRead<ChildStdout, LinesCodec>,
     broken: bool,
     permission_settings: bool,
+    server_id: String,
 }
 
 pub enum SshAuthentication<'a> {
@@ -27,6 +28,15 @@ impl Client {
     pub async fn local(binary: &Path, state: Option<&Path>) -> Result<Self> {
         let mut command = Command::new(binary);
         command.arg("connect-local");
+        if let Some(state) = state {
+            command.arg("--state-dir").arg(state);
+        }
+        Self::spawn(command).await
+    }
+    /// Cleanup reaches the existing local daemon without initiating an upgrade.
+    pub async fn local_cleanup(binary: &Path, state: Option<&Path>) -> Result<Self> {
+        let mut command = Command::new(binary);
+        command.arg("connect");
         if let Some(state) = state {
             command.arg("--state-dir").arg(state);
         }
@@ -65,13 +75,16 @@ impl Client {
             output,
             broken: false,
             permission_settings: false,
+            server_id: String::new(),
         };
         match client.request(Request::Hello { version: VERSION }).await? {
             Response::Hello {
                 version: VERSION,
                 permission_settings,
+                server_id,
                 ..
             } => {
+                client.server_id = server_id;
                 client.permission_settings = permission_settings;
                 Ok(client)
             }
@@ -81,6 +94,10 @@ impl Client {
             Response::Error { message, .. } => bail!("{message}"),
             other => bail!("不兼容的 Server: {other:?}"),
         }
+    }
+    /// A failed or cancelled exchange cannot safely reuse this transport.
+    pub fn is_broken(&self) -> bool {
+        self.broken
     }
     pub async fn request(&mut self, request: Request) -> Result<Response> {
         if self.broken {
@@ -96,8 +113,109 @@ impl Client {
         {
             bail!("此 Server 不支持权限设置，请更新 Server 后重新连接；任务未发送");
         }
+        self.exchange(&request).await
+    }
+    pub fn server_id(&self) -> &str {
+        &self.server_id
+    }
+    /// Claim before Open/Send/CreateTerminal, including ambiguous outcomes. A fresh
+    /// App reclaim fences a delayed close left by an older App instance.
+    pub async fn claim_resources(
+        &mut self,
+        owner_id: String,
+        resources: Vec<latte_work_protocol::lifecycle::Resource>,
+    ) -> Result<()> {
+        use latte_work_protocol::lifecycle;
+        let response: lifecycle::Response = self
+            .exchange(&lifecycle::Request::ClaimResources {
+                owner_id,
+                resources,
+            })
+            .await?;
+        match response {
+            lifecycle::Response::ResourcesClaimed => Ok(()),
+            lifecycle::Response::Error { message, .. } => {
+                bail!("Server 需要支持资源归属，请更新 Server 后重新连接：{message}")
+            }
+            _ => bail!("资源归属响应不兼容"),
+        }
+    }
+    /// Reattach to surviving remote resources without reopening a process or
+    /// replaying a turn. Missing/stale owners are never recreated or taken over.
+    pub async fn adopt_resources(
+        &mut self,
+        server_id: String,
+        previous_owner_id: String,
+        owner_id: String,
+        resources: Vec<latte_work_protocol::lifecycle::Resource>,
+    ) -> Result<Vec<latte_work_protocol::lifecycle::Resource>> {
+        use latte_work_protocol::lifecycle;
+        if server_id != self.server_id {
+            return Ok(vec![]);
+        }
+        let response: lifecycle::Response = self
+            .exchange(&lifecycle::Request::AdoptResources {
+                server_id,
+                previous_owner_id,
+                owner_id,
+                resources,
+            })
+            .await?;
+        match response {
+            lifecycle::Response::ResourcesAdopted { resources } => Ok(resources),
+            lifecycle::Response::Error { message, .. } => bail!("{message}"),
+            _ => bail!("资源恢复响应不兼容"),
+        }
+    }
+    pub async fn close_owned_resources(
+        &mut self,
+        server_id: String,
+        owner_id: String,
+        resources: Vec<latte_work_protocol::lifecycle::Resource>,
+    ) -> Result<()> {
+        use latte_work_protocol::lifecycle;
+        if server_id != self.server_id {
+            return Ok(());
+        }
+        let response: lifecycle::Response = self
+            .exchange(&lifecycle::Request::CloseOwnedResources {
+                server_id,
+                owner_id,
+                resources,
+            })
+            .await?;
+        match response {
+            lifecycle::Response::ResourcesClosed => Ok(()),
+            lifecycle::Response::Error { message, .. } => bail!("{message}"),
+            _ => bail!("资源关闭响应不兼容"),
+        }
+    }
+    /// Native-only idle shutdown on the connected instance. Busy daemons are preserved.
+    pub async fn shutdown_if_idle(&mut self) -> Result<bool> {
+        use latte_work_protocol::lifecycle;
+        let response: lifecycle::Response = self
+            .exchange(&lifecycle::Request::PrepareUpgrade {
+                server_id: self.server_id.clone(),
+            })
+            .await?;
+        match response {
+            lifecycle::Response::UpgradeReady => Ok(true),
+            lifecycle::Response::Error { .. } => Ok(false),
+            _ => bail!("后台退出响应不兼容"),
+        }
+    }
+    async fn exchange<Q: serde::Serialize, R: serde::de::DeserializeOwned>(
+        &mut self,
+        request: &Q,
+    ) -> Result<R> {
+        if self.broken {
+            bail!("连接已失效，请重新连接；任务不会自动重发");
+        }
+        // If this future is dropped (for example by a quit deadline), its response
+        // may still arrive. Never reuse a transport with an ambiguous frame boundary.
+        self.broken = true;
         let result = tokio::time::timeout(Duration::from_secs(25), async {
-            let mut data = serde_json::to_vec(&request)?;
+            let mut data = serde_json::to_vec(request)?;
             if data.len() > MAX_FRAME {
                 bail!("请求过大");
             }
@@ -105,11 +223,14 @@ impl Client {
             self.input.write_all(&data).await?;
             self.input.flush().await?;
             let line = self.output.next().await.context("Host 连接已关闭")??;
-            Ok::<_, anyhow::Error>(serde_json::from_str::<Response>(&line)?)
+            Ok::<_, anyhow::Error>(serde_json::from_str::<R>(&line)?)
         })
         .await;
         match result {
-            Ok(Ok(response)) => Ok(response),
+            Ok(Ok(response)) => {
+                self.broken = false;
+                Ok(response)
+            }
             other => {
                 self.broken = true;
                 let _ = self.child.start_kill();
@@ -193,18 +314,20 @@ where
 {
     let agent = match &request {
         Request::Models { agent, .. } => agent.clone(),
-        Request::Send { session_id, .. } => match target
-            .lock()
-            .await
-            .request(Request::Session {
-                session_id: session_id.clone(),
-            })
-            .await?
-        {
-            Response::Session { session } => session.agent,
-            Response::Error { message, .. } => bail!("{message}"),
-            _ => bail!("会话响应格式不匹配"),
-        },
+        Request::Send { session_id, .. } | Request::OpenAgentSession { session_id, .. } => {
+            match target
+                .lock()
+                .await
+                .request(Request::Session {
+                    session_id: session_id.clone(),
+                })
+                .await?
+            {
+                Response::Session { session } => session.agent,
+                Response::Error { message, .. } => bail!("{message}"),
+                _ => bail!("会话响应格式不匹配"),
+            }
+        }
         _ => bail!("此请求不接受本轮 Provider 配置"),
     };
     let snapshot = resolve(agent).await?;
@@ -217,6 +340,7 @@ async fn request_with_snapshot(
     snapshot: Option<latte_work_protocol::ProviderSnapshot>,
 ) -> Result<Response> {
     let is_send = matches!(&request, Request::Send { .. });
+    let is_open = matches!(&request, Request::OpenAgentSession { .. });
     let request = match request {
         Request::Models {
             agent,
@@ -249,12 +373,21 @@ async fn request_with_snapshot(
                     .unwrap_or(latte_work_protocol::TurnProvider::Cli),
             ),
         },
+        Request::OpenAgentSession { session_id, .. } => Request::OpenAgentSession {
+            session_id,
+            provider: Some(
+                snapshot
+                    .map(latte_work_protocol::TurnProvider::Snapshot)
+                    .unwrap_or(latte_work_protocol::TurnProvider::Cli),
+            ),
+        },
         _ => unreachable!(),
     };
     let response = target.lock().await.request(request).await?;
     match response {
         Response::Models { .. } if !is_send => Ok(response),
         Response::Accepted { .. } if is_send => Ok(response),
+        Response::Ok if is_open => Ok(response),
         Response::Error { .. } => Ok(response),
         _ => bail!("远程执行响应格式不匹配"),
     }
@@ -399,10 +532,46 @@ for line in sys.stdin:
             .await
             .unwrap_err();
         assert!(error.to_string().contains("不支持权限设置"));
+        assert!(!client.is_broken());
         assert!(matches!(
             client.request(Request::Projects).await.unwrap(),
             Response::Projects { .. }
         ));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cancelled_request_cannot_reuse_a_stale_response() {
+        let mut command = Command::new("python3");
+        command.args([
+            "-u",
+            "-c",
+            r#"
+import sys,json,time
+for line in sys.stdin:
+    req=json.loads(line)
+    if req['method']=='hello':
+        print(json.dumps({'kind':'hello','version':1,'server_id':'fixture','agents':[]}),flush=True)
+    else:
+        time.sleep(1)
+        print(json.dumps({'kind':'projects','projects':[]}),flush=True)
+"#,
+        ]);
+        let mut client = Client::spawn(command).await.unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), client.request(Request::Projects))
+                .await
+                .is_err()
+        );
+        assert!(client.is_broken());
+        assert!(
+            client
+                .request(Request::Projects)
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("连接已失效")
+        );
     }
 
     #[test]

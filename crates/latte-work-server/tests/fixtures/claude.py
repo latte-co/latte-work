@@ -1,26 +1,73 @@
 #!/usr/bin/env python3
 """Deterministic native-protocol fixture. Never connects to a model."""
-import sys,json,time,os,subprocess
+import sys,json,time,os,subprocess,threading
 if '--version' in sys.argv:
     print('fixture-claude 1.0');sys.exit(0)
 if '--help' in sys.argv:
     print('--permission-mode <mode> (choices: "default", "acceptEdits", "plan", "dontAsk", "bypassPermissions")');sys.exit(0)
-def emit(value): print(json.dumps(value),flush=True)
+output_lock=threading.Lock()
+def emit(value):
+    with output_lock: print(json.dumps(value),flush=True)
+turns=0
+child=None
+background=None
 resumed=any(arg.startswith('--resume=') for arg in sys.argv)
 for line in sys.stdin:
     value=json.loads(line)
     if value['type']=='control_request':
+        if value['request']['subtype']=='interrupt':
+            if child is not None:
+                child.terminate();child.wait();child=None
+            # Result and control acknowledgement may arrive in either order.
+            emit({'type':'result','subtype':'success','is_error':False})
+            emit({'type':'control_response','response':{'subtype':'success','request_id':value['request_id']}})
+            continue
+        if '--no-session-persistence' not in sys.argv:
+            with open('fixture-agent-pid','w') as f:f.write(str(os.getpid()))
         emit({'type':'control_response','response':{'subtype':'success','request_id':value['request_id'],'response':{'commands':[{'name':'compact','description':'Compact history','argumentHint':'[instructions]'},{'name':'project:check','description':os.path.basename(os.getcwd()),'argumentHint':'<target>'}]}}})
     elif value['type']=='user':
         text=value['message']['content']
+        resumed=resumed or turns>0
+        turns+=1
         emit({'type':'system','subtype':'init','session_id':'11111111-1111-4111-8111-111111111111'})
+        if text=='environment':
+            output=subprocess.check_output(['latte-env-fixture'],text=True)
+            emit({'type':'assistant','message':{'content':[{'type':'text','text':output}]}})
+            emit({'type':'result','subtype':'success','is_error':False})
+            continue
+        if text=='usage':
+            emit({'type':'stream_event','event':{'type':'content_block_delta','delta':{'type':'thinking_delta','thinking':'private fixture reasoning'}}})
+            emit({'type':'stream_event','event':{'type':'content_block_stop'}})
+            emit({'type':'stream_event','event':{'type':'message_start','message':{'model':'fixture-model','usage':{'input_tokens':0,'output_tokens':0}}}})
+            emit({'type':'assistant','message':{'model':'fixture-model','usage':{'input_tokens':0,'output_tokens':0},'content':[{'type':'text','text':'usage fixture'}]}})
+            emit({'type':'stream_event','event':{'type':'message_delta','usage':{'input_tokens':100,'cache_read_input_tokens':600,'cache_creation_input_tokens':300,'output_tokens':80}}})
+            emit({'type':'stream_event','event':{'type':'message_stop'}})
+            emit({'type':'result','subtype':'success','is_error':False,'modelUsage':{'fixture-model':{'contextWindow':200000,'inputTokens':900000}},'usage':{'input_tokens':200,'cache_read_input_tokens':1200,'cache_creation_input_tokens':600,'output_tokens':80},'duration_api_ms':52500,'num_turns':2})
+            continue
         if text=='malformed': print('this is not json',flush=True);sys.exit(0)
         if text=='exit': sys.exit(2)
         if text=='hang':
             child=subprocess.Popen(['sleep','120'])
             emit({'type':'assistant','message':{'content':[{'type':'text','text':f'child:{child.pid}'}]}})
-            time.sleep(120)
-        if text.startswith('/'):
+            continue
+        if text=='identity':
+            emit({'type':'assistant','message':{'content':[{'type':'text','text':json.dumps({'pid':os.getpid(),'turns':turns,'background_pid':background.pid if background else None})}]}})
+            emit({'type':'result','subtype':'success','is_error':False})
+        elif text in ('background','background-report'):
+            background=subprocess.Popen(['sleep','120' if text=='background' else '0.5'])
+            emit({'type':'system','subtype':'task_started','task_id':'bg-task','task_type':'local_agent'})
+            emit({'type':'assistant','message':{'content':[{'type':'text','text':f'background:{background.pid}'}]}})
+            emit({'type':'result','subtype':'success','is_error':False})
+            if text=='background-report':
+                def report():
+                    background.wait()
+                    emit({'type':'system','subtype':'task_notification','task_id':'bg-task','status':'completed'})
+                    emit({'type':'assistant','message':{'content':[{'type':'text','text':'BACKGROUND_REPORT_OK'}]}})
+                    emit({'type':'result','subtype':'success','is_error':False})
+                    emit({'type':'system','subtype':'session_state_changed','state':'idle'})
+                threading.Thread(target=report,daemon=True).start()
+        elif text.startswith('/'):
+
             emit({'type':'result','subtype':'success','is_error':False,'result':('resumed:' if resumed else 'fresh:')+text})
         elif text=='permission':
             mode=next((a.split('=',1)[1] for a in sys.argv if a.startswith('--permission-mode=')), None)
@@ -58,7 +105,7 @@ for line in sys.stdin:
             emit({'type':'result','subtype':'success','is_error':False})
         elif text=='approve':
             emit({'type':'assistant','message':{'content':[{'type':'tool_use','id':'tool-1','name':'Write','input':{'file_path':'approved.txt','content':'approved'}}]}})
-            emit({'type':'control_request','request_id':'permission-1','request':{'subtype':'can_use_tool','tool_name':'Write','input':{'file_path':'approved.txt','content':'approved'}}})
+            emit({'type':'control_request','request_id':'permission-1','request':{'subtype':'can_use_tool','tool_use_id':'tool-1','tool_name':'Write','input':{'file_path':'approved.txt','content':'approved'}}})
         else:
             for token in ['resumed:' if resumed else 'fresh:','你好']:
                 emit({'type':'stream_event','event':{'type':'content_block_delta','delta':{'type':'text_delta','text':token}}})

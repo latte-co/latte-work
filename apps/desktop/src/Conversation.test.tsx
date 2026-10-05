@@ -1,0 +1,643 @@
+// @vitest-environment jsdom
+import {
+  act,
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  within,
+} from "@testing-library/react";
+import { afterEach, beforeEach, expect, it, vi } from "vitest";
+import { Conversation } from "./Conversation";
+import { DraftStore } from "./drafts";
+import type { Event, Session } from "./protocol";
+const mocks = vi.hoisted(() => ({ request: vi.fn() }));
+vi.mock("./api", () => ({ request: mocks.request, message: String }));
+vi.mock("./useAgentPreferences", () => ({
+  useAgentPreferences: () => ({
+    model: null,
+    effort: null,
+    permissionMode: null,
+  }),
+}));
+vi.mock("./ModelPicker", async () => {
+  const { useEffect } = await import("react");
+  const { modelSelectionScope } = await import("./modelSelectionScope");
+  return {
+    ModelPicker: (props: {
+      hostId: string;
+      projectId?: string;
+      agent: string;
+      value: null;
+      effort: null;
+      onReadyChange: (value: { scope: string; ready: boolean }) => void;
+    }) => {
+      useEffect(
+        () =>
+          props.onReadyChange({
+            scope: modelSelectionScope(
+              props.hostId,
+              props.projectId,
+              props.agent,
+              props.value,
+              props.effort,
+            ),
+            ready: true,
+          }),
+        [
+          props.hostId,
+          props.projectId,
+          props.agent,
+          props.value,
+          props.effort,
+          props.onReadyChange,
+        ],
+      );
+      return null;
+    },
+  };
+});
+vi.mock("./PermissionPicker", () => ({ PermissionPicker: () => null }));
+vi.mock("./TaskProjectPicker", () => ({ TaskProjectPicker: () => null }));
+beforeEach(() => {
+  HTMLElement.prototype.scrollTo = vi.fn();
+  HTMLElement.prototype.scrollIntoView = vi.fn();
+  mocks.request.mockResolvedValue({
+    kind: "files",
+    entries: [{ name: "note.md", path: "note.md", directory: false }],
+  });
+});
+afterEach(cleanup);
+it.each(["opening", "restoring"] as const)(
+  "places %s feedback in the return-to-latest slot",
+  (phase) => {
+    render(
+      <Conversation
+        {...props()}
+        session={session("s")}
+        agentSessionState={phase}
+      />,
+    );
+    const label = screen.getByText(
+      phase === "opening" ? "正在打开" : "正在恢复",
+    );
+    expect(label.closest(".composer-context")).not.toBeNull();
+    expect(label.closest(".agent-session-feedback")).toBeNull();
+    expect(screen.queryByRole("button", { name: "回到最新" })).toBeNull();
+  },
+);
+const session = (id: string) =>
+  ({ id, agent: "claude", status: "ready", archived: false }) as Session;
+const props = () => ({
+  drafts: new DraftStore(),
+  hostId: "local",
+  projectId: "p",
+  projectName: "Test",
+  projects: [],
+  hosts: [],
+  settingsOpen: false,
+  events: [],
+  connected: true,
+  available: true,
+  selectTaskProject: vi.fn(),
+  openProject: vi.fn(),
+  send: vi.fn().mockResolvedValue(true),
+  cancel: vi.fn(),
+  approve: vi.fn(),
+});
+const input = () =>
+  screen.getByRole("textbox", { name: "任务输入" }) as HTMLTextAreaElement;
+const approvalEvents = (id = "a"): Event[] => [
+  {
+    seq: 1,
+    at: 0,
+    session_id: id,
+    event: { kind: "user", text: "检查项目", request_id: "send" },
+  },
+  {
+    seq: 2,
+    at: 1,
+    session_id: id,
+    event: {
+      kind: "approval",
+      request_id: "approval-1",
+      tool: "Bash",
+      input: { command: "pwd" },
+    },
+  },
+];
+it("docks approval actions above the composer while history keeps only a record", async () => {
+  const p = props();
+  const waiting = { ...session("a"), status: "waiting" as const };
+  const events = approvalEvents();
+  const view = render(
+    <Conversation {...p} session={waiting} events={events} />,
+  );
+  const dock = await screen.findByRole("region", { name: "待审批操作" });
+  const composer = view.container.querySelector(".composer-wrap")!;
+  const history = view.container.querySelector(".conversation-history")!;
+  expect(composer.contains(dock)).toBe(true);
+  expect(history.querySelector(".approval-card")).toBeNull();
+  expect(
+    within(history as HTMLElement).queryByRole("button", { name: "允许一次" }),
+  ).toBeNull();
+  expect(within(history as HTMLElement).getByText("等待审批")).toBeTruthy();
+  fireEvent.click(within(dock).getByRole("button", { name: "允许一次" }));
+  await waitFor(() =>
+    expect(p.approve).toHaveBeenCalledWith("approval-1", true),
+  );
+  view.rerender(
+    <Conversation
+      {...p}
+      session={{ ...waiting, status: "running" }}
+      events={[
+        ...events,
+        {
+          seq: 3,
+          at: 2,
+          session_id: "a",
+          event: {
+            kind: "approval_resolved",
+            request_id: "approval-1",
+            allow: true,
+          },
+        },
+      ]}
+    />,
+  );
+  expect(screen.queryByRole("region", { name: "待审批操作" })).toBeNull();
+  expect(screen.getByText("已允许")).toBeTruthy();
+});
+it("shows every parallel approval, disables offline decisions, and expires requests on stop", async () => {
+  const p = props();
+  const waiting = { ...session("a"), status: "waiting" as const };
+  const events: Event[] = [
+    ...approvalEvents(),
+    {
+      seq: 3,
+      at: 2,
+      session_id: "a",
+      event: {
+        kind: "approval",
+        request_id: "approval-2",
+        tool: "Read",
+        input: { file_path: "README.md" },
+      },
+    },
+  ];
+  const view = render(
+    <Conversation {...p} session={waiting} events={events} connected={false} />,
+  );
+  const dock = await screen.findByRole("region", { name: "待审批操作" });
+  expect(within(dock).getByText("2 项操作等待确认")).toBeTruthy();
+  for (const button of within(dock).getAllByRole("button")) {
+    expect((button as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.click(button);
+  }
+  expect(p.approve).not.toHaveBeenCalled();
+  view.rerender(<Conversation {...p} session={waiting} events={events} />);
+  fireEvent.click(within(dock).getAllByRole("button", { name: "拒绝" })[1]);
+  await waitFor(() =>
+    expect(p.approve).toHaveBeenCalledWith("approval-2", false),
+  );
+  view.rerender(
+    <Conversation
+      {...p}
+      session={{ ...waiting, status: "stopped" }}
+      events={[
+        ...events,
+        {
+          seq: 4,
+          at: 3,
+          session_id: "a",
+          event: { kind: "state", status: "stopped", message: null },
+        },
+      ]}
+    />,
+  );
+  expect(screen.queryByRole("region", { name: "待审批操作" })).toBeNull();
+  expect(screen.getAllByText("审批已过期")).toHaveLength(2);
+});
+it("conceals approvals until replay is ready and never carries them into another session", async () => {
+  const p = props();
+  const waiting = { ...session("a"), status: "waiting" as const };
+  const events = approvalEvents();
+  const view = render(
+    <Conversation {...p} session={waiting} events={events} historyLoading />,
+  );
+  expect(screen.queryByRole("region", { name: "待审批操作" })).toBeNull();
+  view.rerender(<Conversation {...p} session={waiting} events={events} />);
+  await screen.findByRole("region", { name: "待审批操作" });
+  view.rerender(
+    <Conversation
+      {...p}
+      session={{ ...session("b"), status: "waiting" }}
+      events={events}
+    />,
+  );
+  expect(screen.queryByRole("region", { name: "待审批操作" })).toBeNull();
+  view.rerender(
+    <Conversation
+      {...p}
+      session={{ ...waiting, archived: true }}
+      events={events}
+    />,
+  );
+  expect(screen.queryByRole("region", { name: "待审批操作" })).toBeNull();
+});
+it("keeps approval submission scoped when switching sessions before an earlier response returns", async () => {
+  const p = props();
+  const finishes: (() => void)[] = [];
+  p.approve.mockImplementation(
+    () => new Promise<void>((resolve) => finishes.push(resolve)),
+  );
+  const view = render(
+    <Conversation
+      {...p}
+      session={{ ...session("a"), status: "waiting" }}
+      events={approvalEvents("a")}
+    />,
+  );
+  fireEvent.click(await screen.findByRole("button", { name: "允许一次" }));
+  expect(
+    (screen.getByRole("button", { name: "处理中…" }) as HTMLButtonElement)
+      .disabled,
+  ).toBe(true);
+  view.rerender(
+    <Conversation
+      {...p}
+      session={{ ...session("b"), status: "waiting" }}
+      events={approvalEvents("b")}
+    />,
+  );
+  fireEvent.click(await screen.findByRole("button", { name: "允许一次" }));
+  expect(p.approve).toHaveBeenCalledTimes(2);
+  await act(async () => finishes[0]());
+  expect(
+    (screen.getByRole("button", { name: "处理中…" }) as HTMLButtonElement)
+      .disabled,
+  ).toBe(true);
+  await act(async () => finishes[1]());
+  expect(
+    (screen.getByRole("button", { name: "允许一次" }) as HTMLButtonElement)
+      .disabled,
+  ).toBe(false);
+});
+it("keeps independent text and references across remounts, never replaces a nonempty draft with a suggestion", async () => {
+  const p = props();
+  const view = render(<Conversation {...p} key="a" session={session("a")} />);
+  fireEvent.change(input(), { target: { value: "keep this" } });
+  expect(screen.queryByRole("button", { name: "梳理项目结构" })).toBeNull();
+  fireEvent.click(screen.getByRole("button", { name: "添加项目引用" }));
+  fireEvent.click(await screen.findByRole("option", { name: "note.md" }));
+  view.rerender(<Conversation {...p} key="b" session={session("b")} />);
+  expect(input().value).toBe("");
+  fireEvent.change(input(), { target: { value: "another" } });
+  view.rerender(<Conversation {...p} key="a2" session={session("a")} />);
+  expect(input().value).toBe("keep this");
+  expect(screen.getByRole("button", { name: "移除引用 note.md" })).toBeTruthy();
+  view.rerender(
+    <Conversation {...p} key="remote" hostId="remote" session={session("a")} />,
+  );
+  expect(input().value).toBe("");
+  expect(screen.queryByRole("button", { name: "移除引用 note.md" })).toBeNull();
+});
+it.each([true, false])(
+  "handles first-send session creation without losing or duplicating a draft (accepted=%s)",
+  async (accepted) => {
+    const p = props();
+    let finish!: (value: boolean) => void;
+    p.send.mockImplementation(
+      () =>
+        new Promise<boolean>((resolve) => {
+          finish = resolve;
+        }),
+    );
+    const view = render(<Conversation {...p} />);
+    fireEvent.change(input(), { target: { value: "first send" } });
+    fireEvent.click(screen.getByRole("button", { name: "发送任务" }));
+    view.rerender(<Conversation {...p} session={session("created")} />);
+    expect(input().value).toBe("first send");
+    await act(async () => finish(accepted));
+    await waitFor(() =>
+      expect(input().value).toBe(accepted ? "" : "first send"),
+    );
+    view.rerender(<Conversation {...p} key="new" />);
+    expect(input().value).toBe("");
+  },
+);
+it("a late accepted send cannot clear a new draft written after navigation", async () => {
+  const p = props();
+  let finish!: (value: boolean) => void;
+  p.send.mockImplementation(
+    () =>
+      new Promise<boolean>((resolve) => {
+        finish = resolve;
+      }),
+  );
+  const view = render(<Conversation {...p} key="old" session={session("a")} />);
+  fireEvent.change(input(), { target: { value: "submitted" } });
+  fireEvent.click(screen.getByRole("button", { name: "发送任务" }));
+  view.rerender(<Conversation {...p} key="return" session={session("a")} />);
+  fireEvent.change(input(), { target: { value: "new draft" } });
+  await act(async () => finish(true));
+  expect(input().value).toBe("new draft");
+});
+it.each([true, false])(
+  "reconciles a session render that arrives after a fast send response (accepted=%s)",
+  async (accepted) => {
+    const p = props();
+    p.send.mockResolvedValue(accepted);
+    const view = render(<Conversation {...p} />);
+    fireEvent.change(input(), { target: { value: "fast response" } });
+    await act(async () =>
+      fireEvent.click(screen.getByRole("button", { name: "发送任务" })),
+    );
+    view.rerender(<Conversation {...p} session={session("created")} />);
+    expect(input().value).toBe(accepted ? "" : "fast response");
+  },
+);
+
+it("shows actual thinking and stop progress, restoring status when cancellation fails", async () => {
+  const p = props();
+  let rejectStop!: (value: boolean) => void;
+  p.cancel.mockImplementation(
+    () =>
+      new Promise<boolean>((resolve) => {
+        rejectStop = resolve;
+      }),
+  );
+  const running = { ...session("s"), status: "running" as const };
+  const events = [
+    {
+      seq: 1,
+      at: 0,
+      session_id: "s",
+      event: { kind: "progress" as const, phase: "thinking" as const },
+    },
+  ];
+  const view = render(
+    <Conversation {...p} session={running} events={events} />,
+  );
+  await waitFor(() =>
+    expect(screen.getByRole("status").textContent).toBe("正在思考"),
+  );
+  fireEvent.click(screen.getByRole("button", { name: "停止任务" }));
+  expect(screen.getByRole("status").textContent).toBe("正在停止");
+  await act(async () => rejectStop(false));
+  expect(screen.getByRole("status").textContent).toBe("正在思考");
+  view.rerender(
+    <Conversation
+      {...p}
+      session={{ ...running, status: "completed" }}
+      events={events}
+    />,
+  );
+  expect(screen.queryByRole("status")).toBeNull();
+});
+
+it("keeps reading positions across session switches and resets only on reopening or recovery", async () => {
+  const p = props();
+  const positions = new Map<string, { top: number; follow: boolean }>();
+  const aEvents: Event[] = [
+    {
+      seq: 1,
+      at: 0,
+      session_id: "a",
+      event: { kind: "text", text: "Long history" },
+    },
+  ];
+  const bEvents: Event[] = [{ ...aEvents[0], session_id: "b" }];
+  const view = render(
+    <Conversation
+      {...p}
+      session={session("a")}
+      events={aEvents}
+      readingScope="a-open-1"
+      readingPositions={positions}
+    />,
+  );
+  const el = view.container.querySelector(
+    ".conversation-scroll",
+  ) as HTMLDivElement;
+  Object.defineProperties(el, {
+    scrollHeight: { configurable: true, value: 1500 },
+    clientHeight: { configurable: true, value: 400 },
+  });
+  await waitFor(() => expect(el.getAttribute("aria-busy")).toBe("false"));
+  el.scrollTop = 200;
+  fireEvent.scroll(el);
+  expect(positions.get("a-open-1")).toEqual({ top: 200, follow: false });
+  view.rerender(
+    <Conversation
+      {...p}
+      session={session("b")}
+      events={bEvents}
+      readingScope="b-open-1"
+      readingPositions={positions}
+    />,
+  );
+  await waitFor(() => expect(el.getAttribute("aria-busy")).toBe("false"));
+  expect(el.scrollTop).toBe(1500);
+  view.rerender(
+    <Conversation
+      {...p}
+      session={session("a")}
+      events={aEvents}
+      readingScope="a-open-1"
+      readingPositions={positions}
+    />,
+  );
+  await waitFor(() => expect(el.getAttribute("aria-busy")).toBe("false"));
+  expect(el.scrollTop).toBe(200);
+  expect(screen.getByRole("button", { name: "回到最新" })).toBeTruthy();
+  view.rerender(
+    <Conversation
+      {...p}
+      session={session("a")}
+      events={aEvents}
+      readingScope="a-restored-2"
+      readingPositions={positions}
+    />,
+  );
+  await waitFor(() => expect(el.getAttribute("aria-busy")).toBe("false"));
+  expect(el.scrollTop).toBe(1500);
+  expect(screen.queryByRole("button", { name: "回到最新" })).toBeNull();
+});
+
+it("keeps connection progress near the composer, preserves drafts, and offers a concise retry after failure", () => {
+  const p = props();
+  const reconnect = vi.fn();
+  const view = render(
+    <Conversation
+      {...p}
+      connected={false}
+      connecting
+      reconnect={reconnect}
+      session={session("a")}
+    />,
+  );
+  expect(input().placeholder).toBe("正在准备…");
+  expect(screen.queryByText("暂时无法连接")).toBeNull();
+  expect(
+    (screen.getByRole("button", { name: "发送任务" }) as HTMLButtonElement)
+      .disabled,
+  ).toBe(true);
+  fireEvent.change(input(), { target: { value: "keep draft" } });
+  expect(screen.getByText("正在准备")).toBeTruthy();
+  view.rerender(
+    <Conversation
+      {...p}
+      connected={false}
+      connecting={false}
+      connectionError="无法确认本机后台版本"
+      reconnect={reconnect}
+      session={session("a")}
+    />,
+  );
+  expect(input().value).toBe("keep draft");
+  expect(screen.getByText("暂时无法连接").getAttribute("title")).toBe(
+    "无法确认本机后台版本",
+  );
+  expect(screen.queryByText("无法确认本机后台版本")).toBeNull();
+  fireEvent.click(screen.getByRole("button", { name: "重新连接" }));
+  expect(reconnect).toHaveBeenCalledOnce();
+  view.rerender(
+    <Conversation {...p} reconnect={reconnect} session={session("a")} />,
+  );
+  expect(screen.queryByText("暂时无法连接")).toBeNull();
+  expect(input().value).toBe("keep draft");
+});
+
+it("keeps history concealed until it is fully loaded and positioned at the bottom", async () => {
+  const p = props();
+  const ready = vi.fn();
+  const events = [
+    {
+      seq: 1,
+      at: 0,
+      session_id: "a",
+      event: { kind: "text" as const, text: "Long final reply" },
+    },
+  ];
+  const view = render(
+    <Conversation
+      {...p}
+      session={session("a")}
+      historyLoading
+      onHistoryReady={ready}
+      events={events}
+    />,
+  );
+  const el = view.container.querySelector(
+    ".conversation-scroll",
+  ) as HTMLDivElement;
+  Object.defineProperties(el, {
+    scrollHeight: { configurable: true, value: 2200 },
+    clientHeight: { configurable: true, value: 400 },
+  });
+  expect(el.getAttribute("aria-busy")).toBe("true");
+  expect(ready).not.toHaveBeenCalled();
+  expect(screen.queryByText("正在加载")).toBeNull();
+  expect(
+    view.container.querySelector(".messages")?.getAttribute("aria-hidden"),
+  ).toBe("true");
+  view.rerender(
+    <Conversation
+      {...p}
+      session={session("a")}
+      historyLoading={false}
+      onHistoryReady={ready}
+      events={events}
+    />,
+  );
+  await waitFor(() => expect(el.getAttribute("aria-busy")).toBe("false"));
+  expect(el.scrollTop).toBe(2200);
+  expect(ready).toHaveBeenCalledOnce();
+  expect(screen.queryByText("正在加载")).toBeNull();
+  expect(
+    view.container.querySelector(".messages")?.getAttribute("aria-hidden"),
+  ).toBe("false");
+});
+
+it("shows one reconnect action for a lost connection and preserves the draft", () => {
+  const p = props();
+  const reconnect = vi.fn();
+  const view = render(<Conversation {...p} session={session("a")} />);
+  fireEvent.change(input(), { target: { value: "保留未发送的消息" } });
+  view.rerender(
+    <Conversation
+      {...p}
+      session={session("a")}
+      connected={false}
+      connectionLost
+      connectionError="连接已失效；请求可能已执行"
+      reconnect={reconnect}
+    />,
+  );
+  expect(screen.getByText("连接已断开").title).toContain("请求可能已执行");
+  expect(screen.queryByText("连接已失效；请求可能已执行")).toBeNull();
+  fireEvent.click(screen.getByRole("button", { name: "重新连接" }));
+  expect(reconnect).toHaveBeenCalledOnce();
+  view.rerender(<Conversation {...p} session={session("a")} />);
+  expect(input().value).toBe("保留未发送的消息");
+  expect(p.send).not.toHaveBeenCalled();
+});
+
+it("keeps the reading anchor when older history is prepended without concealing the current transcript", async () => {
+  const p = props();
+  const positions = new Map<string, { top: number; follow: boolean }>();
+  const latest: Event = {
+    seq: 200,
+    at: 0,
+    session_id: "a",
+    event: { kind: "text", text: "Latest" },
+  };
+  const view = render(
+    <Conversation
+      {...p}
+      session={session("a")}
+      events={[latest]}
+      readingScope="a"
+      readingPositions={positions}
+    />,
+  );
+  const el = view.container.querySelector(
+    ".conversation-scroll",
+  ) as HTMLDivElement;
+  let height = 1500;
+  Object.defineProperties(el, {
+    scrollHeight: { configurable: true, get: () => height },
+    clientHeight: { configurable: true, value: 400 },
+  });
+  // Commit a current layout measurement, then scroll away from the bottom.
+  view.rerender(
+    <Conversation
+      {...p}
+      session={session("a")}
+      events={[latest]}
+      readingScope="a"
+      readingPositions={positions}
+    />,
+  );
+  await waitFor(() => expect(el.getAttribute("aria-busy")).toBe("false"));
+  el.scrollTop = 200;
+  fireEvent.scroll(el);
+  height = 2300;
+  view.rerender(
+    <Conversation
+      {...p}
+      session={session("a")}
+      events={[
+        { ...latest, seq: 100, event: { kind: "notice", text: "Earlier" } },
+        latest,
+      ]}
+      readingScope="a"
+      readingPositions={positions}
+    />,
+  );
+  expect(el.scrollTop).toBe(1000);
+  expect(positions.get("a")).toEqual({ top: 1000, follow: false });
+  expect(el.getAttribute("aria-busy")).toBe("false");
+});

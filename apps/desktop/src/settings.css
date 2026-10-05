@@ -1,0 +1,256 @@
+/* Settings share typography, surfaces and control metrics across pages. */
+.settings-panel-content {
+  --settings-gap: var(--space-5);
+  font-size: var(--text-md);
+  line-height: var(--leading-ui);
+}
+.settings-panel-content > h2 {
+  margin: 0 0 var(--space-2);
+  font-size: var(--text-heading);
+  font-weight: 600;
+  letter-spacing: 0;
+}
+.settings-panel-content > h3,
+.settings-panel-content .agent-card h3,
+.settings-panel-content .provider-form h3 {
+  font-size: var(--text-subheading);
+  font-weight: 500;
+  margin: 0 0 var(--space-4);
+}
+.settings-panel-content > h3 {
+  margin-top: var(--space-6);
+}
+.settings-panel-content > p,
+.settings-panel-content .form-note,
+.settings-panel-content .appearance-footer,
+.settings-panel-content .appearance-notice {
+  font-size: var(--text-sm);
+  font-weight: 400;
+  line-height: 1.6;
+  color: var(--color-text-secondary);
+}
+.settings-panel-content > p {
+  margin: 0 0 var(--space-5);
+}
+.settings-panel-content label {
+  font-size: var(--text-md);
+  font-weight: 400;
+  color: var(--color-text-secondary);
+}
+.settings-panel-content
+  :is(
+    .appearance-controls,
+    .agent-card,
+    .provider-entry,
+    .provider-form,
+    .settings-connection
+  ) {
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-panel);
+  padding: var(--space-5);
+}
+.settings-panel-content .appearance-controls {
+  padding-block: 0;
+}
+.settings-panel-content :is(.agent-card, .provider-form, .provider-list) {
+  margin: var(--space-5) 0;
+}
+.settings-panel-content .provider-form fieldset {
+  gap: var(--space-4);
+}
+.settings-panel-content .provider-form label {
+  margin: 0;
+}
+.settings-panel-content .appearance-row {
+  min-height: 64px;
+  padding-block: var(--space-3);
+  gap: var(--space-4);
+}
+.settings-panel-content .appearance-row > :is(span, strong, label) {
+  font-size: var(--text-md);
+  font-weight: 400;
+  color: var(--color-text-secondary);
+}
+.settings-panel-content
+  :is(
+    .appearance-row small,
+    .provider-choice small,
+    .settings-connection small,
+    .provider-models-field small
+  ) {
+  font-size: var(--text-sm);
+  line-height: 1.6;
+  font-weight: 400;
+}
+.settings-panel-content .appearance-row .select-trigger {
+  margin: 0;
+}
+.settings-panel-content
+  :is(
+    .primary,
+    .secondary,
+    .appearance-actions > button,
+    .appearance-footer button
+  ) {
+  min-height: 36px;
+  padding: var(--space-2) var(--space-3);
+  font-size: var(--text-md);
+  font-weight: 500;
+  border-radius: var(--radius-control);
+}
+.settings-panel-content
+  :is(.appearance-actions > button, .appearance-footer button) {
+  border: 1px solid var(--color-border);
+  background: var(--color-input);
+}
+.settings-panel-content .appearance-actions > .select-trigger {
+  min-height: var(--control-height);
+  font-weight: 400;
+}
+.settings-panel-content .modal-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  margin-top: var(--space-4);
+  padding-top: var(--space-4);
+  border-top: 1px solid var(--color-border-subtle);
+}
+.settings-panel-content .modal-actions > .form-note {
+  margin-right: auto;
+}
+.settings-panel-content .appearance-switch {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  flex-shrink: 0;
+  min-height: 24px;
+}
+.settings-panel-content .appearance-switch span {
+  display: block;
+  flex-shrink: 0;
+}
+.settings-panel-content .agent-notice {
+  color: var(--color-success);
+}
+.settings-panel-content .form-error {
+  color: var(--color-danger);
+  font-size: var(--text-sm);
+}
+.settings-panel-content .appearance-warning {
+  color: var(--color-warning);
+}
+@media (max-width: 700px) {
+  .settings-panel-content .appearance-row {
+    flex-wrap: wrap;
+  }
+  .settings-panel-content .appearance-font-controls {
+    flex-wrap: wrap;
+  }
+  .settings-panel-content .settings-connection {
+    flex-wrap: wrap;
+  }
+}
+.settings-panel-content .ssh-settings-heading h2 {
+  margin: 0 0 var(--space-2);
+  letter-spacing: 0;
+}
+.settings-panel-content .ssh-settings-heading p {
+  font-size: var(--text-sm);
+  line-height: 1.6;
+  color: var(--color-text-secondary);
+}
+.settings-panel-content .ssh-host-row,
+.settings-panel-content .archive-chat {
+  padding: var(--space-5);
+  background: var(--color-surface);
+}
+.settings-panel-content .archive-chat {
+  border-radius: var(--radius-panel);
+}
+.settings-panel-content
+  :is(
+    .ssh-host-main small,
+    .ssh-status,
+    .archive-count,
+    .archive-group small,
+    .settings-details
+  ) {
+  font-size: var(--text-sm);
+  line-height: 1.6;
+}
+.settings-panel-content .settings-details {
+  margin-top: var(--space-5);
+}
+.settings-panel-content
+  :is(.archive-chat > button, .archive-load-error > button) {
+  min-height: 36px;
+  padding: var(--space-2) var(--space-3);
+  font-size: var(--text-md);
+  font-weight: 500;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-control);
+  background: var(--color-input);
+}
+.settings-panel-content .archive-search {
+  border-radius: var(--radius-control);
+  background: var(--color-input);
+}
+.settings-panel-content .archive-search input {
+  margin: 0;
+}
+.settings-panel-content .archive-filters > .select-trigger {
+  margin: 0;
+}
+.settings-panel-content :is(.ssh-empty, .archive-empty) {
+  padding: var(--space-6);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-panel);
+  background: var(--color-surface);
+  color: var(--color-text-secondary);
+}
+.settings-panel-content .ssh-modal {
+  padding: var(--space-6);
+}
+.settings-panel-content .ssh-modal label {
+  margin: var(--space-4) 0;
+}
+.settings-panel-content .ssh-auth-options label {
+  margin: 0;
+}
+@media (max-width: 700px) {
+  .settings-panel-content
+    :is(.ssh-host-row, .ssh-settings-heading, .archive-chat) {
+    flex-wrap: wrap;
+  }
+  .settings-panel-content .ssh-host-actions {
+    flex-wrap: wrap;
+  }
+}
+.settings-panel-content .ssh-host-list {
+  margin: var(--space-4) 0 var(--space-5);
+}
+.settings-panel-content .ssh-modal .settings-details {
+  margin-bottom: var(--space-4);
+}
+.provider-model-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  margin-bottom: var(--space-3);
+}
+.provider-model-heading h4 {
+  margin: 0;
+}
+.provider-model-table {
+  table-layout: fixed;
+}
+.provider-model-table th:last-child {
+  width: 48px;
+}
+.provider-model-table td:nth-child(2),
+.provider-model-table th:nth-child(2) {
+  padding-left: var(--space-3);
+}

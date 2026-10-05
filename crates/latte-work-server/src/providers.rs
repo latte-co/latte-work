@@ -264,6 +264,7 @@ impl ProviderStore {
             base_url: draft.base_url,
             model: draft.model,
             models: draft.models,
+            model_labels: draft.model_labels,
             auth: draft.auth,
             has_credential: true,
             revision: uuid::Uuid::new_v4().to_string(),
@@ -377,7 +378,14 @@ impl ProviderStore {
         if let Some(p) = &provider {
             compatible(agent, p)?;
             // The catalog carries metadata only; validate it using a non-secret placeholder.
-            validate(p, "metadata-only")?;
+            validate(
+                p,
+                if p.auth == latte_work_protocol::ProviderAuth::None {
+                    ""
+                } else {
+                    "metadata-only"
+                },
+            )?;
         }
         let effort_levels = crate::agents::effort_levels(
             agent,
@@ -396,7 +404,7 @@ impl ProviderStore {
                 provider: Some(p.name),
                 default_model: Some(p.model),
                 effort_levels,
-                model_labels: BTreeMap::new(),
+                model_labels: p.model_labels,
             })
         } else {
             Ok(Response::Models {
@@ -421,6 +429,28 @@ impl ProviderStore {
         let mut config = self.launch_config(agent);
         config.model = model.map(str::to_owned);
         Ok(config)
+    }
+    pub fn open_config(
+        &self,
+        agent: &str,
+        historical_model: Option<&str>,
+        provider: Option<TurnProvider>,
+    ) -> Result<LaunchConfig> {
+        let metadata = match &provider {
+            Some(TurnProvider::Snapshot(snapshot)) => Some(snapshot.provider.clone()),
+            Some(TurnProvider::Cli) => None,
+            None => self.launch_config(agent).provider.map(|p| p.metadata),
+        };
+        let Response::Models {
+            models,
+            default_model,
+            ..
+        } = Self::models_for_provider(agent, historical_model, metadata)?
+        else {
+            unreachable!()
+        };
+        let model = historical_model.filter(|model| models.iter().any(|value| value == model));
+        self.turn_config(agent, model.or(default_model.as_deref()), provider)
     }
     pub fn turn_config(
         &self,
@@ -539,6 +569,55 @@ fn compatible(agent: &str, provider: &Provider) -> Result<()> {
 mod tests {
     use super::*;
     use latte_work_protocol::{ProviderAuth, ProviderProtocol};
+    #[test]
+    fn display_names_do_not_change_model_ids_in_no_auth_catalog() {
+        let provider: Provider = serde_json::from_value(serde_json::json!({
+            "id":"p", "name":"Local", "base_url":"http://localhost:8000", "protocol":"anthropic_messages",
+            "model":"real-id", "models":["other"], "model_labels":{"real-id":"Friendly"},
+            "auth":"none", "has_credential":false
+        })).unwrap();
+        let Response::Models {
+            models,
+            model_labels,
+            default_model,
+            ..
+        } = ProviderStore::models_for_provider("claude", None, Some(provider)).unwrap()
+        else {
+            panic!()
+        };
+        assert_eq!(models, vec!["real-id", "other"]);
+        assert_eq!(default_model.as_deref(), Some("real-id"));
+        assert_eq!(model_labels["real-id"], "Friendly");
+    }
+    #[test]
+    fn opening_history_uses_current_provider_without_relaxing_send_validation() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = ProviderStore::open(dir.path()).unwrap();
+        let id = saved(&mut store, draft(ProviderProtocol::AnthropicMessages));
+        store.bind("claude", Some(id.clone())).unwrap();
+        let snapshot = Some(store.snapshot("claude", &id).unwrap());
+        let open = store
+            .open_config(
+                "claude",
+                Some("opus"),
+                snapshot.clone().map(TurnProvider::Snapshot),
+            )
+            .unwrap();
+        assert_eq!(open.model.as_deref(), Some("first"));
+        assert!(
+            store
+                .turn_config("claude", Some("opus"), snapshot.map(TurnProvider::Snapshot))
+                .is_err()
+        );
+        assert_eq!(
+            store
+                .open_config("claude", Some("first"), None)
+                .unwrap()
+                .model
+                .as_deref(),
+            Some("first")
+        );
+    }
     fn draft(protocol: ProviderProtocol) -> ProviderDraft {
         ProviderDraft {
             id: None,
@@ -547,6 +626,7 @@ mod tests {
             base_url: "https://example.test".into(),
             model: "first".into(),
             models: vec![],
+            model_labels: Default::default(),
             auth: ProviderAuth::ApiKey,
             credential: Some("fixture-private-key".into()),
         }

@@ -45,3 +45,24 @@ describe("durable transcript projection", () => {
     ).toMatchObject({ resolved: true });
   });
 });
+it("does not reactivate an interrupted approval when a later turn starts", () => {
+  expect(
+    transcript([
+      e(1, { kind: "approval", request_id: "old", tool: "Write", input: {} }),
+      e(2, { kind: "state", status: "stopped", message: null }),
+      e(3, { kind: "user", text: "new", request_id: "new" }),
+      e(4, { kind: "state", status: "running", message: null }),
+    ])[0],
+  ).toMatchObject({ resolved: true, decision: "expired" });
+});
+
+it("preserves each user message's original send time through replay", () => {
+  const at = 1790760900000;
+  const event = {
+    ...e(1, { kind: "user", text: "继续", request_id: "r" }),
+    at,
+  };
+  expect(transcript(appendEvents([event], [event]))).toEqual([
+    { key: 1, type: "user", text: "继续", at },
+  ]);
+});

@@ -1,6 +1,6 @@
 //! Read-only project inspection, with canonical containment and bounded output.
 use anyhow::{Context, Result, bail};
-use latte_work_protocol::FileEntry;
+use latte_work_protocol::{ChangeSection, FileEntry, GitChange};
 use std::{
     path::{Component, Path},
     process::Stdio,
@@ -173,15 +173,140 @@ pub async fn diff(root: &Path) -> Result<(String, bool)> {
         ],
     )
     .await?;
-    let (status, c) = git(root, &["status", "--short", "--untracked-files=normal"]).await?;
+    let (status, c) = git(
+        root,
+        &["status", "--short", "--untracked-files=normal", "--", "."],
+    )
+    .await?;
     Ok((
         format!("# 工作区状态\n{status}\n# 未暂存改动\n{unstaged}\n# 已暂存改动\n{staged}"),
         a || b || c,
     ))
 }
+/// Porcelain -z always reports repository-relative paths, including in subprojects.
+/// Read one bounded snapshot, and keep project paths literal throughout Git calls.
+pub async fn changes(root: &Path) -> Result<(Vec<GitChange>, bool)> {
+    let (prefix, _) = git(root, &["rev-parse", "--show-prefix"]).await?;
+    let prefix = prefix.strip_suffix('\n').unwrap_or(&prefix);
+    let (status, mut truncated) = git(
+        root,
+        &[
+            "status",
+            "--porcelain=v1",
+            "-z",
+            "--untracked-files=all",
+            "--",
+            ".",
+        ],
+    )
+    .await?;
+    let complete = status.rfind('\0').map(|end| &status[..=end]).unwrap_or("");
+    let mut records = complete.split('\0');
+    let mut entries = Vec::new();
+    while let Some(record) = records.next() {
+        if record.is_empty() {
+            continue;
+        }
+        if record.len() < 4 || record.as_bytes()[2] != b' ' {
+            truncated = true;
+            break;
+        }
+        let flags = &record.as_bytes()[..2];
+        let renamed = flags.iter().any(|flag| matches!(flag, b'R' | b'C'));
+        let previous = if renamed { records.next() } else { None };
+        let Some(path) = record[3..].strip_prefix(prefix) else {
+            continue;
+        };
+        if path.is_empty() {
+            continue;
+        }
+        let previous_path = previous
+            .and_then(|path| path.strip_prefix(prefix))
+            .map(str::to_owned);
+        for (flag, section) in if flags == b"??" {
+            vec![(b'?', ChangeSection::Untracked)]
+        } else {
+            vec![
+                (flags[0], ChangeSection::Staged),
+                (flags[1], ChangeSection::Unstaged),
+            ]
+        } {
+            if flag == b' ' || flag == b'!' {
+                continue;
+            }
+            if entries.len() >= 1000 {
+                truncated = true;
+                break;
+            }
+            entries.push(GitChange {
+                path: path.into(),
+                previous_path: if matches!(flag, b'R' | b'C') {
+                    previous_path.clone()
+                } else {
+                    None
+                },
+                section,
+                status: char::from(flag).to_string(),
+            });
+        }
+        if entries.len() >= 1000 {
+            truncated |= records.any(|record| !record.is_empty());
+            break;
+        }
+    }
+    Ok((entries, truncated))
+}
+pub async fn change_diff(
+    root: &Path,
+    path: &str,
+    section: ChangeSection,
+) -> Result<(String, bool)> {
+    if path.is_empty()
+        || path.len() > 4096
+        || path.contains('\0')
+        || Path::new(path).is_absolute()
+        || Path::new(path)
+            .components()
+            .any(|c| !matches!(c, Component::Normal(_)))
+    {
+        bail!("路径必须位于项目目录内");
+    }
+    if section == ChangeSection::Untracked {
+        let (text, truncated) = read(root, path).await?;
+        // Plain contents, not a synthetic patch: binary and symlink checks stay in read().
+        return Ok((text, truncated));
+    }
+    let mut args = vec![
+        "diff",
+        "--relative",
+        "--no-color",
+        "--no-ext-diff",
+        "--no-textconv",
+    ];
+    if section == ChangeSection::Staged {
+        args.push("--cached");
+    }
+    let (entries, _) = changes(root).await?;
+    let previous = entries
+        .iter()
+        .find(|entry| entry.path == path && entry.section == section)
+        .and_then(|entry| entry.previous_path.as_deref());
+    args.extend(["--", path]);
+    if let Some(previous) = previous {
+        args.push(previous);
+    }
+    git(root, &args).await
+}
+
 async fn git(root: &Path, args: &[&str]) -> Result<(String, bool)> {
     let mut child = Command::new("git")
-        .args(["-c", "core.fsmonitor=false", "-c", "core.quotePath=false"])
+        .args([
+            "--literal-pathspecs",
+            "-c",
+            "core.fsmonitor=false",
+            "-c",
+            "core.quotePath=false",
+        ])
         .args(args)
         .current_dir(root)
         .env("GIT_OPTIONAL_LOCKS", "0")
@@ -303,5 +428,96 @@ mod tests {
         assert!(resolve(root.path(), "escape").is_err());
         std::fs::write(root.path().join("ok"), "text").unwrap();
         assert!(resolve(root.path(), "ok").is_ok());
+    }
+    #[tokio::test]
+    async fn changes_are_project_scoped_and_preserve_unusual_paths() {
+        let root = tempfile::tempdir().unwrap();
+        let run = |args: &[&str]| {
+            let status = std::process::Command::new("git")
+                .args(args)
+                .current_dir(root.path())
+                .status()
+                .unwrap();
+            assert!(status.success());
+        };
+        run(&["init", "-q"]);
+        run(&["config", "user.name", "Fixture"]);
+        run(&["config", "user.email", "fixture@example.test"]);
+        let sub = root.path().join("project");
+        std::fs::create_dir(&sub).unwrap();
+        std::fs::write(sub.join("existing.txt"), "original\n").unwrap();
+        std::fs::write(sub.join("old.txt"), "rename me\n").unwrap();
+        std::fs::write(root.path().join("outside.txt"), "outside\n").unwrap();
+        run(&["add", "."]);
+        run(&["commit", "-qm", "initial"]);
+        std::fs::write(sub.join("existing.txt"), "staged\n").unwrap();
+        run(&["add", "project/existing.txt"]);
+        std::fs::write(sub.join("existing.txt"), "working\n").unwrap();
+        run(&["mv", "project/old.txt", "project/renamed.txt"]);
+        let unusual = "中文 space\nfile.txt";
+        std::fs::write(sub.join(unusual), "untracked\n").unwrap();
+        std::fs::write(root.path().join("outside.txt"), "changed\n").unwrap();
+        std::fs::write(root.path().join("outside-new.txt"), "new\n").unwrap();
+        let (entries, truncated) = changes(&sub).await.unwrap();
+        assert!(!truncated);
+        assert_eq!(entries.len(), 4);
+        assert!(entries.iter().all(|entry| !entry.path.contains("outside") && !entry.path.starts_with("project/")));
+        assert!(
+            entries
+                .iter()
+                .any(|entry| entry.path == unusual && entry.section == ChangeSection::Untracked)
+        );
+        assert!(entries.iter().any(|entry| entry.path == "renamed.txt"
+            && entry.previous_path.as_deref() == Some("old.txt")));
+        assert!(
+            change_diff(&sub, "existing.txt", ChangeSection::Staged)
+                .await
+                .unwrap()
+                .0
+                .contains("+staged")
+        );
+        assert!(
+            change_diff(&sub, "existing.txt", ChangeSection::Unstaged)
+                .await
+                .unwrap()
+                .0
+                .contains("+working")
+        );
+        assert_eq!(
+            change_diff(&sub, unusual, ChangeSection::Untracked)
+                .await
+                .unwrap()
+                .0,
+            "untracked\n"
+        );
+        assert!(!diff(&sub).await.unwrap().0.contains("outside"));
+        for path in ["../outside.txt", "/etc/passwd", ":(top)*", ""] {
+            // Magic syntax is a literal filename, never a pathspec escape.
+            let result = change_diff(&sub, path, ChangeSection::Unstaged).await;
+            if path.starts_with(':') {
+                assert_eq!(result.unwrap().0, "");
+            } else {
+                assert!(result.is_err());
+            }
+        }
+        std::os::unix::fs::symlink(root.path().join("outside.txt"), sub.join("link")).unwrap();
+        assert!(
+            change_diff(&sub, "link", ChangeSection::Untracked)
+                .await
+                .is_err()
+        );
+        std::fs::write(sub.join("binary"), [0, 1, 2]).unwrap();
+        assert!(
+            change_diff(&sub, "binary", ChangeSection::Untracked)
+                .await
+                .is_err()
+        );
+        std::fs::write(sub.join("large"), vec![b'a'; LIMIT + 10]).unwrap();
+        assert!(
+            change_diff(&sub, "large", ChangeSection::Untracked)
+                .await
+                .unwrap()
+                .1
+        );
     }
 }

@@ -209,7 +209,7 @@ it("isolates conversations in the same project and restores selection and expans
     screen.getByRole("tab", { name: "文件" }).getAttribute("aria-selected"),
   ).toBe("true");
   expect(screen.queryByRole("tab", { name: "改动" })).toBeNull();
-  expect(screen.getByRole("button", { name: "还原工作区" })).toBeTruthy();
+  expect(screen.getByRole("button", { name: "分离右侧栏" })).toBeTruthy();
 });
 it("reconciles only this conversation's terminal IDs, never imports project terminals", async () => {
   const terminal = {
@@ -285,4 +285,84 @@ it("keeps the same conversation sidebar when its host/project changes and routes
     method: "close_terminal",
     terminal_id: "original",
   });
+});
+
+it("keeps conversation first in merged tabs, supports keyboard selection, and preserves resource instances", async () => {
+  const terminal = {
+    id: "merged-shell",
+    project_id: "one",
+    title: "sh",
+    exited: false,
+    exit_code: null,
+  };
+  mocks.request.mockResolvedValue({ kind: "terminals", terminals: [terminal] });
+  updateWorkspace(props.workspaceId, {
+    tabs: [
+      { id: "files", kind: "files" },
+      { id: terminal.id, kind: "terminal", terminal },
+    ],
+    current: "files",
+    expanded: true,
+    conversationActive: true,
+  });
+  const view = render(<Workspace {...props} conversationTitle="测试对话" />);
+  await act(async () => {});
+  const tabs = screen.getAllByRole("tab");
+  expect(tabs.map((tab) => tab.textContent)).toEqual([
+    "测试对话",
+    "文件",
+    "sh · 本机",
+  ]);
+  expect(tabs[0].getAttribute("aria-selected")).toBe("true");
+  expect(screen.queryByRole("button", { name: "关闭测试对话" })).toBeNull();
+  expect(screen.queryByRole("tabpanel")).toBeNull();
+  fireEvent.keyDown(tabs[0], { key: "ArrowRight" });
+  expect(screen.getByRole("tabpanel").textContent).toContain("文件预览");
+  expect(document.activeElement).toBe(tabs[1]);
+  fireEvent.keyDown(tabs[1], { key: "End" });
+  expect(screen.getByRole("tabpanel").textContent).toContain(
+    "Shell merged-shell",
+  );
+  fireEvent.keyDown(tabs[2], { key: "Home" });
+  expect(screen.queryByRole("tabpanel")).toBeNull();
+  expect(mocks.disposed).not.toHaveBeenCalled();
+  view.rerender(
+    <Workspace {...props} conversationTitle="测试对话" visible={false} />,
+  );
+  view.rerender(<Workspace {...props} conversationTitle="测试对话" />);
+  expect(
+    screen.getByRole("tab", { name: "测试对话" }).getAttribute("aria-selected"),
+  ).toBe("true");
+  fireEvent.click(screen.getByRole("button", { name: "分离右侧栏" }));
+  expect(props.close).toHaveBeenCalledTimes(1);
+  act(() => updateWorkspace(props.workspaceId, { expanded: false }));
+  expect(screen.queryByRole("tab", { name: "测试对话" })).toBeNull();
+  expect(screen.getByRole("tabpanel").textContent).toContain(
+    "Shell merged-shell",
+  );
+  expect(mocks.disposed).not.toHaveBeenCalled();
+});
+it("keeps a merged conversation tab when all resources close or no project is selected", async () => {
+  updateWorkspace(props.workspaceId, {
+    tabs: [{ id: "files", kind: "files" }],
+    current: "files",
+    expanded: true,
+  });
+  const view = render(<Workspace {...props} conversationTitle="保留对话" />);
+  await act(async () => {});
+  await act(async () =>
+    fireEvent.click(screen.getByRole("button", { name: "关闭文件" })),
+  );
+  expect(screen.getAllByRole("tab")).toHaveLength(1);
+  expect(
+    screen.getByRole("tab", { name: "保留对话" }).getAttribute("aria-selected"),
+  ).toBe("true");
+  expect(screen.getByRole("button", { name: "添加工作区标签" })).toBeTruthy();
+  view.rerender(
+    <Workspace {...props} project={undefined} conversationTitle="新任务" />,
+  );
+  expect(
+    screen.getByRole("tab", { name: "新任务" }).getAttribute("aria-selected"),
+  ).toBe("true");
+  expect(screen.getByRole("button", { name: "分离右侧栏" })).toBeTruthy();
 });

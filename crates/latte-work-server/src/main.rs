@@ -1,4 +1,5 @@
 //! A single host daemon; `connect` is a disposable local/SSH byte bridge.
+mod agent_environment;
 mod agents;
 mod attachments;
 mod files;
@@ -153,7 +154,11 @@ async fn serve(dir: &Path) -> Result<()> {
         std::fs::remove_file(&socket)?;
     }
     let database = Arc::new(Mutex::new(store::Store::open(&dir.join("state.sqlite"))?));
-    let (agent_binary, agent) = agents::discover().await;
+    let environment_warning = agent_environment::initialize().await;
+    let (agent_binary, mut agent) = agents::discover().await;
+    if let Some(warning) = environment_warning {
+        agent.detail = format!("{} · {warning}", agent.detail);
+    }
     let service = Service {
         attachments: Arc::new(Mutex::new(attachments::Attachments::new(dir)?)),
         lifecycle: Arc::new(upgrade::Lifecycle::new()?),
@@ -192,10 +197,15 @@ async fn serve(dir: &Path) -> Result<()> {
         .lock()
         .map_err(|_| anyhow::anyhow!("run lock poisoned"))?
         .values()
-        .cloned()
+        .map(|run| run.control.clone())
         .collect();
     for control in controls {
-        let _ = control.send(Control::Cancel).await;
+        let _ = control
+            .send(Control::Cancel {
+                reply: None,
+                only_if_idle: false,
+            })
+            .await;
     }
     tokio::time::sleep(Duration::from_secs(3)).await;
     std::fs::remove_file(socket)?;
@@ -236,6 +246,7 @@ async fn connection(stream: UnixStream, service: Service) -> Result<()> {
                             server_id: service.server_id.clone(),
                             agents: vec![service.agent.clone()],
                             permission_settings: true,
+                            history_window: true,
                         }
                     } else {
                         Response::Error {
@@ -274,7 +285,16 @@ async fn connection(stream: UnixStream, service: Service) -> Result<()> {
     Ok(())
 }
 async fn dispatch(s: &Service, request: Request) -> Result<Response> {
-    Ok(match request {
+    let closed_resource = match &request {
+        Request::CloseAgentSession { session_id, .. } => {
+            Some(upgrade::Resource::AgentSession(session_id.clone()))
+        }
+        Request::CloseTerminal { terminal_id } => {
+            Some(upgrade::Resource::Terminal(terminal_id.clone()))
+        }
+        _ => None,
+    };
+    let mut response = match request {
         Request::Hello { .. } => unreachable!(),
         Request::Providers => s
             .providers
@@ -542,6 +562,54 @@ async fn dispatch(s: &Service, request: Request) -> Result<Response> {
                 session: db(&s.database, |d| d.create_session(project_id, agent))?,
             }
         }
+        Request::OpenAgentSession {
+            session_id,
+            provider,
+        } => {
+            if !s.agent.available {
+                bail!("此 Host 的 Agent CLI 不可用");
+            }
+            let (session, path) = db(&s.database, |d| {
+                let session = d.session(&session_id)?;
+                let path = d.project(&session.project_id)?.path;
+                Ok((session, path))
+            })?;
+            if session.archived {
+                bail!("请先取消归档再打开 Agent 会话");
+            }
+            let mut config = s
+                .providers
+                .lock()
+                .map_err(|_| anyhow::anyhow!("Provider 配置锁异常"))?
+                .open_config(&session.agent, session.model.as_deref(), provider)?;
+            config.effort = session.effort.filter(|level| {
+                agents::effort_levels(&session.agent, config.model.as_deref()).contains(level)
+            });
+            config.permission_mode = session.permission_mode.clone();
+            runtime::open(
+                s.database.clone(),
+                s.runs.clone(),
+                s.agent_binary.clone(),
+                session,
+                path,
+                config,
+            )
+            .await?;
+            Response::Ok
+        }
+        Request::CloseAgentSession {
+            session_id,
+            only_if_idle,
+        } => {
+            runtime::close(
+                &s.database,
+                &s.runs,
+                &session_id,
+                only_if_idle.unwrap_or(false),
+            )
+            .await?;
+            Response::Ok
+        }
         Request::Send {
             provider,
             session_id,
@@ -606,33 +674,39 @@ async fn dispatch(s: &Service, request: Request) -> Result<Response> {
             }
             launch_config.permission_mode = permission_mode.clone();
             launch_config.effort = effort;
-            let (new, session, path) = db(&s.database, |d| {
+            let (session, path) = db(&s.database, |d| {
                 let session = d.session(&session_id)?;
                 let path = d.project(&session.project_id)?.path;
-                let new = d.begin(
-                    &session_id,
-                    &request_id,
-                    &text,
-                    model.as_deref(),
-                    effort,
-                    fingerprint.as_deref(),
-                    permission_mode.as_deref(),
-                )?;
-                Ok((new, session, path))
+                Ok((session, path))
             })?;
-            if new {
-                runtime::launch(
-                    s.database.clone(),
-                    s.runs.clone(),
-                    s.agent_binary.clone(),
-                    session,
-                    path,
+            let new = runtime::submit(
+                s.database.clone(),
+                s.runs.clone(),
+                s.agent_binary.clone(),
+                session,
+                path,
+                runtime::SendTurn {
+                    request_id,
                     text,
-                    launch_config,
-                )?;
-            }
+                    model,
+                    fingerprint,
+                    config: launch_config,
+                },
+            )
+            .await?;
             Response::Accepted { duplicate: !new }
         }
+        Request::History { session_id, before } => db(&s.database, |d| {
+            let session = d.session(&session_id)?;
+            let (events, has_more, needs_earlier, before) = d.history(&session_id, before)?;
+            Ok(Response::History {
+                session,
+                events,
+                has_more,
+                needs_earlier,
+                before,
+            })
+        })?,
         Request::Poll { session_id, after } => db(&s.database, |d| {
             let session = d.session(&session_id)?;
             let (events, has_more) = d.events(&session_id, after)?;
@@ -652,7 +726,7 @@ async fn dispatch(s: &Service, request: Request) -> Result<Response> {
                 .lock()
                 .map_err(|_| anyhow::anyhow!("run lock poisoned"))?
                 .get(&session_id)
-                .cloned()
+                .map(|run| run.control.clone())
                 .context("此会话没有运行中的任务")?;
             let (reply, receive) = oneshot::channel();
             control
@@ -673,9 +747,13 @@ async fn dispatch(s: &Service, request: Request) -> Result<Response> {
                 .lock()
                 .map_err(|_| anyhow::anyhow!("run lock poisoned"))?
                 .get(&session_id)
-                .cloned()
+                .map(|run| run.control.clone())
                 .context("此会话没有运行中的任务")?;
-            control.send(Control::Cancel).await?;
+            let (reply, receive) = oneshot::channel();
+            control.send(Control::Interrupt { reply }).await?;
+            tokio::time::timeout(Duration::from_secs(15), receive)
+                .await??
+                .map_err(anyhow::Error::msg)?;
             Response::Ok
         }
         Request::Files { project_id, path } => {
@@ -723,10 +801,31 @@ async fn dispatch(s: &Service, request: Request) -> Result<Response> {
             let (text, truncated) = files::read(Path::new(&p.path), &path).await?;
             Response::Content { text, truncated }
         }
+        Request::Changes { project_id } => {
+            let p = db(&s.database, |d| d.project(&project_id))?;
+            let (entries, truncated) = files::changes(Path::new(&p.path)).await?;
+            Response::Changes { entries, truncated }
+        }
+        Request::ChangeDiff {
+            project_id,
+            path,
+            section,
+        } => {
+            let p = db(&s.database, |d| d.project(&project_id))?;
+            let (text, truncated) = files::change_diff(Path::new(&p.path), &path, section).await?;
+            Response::Content { text, truncated }
+        }
         Request::Diff { project_id } => {
             let p = db(&s.database, |d| d.project(&project_id))?;
             let (text, truncated) = files::diff(Path::new(&p.path)).await?;
             Response::Content { text, truncated }
         }
-    })
+    };
+    if matches!(response, Response::Ok)
+        && let Some(resource) = closed_resource
+    {
+        s.lifecycle.forget(&resource)?;
+    }
+    runtime::project_session_state(&s.runs, &mut response)?;
+    Ok(response)
 }

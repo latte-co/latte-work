@@ -1,5 +1,5 @@
 use anyhow::{Result, bail};
-use latte_work_protocol::Provider;
+use latte_work_protocol::{Provider, ProviderAuth};
 
 pub fn validate_provider(provider: &Provider, credential: &str) -> Result<()> {
     if provider.id.is_empty()
@@ -24,8 +24,8 @@ pub fn validate_provider(provider: &Provider, credential: &str) -> Result<()> {
     {
         bail!("Base URL 必须是 HTTP(S) 地址，不能包含用户名、密码、查询参数或片段");
     }
-    if provider.models.len() > 64 {
-        bail!("每个 Provider 最多配置 64 个模型");
+    if provider.models.len() > 256 {
+        bail!("每个 Provider 最多配置 256 个模型");
     }
     for model in std::iter::once(&provider.model).chain(provider.models.iter()) {
         if model.is_empty()
@@ -35,6 +35,23 @@ pub fn validate_provider(provider: &Provider, credential: &str) -> Result<()> {
         {
             bail!("请填写有效的模型 ID（不能包含空白，最多 256 字节）");
         }
+    }
+    if provider.model_labels.len() > 257
+        || provider.model_labels.iter().any(|(id, name)| {
+            id.is_empty()
+                || id.len() > 256
+                || id.chars().any(|c| c.is_whitespace() || c.is_control())
+                || name.chars().count() > 80
+                || name.chars().any(char::is_control)
+        })
+    {
+        bail!("模型显示名称最多 80 个字符，映射数量最多 257 个");
+    }
+    if provider.auth == ProviderAuth::None {
+        if !credential.is_empty() {
+            bail!("无需认证的 Provider 不应保存凭据");
+        }
+        return Ok(());
     }
     if credential.trim().is_empty()
         || credential.len() > 8192

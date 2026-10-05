@@ -1,3 +1,4 @@
+import { Modal } from "./Modal";
 import { useEffect, useState } from "react";
 import { X } from "lucide-react";
 import { message, type Host } from "./api";
@@ -40,7 +41,7 @@ export function SshPasswordDialog({
   }
   return (
     <div className="modal-backdrop ssh-password-backdrop">
-      <section
+      <Modal
         className="modal ssh-password-modal"
         role="dialog"
         aria-modal="true"
@@ -88,7 +89,7 @@ export function SshPasswordDialog({
             </button>
           </div>
         </form>
-      </section>
+      </Modal>
     </div>
   );
 }

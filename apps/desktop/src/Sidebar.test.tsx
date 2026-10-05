@@ -88,10 +88,7 @@ it("refreshes collapsed background projects even while the current view rerender
   };
   const view = render(<Sidebar state={props()} />);
   await act(async () => {});
-  const project = screen.getByRole("button", {
-    name: /^Other/,
-    expanded: false,
-  });
+  const project = screen.getByRole("button", { name: "Other" });
   expect(
     within(project).getByRole("img", { name: "项目中有对话执行中" }),
   ).toBeTruthy();
@@ -106,4 +103,236 @@ it("refreshes collapsed background projects even while the current view rerender
     within(project).queryByRole("img", { name: "项目中有对话执行中" }),
   ).toBeNull();
   expect(mocks.request).toHaveBeenCalledTimes(2);
+});
+it("opens row menus without selecting a conversation and keeps the trigger marked open", () => {
+  const s = state([session("running")]);
+  render(<Sidebar state={s} />);
+  const more = screen.getByRole("button", { name: "Task 的更多操作" });
+  fireEvent.click(more);
+  expect(s.openSession).not.toHaveBeenCalled();
+  expect(more.getAttribute("aria-expanded")).toBe("true");
+  expect(more.closest(".session-item")?.getAttribute("data-menu-open")).toBe(
+    "true",
+  );
+  expect(screen.getByRole("menu", { name: "Task 会话操作" })).toBeTruthy();
+  fireEvent.keyDown(document, { key: "Escape" });
+  expect(more.getAttribute("aria-expanded")).toBe("false");
+  const project = screen.getByRole("button", { name: "Project 的更多操作" });
+  fireEvent.click(project);
+  expect(project.getAttribute("aria-expanded")).toBe("true");
+});
+it("scopes quick pin/archive actions and prevents archiving active tasks", async () => {
+  const s = state([session("running")]);
+  s.sessionAction = vi.fn().mockResolvedValue(undefined);
+  mocks.request.mockResolvedValue({
+    kind: "sessions",
+    sessions: [session("running")],
+  });
+  render(<Sidebar state={s} />);
+  fireEvent.click(screen.getByRole("button", { name: "归档 Task" }));
+  expect(s.sessionAction).not.toHaveBeenCalled();
+  await act(async () =>
+    fireEvent.click(screen.getByRole("button", { name: "置顶 Task" })),
+  );
+  expect(s.sessionAction).toHaveBeenCalledWith("local", {
+    method: "pin_session",
+    session_id: "s",
+    pinned: true,
+  });
+});
+it("keeps archived chats and archive navigation out of project sections", () => {
+  render(
+    <Sidebar state={state([{ ...session("completed"), archived: true }])} />,
+  );
+  expect(screen.queryByText("Task")).toBeNull();
+  expect(screen.queryByText(/已归档/)).toBeNull();
+});
+
+it("mutes empty projects and restores their emphasis when a conversation exists", () => {
+  const view = render(<Sidebar state={state([])} />);
+  const project = screen.getByRole("button", { name: "Project" });
+  expect(project.closest(".project-heading")?.classList.contains("empty")).toBe(
+    true,
+  );
+  view.rerender(<Sidebar state={state([session("completed")])} />);
+  expect(project.closest(".project-heading")?.classList.contains("empty")).toBe(
+    false,
+  );
+  const pinned = { ...session("completed"), pinned_at: 1, hostId: "local" };
+  view.rerender(<Sidebar state={{ ...state([]), pinned: [pinned] }} />);
+  expect(project.closest(".project-heading")?.classList.contains("empty")).toBe(
+    false,
+  );
+  expect(screen.queryByText("还没有任务")).toBeNull();
+});
+
+it("shows pinned sessions only once and restores them under the project after unpinning", () => {
+  const pinned = { ...session("completed"), pinned_at: 1 };
+  const base = state([pinned]);
+  const view = render(
+    <Sidebar state={{ ...base, pinned: [{ ...pinned, hostId: "local" }] }} />,
+  );
+  expect(screen.getAllByText("Task")).toHaveLength(1);
+  expect(
+    within(screen.getByRole("region", { name: "置顶会话" })).getByText("Task"),
+  ).toBeTruthy();
+  expect(screen.queryByText("还没有任务")).toBeNull();
+  view.rerender(<Sidebar state={state([session("completed")])} />);
+  expect(screen.getAllByText("Task")).toHaveLength(1);
+  expect(screen.queryByRole("region", { name: "置顶会话" })).toBeNull();
+});
+
+it("shows delayed history feedback only beside the selected conversation", () => {
+  vi.useFakeTimers();
+  const s = state([
+    session("completed"),
+    { ...session("completed"), id: "other", title: "Other task" },
+  ]);
+  const view = render(<Sidebar state={s} historyPending />);
+  expect(screen.queryByLabelText("正在加载对话")).toBeNull();
+  act(() => vi.advanceTimersByTime(300));
+  const indicator = screen.getByLabelText("正在加载对话");
+  expect(indicator.closest("button")?.textContent).toContain("Task");
+  expect(screen.queryByText("正在加载")).toBeNull();
+  act(() => vi.advanceTimersByTime(4700));
+  expect(screen.queryByText("正在加载")).toBeNull();
+  expect(within(indicator).getAllByRole("status")).toHaveLength(1);
+  view.rerender(<Sidebar state={s} historyPending={false} />);
+  expect(screen.queryByLabelText("正在加载对话")).toBeNull();
+});
+
+it.each(["opening", "restoring"] as const)(
+  "merges %s and history feedback into one indicator on the right",
+  (phase) => {
+    vi.useFakeTimers();
+    const s = state([session("running")]);
+    s.agentSessionState = () => phase;
+    render(<Sidebar state={s} historyPending />);
+    const row = screen.getByRole("button", { name: "Task" });
+    const expectSingleIndicator = () => {
+      const indicator = within(row).getByRole("status");
+      expect(indicator.closest(".row-status")).not.toBeNull();
+      expect(row.querySelector(".session-agent-open")).toBeNull();
+      expect(within(row).queryByRole("img", { name: "执行中" })).toBeNull();
+      expect(row.textContent).toBe("Task");
+    };
+    expectSingleIndicator();
+    act(() => vi.advanceTimersByTime(5000));
+    expectSingleIndicator();
+    expect(within(row).getByLabelText("正在加载对话")).toBeTruthy();
+  },
+);
+
+it("shows live Agent evidence in hover information without a leading icon or an open request", () => {
+  vi.useFakeTimers();
+  const opened = { ...session("completed"), agent_session_open: true };
+  const base = state([opened]);
+  const view = render(<Sidebar state={base} />);
+  const hover = (row: HTMLElement) => {
+    fireEvent.mouseEnter(row);
+    act(() => vi.advanceTimersByTime(350));
+    return screen.getByRole("tooltip");
+  };
+  const row = screen.getByRole("button", { name: "Task" });
+  expect(row.firstElementChild?.className).toBe("session-label");
+  expect(screen.queryByRole("tooltip")).toBeNull();
+  const info = hover(row);
+  expect(within(info).getByText("Task")).toBeTruthy();
+  expect(within(info).getByText("Project")).toBeTruthy();
+  expect(within(info).getByText("Local · 已完成")).toBeTruthy();
+  expect(within(info).getByText("已打开")).toBeTruthy();
+  expect(base.openSession).not.toHaveBeenCalled();
+  expect(mocks.request).not.toHaveBeenCalled();
+  const pinned = { ...opened, pinned_at: 1, hostId: "local" };
+  view.rerender(
+    <Sidebar state={{ ...base, sessions: [pinned], pinned: [pinned] }} />,
+  );
+  const pinnedRow = within(
+    screen.getByRole("region", { name: "置顶会话" }),
+  ).getByRole("button", { name: "Task" });
+  expect(within(hover(pinnedRow)).getByText("已打开")).toBeTruthy();
+  view.rerender(
+    <Sidebar
+      state={state([{ ...session("running"), agent_session_open: false }])}
+    />,
+  );
+  expect(
+    within(hover(screen.getByRole("button", { name: "Task" }))).queryByText(
+      "已打开",
+    ),
+  ).toBeNull();
+  expect(screen.getByRole("img", { name: "执行中" })).toBeTruthy();
+  view.rerender(<Sidebar state={{ ...base, connected: false }} />);
+  const disconnected = hover(screen.getByRole("button", { name: "Task" }));
+  expect(within(disconnected).queryByText("已打开")).toBeNull();
+  expect(within(disconnected).getByText("会话状态待确认")).toBeTruthy();
+  view.rerender(<Sidebar state={state([session("completed")])} />);
+  expect(within(screen.getByRole("tooltip")).queryByText("已打开")).toBeNull();
+});
+
+it("keeps live session evidence scoped to its host and hides it after host disconnect", () => {
+  vi.useFakeTimers();
+  const remote = {
+    ...session("completed"),
+    pinned_at: 1,
+    agent_session_open: true,
+    hostId: "remote",
+  };
+  const base = state([]);
+  const props = {
+    ...base,
+    hosts: [
+      ...base.hosts,
+      { id: "remote", name: "Remote", ssh: "remote", server_path: null },
+    ],
+    projects: [
+      ...base.projects,
+      { hostId: "remote", id: "p", name: "Remote project", path: "/remote" },
+    ],
+    pinned: [remote],
+    isHostConnected: (id: string) => id === "remote",
+  };
+  const view = render(<Sidebar state={props} />);
+  fireEvent.mouseEnter(screen.getByRole("button", { name: "Task" }));
+  act(() => vi.advanceTimersByTime(350));
+  expect(within(screen.getByRole("tooltip")).getByText("已打开")).toBeTruthy();
+  view.rerender(<Sidebar state={{ ...props, isHostConnected: () => false }} />);
+  expect(within(screen.getByRole("tooltip")).queryByText("已打开")).toBeNull();
+  expect(
+    within(screen.getByRole("tooltip")).getByText("会话状态待确认"),
+  ).toBeTruthy();
+});
+
+it("includes pinned and unselected conversations once in project hover counts and does not guess after disconnect", () => {
+  vi.useFakeTimers();
+  const opened = {
+    ...session("completed"),
+    agent_session_open: true,
+    pinned_at: 1,
+  };
+  const other = {
+    ...opened,
+    id: "other",
+    title: "Other pinned",
+    hostId: "local",
+  };
+  const base = {
+    ...state([
+      opened,
+      { ...session("completed"), id: "closed", agent_session_open: false },
+      { ...opened, id: "archived", archived: true },
+    ]),
+    pinned: [{ ...opened, hostId: "local" }, other],
+  };
+  const view = render(<Sidebar state={base} />);
+  fireEvent.mouseEnter(screen.getByRole("button", { name: "Project" }));
+  act(() => vi.advanceTimersByTime(350));
+  const info = screen.getByRole("tooltip");
+  expect(within(info).getByText("Project")).toBeTruthy();
+  expect(within(info).getByText("/repo")).toBeTruthy();
+  expect(within(info).getByText("Local")).toBeTruthy();
+  expect(within(info).getByText("3 个任务 · 2 个已打开")).toBeTruthy();
+  expect(mocks.request).not.toHaveBeenCalled();
+  view.rerender(<Sidebar state={{ ...base, connected: false }} />);
+  expect(within(info).getByText("3 个任务 · 会话状态待确认")).toBeTruthy();
 });

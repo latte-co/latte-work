@@ -1,3 +1,6 @@
+import { copyText } from "./clipboard";
+import { AppearancePreview } from "./AppearancePreview";
+import { MessageContent } from "./MessageContent";
 import { useEffect, useRef, useState, type CSSProperties } from "react";
 import { Check, Copy, RotateCcw, Upload } from "lucide-react";
 import { Select } from "./Select";
@@ -76,37 +79,6 @@ function ColorControl({
       {!valid && <small role="status">请输入 #RRGGBB</small>}
     </div>
   );
-}
-async function copyThemeText(text: string): Promise<void> {
-  const focused = document.activeElement;
-  const selection = window.getSelection();
-  const ranges = selection
-    ? Array.from({ length: selection.rangeCount }, (_, i) =>
-        selection.getRangeAt(i).cloneRange(),
-      )
-    : [];
-  const field = document.createElement("textarea");
-  field.value = text;
-  field.readOnly = true;
-  field.className = "appearance-copy-buffer";
-  field.setAttribute("aria-hidden", "true");
-  document.body.appendChild(field);
-  let copied = false;
-  try {
-    field.focus({ preventScroll: true });
-    field.select();
-    copied = document.execCommand?.("copy") ?? false;
-  } catch {
-    // Modern clipboard is a fallback when the WebView disables legacy copying.
-  } finally {
-    field.remove();
-    if (focused instanceof HTMLElement) focused.focus({ preventScroll: true });
-    if (selection) {
-      selection.removeAllRanges();
-      ranges.forEach((range) => selection.addRange(range));
-    }
-  }
-  if (!copied) await navigator.clipboard.writeText(text);
 }
 
 export function AppearanceSettings() {
@@ -205,12 +177,15 @@ export function AppearanceSettings() {
         style={themeTokens(theme) as CSSProperties}
         aria-label="主题预览"
       >
-        <div className="appearance-preview-copy">
-          <strong>让想法变成作品</strong>
-          <span>正文预览 · Latte Work</span>
-          <a href="#appearance-controls" onClick={(e) => e.preventDefault()}>
-            链接与强调色
-          </a>
+        <div className="appearance-preview-copy markdown">
+          <MessageContent
+            text={`### 让想法变成作品
+
+这是聊天正文的预览。中文、English 和 \`inline code\` 保持清晰，**重点信息**稍作强调。
+
+- 清晰的行距与段落留白，适合阅读较长的回复。
+- [链接与强调色](#appearance-controls)与正文保持同一阅读节奏。`}
+          />
         </div>
         <div className="appearance-preview-code">
           <div>
@@ -222,6 +197,12 @@ export function AppearanceSettings() {
             <code>const theme = "your style";</code>
           </div>
         </div>
+      </div>
+      <div
+        className="appearance-preview"
+        style={themeTokens(theme) as CSSProperties}
+      >
+        <AppearancePreview />
       </div>
       <div className="appearance-controls" id="appearance-controls">
         <div className="appearance-row">
@@ -247,7 +228,7 @@ export function AppearanceSettings() {
                 setNotice("");
                 setTransferring(true);
                 try {
-                  await copyThemeText(JSON.stringify(settings, null, 2));
+                  await copyText(JSON.stringify(settings, null, 2));
                   setNotice("已复制完整主题 JSON，可保存为 .json 文件后导入。");
                 } catch {
                   setImportError(

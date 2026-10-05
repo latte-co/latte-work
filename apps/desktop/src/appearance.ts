@@ -211,12 +211,12 @@ export function themeTokens(theme: ThemeConfig): Record<string, string> {
   const dark = luminance(bg) < 0.4;
   const depth = 0.025 + (theme.contrast / 100) * 0.11;
   const surface = (n: number) => mix(bg, fg, n);
-  const sidebar = surface(depth * (dark ? 0.16 : 0.25));
+  const sidebar = surface(depth * (dark ? 0.5 : 0.55));
   return {
     "--color-canvas": bg,
     "--color-text": fg,
     "--color-sidebar": theme.translucentSidebar ? sidebar + "c7" : sidebar,
-    "--color-surface": surface(dark ? depth : depth * 0.25),
+    "--color-surface": surface(dark ? depth : depth * 0.65),
     "--color-elevated": dark ? surface(depth) : bg,
     "--color-input": surface(depth * 0.25),
     "--color-composer": dark ? surface(depth + 0.025) : bg,
@@ -224,11 +224,11 @@ export function themeTokens(theme: ThemeConfig): Record<string, string> {
     "--color-text-muted": surface(dark ? 0.62 : 0.65),
     "--color-placeholder": surface(dark ? 0.62 : 0.65),
     "--color-border-subtle": surface(dark ? depth + 0.02 : depth * 0.6),
-    "--color-border": surface(dark ? depth + 0.04 : depth),
+    "--color-border": surface(dark ? depth + 0.06 : depth + 0.02),
     "--color-border-strong": surface(dark ? depth + 0.06 : depth + 0.02),
     "--color-hover": fg + (dark ? "12" : "09"),
-    "--color-selected": fg + "12",
-    "--color-focus-background": fg + "18",
+    "--color-selected": fg + (dark ? "20" : "16"),
+    "--color-focus-background": fg + "29",
     "--color-primary": accent,
     "--color-primary-hover": mix(accent, dark ? "#FFFFFF" : "#000000", 0.1),
     "--color-on-primary":
@@ -239,7 +239,10 @@ export function themeTokens(theme: ThemeConfig): Record<string, string> {
     "--color-action-hover": dark ? "#EAEAEA" : "#383838",
     "--color-on-action": dark ? "#222222" : "#FFFFFF",
     "--color-disabled-bg": surface(0.055),
-    "--color-disabled-text": surface(0.4),
+    "--color-disabled-text": surface(dark ? 0.62 : 0.65),
+    "--color-stop": surface(dark ? 0.22 : 0.12),
+    "--color-stop-hover": surface(dark ? 0.3 : 0.2),
+    "--color-on-stop": fg,
     "--color-brand": accent,
     "--color-success": dark ? "#75C99A" : "#237A48",
     "--color-warning": dark ? "#E4B66A" : "#946000",
@@ -257,6 +260,7 @@ export function themeTokens(theme: ThemeConfig): Record<string, string> {
     "--font-code": codeFonts[theme.codeFont],
     "--weight-ui": theme.uiWeight,
     "--weight-content": theme.contentWeight,
+    "--weight-content-emphasis": theme.contentWeight === "400" ? "500" : "600",
     "--weight-code": theme.codeWeight,
   };
 }

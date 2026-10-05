@@ -4,6 +4,8 @@ cd "$(dirname "$0")/.."
 mode="${1:-dev}"
 case "$mode" in dev|build|package|prepare) ;; *) echo 'usage: desktop.sh dev|build|package' >&2; exit 2;; esac
 export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$PWD/target}"
+mkdir -p "$CARGO_TARGET_DIR"
+CARGO_TARGET_DIR="$(cd "$CARGO_TARGET_DIR" && pwd -P)"
 if command -v sccache >/dev/null && [[ -z "${RUSTC_WRAPPER:-}" ]]; then export RUSTC_WRAPPER=sccache; fi
 profile=debug
 flags=(--locked)
@@ -22,4 +24,5 @@ esac
 
 if [[ "$(uname -s)" == Darwin ]]; then
   ../../scripts/sign-macos.sh "$CARGO_TARGET_DIR/$profile/bundle/macos/Latte Work.app"
+  if [[ "$mode" == package ]]; then ../../scripts/package-dmg.sh; fi
 fi
