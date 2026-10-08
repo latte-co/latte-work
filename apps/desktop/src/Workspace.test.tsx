@@ -62,6 +62,57 @@ beforeEach(() => {
   );
 });
 afterEach(cleanup);
+it("opens independent child tabs, reuses a selected child, retains the list and closes without stopping", async () => {
+  updateWorkspace(props.workspaceId, {
+    tabs: [{ id: "subagents", kind: "subagents" }],
+    current: "subagents",
+    visible: true,
+  });
+  const subagents = {
+    tasks: ["alpha", "beta"].map((id) => ({
+      id,
+      native_id: `native-${id}`,
+      tool_use_id: `tool-${id}`,
+      title: id,
+      status: "completed" as const,
+      summary: `${id} result`,
+      last_tool: "Read",
+      started_at: 1,
+      updated_at: 2,
+    })),
+    loading: false,
+    error: "",
+    truncated: false,
+  };
+  const view = render(<Workspace {...props} subagents={subagents} />);
+  await act(async () => {});
+  fireEvent.click(screen.getByRole("button", { name: /alpha.*已完成/ }));
+  expect(
+    screen.getByRole("tab", { name: "alpha" }).getAttribute("aria-selected"),
+  ).toBe("true");
+  expect(screen.getByText("alpha result")).toBeTruthy();
+  expect(screen.queryByText("任务标识")).toBeNull();
+  fireEvent.click(screen.getByRole("tab", { name: "子智能体" }));
+  fireEvent.click(screen.getByRole("button", { name: /beta.*已完成/ }));
+  fireEvent.click(screen.getByRole("tab", { name: "子智能体" }));
+  fireEvent.click(screen.getByRole("button", { name: /alpha.*已完成/ }));
+  expect(screen.getAllByRole("tab")).toHaveLength(3);
+  const live = {
+    ...subagents,
+    tasks: subagents.tasks.map((task) =>
+      task.id === "alpha" ? { ...task, summary: "updated alpha result" } : task,
+    ),
+  };
+  view.rerender(<Workspace {...props} subagents={live} />);
+  expect(screen.getByText("updated alpha result")).toBeTruthy();
+  fireEvent.click(screen.getByRole("button", { name: "关闭alpha" }));
+  expect(screen.getAllByRole("tab")).toHaveLength(2);
+  expect(
+    mocks.request.mock.calls.some(([, request]) =>
+      ["send", "cancel", "close_agent_session"].includes(request.method),
+    ),
+  ).toBe(false);
+});
 it("adds independent tabs, retains mounted shells on hide, and closes explicitly", async () => {
   const view = render(<Workspace {...props} />);
   await act(async () => {});
@@ -202,13 +253,13 @@ it("isolates conversations in the same project and restores selection and expans
   expect(
     screen.getByRole("button", { name: "展开工作区到主区域" }),
   ).toBeTruthy();
-  fireEvent.click(screen.getByRole("button", { name: "改动" }));
+  fireEvent.click(screen.getByRole("button", { name: "变更" }));
   view.rerender(<Workspace {...props} workspaceId={one} />);
   await act(async () => {});
   expect(
     screen.getByRole("tab", { name: "文件" }).getAttribute("aria-selected"),
   ).toBe("true");
-  expect(screen.queryByRole("tab", { name: "改动" })).toBeNull();
+  expect(screen.queryByRole("tab", { name: "变更" })).toBeNull();
   expect(screen.getByRole("button", { name: "分离右侧栏" })).toBeTruthy();
 });
 it("reconciles only this conversation's terminal IDs, never imports project terminals", async () => {

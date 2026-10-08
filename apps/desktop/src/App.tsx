@@ -1,3 +1,4 @@
+import { TaskOverview } from "./TaskOverview";
 import { useAppLifecycle } from "./appLifecycle";
 import { useCallback, useRef, useState } from "react";
 import { DraftStore } from "./drafts";
@@ -20,7 +21,14 @@ import { SettingsPage } from "./SettingsPage";
 import { HostDialogs } from "./HostDialogs";
 import { SshPasswordDialog } from "./SshPasswordDialog";
 import { useWorkbench } from "./useWorkbench";
-import { CONVERSATION_MIN_WIDTH } from "./workspaceState";
+import { useSubagents } from "./useSubagents";
+import { latestTurnChanges } from "./transcript";
+import {
+  openWorkspaceResource,
+  openTurnChanges,
+  openSubagents,
+  CONVERSATION_MIN_WIDTH,
+} from "./workspaceState";
 
 export default function App() {
   useAppLifecycle();
@@ -64,8 +72,30 @@ export default function App() {
     resize,
     setRetry,
   } = workbench;
+  const subagents = useSubagents(hostId, session?.id, connected, events);
+  const lastTurn = latestTurnChanges(events);
+  const lastTurnVersion = lastTurn
+    ? JSON.stringify([
+        lastTurn.request_id,
+        lastTurn.undo,
+        lastTurn.interrupted,
+        lastTurn.background_pending,
+      ])
+    : undefined;
+  const showSubagents = () => openSubagents(workbench.workspaceId);
   const merged = panel && workbench.workspace.expanded;
   const conversationHidden = merged && !workbench.workspace.conversationActive;
+  const overview = (
+    <TaskOverview
+      key={workbench.workspaceId}
+      hostId={hostId}
+      project={project}
+      connected={connected}
+      subagents={subagents}
+      openChanges={() => openWorkspaceResource(workbench.workspaceId, "diff")}
+      openSubagents={showSubagents}
+    />
+  );
   return (
     <>
       <div
@@ -138,6 +168,7 @@ export default function App() {
                 {host.ssh ? <Globe size={12} /> : <Monitor size={12} />}
                 {host.name}
               </span>
+              {overview}
               <button
                 className="panel-toggle icon-button"
                 title={panel ? "收起工作区" : "展开工作区"}
@@ -165,6 +196,18 @@ export default function App() {
             </div>
           )}
           <Conversation
+            subagents={subagents}
+            openSubagents={showSubagents}
+            openTurnChanges={(changes, path) => {
+              if (session)
+                openTurnChanges(
+                  workbench.workspaceId,
+                  session.id,
+                  changes.request_id,
+                  changes.summary.baseline_at,
+                  path,
+                );
+            }}
             drafts={drafts}
             agent={agent}
             session={session}
@@ -249,6 +292,10 @@ export default function App() {
           onPointerDown={(e) => resize(e, "right")}
         />
         <Workspace
+          sessionId={session?.id}
+          lastTurnVersion={lastTurnVersion}
+          overview={overview}
+          subagents={subagents}
           workspaceId={workbench.workspaceId}
           conversationTitle={session?.title ?? "新任务"}
           sidebarOpen={sidebarOpen}

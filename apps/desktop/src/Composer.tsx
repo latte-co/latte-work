@@ -22,6 +22,7 @@ import type { AgentSlashCommand, FileEntry } from "./protocol";
 import {
   commandTitle,
   composerTrigger,
+  isSubagentPanelCommand,
   referencePrompt,
   type ComposerTrigger,
 } from "./composerActions";
@@ -52,7 +53,8 @@ interface Props {
   value: string;
   onChange: (text: string) => void;
   placeholder: string;
-  onSubmit: (prompt: string) => Promise<boolean>;
+  onSubmit: (prompt: string, uiAction?: "subagents") => Promise<boolean>;
+  onOpenSubagents?: () => void;
   toolbar: (submit: () => void, hasContent: boolean) => ReactNode;
 }
 type Option = {
@@ -174,6 +176,7 @@ export function Composer(props: Props) {
   }
   useEffect(() => {
     close();
+    setCommands([]);
     setNotice("");
     // A different project never inherits references. Existing-session drafts survive remounts.
     if (references.scope !== scope) setReferences({ scope, entries: [] });
@@ -316,6 +319,11 @@ export function Composer(props: Props) {
             `${item.name} ${commandTitle(item, agent)} ${item.description}`
               .toLowerCase()
               .includes(query.toLowerCase()),
+          )
+          .sort(
+            (a, b) =>
+              Number(b.name.toLowerCase() === query.toLowerCase()) -
+              Number(a.name.toLowerCase() === query.toLowerCase()),
           )
           .map((item) => ({
             id: item.name,
@@ -487,20 +495,56 @@ export function Composer(props: Props) {
   }
   async function submit() {
     if (disabled || sending || submitting.current || pasteBusy.current) return;
+    if (isSubagentPanelCommand(value, agent)) {
+      close();
+      if (props.onOpenSubagents) {
+        props.onOpenSubagents();
+        onChange("");
+        setNotice("");
+      } else setNotice("无法打开子智能体面板");
+      return;
+    }
     if (value.trimStart().startsWith("/") && attached.length) {
       setNotice("Agent 命令使用原生参数，请先移除项目引用，避免改变命令含义。");
       return;
     }
     if (!value.trim() && !attached.length) return;
     const owner = scope;
+    const commandContext = currentContext.current;
     submitting.current = true;
     close();
+    const nativeCommand = value.trim().match(/^\/([^\s]+)(?:\s|$)/)?.[1];
     try {
-      if (await onSubmit(referencePrompt(value, attached))) {
+      let catalog = commands;
+      if (
+        nativeCommand &&
+        !catalog.some((command) => command.name === nativeCommand)
+      ) {
+        const response = await request(hostId, {
+          method: "agent_commands",
+          agent,
+          project_id: projectId!,
+        });
+        if (response.kind !== "agent_commands")
+          throw new Error("无法读取原生命令列表");
+        catalog = response.commands;
+        if (
+          currentScope.current !== owner ||
+          currentContext.current !== commandContext
+        )
+          return;
+      }
+      const uiAction = catalog.find(
+        (command) => command.name === nativeCommand,
+      )?.ui_action;
+      const prompt = referencePrompt(value, attached);
+      if (await (uiAction ? onSubmit(prompt, uiAction) : onSubmit(prompt))) {
         if (!props.referenceState && currentScope.current === owner)
           setReferences({ scope: owner, entries: [] });
         setNotice("");
       }
+    } catch (cause) {
+      if (currentScope.current === owner) setNotice(message(cause));
     } finally {
       submitting.current = false;
     }

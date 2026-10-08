@@ -1,10 +1,11 @@
 import { useAppClose } from "./appLifecycle";
 import { CodeView } from "./CodeView";
 import { useEffect, useState } from "react";
-import { FileText, Folder, ArrowLeft, RefreshCw } from "lucide-react";
+import { FileText, Folder, Folders, ArrowLeft, RefreshCw } from "lucide-react";
 import type { FileEntry, Project } from "./protocol";
 import { request, message } from "./api";
 import { ChangesView } from "./ChangesView";
+import { WorkspaceFileTree } from "./WorkspaceFileTree";
 
 export function WorkspaceFiles({
   hostId,
@@ -38,6 +39,7 @@ export function WorkspaceFiles({
   const [truncated, setTruncated] = useState(false);
   const [revision, refresh] = useState(0);
   const [loading, setLoading] = useState(false);
+  const [treeOpen, setTreeOpen] = useState(true);
   useEffect(() => {
     if (!active || tab !== "files") return;
     let disposed = false;
@@ -70,18 +72,31 @@ export function WorkspaceFiles({
   if (tab === "diff")
     return <ChangesView hostId={hostId} project={project} active={active} />;
   return (
-    <>
+    <div className="workspace-files">
       <div className="workspace-file-heading">
         <span>项目文件</span>
-        <button
-          className="icon-button"
-          aria-label="刷新"
-          title="刷新"
-          disabled={loading}
-          onClick={() => refresh((v) => v + 1)}
-        >
-          <RefreshCw size={14} />
-        </button>
+        <div className="workspace-file-actions">
+          {file && (
+            <button
+              className="icon-button"
+              aria-label={treeOpen ? "隐藏文件树" : "显示文件树"}
+              title={treeOpen ? "隐藏文件树" : "显示文件树"}
+              aria-pressed={treeOpen}
+              onClick={() => setTreeOpen((value) => !value)}
+            >
+              <Folders size={16} />
+            </button>
+          )}
+          <button
+            className="icon-button"
+            aria-label="刷新"
+            title="刷新"
+            disabled={loading}
+            onClick={() => refresh((v) => v + 1)}
+          >
+            <RefreshCw size={14} />
+          </button>
+        </div>
       </div>
       <div className="breadcrumb" title={file || path || project.path}>
         {project.name}
@@ -100,39 +115,69 @@ export function WorkspaceFiles({
             <ArrowLeft size={13} />
             {file ? "返回目录" : "上一级"}
           </button>
-          {file && !loading && !error && (
-            <span>只读预览{truncated ? " · 内容已截断" : ""}</span>
+          {file && !loading && !error && truncated && <span>内容已截断</span>}
+        </div>
+      )}
+      <div className="workspace-files-body">
+        <div className="workspace-file-content">
+          {loading ? (
+            <div className="panel-empty" role="status">
+              正在读取…
+            </div>
+          ) : error ? (
+            <div className="panel-error" role="alert">
+              {error}
+            </div>
+          ) : !file ? (
+            <div className="file-list">
+              {entries.map((entry) => (
+                <button
+                  key={entry.path}
+                  onClick={() =>
+                    navigate(
+                      entry.directory
+                        ? { path: entry.path }
+                        : { file: entry.path },
+                    )
+                  }
+                >
+                  {entry.directory ? (
+                    <Folder size={15} />
+                  ) : (
+                    <FileText size={15} />
+                  )}
+                  <span>{entry.name}</span>
+                </button>
+              ))}
+              {entries.length === 0 && <p className="muted">目录为空</p>}
+            </div>
+          ) : (
+            <CodeView key={file} content={content} />
           )}
         </div>
-      )}
-      {loading ? (
-        <div className="panel-empty" role="status">
-          正在读取…
-        </div>
-      ) : error ? (
-        <div className="panel-error" role="alert">
-          {error}
-        </div>
-      ) : !file ? (
-        <div className="file-list">
-          {entries.map((entry) => (
-            <button
-              key={entry.path}
-              onClick={() =>
-                navigate(
-                  entry.directory ? { path: entry.path } : { file: entry.path },
-                )
+        {file && (
+          <nav
+            className="workspace-file-tree"
+            aria-label="项目文件树"
+            hidden={!treeOpen}
+          >
+            <WorkspaceFileTree
+              key={`${hostId}:${project.id}`}
+              hostId={hostId}
+              projectId={project.id}
+              file={file}
+              active={active && treeOpen}
+              revision={revision}
+              openFile={(nextFile) =>
+                navigate({
+                  file: nextFile,
+                  path: nextFile.split("/").slice(0, -1).join("/"),
+                })
               }
-            >
-              {entry.directory ? <Folder size={15} /> : <FileText size={15} />}
-              <span>{entry.name}</span>
-            </button>
-          ))}
-          {entries.length === 0 && <p className="muted">目录为空</p>}
-        </div>
-      ) : (
-        <CodeView content={content} />
-      )}
-    </>
+            />
+          </nav>
+        )}
+      </div>
+    </div>
   );
 }

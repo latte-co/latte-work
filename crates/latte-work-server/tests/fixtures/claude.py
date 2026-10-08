@@ -24,12 +24,19 @@ for line in sys.stdin:
             continue
         if '--no-session-persistence' not in sys.argv:
             with open('fixture-agent-pid','w') as f:f.write(str(os.getpid()))
-        emit({'type':'control_response','response':{'subtype':'success','request_id':value['request_id'],'response':{'commands':[{'name':'compact','description':'Compact history','argumentHint':'[instructions]'},{'name':'project:check','description':os.path.basename(os.getcwd()),'argumentHint':'<target>'}]}}})
+        emit({'type':'control_response','response':{'subtype':'success','request_id':value['request_id'],'response':{'commands':[{'name':'compact','description':'Compact history','argumentHint':'[instructions]'},{'name':'project:check','description':os.path.basename(os.getcwd()),'argumentHint':'<target>'},{'name':'agents','description':'Native child agents','argumentHint':''}]}}})
     elif value['type']=='user':
         text=value['message']['content']
         resumed=resumed or turns>0
         turns+=1
         emit({'type':'system','subtype':'init','session_id':'11111111-1111-4111-8111-111111111111'})
+        if text.startswith('task-edit'):
+            with open('task.txt','w') as f:f.write('third line\n' if text.startswith('task-edit-second') else 'agent change\nsecond line\n')
+            emit({'type':'assistant','message':{'content':[{'type':'tool_use','id':'edit-1','name':'Edit','input':{'file_path':'task.txt'}},{'type':'tool_use','id':'connector-1','name':'mcp__fixture_docs__read','input':{}}]}})
+            emit({'type':'assistant','parent_tool_use_id':'child-agent','message':{'content':[{'type':'tool_use','id':'child-read','name':'mcp__fixture_docs__search','input':{}}]}})
+            emit({'type':'assistant','message':{'content':[{'type':'text','text':'TASK_EDIT_OK'}]}})
+            emit({'type':'result','subtype':'success','is_error':False})
+            continue
         if text=='environment':
             output=subprocess.check_output(['latte-env-fixture'],text=True)
             emit({'type':'assistant','message':{'content':[{'type':'text','text':output}]}})
@@ -50,7 +57,17 @@ for line in sys.stdin:
             child=subprocess.Popen(['sleep','120'])
             emit({'type':'assistant','message':{'content':[{'type':'text','text':f'child:{child.pid}'}]}})
             continue
-        if text=='identity':
+        if text=='subagents':
+            emit({'type':'assistant','message':{'content':[{'type':'tool_use','id':'agent-tool','name':'Agent','input':{'description':'Inspect project'}}]}})
+            emit({'type':'system','subtype':'task_started','task_id':'native-child','task_type':'local_agent','tool_use_id':'agent-tool','description':'Inspect project'})
+            emit({'type':'system','subtype':'task_progress','task_id':'native-child','description':'Inspect project','last_tool_name':'Read'})
+            emit({'type':'user','message':{'content':[{'type':'tool_result','tool_use_id':'agent-tool','content':'Launched in background'}]}})
+            emit({'type':'assistant','message':{'content':[{'type':'text','text':'Child still running'}]}})
+            emit({'type':'result','subtype':'success','is_error':False})
+            # Native idle success envelopes must not tear down background work.
+            emit({'type':'result','subtype':'success','is_error':False})
+            emit({'type':'result','subtype':'success','is_error':False})
+        elif text=='identity':
             emit({'type':'assistant','message':{'content':[{'type':'text','text':json.dumps({'pid':os.getpid(),'turns':turns,'background_pid':background.pid if background else None})}]}})
             emit({'type':'result','subtype':'success','is_error':False})
         elif text in ('background','background-report'):
@@ -67,6 +84,10 @@ for line in sys.stdin:
                     emit({'type':'system','subtype':'session_state_changed','state':'idle'})
                 threading.Thread(target=report,daemon=True).start()
         elif text.startswith('/'):
+            if text=='/agents':
+                emit({'type':'system','subtype':'task_updated','task_id':'native-child','patch':{'status':'killed'}})
+                emit({'type':'system','subtype':'task_notification','task_id':'native-child','status':'stopped','summary':'Stopped by native command'})
+                emit({'type':'system','subtype':'session_state_changed','state':'idle'})
 
             emit({'type':'result','subtype':'success','is_error':False,'result':('resumed:' if resumed else 'fresh:')+text})
         elif text=='permission':

@@ -1,3 +1,6 @@
+import { TurnChangesCard } from "./TurnChangesCard";
+import { SubagentSummary } from "./SubagentsPanel";
+import type { SubagentsState } from "./useSubagents";
 import { UserMessage } from "./UserMessage";
 import { WorkingStatus } from "./WorkingStatus";
 import {
@@ -13,7 +16,13 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { MessageContent } from "./MessageContent";
 import { DraftStore, useDraft, type Draft } from "./drafts";
 import { ArrowUp, ArrowDown, Bot } from "lucide-react";
-import type { AgentInfo, Effort, Event, Session } from "./protocol";
+import type {
+  AgentInfo,
+  Effort,
+  Event,
+  Session,
+  TurnChanges,
+} from "./protocol";
 import type { Host } from "./api";
 import type { HostedProject } from "./projectCatalog";
 import { Composer } from "./Composer";
@@ -34,6 +43,9 @@ export const statusNames = {
   unknown: "状态待确认",
 };
 interface Props {
+  subagents?: SubagentsState;
+  openSubagents?: () => void;
+  openTurnChanges?: (changes: TurnChanges, path?: string) => void;
   drafts: DraftStore;
   agent?: AgentInfo;
   session?: Session;
@@ -68,11 +80,15 @@ interface Props {
     model: string | null,
     effort: Effort | null,
     permissionMode: string | null,
+    uiAction?: "subagents",
   ) => Promise<boolean>;
   cancel: () => void | Promise<boolean>;
   approve: (id: string, allow: boolean) => Promise<void>;
 }
 export function Conversation({
+  subagents,
+  openSubagents,
+  openTurnChanges,
   drafts,
   agent,
   session,
@@ -302,7 +318,10 @@ export function Conversation({
   useEffect(() => {
     if (!preparingHistory) onHistoryReady?.();
   }, [preparingHistory, historyScope, onHistoryReady]);
-  async function submit(prompt: string): Promise<boolean> {
+  async function submit(
+    prompt: string,
+    uiAction?: "subagents",
+  ): Promise<boolean> {
     if (
       !prompt.trim() ||
       sending ||
@@ -326,7 +345,13 @@ export function Conversation({
     submission.current = submitted;
     setSending(true);
     try {
-      submitted.accepted = await send(prompt, model, effort, permissionMode);
+      submitted.accepted = await send(
+        prompt,
+        model,
+        effort,
+        permissionMode,
+        uiAction,
+      );
       if (submitted.accepted) {
         drafts.clear(draftKey, draft);
         if (migrated.current) drafts.clear(migrated.current, draft);
@@ -436,6 +461,9 @@ export function Conversation({
                   </button>
                 </div>
               )}
+              {subagents && openSubagents && (
+                <SubagentSummary state={subagents} open={openSubagents} />
+              )}
               <TurnTranscript events={events}>
                 {(item) =>
                   item.type === "user" ? (
@@ -454,6 +482,24 @@ export function Conversation({
                   ) : (
                     (() => {
                       const v = item.value;
+                      if (v.kind === "turn_changes" && openTurnChanges)
+                        return (
+                          <TurnChangesCard
+                            key={`${hostId}:${session?.id}:${item.key}`}
+                            hostId={hostId}
+                            sessionId={session?.id ?? ""}
+                            canUndo={
+                              connected &&
+                              !!session &&
+                              !["running", "waiting"].includes(
+                                session.status,
+                              ) &&
+                              latestRequestId(events) === v.changes.request_id
+                            }
+                            changes={v.changes}
+                            open={(path) => openTurnChanges(v.changes, path)}
+                          />
+                        );
                       if (v.kind === "approval")
                         return (
                           <ApprovalCard
@@ -618,6 +664,7 @@ export function Conversation({
           value={text}
           onChange={setText}
           onSubmit={submit}
+          onOpenSubagents={openSubagents}
           placeholder={
             !connected
               ? connecting || !connectionError
@@ -696,4 +743,11 @@ export function Conversation({
       </div>
     </section>
   );
+}
+
+function latestRequestId(events: Event[]) {
+  const event = [...events]
+    .reverse()
+    .find((event) => event.event.kind === "user")?.event;
+  return event?.kind === "user" ? event.request_id : undefined;
 }

@@ -6,6 +6,7 @@ import {
   render,
   screen,
   within,
+  waitFor,
 } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { Sidebar } from "./Sidebar";
@@ -46,6 +47,11 @@ const state = (sessions: Session[]) =>
   }) as unknown as Workbench;
 beforeEach(() => {
   localStorage.clear();
+  // Existing cases isolate project/pinned rows; recent navigation is covered below.
+  localStorage.setItem(
+    "latte-work.sidebar-sections.v1",
+    JSON.stringify({ recent: false }),
+  );
   vi.clearAllMocks();
 });
 afterEach(() => {
@@ -73,6 +79,115 @@ it("distinguishes running, waiting and unread, and reflects folder expansion", (
   expect(screen.getByRole("img", { name: "未读" })).toBeTruthy();
   rerender(<Sidebar state={state([session("completed", false)])} />);
   expect(screen.queryByRole("img", { name: "未读" })).toBeNull();
+});
+it("opens recent history across projects and hosts without selecting on startup", async () => {
+  localStorage.clear();
+  const base = state([]);
+  const remote = {
+    ...session("completed"),
+    id: "same",
+    title: "Remote history",
+    project_id: "remote-project",
+  };
+  mocks.request.mockImplementation(async (hostId, request) =>
+    request.method === "recent_sessions"
+      ? {
+          kind: "recent_sessions",
+          sessions: [
+            {
+              session:
+                hostId === "local"
+                  ? {
+                      ...session("completed"),
+                      id: "same",
+                      title: "Local history",
+                    }
+                  : remote,
+              updated_at: hostId === "local" ? 3 : 5,
+            },
+          ],
+          next: null,
+        }
+      : { kind: "sessions", sessions: [] },
+  );
+  const props = {
+    ...base,
+    hosts: [
+      ...base.hosts,
+      { id: "remote", name: "Remote", ssh: "remote", server_path: null },
+    ],
+    projects: [
+      ...base.projects,
+      {
+        hostId: "remote",
+        id: "remote-project",
+        name: "Remote project",
+        path: "/remote",
+      },
+    ],
+  };
+  render(<Sidebar state={props} />);
+  const recent = within(screen.getByRole("region", { name: "最近对话" }));
+  await recent.findByRole("button", { name: "Remote history" });
+  expect(
+    recent
+      .getAllByRole("button")
+      .filter((button) => button.classList.contains("session-row"))
+      .map((button) => button.textContent),
+  ).toEqual(["Remote history", "Local history"]);
+  expect(props.openSession).not.toHaveBeenCalled();
+  fireEvent.click(recent.getByRole("button", { name: "Remote history" }));
+  expect(props.openSession).toHaveBeenCalledWith(
+    expect.objectContaining({
+      id: "same",
+      hostId: "remote",
+      project_id: "remote-project",
+    }),
+  );
+  expect(
+    screen
+      .getByRole("button", { name: "Remote project" })
+      .getAttribute("aria-expanded"),
+  ).toBe("false");
+  fireEvent.click(recent.getByRole("button", { name: "最近" }));
+  expect(recent.queryByRole("button", { name: "Remote history" })).toBeNull();
+  expect(
+    JSON.parse(localStorage.getItem("latte-work.sidebar-sections.v1")!).recent,
+  ).toBe(false);
+});
+it("keeps loaded recent history visible through a failed refresh and retry", async () => {
+  localStorage.clear();
+  let fail = false;
+  mocks.request.mockImplementation(async () => {
+    if (fail) throw new Error("Host is offline");
+    return {
+      kind: "recent_sessions",
+      sessions: [{ session: session("completed"), updated_at: 1 }],
+      next: { updated_at: 1, id: "s" },
+    };
+  });
+  render(<Sidebar state={state([])} />);
+  const recent = within(screen.getByRole("region", { name: "最近对话" }));
+  await recent.findByRole("button", { name: "Task" });
+  fail = true;
+  fireEvent.click(recent.getByRole("button", { name: "加载更早的对话" }));
+  await recent.findByRole("button", { name: "Local 加载失败 · 重试" });
+  expect(recent.getByRole("button", { name: "Task" })).toBeTruthy();
+  expect(recent.queryByText("暂无历史对话")).toBeNull();
+  fail = false;
+  mocks.request.mockResolvedValue({
+    kind: "recent_sessions",
+    sessions: [{ session: session("completed"), updated_at: 1 }],
+    next: null,
+  });
+  fireEvent.click(
+    recent.getByRole("button", { name: "Local 加载失败 · 重试" }),
+  );
+  await waitFor(() =>
+    expect(
+      recent.queryByRole("button", { name: "Local 加载失败 · 重试" }),
+    ).toBeNull(),
+  );
 });
 it("refreshes collapsed background projects even while the current view rerenders", async () => {
   vi.useFakeTimers();
@@ -120,6 +235,71 @@ it("opens row menus without selecting a conversation and keeps the trigger marke
   const project = screen.getByRole("button", { name: "Project 的更多操作" });
   fireEvent.click(project);
   expect(project.getAttribute("aria-expanded")).toBe("true");
+});
+it("disables close until the live conversation is open and skips it with the keyboard", async () => {
+  const base = state([{ ...session("completed"), agent_session_open: false }]);
+  base.sessionAction = vi.fn().mockResolvedValue(undefined);
+  const view = render(<Sidebar state={base} />);
+  fireEvent.click(screen.getByRole("button", { name: "Task 的更多操作" }));
+  const closeButton = () =>
+    screen.getByRole("menuitem", { name: "关闭" }) as HTMLButtonElement;
+  expect(closeButton().disabled).toBe(true);
+  fireEvent.click(closeButton());
+  expect(base.sessionAction).not.toHaveBeenCalled();
+  fireEvent.keyDown(document, { key: "End" });
+  fireEvent.keyDown(document, { key: "ArrowUp" });
+  expect(document.activeElement).toBe(
+    screen.getByRole("menuitem", { name: "复制…" }),
+  );
+  const opened = {
+    ...base,
+    sessions: [{ ...base.sessions[0], agent_session_open: true }],
+  };
+  view.rerender(<Sidebar state={opened} />);
+  expect(closeButton().disabled).toBe(false);
+  view.rerender(<Sidebar state={{ ...opened, connected: false }} />);
+  expect(closeButton().disabled).toBe(true);
+  expect(closeButton().title).toBe("会话状态待确认");
+  view.rerender(
+    <Sidebar state={{ ...opened, agentSessionState: () => "restoring" }} />,
+  );
+  expect(closeButton().disabled).toBe(true);
+  view.rerender(<Sidebar state={base} />);
+  expect(closeButton().disabled).toBe(true);
+  view.rerender(<Sidebar state={opened} />);
+  await act(async () => fireEvent.click(closeButton()));
+  expect(base.sessionAction).toHaveBeenCalledExactlyOnceWith("local", {
+    method: "close_agent_session",
+    session_id: "s",
+  });
+});
+it("uses the target host's latest state for a pinned conversation menu", async () => {
+  const local = { ...session("completed"), agent_session_open: true };
+  const remote = { ...local, hostId: "remote", agent_session_open: false };
+  const base = {
+    ...state([local]),
+    pinned: [remote],
+    isHostConnected: () => true,
+    sessionAction: vi.fn().mockResolvedValue(undefined),
+  };
+  const view = render(<Sidebar state={base} />);
+  fireEvent.click(
+    screen.getAllByRole("button", { name: "Task 的更多操作" })[0],
+  );
+  const closeButton = () =>
+    screen.getByRole("menuitem", { name: "关闭" }) as HTMLButtonElement;
+  expect(closeButton().disabled).toBe(true);
+  view.rerender(
+    <Sidebar
+      state={{ ...base, pinned: [{ ...remote, agent_session_open: true }] }}
+    />,
+  );
+  expect(closeButton().disabled).toBe(false);
+  await act(async () => fireEvent.click(closeButton()));
+  expect(base.sessionAction).toHaveBeenCalledExactlyOnceWith("remote", {
+    method: "close_agent_session",
+    session_id: "s",
+  });
 });
 it("scopes quick pin/archive actions and prevents archiving active tasks", async () => {
   const s = state([session("running")]);

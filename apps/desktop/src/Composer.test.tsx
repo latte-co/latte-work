@@ -26,6 +26,7 @@ const mocks = vi.hoisted(() => ({
   request: vi.fn(),
   send: vi.fn(),
   choose: vi.fn(),
+  openSubagents: vi.fn(),
 }));
 vi.mock("./api", () => ({
   request: mocks.request,
@@ -52,6 +53,7 @@ function Harness({
       value={text}
       onChange={setText}
       onSubmit={mocks.send}
+      onOpenSubagents={mocks.openSubagents}
       placeholder="任务"
       toolbar={(submit, content) => (
         <button disabled={!content} onClick={submit}>
@@ -496,4 +498,140 @@ it("keeps pasted text authoritative when a clipboard manager restores older file
     ).toBe("ordinary text from this paste"),
   );
   expect(pasteMocks.importFile).not.toHaveBeenCalled();
+});
+
+it("passes a native subagent UI action with exact pasted command arguments, without sending on selection", async () => {
+  mocks.request.mockResolvedValue({
+    kind: "agent_commands",
+    commands: [
+      {
+        name: "agents",
+        description: "Native agents",
+        argument_hint: "",
+        ui_action: "subagents",
+      },
+    ],
+  });
+  render(<Harness />);
+  type("/ag");
+  await screen.findByRole("option", { name: /agents/ });
+  fireEvent.keyDown(screen.getByRole("textbox"), { key: "Enter" });
+  expect(mocks.send).not.toHaveBeenCalled();
+  type("/agents 保留原生参数");
+  fireEvent.click(screen.getByText("发送"));
+  await waitFor(() =>
+    expect(mocks.send).toHaveBeenCalledWith(
+      "/agents 保留原生参数",
+      "subagents",
+    ),
+  );
+});
+
+it("discovers a fully pasted native command and fences a late discovery after changing projects", async () => {
+  let finish!: (value: unknown) => void;
+  mocks.request.mockImplementation(
+    () =>
+      new Promise((resolve) => {
+        finish = resolve;
+      }),
+  );
+  const view = render(<Harness />);
+  type("/agents 参数");
+  fireEvent.click(screen.getByText("发送"));
+  await waitFor(() =>
+    expect(mocks.request).toHaveBeenCalledWith("remote", {
+      method: "agent_commands",
+      agent: "claude",
+      project_id: "p",
+    }),
+  );
+  view.rerender(<Harness projectId="other" />);
+  await act(async () =>
+    finish({
+      kind: "agent_commands",
+      commands: [
+        {
+          name: "agents",
+          description: "",
+          argument_hint: "",
+          ui_action: "subagents",
+        },
+      ],
+    }),
+  );
+  expect(mocks.send).not.toHaveBeenCalled();
+});
+
+it("prioritizes the exact native command over matches in other command descriptions", async () => {
+  mocks.request.mockResolvedValue({
+    kind: "agent_commands",
+    commands: [
+      { name: "batch", description: "Run many agents", argument_hint: "" },
+      {
+        name: "agents",
+        description: "Manage agents",
+        argument_hint: "",
+        ui_action: "subagents",
+      },
+    ],
+  });
+  render(<Harness />);
+  type("/agents");
+  await screen.findAllByRole("option");
+  fireEvent.keyDown(screen.getByRole("textbox"), { key: "Enter" });
+  expect((screen.getByRole("textbox") as HTMLTextAreaElement).value).toBe(
+    "/agents ",
+  );
+  expect(mocks.send).not.toHaveBeenCalled();
+});
+
+it.each(["/list-agents", "/agents", "/tasks"])(
+  "routes %s directly to the local panel without discovery or submission",
+  async (command) => {
+    render(<Harness />);
+    type(` ${command}  `);
+    fireEvent.click(screen.getByText("发送"));
+    expect(mocks.openSubagents).toHaveBeenCalledOnce();
+    expect(mocks.send).not.toHaveBeenCalled();
+    expect(mocks.request).not.toHaveBeenCalled();
+    expect((screen.getByRole("textbox") as HTMLTextAreaElement).value).toBe("");
+  },
+);
+
+it("opens the local panel after selecting list-agents from the native menu", async () => {
+  mocks.request.mockResolvedValue({
+    kind: "agent_commands",
+    commands: [
+      {
+        name: "list-agents",
+        description: "List agents",
+        argument_hint: "",
+        ui_action: "subagents",
+      },
+    ],
+  });
+  render(<Harness />);
+  type("/list-ag");
+  await screen.findByRole("option", { name: /list-agents/ });
+  fireEvent.keyDown(screen.getByRole("textbox"), { key: "Enter" });
+  expect(mocks.openSubagents).not.toHaveBeenCalled();
+  expect(mocks.send).not.toHaveBeenCalled();
+  mocks.request.mockClear();
+  fireEvent.keyDown(screen.getByRole("textbox"), { key: "Enter" });
+  expect(mocks.openSubagents).toHaveBeenCalledOnce();
+  expect(mocks.send).not.toHaveBeenCalled();
+  expect(mocks.request).not.toHaveBeenCalled();
+});
+
+it("preserves attached references when a local panel command clears only its text", async () => {
+  render(<Harness />);
+  type("@README");
+  fireEvent.click(await screen.findByRole("option", { name: /README.md/ }));
+  type("/list-agents ");
+  fireEvent.click(screen.getByText("发送"));
+  expect(mocks.openSubagents).toHaveBeenCalledOnce();
+  expect(mocks.send).not.toHaveBeenCalled();
+  expect(
+    screen.getByRole("button", { name: "移除引用 README.md" }),
+  ).toBeTruthy();
 });

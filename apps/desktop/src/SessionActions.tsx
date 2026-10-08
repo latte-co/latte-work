@@ -19,14 +19,20 @@ import { message, request } from "./api";
 import type { Workbench } from "./useWorkbench";
 import type { HostedSession } from "./sessionNavigation";
 import { conversationMarkdown, loadConversation } from "./sessionNavigation";
+import {
+  agentSessionLabels,
+  type AgentSessionState,
+} from "./agentSessionState";
 
 export function SessionActions({
   session,
+  agentState,
   point,
   close,
   state,
 }: {
   session: HostedSession;
+  agentState: AgentSessionState;
   point: { x: number; y: number };
   close: () => void;
   state: Workbench;
@@ -50,6 +56,7 @@ export function SessionActions({
   );
   const menuView = view === "menu" || view === "copy";
   const active = ["running", "waiting"].includes(session.status);
+  const canClose = agentState === "open";
   const previousView = useRef(view);
   useLayoutEffect(() => {
     if (!menu.current) return;
@@ -270,9 +277,16 @@ export function SessionActions({
             )}
             <button
               role="menuitem"
-              disabled={busy}
-              title="关闭 Agent session，保留对话历史"
+              disabled={busy || !canClose}
+              title={
+                canClose
+                  ? "关闭对话，保留历史"
+                  : agentState === "closed"
+                    ? "此对话尚未打开"
+                    : agentSessionLabels[agentState]
+              }
               onClick={() =>
+                canClose &&
                 run({ method: "close_agent_session", session_id: id })
               }
             >

@@ -79,6 +79,17 @@ pub enum Effort {
     Xhigh,
     Max,
 }
+/// Stable keyset cursor for history across all visible projects on one host.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+pub struct RecentCursor {
+    pub updated_at: f64,
+    pub id: String,
+}
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+pub struct RecentSession {
+    pub session: Session,
+    pub updated_at: f64,
+}
 impl Effort {
     pub const fn as_str(self) -> &'static str {
         match self {
@@ -116,9 +127,52 @@ pub struct TurnUsage {
     pub model_time_ms: Option<f64>,
     pub steps: Option<f64>,
 }
+/// Native child execution evidence, separate from the main turn's status.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+pub enum SubagentStatus {
+    Running,
+    Paused,
+    Completed,
+    Failed,
+    Stopped,
+    Unknown,
+}
+impl SubagentStatus {
+    pub fn active(self) -> bool {
+        matches!(self, Self::Running | Self::Paused)
+    }
+}
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+pub struct SubagentUpdate {
+    pub id: String,
+    pub tool_use_id: Option<String>,
+    pub title: Option<String>,
+    pub status: Option<SubagentStatus>,
+    pub summary: Option<String>,
+    pub last_tool: Option<String>,
+}
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+pub struct Subagent {
+    pub id: String,
+    pub native_id: String,
+    pub tool_use_id: Option<String>,
+    pub title: String,
+    pub status: SubagentStatus,
+    pub summary: Option<String>,
+    pub last_tool: Option<String>,
+    pub started_at: Option<f64>,
+    pub updated_at: f64,
+}
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum EventKind {
+    TurnChanges {
+        changes: TurnChanges,
+    },
+    Subagent {
+        update: SubagentUpdate,
+    },
     Progress {
         phase: ExecutionPhase,
     },
@@ -285,6 +339,15 @@ pub struct AgentSlashCommand {
     pub display_name: Option<String>,
     pub description: String,
     pub argument_hint: String,
+    /// Presentation hint supplied only for an advertised native command.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub ui_action: Option<AgentCommandUiAction>,
+}
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentCommandUiAction {
+    Subagents,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
@@ -393,6 +456,9 @@ pub enum Request {
         project_id: String,
     },
     PinnedSessions,
+    RecentSessions {
+        before: Option<RecentCursor>,
+    },
     RenameSession {
         session_id: String,
         title: String,
@@ -451,6 +517,9 @@ pub enum Request {
         session_id: String,
         after: f64,
     },
+    Subagents {
+        session_id: String,
+    },
     Approve {
         session_id: String,
         request_id: String,
@@ -494,6 +563,56 @@ pub enum Request {
     Changes {
         project_id: String,
     },
+    GitInfo {
+        project_id: String,
+    },
+    GitReview {
+        project_id: String,
+        scope: GitReviewScope,
+        base: Option<String>,
+    },
+    GitReviewDiff {
+        project_id: String,
+        scope: GitReviewScope,
+        base: Option<String>,
+        head: Option<String>,
+        path: String,
+        full_context: bool,
+    },
+    ChangeSummary {
+        project_id: String,
+        session_id: Option<String>,
+    },
+    UndoTurnChanges {
+        session_id: String,
+        request_id: String,
+    },
+    TurnChangeSummary {
+        session_id: String,
+        request_id: String,
+    },
+    LastTurnChanges {
+        session_id: String,
+    },
+    TurnChangeDiff {
+        session_id: String,
+        request_id: String,
+        path: String,
+    },
+    TaskChangeDiff {
+        session_id: String,
+        path: String,
+    },
+    Sources {
+        session_id: String,
+    },
+    PreviewSource {
+        project_id: String,
+        session_id: Option<String>,
+        path: String,
+        #[ts(type = "number")]
+        offset: u64,
+    },
     ChangeDiff {
         project_id: String,
         path: String,
@@ -515,12 +634,146 @@ pub struct GitChange {
     pub status: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+pub enum GitReviewScope {
+    Branch,
+    Worktree,
+    Unstaged,
+    Staged,
+}
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+pub struct GitRef {
+    pub name: String,
+    pub full_name: String,
+}
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+pub struct GitInfo {
+    pub branch: Option<String>,
+    pub head: Option<String>,
+    pub default_base: Option<String>,
+    pub refs: Vec<GitRef>,
+    pub truncated: bool,
+}
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+pub struct GitReviewFile {
+    pub path: String,
+    pub previous_path: Option<String>,
+    pub status: String,
+    pub added: Option<u32>,
+    pub removed: Option<u32>,
+    pub binary: bool,
+    pub untracked: bool,
+}
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+pub struct GitReview {
+    /// Resolved commits pin a branch comparison even after refs move.
+    pub base: Option<String>,
+    pub head: Option<String>,
+    pub entries: Vec<GitReviewFile>,
+    pub added: u32,
+    pub removed: u32,
+    pub truncated: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+pub struct TaskChange {
+    pub path: String,
+    pub status: String,
+    pub added: Option<u32>,
+    pub removed: Option<u32>,
+}
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+pub struct ChangeSummary {
+    pub entries: Vec<TaskChange>,
+    pub added: u32,
+    pub removed: u32,
+    pub binary_files: u32,
+    pub truncated: bool,
+    pub baseline_at: Option<f64>,
+    pub unavailable: Option<String>,
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+pub enum TurnUndoStatus {
+    Ready,
+    Reverted,
+    Unknown,
+}
+/// Frozen worktree delta between admission and the main result/confirmed stop.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+pub struct TurnChanges {
+    pub request_id: String,
+    pub summary: ChangeSummary,
+    pub interrupted: bool,
+    pub background_pending: bool,
+    pub undo: TurnUndoStatus,
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+pub enum SourceKind {
+    File,
+    Directory,
+    Tool,
+    Connector,
+}
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+pub struct TaskSource {
+    pub id: String,
+    pub name: String,
+    pub kind: SourceKind,
+    pub path: Option<String>,
+    pub mime_type: Option<String>,
+    pub tools: Vec<String>,
+    pub uses: u32,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Response {
+    RecentSessions {
+        sessions: Vec<RecentSession>,
+        next: Option<RecentCursor>,
+    },
+    LastTurnChanges {
+        changes: Option<TurnChanges>,
+    },
+    TurnChanges {
+        changes: TurnChanges,
+    },
+    ChangeSummary {
+        summary: ChangeSummary,
+    },
+    Sources {
+        entries: Vec<TaskSource>,
+        truncated: bool,
+    },
+    SourcePreview {
+        data: Vec<u8>,
+        mime_type: String,
+        #[ts(type = "number")]
+        size: u64,
+        #[ts(type = "number")]
+        next: u64,
+        has_more: bool,
+    },
+    SourceDirectory {
+        entries: Vec<FileEntry>,
+        truncated: bool,
+    },
+    Subagents {
+        tasks: Vec<Subagent>,
+        truncated: bool,
+    },
     Changes {
         entries: Vec<GitChange>,
         truncated: bool,
+    },
+    GitInfo {
+        info: GitInfo,
+    },
+    GitReview {
+        review: GitReview,
     },
     AgentPermissions {
         modes: Vec<AgentPermissionMode>,

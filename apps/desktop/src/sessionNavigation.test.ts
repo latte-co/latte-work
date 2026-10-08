@@ -2,6 +2,7 @@
 import { describe, expect, it } from "vitest";
 import {
   pinnedSessions,
+  recentSessions,
   readPinnedCache,
   sessionKey,
   loadConversation,
@@ -30,6 +31,62 @@ const projects = ["local", "remote"].map((hostId) => ({
   path: "/repo",
   name: "project",
 }));
+describe("recent conversations", () => {
+  it("merges host identities, deduplicates pages and sorts by actual activity", () => {
+    const local = { session: session("same", null), updated_at: 3 };
+    const remote = { session: session("same", null), updated_at: 5 };
+    const rows = recentSessions(
+      { local: [local, local], remote: [remote] },
+      projects,
+      "local",
+      [],
+      [],
+    );
+    expect(rows.map((row) => [row.hostId, row.updated_at])).toEqual([
+      ["remote", 5],
+      ["local", 3],
+    ]);
+  });
+  it("overlays live metadata, omits hidden/archived/pinned rows and keeps activity timestamps", () => {
+    const original = session("old", null);
+    const cache = {
+      local: [
+        { session: original, updated_at: 9 },
+        {
+          session: { ...original, id: "gone", project_id: "removed" },
+          updated_at: 10,
+        },
+      ],
+    };
+    expect(
+      recentSessions(
+        cache,
+        projects,
+        "local",
+        [{ ...original, title: "Renamed" }],
+        [],
+      ),
+    ).toMatchObject([{ title: "Renamed", updated_at: 9 }]);
+    expect(
+      recentSessions(
+        cache,
+        projects,
+        "local",
+        [{ ...original, archived: true }],
+        [],
+      ),
+    ).toEqual([]);
+    expect(
+      recentSessions(
+        cache,
+        projects,
+        "local",
+        [],
+        [{ ...original, pinned_at: 1, hostId: "local" }],
+      ),
+    ).toEqual([]);
+  });
+});
 describe("global pinned conversations", () => {
   it("retains host identity for matching session ids and sorts by pin time", () => {
     const result = pinnedSessions(

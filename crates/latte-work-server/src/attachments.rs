@@ -37,6 +37,15 @@ impl Attachments {
             pending: HashMap::new(),
         })
     }
+    pub fn is_completed(&self, path: &Path) -> bool {
+        path.parent() == Some(self.root.as_path())
+            && path.file_name().and_then(|n| n.to_str()).is_some_and(|n| {
+                n.len() > 37
+                    && n.as_bytes()[36] == b'-'
+                    && n.get(..36)
+                        .is_some_and(|prefix| uuid::Uuid::parse_str(prefix).is_ok())
+            })
+    }
     pub fn begin(&mut self, name: String, size: u64) -> Result<String> {
         self.pending
             .retain(|_, p| p.touched.elapsed() < Duration::from_secs(600));

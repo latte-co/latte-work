@@ -3,9 +3,17 @@
 use super::{Action, AgentAdapter, AgentCommand, Input};
 use crate::providers::LaunchConfig;
 use anyhow::{Context, Result, bail};
-use latte_work_protocol::{ContextUsage, EventKind, ExecutionPhase, TurnUsage};
+use latte_work_protocol::{
+    ContextUsage, EventKind, ExecutionPhase, SubagentStatus, SubagentUpdate, TurnUsage,
+};
 use serde_json::{Value, json};
-use std::{collections::HashSet, io::Write, path::PathBuf, process::Stdio, time::Duration};
+use std::{
+    collections::{HashMap, HashSet},
+    io::Write,
+    path::PathBuf,
+    process::Stdio,
+    time::Duration,
+};
 
 pub const MODEL_ALIASES: &[&str] = &["sonnet", "opus", "haiku", "fable"];
 
@@ -172,8 +180,11 @@ pub struct Claude {
     phase: Phase,
     commands: HashSet<String>,
     tasks: HashSet<String>,
+    agent_tasks: HashMap<String, Option<String>>,
+    foreground_agents: HashSet<String>,
     session_state: Option<String>,
     delegated: bool,
+    last_result: Option<String>,
 }
 // Gateways may return a provider-prefixed model while CLI accounting uses its
 // bare name plus a context suffix. Only match that same name, never any model.
@@ -273,6 +284,7 @@ impl AgentAdapter for Claude {
     fn can_reconfigure(&self) -> bool {
         matches!(self.phase, Phase::BetweenTurns)
             && self.tasks.is_empty()
+            && self.foreground_agents.is_empty()
             && (self.session_state.as_deref() == Some("idle")
                 || (self.session_state.is_none() && !self.delegated))
     }
@@ -540,21 +552,72 @@ impl Claude {
                 self.session_state = m["state"].as_str().map(str::to_owned);
             }
             "system" if m["subtype"] == "task_started" => {
-                let id = m["task_id"]
-                    .as_str()
-                    .filter(|s| !s.is_empty() && s.len() <= 256)
-                    .context("无效的 Claude 后台任务标识")?;
+                let id = native_task_id(&m)?;
                 if self.tasks.len() >= 256 && !self.tasks.contains(id) {
                     bail!("Claude 后台任务数量超出限制");
                 }
                 self.tasks.insert(id.into());
-            }
-            "system" if m["subtype"] == "task_notification" || m["subtype"] == "task_updated" => {
-                if matches!(
-                    m["status"].as_str(),
-                    Some("completed" | "failed" | "stopped")
-                ) && let Some(id) = m["task_id"].as_str()
+                let tool = bounded_field(&m, "tool_use_id", 256);
+                if m["task_type"] == "local_agent"
+                    || tool
+                        .as_ref()
+                        .is_some_and(|id| self.foreground_agents.contains(id))
                 {
+                    if let Some(tool) = &tool {
+                        self.foreground_agents.remove(tool);
+                    }
+                    if self.agent_tasks.len() >= 256 && !self.agent_tasks.contains_key(id) {
+                        if let Some(old) = self
+                            .agent_tasks
+                            .keys()
+                            .find(|key| !self.tasks.contains(*key))
+                            .cloned()
+                        {
+                            self.agent_tasks.remove(&old);
+                        } else {
+                            bail!("Claude 子智能体数量超出限制");
+                        }
+                    }
+                    self.agent_tasks.insert(id.into(), tool.clone());
+                    output.push(subagent_action(id, tool, &m, Some(SubagentStatus::Running)));
+                }
+            }
+            "system"
+                if matches!(
+                    m["subtype"].as_str(),
+                    Some("task_notification" | "task_updated" | "task_progress")
+                ) =>
+            {
+                let id = native_task_id(&m)?;
+                let fields = if m["subtype"] == "task_updated" && m["patch"].is_object() {
+                    &m["patch"]
+                } else {
+                    &m
+                };
+                let raw_status = fields["status"].as_str().or(m["status"].as_str());
+                let status = match raw_status {
+                    Some("running" | "pending") => Some(SubagentStatus::Running),
+                    Some("paused") => Some(SubagentStatus::Paused),
+                    Some("completed") => Some(SubagentStatus::Completed),
+                    Some("failed") => Some(SubagentStatus::Failed),
+                    Some("stopped" | "killed") => Some(SubagentStatus::Stopped),
+                    _ => None,
+                };
+                if let Some(tool) = self.agent_tasks.get(id) {
+                    let mut action = subagent_action(id, tool.clone(), fields, status);
+                    // Native task_progress.description describes the current
+                    // activity (e.g. "Reading ..."), not the delegated task title.
+                    if m["subtype"] == "task_progress"
+                        && let Action::Event(EventKind::Subagent { update }) = &mut action
+                    {
+                        update.title = None;
+                    }
+                    output.push(action);
+                }
+                if matches!(
+                    raw_status,
+                    Some("completed" | "failed" | "stopped" | "killed")
+                ) {
                     self.tasks.remove(id);
                 }
             }
@@ -719,8 +782,50 @@ impl Claude {
                                 }
                             }
                             "tool_use" => {
+                                if let Some(parent) = m["parent_tool_use_id"].as_str() {
+                                    if let (Some(id), Some(name)) =
+                                        (block["id"].as_str(), block["name"].as_str())
+                                    {
+                                        output.push(Action::SourceUsed {
+                                            id: format!("{parent}:{id}"),
+                                            name: name.into(),
+                                        });
+                                    }
+                                    let native = self
+                                        .agent_tasks
+                                        .iter()
+                                        .find(|(_, tool)| tool.as_deref() == Some(parent))
+                                        .map(|(id, _)| id.clone());
+                                    if native.is_some() || self.foreground_agents.contains(parent) {
+                                        output.push(subagent_action(
+                                            &native.unwrap_or_else(|| format!("tool:{parent}")),
+                                            Some(parent.into()),
+                                            &json!({"last_tool_name":block["name"]}),
+                                            None,
+                                        ));
+                                    }
+                                    continue;
+                                }
                                 if matches!(block["name"].as_str(), Some("Agent" | "Task")) {
                                     self.delegated = true;
+                                    if m["parent_tool_use_id"].is_null() {
+                                        let id = block["id"]
+                                            .as_str()
+                                            .filter(|id| !id.is_empty() && id.len() <= 256)
+                                            .context("无效的 Claude Agent 工具标识")?;
+                                        if self.foreground_agents.len() >= 256
+                                            && !self.foreground_agents.contains(id)
+                                        {
+                                            bail!("Claude 子智能体数量超出限制");
+                                        }
+                                        self.foreground_agents.insert(id.into());
+                                        output.push(subagent_action(
+                                            &format!("tool:{id}"),
+                                            Some(id.into()),
+                                            &block["input"],
+                                            Some(SubagentStatus::Running),
+                                        ));
+                                    }
                                 }
                                 output.push(Action::Event(EventKind::Tool {
                                     id: block["id"].as_str().unwrap_or_default().into(),
@@ -737,7 +842,25 @@ impl Claude {
             "user" => {
                 if let Some(blocks) = m["message"]["content"].as_array() {
                     for block in blocks {
-                        if block["type"] == "tool_result" {
+                        if block["type"] == "tool_result" && m["parent_tool_use_id"].is_null() {
+                            if let Some(id) = block["tool_use_id"].as_str()
+                                && self.foreground_agents.remove(id)
+                            {
+                                let summary = match &block["content"] {
+                                    Value::String(text) => text.clone(),
+                                    value => value.to_string(),
+                                };
+                                output.push(subagent_action(
+                                    &format!("tool:{id}"),
+                                    Some(id.into()),
+                                    &json!({"summary":summary}),
+                                    Some(if block["is_error"] == true {
+                                        SubagentStatus::Failed
+                                    } else {
+                                        SubagentStatus::Completed
+                                    }),
+                                ));
+                            }
                             output.push(Action::Event(EventKind::ToolResult {
                                 id: block["tool_use_id"].as_str().unwrap_or_default().into(),
                                 content: block["content"].clone(),
@@ -748,6 +871,45 @@ impl Claude {
                 }
             }
             "result" => {
+                let failed = m["is_error"].as_bool().unwrap_or(false)
+                    || m["subtype"]
+                        .as_str()
+                        .is_some_and(|s| s.starts_with("error"));
+                // Child completions must not finish (or restart) the parent turn.
+                if let Some(parent) = m["parent_tool_use_id"].as_str().filter(|id| !id.is_empty()) {
+                    let native = self
+                        .agent_tasks
+                        .iter()
+                        .find(|(_, tool)| tool.as_deref() == Some(parent))
+                        .map(|(id, _)| id.clone());
+                    if native.is_some() || self.foreground_agents.remove(parent) {
+                        let id = native.unwrap_or_else(|| format!("tool:{parent}"));
+                        self.tasks.remove(&id);
+                        output.push(subagent_action(
+                            &id,
+                            Some(parent.into()),
+                            &json!({"summary":m["result"]}),
+                            Some(if failed {
+                                SubagentStatus::Failed
+                            } else {
+                                SubagentStatus::Completed
+                            }),
+                        ));
+                    }
+                    return Ok(output);
+                }
+                if matches!(self.phase, Phase::BetweenTurns) {
+                    let text = m["result"].as_str().filter(|text| !text.is_empty());
+                    // The CLI can deliver trailing result envelopes after a
+                    // parent turn has completed. Empty/duplicate success is idle
+                    // telemetry, not an initialization failure or another turn.
+                    if !failed && (text.is_none() || text == self.last_result.as_deref()) {
+                        return Ok(output);
+                    }
+                    self.reset_turn();
+                    self.phase = Phase::Running;
+                    output.push(Action::TurnStarted);
+                }
                 if !matches!(self.phase, Phase::Running) {
                     bail!("Claude 在初始化完成前返回了任务结果");
                 }
@@ -780,10 +942,6 @@ impl Claude {
                         }),
                     }));
                 }
-                let failed = m["is_error"].as_bool().unwrap_or(false)
-                    || m["subtype"]
-                        .as_str()
-                        .is_some_and(|s| s.starts_with("error"));
                 let message = if failed {
                     Some(
                         m["result"]
@@ -803,12 +961,44 @@ impl Claude {
                     output.push(Action::Event(EventKind::Text { text: text.into() }));
                 }
                 output.push(Action::Finished { failed, message });
+                self.last_result = m["result"].as_str().map(str::to_owned);
             }
             _ => {}
         }
         Ok(output)
     }
 }
+fn native_task_id(message: &Value) -> Result<&str> {
+    message["task_id"]
+        .as_str()
+        .filter(|id| !id.is_empty() && id.len() <= 256)
+        .context("无效的 Claude 后台任务标识")
+}
+fn bounded_field(value: &Value, key: &str, limit: usize) -> Option<String> {
+    value[key]
+        .as_str()
+        .filter(|s| !s.is_empty())
+        .map(|s| s.chars().take(limit).collect())
+}
+fn subagent_action(
+    id: &str,
+    tool_use_id: Option<String>,
+    fields: &Value,
+    status: Option<SubagentStatus>,
+) -> Action {
+    Action::Event(EventKind::Subagent {
+        update: SubagentUpdate {
+            id: id.into(),
+            tool_use_id,
+            title: bounded_field(fields, "description", 512)
+                .or_else(|| bounded_field(fields, "title", 512)),
+            status,
+            summary: bounded_field(fields, "summary", 2048),
+            last_tool: bounded_field(fields, "last_tool_name", 256),
+        },
+    })
+}
+
 fn parse_commands(value: &Value) -> Result<Vec<latte_work_protocol::AgentSlashCommand>> {
     let entries = value
         .as_array()
@@ -816,7 +1006,7 @@ fn parse_commands(value: &Value) -> Result<Vec<latte_work_protocol::AgentSlashCo
     if entries.len() > 2000 {
         bail!("Agent 命令列表超出限制");
     }
-    let mut names = std::collections::HashSet::new();
+    let mut names = HashSet::new();
     let mut result = Vec::new();
     for entry in entries {
         let name = entry["name"].as_str().context("无效的 Agent 命令名称")?;
@@ -847,6 +1037,8 @@ fn parse_commands(value: &Value) -> Result<Vec<latte_work_protocol::AgentSlashCo
                 .map(str::to_owned),
             description: description.chars().take(2048).collect(),
             argument_hint: argument_hint.chars().take(512).collect(),
+            ui_action: matches!(name, "agents" | "tasks" | "list-agents")
+                .then_some(latte_work_protocol::AgentCommandUiAction::Subagents),
         });
     }
     Ok(result)
@@ -854,6 +1046,107 @@ fn parse_commands(value: &Value) -> Result<Vec<latte_work_protocol::AgentSlashCo
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn child_and_idle_results_never_fail_or_finish_the_parent() {
+        use super::*;
+        let mut adapter = Claude {
+            phase: Phase::Running,
+            ..Default::default()
+        };
+        adapter.foreground_agents.insert("child-tool".into());
+        let child = adapter.decode(json!({"type":"result","parent_tool_use_id":"child-tool","is_error":false,"result":"child result"})).unwrap();
+        assert!(child.iter().any(|action| matches!(action, Action::Event(EventKind::Subagent {update}) if update.status == Some(SubagentStatus::Completed))));
+        assert!(
+            !child
+                .iter()
+                .any(|action| matches!(action, Action::Finished { .. }))
+        );
+        assert!(matches!(adapter.phase, Phase::Running));
+        adapter
+            .decode(json!({"type":"result","is_error":false,"result":"parent result"}))
+            .unwrap();
+        assert!(
+            adapter
+                .decode(json!({"type":"result","is_error":false,"result":"parent result"}))
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            adapter
+                .decode(json!({"type":"result","is_error":false}))
+                .unwrap()
+                .is_empty()
+        );
+        assert!(matches!(adapter.phase, Phase::BetweenTurns));
+        let followup = adapter
+            .decode(json!({"type":"result","is_error":false,"result":"new autonomous result"}))
+            .unwrap();
+        assert!(matches!(followup.first(), Some(Action::TurnStarted)));
+        assert!(
+            followup
+                .iter()
+                .any(|action| matches!(action, Action::Finished { failed: false, .. }))
+        );
+        let failure = adapter
+            .decode(json!({"type":"result","is_error":true,"result":"API error"}))
+            .unwrap();
+        assert!(
+            failure
+                .iter()
+                .any(|action| matches!(action, Action::Finished { failed: true, .. }))
+        );
+        let mut opening = Claude {
+            phase: Phase::Opening,
+            ..Default::default()
+        };
+        assert!(
+            opening
+                .decode(json!({"type":"result","is_error":false}))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn subagents_native_lifecycle_and_foreground_results_are_distinct_from_shell_tasks() {
+        use super::*;
+        let mut agent = Claude::default();
+        let tool = json!({"type":"assistant","message":{"content":[{"type":"tool_use","id":"agent-tool","name":"Agent","input":{"description":"检查结构"}}]}});
+        let actions = agent.decode(tool).unwrap();
+        assert!(actions.iter().any(|action| matches!(action, Action::Event(EventKind::Subagent { update }) if update.id == "tool:agent-tool" && update.status == Some(SubagentStatus::Running))));
+        agent.decode(json!({"type":"system","subtype":"task_started","task_id":"native-child","task_type":"local_agent","tool_use_id":"agent-tool","description":"检查结构"})).unwrap();
+        let progress = agent.decode(json!({"type":"system","subtype":"task_progress","task_id":"native-child","description":"Reading README.md","last_tool_name":"Read"})).unwrap();
+        assert!(progress.iter().any(|action| matches!(action, Action::Event(EventKind::Subagent { update }) if update.title.is_none() && update.last_tool.as_deref()==Some("Read"))));
+        let early = agent.decode(json!({"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"agent-tool","content":"Launched in background"}]}})).unwrap();
+        assert!(
+            !early
+                .iter()
+                .any(|action| matches!(action, Action::Event(EventKind::Subagent { .. })))
+        );
+        let killed = agent.decode(json!({"type":"system","subtype":"task_updated","task_id":"native-child","patch":{"status":"killed"}})).unwrap();
+        assert!(killed.iter().any(|action| matches!(action, Action::Event(EventKind::Subagent { update }) if update.status == Some(SubagentStatus::Stopped))));
+        assert!(agent.tasks.is_empty());
+        let summary = agent.decode(json!({"type":"system","subtype":"task_notification","task_id":"native-child","status":"stopped","summary":"已停止"})).unwrap();
+        assert!(summary.iter().any(|action| matches!(action, Action::Event(EventKind::Subagent { update }) if update.summary.as_deref() == Some("已停止"))));
+        let shell = agent.decode(json!({"type":"system","subtype":"task_started","task_id":"shell","task_type":"local_bash"})).unwrap();
+        assert!(shell.is_empty());
+        assert!(agent.decode(json!({"type":"system","subtype":"task_progress","task_id":"shell","description":"shell progress"})).unwrap().is_empty());
+        agent.decode(json!({"type":"system","subtype":"task_updated","task_id":"shell","patch":{"status":"completed"}})).unwrap();
+        assert!(agent.tasks.is_empty());
+        agent.decode(json!({"type":"assistant","message":{"content":[{"type":"tool_use","id":"foreground","name":"Task","input":{"description":"前台"}}]}})).unwrap();
+        let done = agent.decode(json!({"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"foreground","content":"完成","is_error":false}]}})).unwrap();
+        assert!(done.iter().any(|action| matches!(action, Action::Event(EventKind::Subagent { update }) if update.status == Some(SubagentStatus::Completed))));
+        agent.decode(json!({"type":"assistant","message":{"content":[{"type":"tool_use","id":"legacy-tool","name":"Agent","input":{"description":"Legacy child"}}]}})).unwrap();
+        let legacy = agent.decode(json!({"type":"system","subtype":"task_started","task_id":"legacy-native","tool_use_id":"legacy-tool"})).unwrap();
+        assert!(legacy.iter().any(|action| matches!(action, Action::Event(EventKind::Subagent {update}) if update.id=="legacy-native")));
+        assert!(!agent.foreground_agents.contains("legacy-tool"));
+        let catalog =
+            parse_commands(&json!([{"name":"agents"},{"name":"tasks"},{"name":"project:agents"},{"name":"list-agents"}]))
+                .unwrap();
+        assert!(catalog[0].ui_action.is_some() && catalog[1].ui_action.is_some());
+        assert!(catalog[3].ui_action.is_some());
+        assert!(catalog[2].ui_action.is_none());
+    }
+
     #[test]
     fn thinking_status_is_deduplicated_and_never_carries_reasoning_text() {
         use super::*;

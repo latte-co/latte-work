@@ -641,3 +641,20 @@ it("keeps the reading anchor when older history is prepended without concealing 
   expect(positions.get("a")).toEqual({ top: 1000, follow: false });
   expect(el.getAttribute("aria-busy")).toBe("false");
 });
+
+it("opens the subagent panel instead of sending a chat message for list-agents", async () => {
+  const state = props();
+  const openSubagents = vi.fn();
+  render(
+    <Conversation
+      {...state}
+      session={session("s")}
+      openSubagents={openSubagents}
+    />,
+  );
+  fireEvent.change(input(), { target: { value: "/list-agents " } });
+  fireEvent.keyDown(input(), { key: "Enter" });
+  expect(openSubagents).toHaveBeenCalledOnce();
+  expect(state.send).not.toHaveBeenCalled();
+  expect(input().value).toBe("");
+});

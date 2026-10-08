@@ -64,6 +64,12 @@ finish and terminals close. Restarting only the desktop leaves them running.
 Wire protocol changes: edit latte-work-protocol then run `make types` and
 `make fmt`. Desktop presentation must not import or reproduce Claude wire types.
 
+`recent_sessions` reads unarchived history across visible projects on the target host,
+100 rows per page with an activity-time/session-ID cursor. Activity comes from saved
+conversation events; opening/reading, lifecycle state and pin metadata do not reorder
+history. Older databases are supported through an indexed event projection. Local and
+SSH use the same request; older servers fail explicitly and should be updated.
+
 Read docs/architecture.md for boundaries and docs/remote.md for SSH installation.
 
 The desktop icon source is `apps/desktop/src-tauri/icons/source.svg`. Run
@@ -428,3 +434,108 @@ control and slower CLI metadata. Local and SSH use identical routing. Additional
 lanes attach to the existing daemon during initial connection and are coalesced;
 navigation does not create transports. A reconnect replaces all lanes and fences
 stale responses by connection identity and daemon ID. No Send is retried.
+
+## Native subagent presentation
+
+The additive `subagent` event and `subagents` request use the same local/SSH protocol.
+The server persists a latest child-task projection atomically with each event so a
+bounded history window cannot hide a still-running child. Snapshots return up to
+128 recent records, with live tasks first and an explicit truncation flag.
+Only the Claude adapter interprets native Agent/Task calls, task_started,
+task_progress, task_notification and task_updated patches. Tool-use IDs merge
+foreground calls with native task IDs; background launch acknowledgements do not
+mean completion. Shell background tasks are excluded from the subagent list.
+Child tools update child activity rather than the main-agent transcript/status.
+A main result does not finish its background children. Explicit process close
+marks children stopped only after process-group cleanup; process failure or daemon
+restart marks unfinished children unknown, including after a completed main turn.
+Transport reconnect neither starts children nor replays their prompts.
+
+The conversation summary opens a closeable Subagents workspace tab, grouped by
+active, completed and other states. Selecting a task opens a separate named tab,
+keyed by stable child ID; repeated selection reuses it and leaves the list intact.
+The child tab shows its result, latest tool and duration without implementation IDs.
+Hiding or closing a child tab never stops execution. Child result envelopes cannot
+finish the parent turn. Trailing empty/duplicate success results while idle are
+ignored; result-only autonomous replies and actual failures remain visible.
+
+The topbar Task Overview popover links to changes and subagents. The Sources
+section and source tabs are currently removed from the workspace UI. The source
+inventory and scoped preview APIs described below remain available on the host;
+Composer references continue to use their existing add and send flow.
+For advertised Claude `/agents`, `/list-agents` and `/tasks` commands, the adapter supplies an
+optional presentation hint. Selection fills the draft only. Bare `/agents`,
+`/list-agents` and `/tasks` submissions are desktop navigation: they open the local
+Subagents tab without dispatching a Claude command, creating a conversation or
+writing a user event. They clear only the command text and preserve references.
+Explicit command arguments still use native dispatch and its presentation hint.
+Unsupported commands are not added to the catalog. These controls observe native
+execution; individual child steering/stopping is not synthesized.
+
+Focused checks: adapter/store UT, frontend SubagentsPanel/useSubagents/Composer/
+useWorkbench tests and the final-binary
+`subagents_native_commands_snapshot_reconnect_and_close_share_one_protocol` test.
+Native UI and actual model-driven Claude delegation remain separate evidence.
+`python3 scripts/smoke-subagents.py` uses the installed real Claude CLI with a
+disposable localhost Anthropic model fixture. It verifies actual foreground and
+background Agent execution, child Read isolation, terminal notifications,
+reconnect snapshots and advertised native listing commands without paid API calls.
+It does not verify a live model's delegation decisions. `--pause-for-ui` prints
+an isolated state directory and bounded release/finish markers for native UI checks.
+SDK lifecycle reference: [native task types](https://github.com/anthropics/claude-agent-sdk-python/blob/main/src/claude_agent_sdk/types.py).
+
+
+### Task changes and source previews
+
+Before the first accepted agent request spawns, the server stores a durable file
+baseline in the task database. The request is persisted first. Git-visible files
+(including tracked and untracked dirty files) are read without changing the index,
+refs or user files. Baselines are limited to 1,000 files, 512 KiB per file, 8 MiB
+total and 12 seconds. Unknown, oversized and symlink entries are explicitly partial;
+old tasks without a baseline never retroactively infer one. Task totals/diffs compare
+this baseline with the current worktree, regardless of staging or later commits.
+This is temporal attribution: other writers in a shared directory can appear in
+these net changes. The UI provides separate task and workspace views.
+
+Explicit user reference manifests and actual native tool calls are indexed durably.
+Tool-use IDs deduplicate calls, including child calls. MCP tool names identify
+connector groups; installed-but-unused connectors are never fabricated. Source
+inventories return at most 128 entries with a truncation flag.
+
+The host-only preview API reads 64 KiB chunks with a five-second timeout. It accepts
+project-contained paths, completed managed uploads, explicitly resolved project
+references, or the task's persisted references. Canonical containment is checked;
+ordinary read_file boundaries and agent permissions are unchanged. Images, PDF and
+video are sniffed from bytes; HTML and SVG remain plain text. Directory previews
+skip symlinks. Files larger than 64 MiB fail explicitly. Desktop inline media are
+limited to 16 MiB, text to 512 KiB, and full system preview copies to 32 MiB.
+Object URLs are revoked on disposal and late responses are fenced by host/task.
+The desktop renders PDF first-page thumbnails through macOS Quick Look (two concurrent
+renders, ten-second timeout, at most 8 MiB of PNG), with full-document system preview.
+No iframe or external document scripts are enabled. Quick Look uses a private 0600 local copy, at most two concurrent processes,
+and removes that copy on preview close, application Quit or after one hour. SSH hosts use the same chunked
+protocol; the server has no GUI dependency.
+
+Each accepted user turn also saves a request-linked baseline before native dispatch.
+At the main result or confirmed process stop/failure, the server freezes before/after
+bytes and a `turn_changes` event, atomically replacing the pending baseline. Only
+changed bytes are retained (the same per-file/total capture limits apply to both
+snapshots). Turn cards show file counts and per-file/total added and removed lines;
+selecting a file or View Changes opens a deduplicated, closeable turn tab. Historical
+turn diffs read these stored bytes, not HEAD or the current filesystem. Main results
+with unfinished background children are explicitly labelled and cannot be undone.
+Shared-directory attribution remains temporal; other concurrent writers can appear.
+Daemon restart marks unfinished snapshot collection unknown, never captures a late
+filesystem state as that turn's result. Legacy turns have no invented snapshots.
+
+Undo is a host operation for the conversation's latest turn only. It requires a
+complete snapshot, no active host tasks/background work/PTYs, and byte/permission
+matches against every stored after-image. Exclusive host admission prevents new
+Send/Open/Approval/terminal writes during restoration; overlapping idle Agent
+runtimes are closed and can be reopened normally. Symlink paths are refused and
+all files are checked before the first write and again before each atomic replacement.
+Files are restored without touching Git's index or refs. A durable unknown intent
+precedes writes; only full success becomes reverted. Failure/crash stays unknown
+and is never automatically retried. Completed repeated Undo requests reconcile
+idempotently. Independent external writers are not locked; post-turn conflicts
+are rejected and an interrupted restoration requires manual workspace inspection.

@@ -23,7 +23,11 @@ pub fn lane(request: &Request) -> Lane {
         | Request::ReadFile { .. }
         | Request::Diff { .. }
         | Request::Changes { .. }
-        | Request::ChangeDiff { .. } => Lane::Metadata,
+        | Request::ChangeDiff { .. }
+        | Request::LastTurnChanges { .. }
+        | Request::GitInfo { .. }
+        | Request::GitReview { .. }
+        | Request::GitReviewDiff { .. } => Lane::Metadata,
         _ => Lane::Read,
     }
 }

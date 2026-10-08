@@ -1,10 +1,43 @@
-import type { Session, Event } from "./protocol";
+import type { Session, Event, RecentSession } from "./protocol";
 import type { HostedProject } from "./projectCatalog";
 import { transcript } from "./transcript";
 
 export type HostedSession = Session & { hostId: string };
 export function sessionKey(hostId: string, id: string) {
   return JSON.stringify([hostId, id]);
+}
+export function recentSessions(
+  cache: Record<string, RecentSession[]>,
+  projects: HostedProject[],
+  hostId: string,
+  current: Session[],
+  pinned: HostedSession[],
+): (HostedSession & { updated_at: number })[] {
+  const known = new Set(
+    projects.map((project) => sessionKey(project.hostId, project.id)),
+  );
+  const live = new Map(
+    [...pinned, ...current.map((session) => ({ ...session, hostId }))].map(
+      (session) => [sessionKey(session.hostId, session.id), session],
+    ),
+  );
+  const rows = new Map<string, HostedSession & { updated_at: number }>();
+  for (const [hostId, entries] of Object.entries(cache))
+    for (const { session, updated_at } of entries) {
+      const key = sessionKey(hostId, session.id);
+      const value = { ...session, ...live.get(key), hostId, updated_at };
+      if (
+        !value.archived &&
+        value.pinned_at === null &&
+        known.has(sessionKey(hostId, value.project_id))
+      )
+        rows.set(key, value);
+    }
+  return [...rows.values()].sort(
+    (a, b) =>
+      b.updated_at - a.updated_at ||
+      sessionKey(b.hostId, b.id).localeCompare(sessionKey(a.hostId, a.id)),
+  );
 }
 export function pinnedSessions(
   cache: Record<string, Session[]>,

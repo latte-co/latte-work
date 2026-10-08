@@ -6,10 +6,12 @@ import {
   clampWorkspaceWidth,
   CONVERSATION_MIN_WIDTH,
   copyWorkspace,
+  openSubagents,
   useWorkspaceState,
   workspaceKey,
 } from "./workspaceState";
 import { useEffect, useRef, useState } from "react";
+import { isSubagentPanelCommand } from "./composerActions";
 import {
   connect,
   disconnect,
@@ -995,7 +997,15 @@ export function useWorkbench() {
     model: string | null,
     effort: Effort | null,
     permission_mode: string | null,
+    uiAction?: "subagents",
   ): Promise<boolean> {
+    if (
+      project &&
+      isSubagentPanelCommand(text, session?.agent ?? agent?.id ?? "claude")
+    ) {
+      openSubagents(workspaceId);
+      return true;
+    }
     if (!connected || !text.trim() || sending.current) return false;
     sending.current = true;
     try {
@@ -1043,6 +1053,8 @@ export function useWorkbench() {
             : s,
         ),
       );
+      if (uiAction === "subagents" && selectedSessionId.current === target.id)
+        openSubagents(workspaceKey(target.id));
       setError("");
       return true;
     } catch (e) {

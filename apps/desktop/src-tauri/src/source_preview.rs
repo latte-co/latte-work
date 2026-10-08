@@ -1,0 +1,183 @@
+//! Explicit, bounded local preview copies. The host has no GUI dependency.
+#[cfg(target_os = "macos")]
+static JOBS: std::sync::Mutex<Vec<tauri::async_runtime::JoinHandle<()>>> =
+    std::sync::Mutex::new(Vec::new());
+pub async fn close() {
+    #[cfg(target_os = "macos")]
+    {
+        let jobs = JOBS
+            .lock()
+            .map(|mut jobs| std::mem::take(&mut *jobs))
+            .unwrap_or_default();
+        for job in &jobs {
+            job.abort();
+        }
+        for job in jobs {
+            let _ = job.await;
+        }
+    }
+}
+#[cfg(target_os = "macos")]
+struct Copy {
+    folder: std::path::PathBuf,
+    path: std::path::PathBuf,
+    thumbnail: std::path::PathBuf,
+}
+#[cfg(target_os = "macos")]
+impl Drop for Copy {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+        let _ = std::fs::remove_file(&self.thumbnail);
+        let _ = std::fs::remove_dir(&self.folder);
+    }
+}
+fn validate(name: &str, data: &[u8], limit: usize) -> Result<(), String> {
+    if name.is_empty()
+        || name.len() > 256
+        || name.contains(['/', '\\', '\0'])
+        || matches!(name, "." | "..")
+        || name.chars().any(char::is_control)
+        || data.len() > limit
+    {
+        return Err("预览文件名无效或内容超过预览上限".into());
+    }
+    Ok(())
+}
+#[cfg(target_os = "macos")]
+fn local_copy(app: &tauri::AppHandle, name: String, data: Vec<u8>) -> Result<Copy, String> {
+    use std::os::unix::fs::PermissionsExt;
+    use tauri::Manager;
+    let root = app
+        .path()
+        .app_cache_dir()
+        .map_err(|e| e.to_string())?
+        .join("source-previews");
+    std::fs::create_dir_all(&root).map_err(|e| e.to_string())?;
+    if root
+        .symlink_metadata()
+        .map_err(|e| e.to_string())?
+        .file_type()
+        .is_symlink()
+    {
+        return Err("预览缓存不能是符号链接".into());
+    }
+    std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700))
+        .map_err(|e| e.to_string())?;
+    let folder = root.join(uuid::Uuid::new_v4().to_string());
+    std::fs::create_dir(&folder).map_err(|e| e.to_string())?;
+    std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o700))
+        .map_err(|e| e.to_string())?;
+    let copy = Copy {
+        path: folder.join(&name),
+        thumbnail: folder.join(format!("{name}.png")),
+        folder,
+    };
+    std::fs::write(&copy.path, data).map_err(|e| e.to_string())?;
+    std::fs::set_permissions(&copy.path, std::fs::Permissions::from_mode(0o600))
+        .map_err(|e| e.to_string())?;
+    Ok(copy)
+}
+#[cfg(target_os = "macos")]
+fn quicklook() -> tokio::process::Command {
+    let mut command = tokio::process::Command::new("/usr/bin/qlmanage");
+    command
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .kill_on_drop(true);
+    command
+}
+#[tauri::command]
+pub async fn preview_pdf(
+    app: tauri::AppHandle,
+    name: String,
+    data: Vec<u8>,
+) -> Result<Vec<u8>, String> {
+    validate(&name, &data, 16 * 1024 * 1024)?;
+    if !data.starts_with(b"%PDF-") {
+        return Err("来源不是 PDF 文件".into());
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (app, name, data);
+        Err("PDF 首页预览目前仅支持 macOS".into())
+    }
+    #[cfg(target_os = "macos")]
+    {
+        use tokio::io::AsyncReadExt;
+        static RENDERS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(2);
+        let _permit = RENDERS
+            .try_acquire()
+            .map_err(|_| "正在生成其他 PDF 预览，请稍后刷新".to_string())?;
+        let copy = local_copy(&app, name, data)?;
+        let status = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            quicklook()
+                .args(["-t", "-s", "1400", "-o"])
+                .arg(&copy.folder)
+                .arg(&copy.path)
+                .status(),
+        )
+        .await
+        .map_err(|_| "PDF 预览生成超时".to_string())?
+        .map_err(|e| e.to_string())?;
+        if !status.success() {
+            return Err("无法生成 PDF 预览，请使用系统预览".into());
+        }
+        let mut png = vec![];
+        tokio::fs::File::open(&copy.thumbnail)
+            .await
+            .map_err(|e| e.to_string())?
+            .take(8 * 1024 * 1024 + 1)
+            .read_to_end(&mut png)
+            .await
+            .map_err(|e| e.to_string())?;
+        if png.len() > 8 * 1024 * 1024 || !png.starts_with(b"\x89PNG\r\n\x1a\n") {
+            return Err("PDF 预览图无效或超过上限".into());
+        }
+        Ok(png)
+    }
+}
+#[tauri::command]
+pub async fn system_preview(
+    app: tauri::AppHandle,
+    name: String,
+    data: Vec<u8>,
+) -> Result<(), String> {
+    validate(&name, &data, 32 * 1024 * 1024)?;
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (app, name, data);
+        Err("系统预览目前仅支持 macOS".into())
+    }
+    #[cfg(target_os = "macos")]
+    {
+        static PREVIEWS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(2);
+        let permit = PREVIEWS
+            .try_acquire()
+            .map_err(|_| "已有两个来源在系统预览中，请先关闭其中一个".to_string())?;
+        let copy = local_copy(&app, name, data)?;
+        let mut child = quicklook()
+            .arg("-p")
+            .arg(&copy.path)
+            .spawn()
+            .map_err(|e| e.to_string())?;
+        use tauri::Manager;
+        let mut jobs = JOBS.lock().map_err(|_| "预览状态不可用".to_string())?;
+        if app
+            .state::<crate::Connections>()
+            .quitting
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            return Err("应用正在退出".into());
+        }
+        jobs.retain(|job| !job.inner().is_finished());
+        jobs.push(tauri::async_runtime::spawn(async move {
+            let _ = tokio::time::timeout(std::time::Duration::from_secs(3600), child.wait()).await;
+            drop(child);
+            drop(copy);
+            drop(permit);
+        }));
+        Ok(())
+    }
+}
