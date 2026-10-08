@@ -397,6 +397,101 @@ it("shows actual thinking and stop progress, restoring status when cancellation 
   expect(screen.queryByRole("status")).toBeNull();
 });
 
+const repeatedEvents = (): Event[] => [
+  {
+    seq: 1,
+    at: 0,
+    session_id: "s",
+    event: {
+      kind: "text",
+      text: Array.from(
+        { length: 12 },
+        (_, i) => `[${890 + i}]: (remaining tool results)\n\n`,
+      ).join(""),
+    },
+  },
+];
+const repetitionWarning = "回复内容似乎在重复，可停止任务后重试。";
+
+it("warns above the composer without hiding prose or automatically stopping", async () => {
+  const p = props();
+  let rejectStop!: (value: boolean) => void;
+  p.cancel.mockImplementation(
+    () =>
+      new Promise<boolean>((resolve) => {
+        rejectStop = resolve;
+      }),
+  );
+  const running = { ...session("s"), status: "running" as const };
+  const view = render(
+    <Conversation {...p} session={running} events={repeatedEvents()} />,
+  );
+  const warning = await screen.findByText(repetitionWarning);
+  expect(warning.closest(".composer-wrap")).not.toBeNull();
+  expect(warning.closest(".conversation-history")).toBeNull();
+  expect(screen.getByText("[890]: (remaining tool results)")).toBeTruthy();
+  expect(screen.getByText("[901]: (remaining tool results)")).toBeTruthy();
+  expect(p.cancel).not.toHaveBeenCalled();
+  fireEvent.click(screen.getByRole("button", { name: "停止任务" }));
+  expect(p.cancel).toHaveBeenCalledTimes(1);
+  expect(screen.queryByText(repetitionWarning)).toBeNull();
+  await act(async () => rejectStop(false));
+  expect(await screen.findByText(repetitionWarning)).toBeTruthy();
+  view.rerender(
+    <Conversation
+      {...p}
+      session={{ ...running, status: "stopped" }}
+      events={repeatedEvents()}
+    />,
+  );
+  expect(screen.queryByText(repetitionWarning)).toBeNull();
+});
+
+it("clears repetition feedback on disconnect, history loading, completion and scope changes", async () => {
+  const p = props();
+  const running = { ...session("s"), status: "running" as const };
+  const repeated = repeatedEvents();
+  const view = render(
+    <Conversation {...p} session={running} events={repeated} />,
+  );
+  expect(await screen.findByText(repetitionWarning)).toBeTruthy();
+  view.rerender(
+    <Conversation
+      {...p}
+      session={running}
+      events={repeated}
+      connected={false}
+    />,
+  );
+  expect(screen.queryByText(repetitionWarning)).toBeNull();
+  expect(
+    (screen.getByRole("button", { name: "停止任务" }) as HTMLButtonElement)
+      .disabled,
+  ).toBe(true);
+  view.rerender(
+    <Conversation {...p} session={running} events={repeated} historyLoading />,
+  );
+  expect(screen.queryByText(repetitionWarning)).toBeNull();
+  view.rerender(<Conversation {...p} session={running} events={repeated} />);
+  expect(await screen.findByText(repetitionWarning)).toBeTruthy();
+  view.rerender(
+    <Conversation
+      {...p}
+      session={{ ...running, status: "completed" }}
+      events={repeated}
+    />,
+  );
+  expect(screen.queryByText(repetitionWarning)).toBeNull();
+  view.rerender(
+    <Conversation
+      {...p}
+      session={{ ...running, id: "other" }}
+      events={repeated}
+    />,
+  );
+  await waitFor(() => expect(screen.queryByText(repetitionWarning)).toBeNull());
+});
+
 it("keeps reading positions across session switches and resets only on reopening or recovery", async () => {
   const p = props();
   const positions = new Map<string, { top: number; follow: boolean }>();
