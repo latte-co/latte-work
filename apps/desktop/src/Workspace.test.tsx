@@ -11,7 +11,11 @@ import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { Workspace } from "./Workspace";
 import { updateWorkspace, readWorkspace } from "./workspaceState";
 import type { Request, Response, TerminalInfo } from "./protocol";
-const mocks = vi.hoisted(() => ({ request: vi.fn(), disposed: vi.fn() }));
+const mocks = vi.hoisted(() => ({
+  request: vi.fn(),
+  disposed: vi.fn(),
+  exits: new Map<string, () => void>(),
+}));
 vi.mock("./api", () => ({
   request: mocks.request,
   message: (e: unknown) => String(e),
@@ -20,9 +24,23 @@ vi.mock("./WorkspaceFiles", () => ({
   WorkspaceFiles: () => <div>文件预览</div>,
 }));
 vi.mock("./TerminalPane", async () => {
-  const { useEffect } = await import("react");
+  const { useEffect, useRef } = await import("react");
   return {
-    TerminalPane: ({ terminal }: { terminal: TerminalInfo }) => {
+    TerminalPane: ({
+      terminal,
+      onExited,
+    }: {
+      terminal: TerminalInfo;
+      onExited: () => void;
+    }) => {
+      const reported = useRef(false);
+      useEffect(() => {
+        mocks.exits.set(terminal.id, onExited);
+        if (terminal.exited && !reported.current) {
+          reported.current = true;
+          onExited();
+        }
+      }, [terminal, onExited]);
       useEffect(() => () => mocks.disposed(terminal.id), [terminal.id]);
       return <div>Shell {terminal.id}</div>;
     },
@@ -40,6 +58,7 @@ const props = {
 };
 beforeEach(() => {
   vi.clearAllMocks();
+  mocks.exits.clear();
   localStorage.clear();
   props.workspaceId = crypto.randomUUID();
   HTMLElement.prototype.scrollIntoView = vi.fn();
@@ -152,6 +171,151 @@ it("adds independent tabs, retains mounted shells on hide, and closes explicitly
   expect(mocks.disposed).toHaveBeenCalledWith(ids[1]);
   expect(screen.getAllByRole("tab")).toHaveLength(1);
 });
+it("closes only the exited terminal on its original host and persists the remaining selection", async () => {
+  const local: TerminalInfo = {
+    id: "local-shell",
+    project_id: project.id,
+    title: "local",
+    exited: false,
+    exit_code: null,
+  };
+  const remote: TerminalInfo = {
+    ...local,
+    id: "remote-shell",
+    title: "remote",
+  };
+  updateWorkspace(props.workspaceId, {
+    tabs: [
+      { id: local.id, kind: "terminal", hostId: "local", terminal: local },
+      {
+        id: remote.id,
+        kind: "terminal",
+        hostId: "remote",
+        hostName: "Devbox",
+        terminal: remote,
+      },
+    ],
+    current: remote.id,
+    expanded: true,
+    conversationActive: false,
+  });
+  mocks.request.mockImplementation(
+    async (_host: string, r: Request): Promise<Response> =>
+      r.method === "terminals"
+        ? { kind: "terminals", terminals: [local, remote] }
+        : { kind: "ok" },
+  );
+  render(<Workspace {...props} />);
+  await act(async () => {});
+  await act(async () => {
+    mocks.exits.get(remote.id)!();
+  });
+  expect(mocks.request).toHaveBeenLastCalledWith("remote", {
+    method: "close_terminal",
+    terminal_id: remote.id,
+  });
+  expect(screen.queryByRole("tab", { name: "remote · Devbox" })).toBeNull();
+  expect(
+    screen
+      .getByRole("tab", { name: "local · 本机" })
+      .getAttribute("aria-selected"),
+  ).toBe("true");
+  expect(mocks.disposed).toHaveBeenCalledWith(remote.id);
+  expect(mocks.disposed).not.toHaveBeenCalledWith(local.id);
+  const saved = JSON.parse(
+    localStorage.getItem(
+      `latte-work.conversation-workspace.v1:${props.workspaceId}`,
+    )!,
+  );
+  expect(saved.tabs.map((tab: { id: string }) => tab.id)).toEqual([local.id]);
+  expect(saved.current).toBe(local.id);
+  await act(async () => {
+    mocks.exits.get(local.id)!();
+  });
+  expect(readWorkspace(props.workspaceId).tabs).toEqual([]);
+  expect(readWorkspace(props.workspaceId).conversationActive).toBe(true);
+  expect(
+    screen.getByRole("tab", { name: "对话" }).getAttribute("aria-selected"),
+  ).toBe("true");
+});
+
+it("removes restored exited tabs without replacing the current file tab", async () => {
+  const terminal: TerminalInfo = {
+    id: "restored-exit",
+    project_id: project.id,
+    title: "sh",
+    exited: false,
+    exit_code: null,
+  };
+  updateWorkspace(props.workspaceId, {
+    tabs: [
+      { id: "files", kind: "files" },
+      { id: terminal.id, kind: "terminal", terminal },
+    ],
+    current: "files",
+  });
+  mocks.request.mockImplementation(
+    async (_host: string, r: Request): Promise<Response> =>
+      r.method === "terminals"
+        ? {
+            kind: "terminals",
+            terminals: [{ ...terminal, exited: true, exit_code: 0 }],
+          }
+        : { kind: "ok" },
+  );
+  const view = render(<Workspace {...props} />);
+  await act(async () => {});
+  expect(mocks.request).toHaveBeenLastCalledWith("local", {
+    method: "close_terminal",
+    terminal_id: terminal.id,
+  });
+  expect(screen.getAllByRole("tab")).toHaveLength(1);
+  expect(readWorkspace(props.workspaceId).current).toBe("files");
+  view.unmount();
+  render(<Workspace {...props} />);
+  await act(async () => {});
+  expect(screen.getAllByRole("tab")).toHaveLength(1);
+  expect(
+    screen.getByRole("tab", { name: "文件" }).getAttribute("aria-selected"),
+  ).toBe("true");
+});
+
+it("keeps an exited tab after failed cleanup for explicit retry without replay", async () => {
+  const terminal: TerminalInfo = {
+    id: "cleanup-failed",
+    project_id: project.id,
+    title: "sh",
+    exited: true,
+    exit_code: 0,
+  };
+  let fail = true;
+  updateWorkspace(props.workspaceId, {
+    tabs: [{ id: terminal.id, kind: "terminal", terminal }],
+    current: terminal.id,
+  });
+  mocks.request.mockImplementation(
+    async (_host: string, r: Request): Promise<Response> => {
+      if (r.method === "terminals")
+        return { kind: "terminals", terminals: [terminal] };
+      if (r.method === "close_terminal" && fail) throw new Error("offline");
+      return { kind: "ok" };
+    },
+  );
+  render(<Workspace {...props} />);
+  await act(async () => {});
+  expect(screen.getByRole("alert").textContent).toContain("offline");
+  expect(screen.getByRole("tab", { name: "sh · 本机" })).toBeTruthy();
+  expect(
+    mocks.request.mock.calls.filter(([, r]) => r.method === "close_terminal"),
+  ).toHaveLength(1);
+  fail = false;
+  await act(async () => {
+    fireEvent.click(screen.getByRole("button", { name: "关闭sh · 本机" }));
+  });
+  expect(screen.queryAllByRole("tab")).toHaveLength(0);
+  expect(screen.getByLabelText("工作区入口")).toBeTruthy();
+});
+
 it("keeps a terminal tab when closing fails and scopes host project restoration", async () => {
   mocks.request.mockImplementation(
     async (_host: string, r: Request): Promise<Response> => {

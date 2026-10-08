@@ -9,6 +9,7 @@ const mocks = vi.hoisted(() => ({
   write: vi.fn(),
   input: null as null | ((text: string) => void),
   dispose: vi.fn(),
+  onExited: vi.fn(),
   options: {} as Record<string, unknown>,
 }));
 vi.mock("./api", () => ({
@@ -94,7 +95,13 @@ it("keeps emulator and cursor across hidden tabs and serializes pending output",
           }
         : { kind: "ok" },
   );
-  const props = { hostId: "host", terminal, active: true, connected: true };
+  const props = {
+    hostId: "host",
+    terminal,
+    active: true,
+    connected: true,
+    onExited: mocks.onExited,
+  };
   const view = render(<TerminalPane {...props} />);
   await act(async () => {});
   expect(mocks.write).toHaveBeenCalledTimes(1);
@@ -133,7 +140,15 @@ it("does not replay ambiguous input or queued commands on retry", async () => {
       };
     },
   );
-  render(<TerminalPane hostId="host" terminal={terminal} active connected />);
+  render(
+    <TerminalPane
+      hostId="host"
+      terminal={terminal}
+      active
+      connected
+      onExited={mocks.onExited}
+    />,
+  );
   await act(async () => {});
   await act(async () => {
     mocks.input?.("command one\r");
@@ -154,7 +169,13 @@ it("does not replay ambiguous input or queued commands on retry", async () => {
 
 it("refreshes colors and fonts without recreating a live terminal or replaying input", async () => {
   const view = render(
-    <TerminalPane hostId="local" terminal={terminal} active connected />,
+    <TerminalPane
+      hostId="local"
+      terminal={terminal}
+      active
+      connected
+      onExited={mocks.onExited}
+    />,
   );
   const pane = view.container.querySelector<HTMLElement>(".terminal-screen")!;
   pane.style.setProperty("--color-canvas", "#ffffff");
@@ -189,6 +210,7 @@ it("closes a hidden terminal on App Quit and reports a failed close", async () =
       terminal={terminal}
       active={false}
       connected={false}
+      onExited={mocks.onExited}
     />,
   );
   await act(async () => {
@@ -203,4 +225,106 @@ it("closes a hidden terminal on App Quit and reports a failed close", async () =
     method: "close_terminal",
     terminal_id: terminal.id,
   });
+  expect(mocks.onExited).not.toHaveBeenCalled();
+});
+
+it("reports confirmed shell exit once after draining and parsing all output", async () => {
+  let finish!: () => void;
+  mocks.request.mockImplementation(
+    async (_host: string, r: Request): Promise<Response> => {
+      if (r.method !== "read_terminal") return { kind: "ok" };
+      return {
+        kind: "terminal_output",
+        terminal: { ...terminal, exited: true, exit_code: 0 },
+        data: [r.after === 0 ? 65 : 66],
+        next: r.after === 0 ? 1 : 2,
+        has_more: r.after === 0,
+        truncated: false,
+      };
+    },
+  );
+  mocks.write.mockImplementationOnce((_data, done) => done());
+  mocks.write.mockImplementationOnce((_data, done) => {
+    finish = done;
+  });
+  const props = {
+    hostId: "remote",
+    terminal,
+    active: true,
+    connected: true,
+    onExited: mocks.onExited,
+  };
+  const view = render(<TerminalPane {...props} />);
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(80);
+  });
+  expect(mocks.write).toHaveBeenCalledTimes(2);
+  expect(mocks.onExited).not.toHaveBeenCalled();
+  await act(async () => {
+    finish();
+  });
+  expect(mocks.onExited).toHaveBeenCalledTimes(1);
+  expect(screen.queryByText(/Shell 已退出/)).toBeNull();
+  expect(mocks.options.disableStdin).toBe(true);
+  const laterCallback = vi.fn();
+  view.rerender(<TerminalPane {...props} onExited={laterCallback} />);
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(240);
+    mocks.input?.("another command\r");
+  });
+  expect(laterCallback).not.toHaveBeenCalled();
+  expect(
+    mocks.request.mock.calls.filter(([, r]) => r.method === "read_terminal"),
+  ).toHaveLength(2);
+  expect(
+    mocks.request.mock.calls.some(([, r]) => r.method === "write_terminal"),
+  ).toBe(false);
+});
+
+it("retires a restored exited terminal even while hidden", async () => {
+  const props = {
+    hostId: "remote",
+    terminal: { ...terminal, exited: true, exit_code: 0 },
+    active: false,
+    connected: true,
+    onExited: mocks.onExited,
+  };
+  const view = render(<TerminalPane {...props} />);
+  await act(async () => {});
+  expect(mocks.onExited).toHaveBeenCalledTimes(1);
+  view.rerender(<TerminalPane {...props} active />);
+  await act(async () => {});
+  expect(mocks.onExited).toHaveBeenCalledTimes(1);
+});
+
+it("keeps a live terminal after nested-shell logout, read failure, or disconnect", async () => {
+  mocks.request.mockImplementation(
+    async (_host: string, r: Request): Promise<Response> => {
+      if (r.method !== "read_terminal") return { kind: "ok" };
+      if (r.after > 0) throw new Error("transport lost");
+      return {
+        kind: "terminal_output",
+        terminal,
+        data: Array.from(new TextEncoder().encode("exit\r\nlogout\r\n$ ")),
+        next: 20,
+        has_more: false,
+        truncated: false,
+      };
+    },
+  );
+  const props = {
+    hostId: "local",
+    terminal,
+    active: true,
+    connected: true,
+    onExited: mocks.onExited,
+  };
+  const view = render(<TerminalPane {...props} />);
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(100);
+  });
+  expect(screen.getByRole("alert").textContent).toContain("transport lost");
+  view.rerender(<TerminalPane {...props} connected={false} />);
+  expect(screen.getByRole("status").textContent).toContain("连接已断开");
+  expect(mocks.onExited).not.toHaveBeenCalled();
 });

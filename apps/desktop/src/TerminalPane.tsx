@@ -13,17 +13,20 @@ export function TerminalPane({
   terminal,
   active: visible,
   connected,
+  onExited,
 }: {
   hostId: string;
   terminal: TerminalInfo;
   active: boolean;
   connected: boolean;
+  onExited: () => void;
 }) {
   const container = useRef<HTMLDivElement>(null);
   const instance = useRef<{ term: Terminal; fit: FitAddon } | null>(null);
   const cursor = useRef(0);
   const polling = useRef(false);
   const exited = useRef(false);
+  const exitReported = useRef(false);
   const writable = useRef(false);
   const pending = useRef(0);
   const chain = useRef(Promise.resolve());
@@ -51,6 +54,13 @@ export function TerminalPane({
   );
   writable.current =
     !closing && connected && !error && ready && !finished && !terminal.exited;
+
+  useEffect(() => {
+    if ((!finished && !terminal.exited) || closing || exitReported.current)
+      return;
+    exitReported.current = true;
+    onExited();
+  }, [finished, terminal.exited, closing, onExited]);
 
   useEffect(
     () => () => {
@@ -267,11 +277,6 @@ export function TerminalPane({
         ref={container}
         aria-label="交互式终端"
       />
-      {finished && (
-        <div className="terminal-notice" role="status">
-          Shell 已退出。可关闭此标签，或点击 ＋ 新建终端。
-        </div>
-      )}
     </div>
   );
 }

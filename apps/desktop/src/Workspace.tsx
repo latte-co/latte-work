@@ -589,6 +589,7 @@ function WorkspacePage({
                 active && !conversationActive && current === tab.id && !busy
               }
               connected={connected}
+              onExited={() => void remove(tab)}
             />
           ) : tab.kind === "turnChanges" ? (
             <TaskChangesView

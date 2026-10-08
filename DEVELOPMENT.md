@@ -92,6 +92,11 @@ Focused checks: `cargo test -p latte-work-server --test e2e terminal_ --locked`
 and `npm test` (frontend includes PTY output-cursor and no-input-replay
 regressions). Native checks should cover Tab switching, panel hide/restore,
 multiple shells, resizing, shell exit, and keyboard copy/paste.
+Confirmed shell exit automatically closes its workspace tab and releases the host
+terminal through `close_terminal`. Live output is drained before closing; restored
+exited metadata also retires the tab. Disconnects and read failures keep the tab,
+and exiting a nested shell does not close a still-running parent shell. Failed
+cleanup remains visible for explicit retry rather than automatically replaying it.
 
 ## Agent adapter development
 
