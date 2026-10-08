@@ -1046,6 +1046,19 @@ button.recent-notice {
   font-size: var(--text-xs);
   margin: var(--space-2) 0;
 }
+.repeated-output-warning {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-2);
+  margin-bottom: var(--space-2);
+  color: var(--color-text-secondary);
+  font-size: var(--text-sm);
+  line-height: var(--leading-ui);
+}
+.repeated-output-warning > svg {
+  flex: none;
+  color: var(--color-warning);
+}
 .composer-add {
   flex-shrink: 0;
 }
