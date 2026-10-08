@@ -6,13 +6,14 @@ import {
 } from "./agentSessionState";
 import { modelSelectionScope } from "./modelSelectionScope";
 import { executionStatus } from "./executionStatus";
+import { hasRepeatedOutput } from "./repeatedOutput";
 import { ApprovalCard } from "./ApprovalCard";
 import { activityTranscript } from "./activity";
 import { ComposerAction } from "./ComposerAction";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { MessageContent } from "./MessageContent";
 import { DraftStore, useDraft, type Draft } from "./drafts";
-import { ArrowUp, ArrowDown, Bot } from "lucide-react";
+import { ArrowUp, ArrowDown, Bot, TriangleAlert } from "lucide-react";
 import type { AgentInfo, Effort, Event, Session } from "./protocol";
 import type { Host } from "./api";
 import type { HostedProject } from "./projectCatalog";
@@ -215,6 +216,17 @@ export function Conversation({
     setStopping(false);
   }, [draftKey, active]);
   const workingStatus = executionStatus(session, events, connected, stopping);
+  const repeatedOutput = useMemo(
+    () =>
+      !!session &&
+      session.status === "running" &&
+      !session.archived &&
+      connected &&
+      !preparingHistory &&
+      !stopping &&
+      hasRepeatedOutput(events, session.id),
+    [events, session, connected, preparingHistory, stopping],
+  );
   async function stop() {
     if (stopping) return;
     const generation = ++stopGeneration.current;
@@ -601,6 +613,12 @@ export function Conversation({
               />
             ))}
           </section>
+        )}
+        {repeatedOutput && (
+          <div className="repeated-output-warning" role="status">
+            <TriangleAlert size={16} aria-hidden="true" />
+            <span>回复内容似乎在重复，可停止任务后重试。</span>
+          </div>
         )}
         <Composer
           referenceState={draft.references}
