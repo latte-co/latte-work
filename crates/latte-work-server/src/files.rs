@@ -298,7 +298,7 @@ pub async fn change_diff(
     git(root, &args).await
 }
 
-async fn git(root: &Path, args: &[&str]) -> Result<(String, bool)> {
+pub(crate) async fn git(root: &Path, args: &[&str]) -> Result<(String, bool)> {
     let mut child = Command::new("git")
         .args([
             "--literal-pathspecs",

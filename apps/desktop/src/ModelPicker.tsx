@@ -4,6 +4,7 @@ import { modelOptions } from "./modelOptions";
 import { modelSelectionScope } from "./modelSelectionScope";
 import { ModelSelector } from "./ModelSelector";
 import type { Effort, Response } from "./protocol";
+import { useStatusIssues } from "./statusNotices";
 
 type Catalog = Extract<Response, { kind: "models" }>;
 export function ModelPicker({
@@ -38,11 +39,22 @@ export function ModelPicker({
   const catalog = loaded?.scope === scope ? loaded.catalog : undefined;
   const [error, setError] = useState("");
   const [retry, setRetry] = useState(0);
+  const [loading, setLoading] = useState(false);
+  useStatusIssues([
+    {
+      id: `models:${hostId}:${projectId}:${agent}`,
+      title: "模型列表暂不可用",
+      error: connected && !settingsOpen ? error : "",
+      pending: connected && !settingsOpen && loading,
+      action: { label: "重新加载模型", run: () => setRetry((v) => v + 1) },
+    },
+  ]);
   useEffect(() => {
     if (!connected || settingsOpen) return;
     let disposed = false;
     setCatalog(undefined);
     setError("");
+    setLoading(true);
     void request(hostId, {
       method: "models",
       agent,
@@ -55,6 +67,9 @@ export function ModelPicker({
       })
       .catch((e) => {
         if (!disposed) setError(message(e));
+      })
+      .finally(() => {
+        if (!disposed) setLoading(false);
       });
     return () => {
       disposed = true;
@@ -107,25 +122,15 @@ export function ModelPicker({
     });
   return (
     <div className="model-picker">
-      {error ? (
-        <button
-          className="model-picker-error"
-          title={error}
-          onClick={() => setRetry((v) => v + 1)}
-        >
-          重新加载模型
-        </button>
-      ) : (
-        <ModelSelector
-          value={providerFallback ?? value ?? ""}
-          options={options}
-          onChange={(id) => onChange(id || null)}
-          effort={effort}
-          levels={catalog?.effort_levels ?? []}
-          onEffortChange={onEffortChange}
-          disabled={disabled || settingsOpen || !connected || !catalog}
-        />
-      )}
+      <ModelSelector
+        value={providerFallback ?? value ?? ""}
+        options={options}
+        onChange={(id) => onChange(id || null)}
+        effort={effort}
+        levels={catalog?.effort_levels ?? []}
+        onEffortChange={onEffortChange}
+        disabled={disabled || settingsOpen || !connected || !catalog}
+      />
     </div>
   );
 }

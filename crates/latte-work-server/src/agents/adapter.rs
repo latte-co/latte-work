@@ -32,6 +32,10 @@ pub enum Input<'a> {
 }
 
 pub enum Action {
+    SourceUsed {
+        id: String,
+        name: String,
+    },
     Commands(Vec<latte_work_protocol::AgentSlashCommand>),
     /// Already encoded bytes, including framing. Runtime only bounds and writes them.
     Write(Vec<u8>),

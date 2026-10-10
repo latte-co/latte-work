@@ -69,6 +69,94 @@ async fn ask(c: &mut Client, r: Request) -> Response {
     c.request(r).await.unwrap()
 }
 #[tokio::test]
+async fn recent_sessions_page_across_projects_with_live_evidence() {
+    let host = Host::start().await;
+    let mut client = host.client().await;
+    let roots = [tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap()];
+    let mut projects = Vec::new();
+    for root in &roots {
+        let Response::Project { project } = ask(
+            &mut client,
+            Request::AddProject {
+                path: root.path().to_string_lossy().into_owned(),
+                name: None,
+            },
+        )
+        .await
+        else {
+            panic!("project response")
+        };
+        projects.push(project);
+    }
+    let mut ids = std::collections::HashSet::new();
+    for n in 0..102 {
+        let Response::Session { session } = ask(
+            &mut client,
+            Request::CreateSession {
+                project_id: projects[n % 2].id.clone(),
+                agent: "claude".into(),
+            },
+        )
+        .await
+        else {
+            panic!("session response")
+        };
+        ids.insert(session.id);
+    }
+    let Response::RecentSessions { sessions, next } =
+        ask(&mut client, Request::RecentSessions { before: None }).await
+    else {
+        panic!("recent response")
+    };
+    assert_eq!(sessions.len(), 100);
+    assert!(
+        sessions
+            .iter()
+            .all(|row| row.session.agent_session_open == Some(false)
+                && row.session.agent_session_busy == Some(false))
+    );
+    assert!(
+        sessions
+            .iter()
+            .any(|row| row.session.project_id == projects[0].id)
+    );
+    assert!(
+        sessions
+            .iter()
+            .any(|row| row.session.project_id == projects[1].id)
+    );
+    let Response::RecentSessions {
+        sessions: older,
+        next: end,
+    } = ask(&mut client, Request::RecentSessions { before: next }).await
+    else {
+        panic!("older response")
+    };
+    assert_eq!(older.len(), 2);
+    assert!(end.is_none());
+    let loaded: std::collections::HashSet<_> = sessions
+        .iter()
+        .chain(older.iter())
+        .map(|row| row.session.id.clone())
+        .collect();
+    assert_eq!(loaded, ids);
+    let id = sessions[0].session.id.clone();
+    ask(
+        &mut client,
+        Request::ArchiveSession {
+            session_id: id.clone(),
+            archived: true,
+        },
+    )
+    .await;
+    let Response::RecentSessions { sessions, .. } =
+        ask(&mut client, Request::RecentSessions { before: None }).await
+    else {
+        panic!("recent response")
+    };
+    assert!(!sessions.iter().any(|row| row.session.id == id));
+}
+#[tokio::test]
 async fn browse_before_registration_and_named_projects_are_host_scoped() {
     let host = Host::start().await;
     let mut client = host.client().await;
@@ -2242,7 +2330,7 @@ async fn agent_commands_discovery_dispatch_resume_and_unsupported_are_native() {
     .await;
     match response {
         Response::AgentCommands { commands } => {
-            assert_eq!(commands.len(), 2);
+            assert_eq!(commands.len(), 3);
             assert_eq!(commands[0].name, "compact");
             assert_eq!(commands[0].argument_hint, "[instructions]");
             assert_eq!(
@@ -2736,6 +2824,57 @@ async fn usage_snapshot_survives_bridge_reconnect_without_billing_inflation() {
         .unwrap();
     assert!(
         matches!(&latest.event,EventKind::Usage {context:Some(c),totals:Some(t)} if c.used_tokens == 1000.0 && c.window_tokens == Some(200000.0) && t.input_tokens == Some(200.0) && t.cache_read_tokens == Some(1200.0))
+    );
+    drop(client);
+    let mut reconnected = host.client().await;
+    let replay = wait(&mut reconnected, &id, Status::Completed).await;
+    assert_eq!(
+        serde_json::to_value(&events).unwrap(),
+        serde_json::to_value(&replay).unwrap()
+    );
+}
+
+#[tokio::test]
+async fn usage_alias_capacity_is_persisted_and_replayed() {
+    let host = Host::start().await;
+    let mut client = host.client().await;
+    let project = tempfile::tempdir().unwrap();
+    let id = session(&mut client, project.path()).await;
+    assert!(matches!(
+        ask(
+            &mut client,
+            Request::Send {
+                session_id: id.clone(),
+                request_id: "usage-alias-request".into(),
+                text: "usage-alias".into(),
+                model: Some("relay/seed-0812".into()),
+                provider: Some(latte_work_protocol::TurnProvider::Snapshot(
+                    serde_json::from_value(serde_json::json!({
+                        "provider": {
+                            "id": "usage-provider", "name": "Usage fixture",
+                            "protocol": "anthropic_messages", "base_url": "https://example.test",
+                            "model": "relay/seed-0812", "models": [], "model_labels": {},
+                            "auth": "bearer", "has_credential": true, "revision": "fixture"
+                        },
+                        "credential": "fixture-only-key"
+                    }))
+                    .unwrap()
+                )),
+                effort: None,
+                permission_mode: None,
+            }
+        )
+        .await,
+        Response::Accepted { duplicate: false }
+    ));
+    let events = wait(&mut client, &id, Status::Completed).await;
+    let latest = events
+        .iter()
+        .rev()
+        .find(|e| matches!(e.event, EventKind::Usage { .. }))
+        .unwrap();
+    assert!(
+        matches!(&latest.event, EventKind::Usage {context:Some(c),..} if c.model == "model_api/experimental_0812" && c.used_tokens == 69692.0 && c.window_tokens == Some(200000.0))
     );
     drop(client);
     let mut reconnected = host.client().await;
@@ -3371,4 +3510,517 @@ async fn disconnected_app_quit_preserves_remote_execution_and_reattaches_without
         .unwrap();
     assert_gone(pid).await;
     wait(&mut restored, &id, Status::Stopped).await;
+}
+
+#[tokio::test]
+async fn subagents_native_commands_snapshot_reconnect_and_close_share_one_protocol() {
+    use latte_work_protocol::SubagentStatus;
+    let host = Host::start().await;
+    let mut client = host.client().await;
+    let folder = tempfile::tempdir().unwrap();
+    let id = session(&mut client, folder.path()).await;
+    send(&mut client, &id, "child-request", "subagents").await;
+    let events = wait(&mut client, &id, Status::Completed).await;
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event.event, EventKind::Subagent { .. }))
+    );
+    let snapshot = ask(
+        &mut client,
+        Request::Subagents {
+            session_id: id.clone(),
+        },
+    )
+    .await;
+    assert!(
+        matches!(snapshot, Response::Subagents {tasks, truncated:false} if tasks.len()==1 && tasks[0].status == SubagentStatus::Running && tasks[0].native_id == "native-child" && tasks[0].last_tool.as_deref()==Some("Read"))
+    );
+    drop(client);
+    let mut client = host.client().await;
+    send(&mut client, &id, "agents-command", "/agents").await;
+    let events = wait(&mut client, &id, Status::Completed).await;
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(&event.event, EventKind::User {text,..} if text=="/agents"))
+    );
+    assert!(
+        matches!(ask(&mut client, Request::Subagents {session_id:id.clone()}).await, Response::Subagents {tasks,..} if tasks.len()==1 && tasks[0].status==SubagentStatus::Stopped && tasks[0].summary.as_deref()==Some("Stopped by native command"))
+    );
+    let another = session(&mut client, folder.path()).await;
+    assert!(
+        matches!(ask(&mut client, Request::Subagents {session_id:another}).await, Response::Subagents {tasks,..} if tasks.is_empty())
+    );
+    send(&mut client, &id, "background-child", "background").await;
+    wait(&mut client, &id, Status::Completed).await;
+    ask(
+        &mut client,
+        Request::CloseAgentSession {
+            session_id: id.clone(),
+            only_if_idle: Some(false),
+        },
+    )
+    .await;
+    assert!(
+        matches!(ask(&mut client, Request::Subagents {session_id:id}).await, Response::Subagents {tasks,..} if tasks.iter().all(|task| !task.status.active()) && tasks.iter().any(|task| task.native_id=="bg-task" && task.status==SubagentStatus::Stopped))
+    );
+}
+
+#[tokio::test]
+async fn task_baselines_and_sources_integrate_with_real_process_reconnect_and_bounded_preview() {
+    let host = Host::start().await;
+    let mut client = host.client().await;
+    let project = tempfile::tempdir().unwrap();
+    let root = project.path().canonicalize().unwrap();
+    assert!(
+        Command::new("git")
+            .current_dir(&root)
+            .args(["init", "-q"])
+            .status()
+            .unwrap()
+            .success()
+    );
+    std::fs::write(root.join("task.txt"), "initial\n").unwrap();
+    assert!(
+        Command::new("git")
+            .current_dir(&root)
+            .args(["add", "."])
+            .status()
+            .unwrap()
+            .success()
+    );
+    assert!(
+        Command::new("git")
+            .current_dir(&root)
+            .args([
+                "-c",
+                "user.name=Fixture",
+                "-c",
+                "user.email=fixture@example.test",
+                "commit",
+                "-qm",
+                "initial"
+            ])
+            .status()
+            .unwrap()
+            .success()
+    );
+    std::fs::write(root.join("task.txt"), "existing dirty\n").unwrap();
+    std::fs::write(root.join("fixture-agent-pid"), "already present\n").unwrap();
+    let id = session(&mut client, &root).await;
+    let Response::Session { session: task } = ask(
+        &mut client,
+        Request::Session {
+            session_id: id.clone(),
+        },
+    )
+    .await
+    else {
+        panic!()
+    };
+    let external = tempfile::tempdir().unwrap();
+    let file = external.path().canonicalize().unwrap().join("image.png");
+    std::fs::write(&file, b"\x89PNG\r\n\x1a\n").unwrap();
+    let preview = |path: String, offset| Request::PreviewSource {
+        project_id: task.project_id.clone(),
+        session_id: Some(id.clone()),
+        path,
+        offset,
+    };
+    assert!(matches!(
+        ask(&mut client, preview(file.to_string_lossy().into(), 0)).await,
+        Response::Error { .. }
+    ));
+    let marker = "\n文件引用（相对路径基于当前项目根目录；绝对路径位于当前执行主机。仅引用路径，按当前权限读取）：\n";
+    let text = format!(
+        "task-edit{marker}{}",
+        serde_json::json!([{"type":"file","path":file,"name":"image.png","mime_type":"image/png"}])
+    );
+    send(&mut client, &id, "task-r1", &text).await;
+    wait(&mut client, &id, Status::Completed).await;
+    let summary_request = || Request::ChangeSummary {
+        project_id: task.project_id.clone(),
+        session_id: Some(id.clone()),
+    };
+    let Response::ChangeSummary { summary } = ask(&mut client, summary_request()).await else {
+        panic!()
+    };
+    let change = summary
+        .entries
+        .iter()
+        .find(|c| c.path == "task.txt")
+        .unwrap();
+    assert_eq!((change.added, change.removed), (Some(2), Some(1)));
+    let baseline_at = summary.baseline_at;
+    let Response::Content { text: patch, .. } = ask(
+        &mut client,
+        Request::TaskChangeDiff {
+            session_id: id.clone(),
+            path: "task.txt".into(),
+        },
+    )
+    .await
+    else {
+        panic!()
+    };
+    assert!(patch.contains("-existing dirty") && patch.contains("+agent change"));
+    let mut reconnect = host.client().await;
+    let Response::Sources { entries, truncated } = ask(
+        &mut reconnect,
+        Request::Sources {
+            session_id: id.clone(),
+        },
+    )
+    .await
+    else {
+        panic!()
+    };
+    assert!(!truncated);
+    let connector = entries
+        .iter()
+        .find(|s| s.id == "connector:fixture_docs")
+        .unwrap();
+    assert_eq!(connector.uses, 2);
+    assert_eq!(connector.tools.len(), 2);
+    assert!(entries.iter().any(|s| s.name == "image.png"));
+    let Response::Sources { entries: again, .. } = ask(
+        &mut reconnect,
+        Request::Sources {
+            session_id: id.clone(),
+        },
+    )
+    .await
+    else {
+        panic!()
+    };
+    assert_eq!(again.iter().find(|s| s.id == connector.id).unwrap().uses, 2);
+    assert!(
+        matches!(ask(&mut reconnect, preview(file.to_string_lossy().into(), 0)).await, Response::SourcePreview { mime_type, data, has_more: false, .. } if mime_type=="image/png" && data.len()==8)
+    );
+    assert!(matches!(
+        ask(&mut reconnect, preview(file.to_string_lossy().into(), 100)).await,
+        Response::Error { .. }
+    ));
+    let other = external.path().join("secret.txt");
+    std::fs::write(&other, "private").unwrap();
+    std::os::unix::fs::symlink(&other, root.join("escape")).unwrap();
+    assert!(matches!(
+        ask(&mut reconnect, preview("escape".into(), 0)).await,
+        Response::Error { .. }
+    ));
+    assert!(matches!(
+        ask(&mut reconnect, preview(other.to_string_lossy().into(), 0)).await,
+        Response::Error { .. }
+    ));
+    assert!(matches!(
+        ask(
+            &mut reconnect,
+            Request::ResolveReference {
+                project_id: task.project_id.clone(),
+                path: other.to_string_lossy().into()
+            }
+        )
+        .await,
+        Response::FileReference { .. }
+    ));
+    assert!(matches!(
+        ask(&mut reconnect, preview(other.to_string_lossy().into(), 0)).await,
+        Response::SourcePreview { .. }
+    ));
+    assert!(matches!(
+        ask(
+            &mut reconnect,
+            Request::ReadFile {
+                project_id: task.project_id.clone(),
+                path: other.to_string_lossy().into()
+            }
+        )
+        .await,
+        Response::Error { .. }
+    ));
+    assert!(matches!(
+        send(&mut reconnect, &id, "task-r1", &text).await,
+        Response::Accepted { duplicate: true }
+    ));
+    let Response::ChangeSummary { summary: later } = ask(&mut reconnect, summary_request()).await
+    else {
+        panic!()
+    };
+    assert_eq!(later.baseline_at, baseline_at);
+}
+
+#[tokio::test]
+async fn turn_changes_freeze_each_request_and_undo_rejects_conflicts_then_reconciles_once() {
+    use latte_work_protocol::TurnUndoStatus;
+    let host = Host::start().await;
+    let mut client = host.client().await;
+    let project = tempfile::tempdir().unwrap();
+    let root = project.path().canonicalize().unwrap();
+    assert!(
+        Command::new("git")
+            .current_dir(&root)
+            .args(["init", "-q"])
+            .status()
+            .unwrap()
+            .success()
+    );
+    std::fs::write(root.join(".gitignore"), "fixture-agent-pid\n").unwrap();
+    std::fs::write(root.join("task.txt"), "existing dirty\n").unwrap();
+    let id = session(&mut client, &root).await;
+    let summary = |request_id: &str| Request::TurnChangeSummary {
+        session_id: id.clone(),
+        request_id: request_id.into(),
+    };
+    let diff = |request_id: &str| Request::TurnChangeDiff {
+        session_id: id.clone(),
+        request_id: request_id.into(),
+        path: "task.txt".into(),
+    };
+    let undo = |request_id: &str| Request::UndoTurnChanges {
+        session_id: id.clone(),
+        request_id: request_id.into(),
+    };
+    let latest = || Request::LastTurnChanges {
+        session_id: id.clone(),
+    };
+    assert!(matches!(
+        ask(&mut client, latest()).await,
+        Response::LastTurnChanges { changes: None }
+    ));
+    send(&mut client, &id, "turn-r1", "task-edit").await;
+    let events = wait(&mut client, &id, Status::Completed).await;
+    assert!(events.iter().any(|e| matches!(&e.event,EventKind::TurnChanges { changes } if changes.request_id=="turn-r1" && changes.summary.entries.len()==1)));
+    let Response::Content { text: first, .. } = ask(&mut client, diff("turn-r1")).await else {
+        panic!()
+    };
+    assert!(first.contains("-existing dirty") && first.contains("+agent change"));
+    assert!(matches!(
+        send(&mut client, &id, "turn-r1", "task-edit").await,
+        Response::Accepted { duplicate: true }
+    ));
+    send(&mut client, &id, "turn-r2", "task-edit-second").await;
+    wait(&mut client, &id, Status::Completed).await;
+    let Response::TurnChanges { changes } = ask(&mut client, summary("turn-r2")).await else {
+        panic!()
+    };
+    assert_eq!((changes.summary.added, changes.summary.removed), (1, 2));
+    assert_eq!(changes.summary.entries.len(), 1);
+    let mut reconnect = host.client().await;
+    let Response::Content { text, .. } = ask(&mut reconnect, diff("turn-r1")).await else {
+        panic!()
+    };
+    assert_eq!(text, first, "old diff must not read the latest workspace");
+    assert!(matches!(
+        ask(&mut reconnect, undo("turn-r1")).await,
+        Response::Error { .. }
+    ));
+    std::fs::write(root.join("task.txt"), "external writer\n").unwrap();
+    assert!(matches!(
+        ask(&mut reconnect, undo("turn-r2")).await,
+        Response::Error { .. }
+    ));
+    assert_eq!(
+        std::fs::read_to_string(root.join("task.txt")).unwrap(),
+        "external writer\n"
+    );
+    std::fs::write(root.join("task.txt"), "third line\n").unwrap();
+    let index_before = Command::new("git")
+        .current_dir(&root)
+        .args(["ls-files", "--stage"])
+        .output()
+        .unwrap()
+        .stdout;
+    let Response::Session { session } = ask(
+        &mut client,
+        Request::Session {
+            session_id: id.clone(),
+        },
+    )
+    .await
+    else {
+        panic!()
+    };
+    let terminal_id = uuid::Uuid::new_v4().to_string();
+    ask(
+        &mut client,
+        Request::CreateTerminal {
+            project_id: session.project_id,
+            terminal_id: terminal_id.clone(),
+            cols: 80,
+            rows: 24,
+        },
+    )
+    .await;
+    assert!(matches!(
+        ask(&mut reconnect, undo("turn-r2")).await,
+        Response::Error { .. }
+    ));
+    ask(&mut client, Request::CloseTerminal { terminal_id }).await;
+    let Response::TurnChanges { changes } = ask(&mut reconnect, undo("turn-r2")).await else {
+        panic!()
+    };
+    assert_eq!(changes.undo, TurnUndoStatus::Reverted);
+    assert_eq!(
+        std::fs::read_to_string(root.join("task.txt")).unwrap(),
+        "agent change\nsecond line\n"
+    );
+    assert_eq!(
+        Command::new("git")
+            .current_dir(&root)
+            .args(["ls-files", "--stage"])
+            .output()
+            .unwrap()
+            .stdout,
+        index_before
+    );
+    std::fs::write(root.join("task.txt"), "post-undo manual edit\n").unwrap();
+    let Response::TurnChanges { changes } = ask(&mut reconnect, undo("turn-r2")).await else {
+        panic!()
+    };
+    assert_eq!(changes.undo, TurnUndoStatus::Reverted);
+    assert_eq!(
+        std::fs::read_to_string(root.join("task.txt")).unwrap(),
+        "post-undo manual edit\n"
+    );
+    let Response::Content { text, .. } = ask(&mut reconnect, diff("turn-r2")).await else {
+        panic!()
+    };
+    assert!(text.contains("-agent change") && text.contains("+third line"));
+    assert!(
+        matches!(ask(&mut reconnect, latest()).await, Response::LastTurnChanges { changes: Some(changes) } if changes.request_id=="turn-r2" && changes.undo==TurnUndoStatus::Reverted && changes.summary.added==1 && changes.summary.removed==2)
+    );
+    assert!(matches!(
+        ask(
+            &mut reconnect,
+            Request::LastTurnChanges {
+                session_id: "missing".into()
+            }
+        )
+        .await,
+        Response::Error { .. }
+    ));
+    assert!(matches!(
+        ask(
+            &mut reconnect,
+            Request::TurnChangeSummary {
+                session_id: "another-session".into(),
+                request_id: "turn-r1".into()
+            }
+        )
+        .await,
+        Response::Error { .. }
+    ));
+}
+
+#[tokio::test]
+async fn git_review_wire_preserves_scope_and_branch_snapshot_after_reconnect() {
+    use latte_work_protocol::GitReviewScope;
+    let host = Host::start().await;
+    let mut client = host.client().await;
+    let root = tempfile::tempdir().unwrap();
+    let run = |args: &[&str]| {
+        assert!(
+            Command::new("git")
+                .args(args)
+                .current_dir(root.path())
+                .output()
+                .unwrap()
+                .status
+                .success()
+        );
+    };
+    run(&["init", "-q", "-b", "main"]);
+    run(&["config", "user.name", "Fixture"]);
+    run(&["config", "user.email", "fixture@example.test"]);
+    std::fs::write(root.path().join("file.txt"), "original\n").unwrap();
+    run(&["add", "."]);
+    run(&["commit", "-qm", "base"]);
+    run(&["update-ref", "refs/remotes/origin/main", "HEAD"]);
+    run(&["checkout", "-qb", "feature"]);
+    std::fs::write(root.path().join("file.txt"), "committed\n").unwrap();
+    run(&["add", "."]);
+    run(&["commit", "-qm", "feature"]);
+    std::fs::write(root.path().join("file.txt"), "working\nextra\n").unwrap();
+    let Response::Project { project } = ask(
+        &mut client,
+        Request::AddProject {
+            path: root.path().to_string_lossy().into(),
+            name: None,
+        },
+    )
+    .await
+    else {
+        panic!()
+    };
+    let Response::GitInfo { info } = ask(
+        &mut client,
+        Request::GitInfo {
+            project_id: project.id.clone(),
+        },
+    )
+    .await
+    else {
+        panic!()
+    };
+    assert_eq!(info.branch.as_deref(), Some("feature"));
+    assert_eq!(
+        info.default_base.as_deref(),
+        Some("refs/remotes/origin/main")
+    );
+    let Response::GitReview { review } = ask(
+        &mut client,
+        Request::GitReview {
+            project_id: project.id.clone(),
+            scope: GitReviewScope::Branch,
+            base: None,
+        },
+    )
+    .await
+    else {
+        panic!()
+    };
+    assert_eq!((review.added, review.removed), (1, 1));
+    let mut reconnect = host.client().await;
+    run(&["update-ref", "refs/remotes/origin/main", "HEAD"]);
+    let request = |path: &str| Request::GitReviewDiff {
+        project_id: project.id.clone(),
+        scope: GitReviewScope::Branch,
+        base: review.base.clone(),
+        head: review.head.clone(),
+        path: path.into(),
+        full_context: false,
+    };
+    assert!(
+        matches!(ask(&mut reconnect,request("file.txt")).await,Response::Content{text,truncated:false} if text.contains("+committed")&&!text.contains("+working"))
+    );
+    assert!(matches!(
+        ask(&mut reconnect, request("../outside")).await,
+        Response::Error { .. }
+    ));
+    let Response::GitReview { review } = ask(
+        &mut reconnect,
+        Request::GitReview {
+            project_id: project.id.clone(),
+            scope: GitReviewScope::Worktree,
+            base: None,
+        },
+    )
+    .await
+    else {
+        panic!()
+    };
+    assert_eq!((review.added, review.removed), (2, 1));
+    assert!(matches!(
+        ask(
+            &mut reconnect,
+            Request::GitReview {
+                project_id: project.id,
+                scope: GitReviewScope::Branch,
+                base: Some("--output=/tmp/escape".into())
+            }
+        )
+        .await,
+        Response::Error { .. }
+    ));
 }

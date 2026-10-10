@@ -1,7 +1,14 @@
-import { useWorkspaceState, type WorkspaceTab as Tab } from "./workspaceState";
+import { TaskChangesView } from "./TaskChangesView";
+import { ChangesView } from "./ChangesView";
+import {
+  openSubagent,
+  useWorkspaceState,
+  type WorkspaceTab as Tab,
+} from "./workspaceState";
 import { useEffect, useId, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import {
+  Bot,
   Files,
   GitCompareArrows,
   TerminalSquare,
@@ -10,12 +17,16 @@ import {
   PanelRight,
   Maximize2,
   MessageCircle,
-  PanelLeft,
 } from "lucide-react";
 import type { Project } from "./protocol";
 import { request, message } from "./api";
 import { WorkspaceFiles } from "./WorkspaceFiles";
+import { SubagentsPanel } from "./SubagentsPanel";
+import type { SubagentsState } from "./useSubagents";
 import { TerminalPane } from "./TerminalPane";
+import { SidebarToggle } from "./SidebarToggle";
+import { useStatusIssues } from "./statusNotices";
+import type { SidebarPreview } from "./useSidebarPreview";
 
 function ConversationTab({
   title,
@@ -47,20 +58,37 @@ function ConversationTab({
   );
 }
 
-type Kind = "terminal" | "files" | "diff";
+type Kind = "terminal" | "files" | "diff" | "subagents";
 
-const labels = { terminal: "终端", files: "文件", diff: "改动" };
+const labels = {
+  terminal: "终端",
+  files: "文件",
+  diff: "变更",
+  turnChanges: "本轮变更",
+  subagents: "子智能体",
+  subagent: "子智能体",
+};
 const icons = {
+  subagents: Bot,
+  subagent: Bot,
   terminal: TerminalSquare,
   files: Files,
   diff: GitCompareArrows,
+  turnChanges: GitCompareArrows,
 };
 
 export function Workspace({
   workspaceId,
+  subagents,
+  overview,
+  conversationActions,
+  statusCenter,
+  sessionId,
+  lastTurnVersion,
   conversationTitle = "对话",
   sidebarOpen = true,
   toggleSidebar,
+  sidebarPreview,
   hostId,
   hostName,
   project,
@@ -69,9 +97,16 @@ export function Workspace({
   close,
 }: {
   workspaceId: string;
+  subagents?: SubagentsState;
+  overview?: React.ReactNode;
+  conversationActions?: React.ReactNode;
+  statusCenter?: React.ReactNode;
+  sessionId?: string;
+  lastTurnVersion?: string;
   conversationTitle?: string;
   sidebarOpen?: boolean;
   toggleSidebar?: () => void;
+  sidebarPreview?: SidebarPreview;
   hostId: string;
   hostName: string;
   project?: Project;
@@ -84,7 +119,13 @@ export function Workspace({
   const conversationActive = expanded && state.conversationActive;
   // Keep each visited conversation mounted so switching preserves its emulator.
   const [pages, setPages] = useState<
-    { key: string; hostId: string; hostName: string; project: Project }[]
+    {
+      key: string;
+      hostId: string;
+      hostName: string;
+      project: Project;
+      sessionId?: string;
+    }[]
   >([]);
   useEffect(() => {
     if (!project) return;
@@ -92,7 +133,7 @@ export function Workspace({
     setPages((pages) =>
       pages.some((p) => p.key === key)
         ? pages
-        : [...pages, { key, hostId, hostName, project }],
+        : [...pages, { key, hostId, hostName, project, sessionId }],
     );
   }, [workspaceId, hostId, hostName, project]);
   return (
@@ -107,9 +148,16 @@ export function Workspace({
           <WorkspacePage
             key={page.key}
             workspaceId={page.key}
+            subagents={selected ? subagents : undefined}
+            overview={selected ? overview : undefined}
+            conversationActions={selected ? conversationActions : undefined}
+            statusCenter={selected ? statusCenter : undefined}
+            sessionId={selected ? sessionId : page.sessionId}
+            lastTurnVersion={selected ? lastTurnVersion : undefined}
             conversationTitle={conversationTitle}
             sidebarOpen={sidebarOpen}
             toggleSidebar={toggleSidebar}
+            sidebarPreview={sidebarPreview}
             hostId={selected ? hostId : page.hostId}
             hostName={selected ? hostName : page.hostName}
             project={selected ? project! : page.project}
@@ -125,14 +173,15 @@ export function Workspace({
       {!project && (
         <div className="workspace-page empty">
           <header data-tauri-drag-region="deep">
+            {expanded && statusCenter}
             {expanded && !sidebarOpen && toggleSidebar && (
-              <button
-                className="icon-button"
-                aria-label="展开侧栏"
-                onClick={toggleSidebar}
-              >
-                <PanelLeft size={16} />
-              </button>
+              <>
+                <SidebarToggle
+                  toggle={toggleSidebar}
+                  preview={sidebarPreview}
+                />
+                <span className="titlebar-divider" aria-hidden="true" />
+              </>
             )}
             {expanded && (
               <div
@@ -148,6 +197,11 @@ export function Workspace({
               </div>
             )}
             <div className="workspace-header-space" data-tauri-drag-region />
+            {expanded && conversationActions}
+            {expanded && overview}
+            {expanded && (
+              <span className="titlebar-divider" aria-hidden="true" />
+            )}
             <button
               className="icon-button"
               aria-label={expanded ? "分离右侧栏" : "收起工作区"}
@@ -163,15 +217,17 @@ export function Workspace({
             hidden={conversationActive}
           >
             <div className="workspace-launchers">
-              {(["diff", "terminal", "files"] as const).map((kind) => {
-                const Icon = icons[kind];
-                return (
-                  <button key={kind} disabled title="选择项目后打开">
-                    <Icon size={18} />
-                    <span>{labels[kind]}</span>
-                  </button>
-                );
-              })}
+              {(["diff", "terminal", "files", "subagents"] as const).map(
+                (kind) => {
+                  const Icon = icons[kind];
+                  return (
+                    <button key={kind} disabled title="选择项目后打开">
+                      <Icon size={18} />
+                      <span>{labels[kind]}</span>
+                    </button>
+                  );
+                },
+              )}
             </div>
           </div>
         </div>
@@ -182,9 +238,16 @@ export function Workspace({
 
 function WorkspacePage({
   workspaceId,
+  subagents,
+  overview,
+  conversationActions,
+  statusCenter,
+  sessionId,
+  lastTurnVersion,
   conversationTitle,
   sidebarOpen,
   toggleSidebar,
+  sidebarPreview,
   hostId,
   hostName,
   project,
@@ -198,9 +261,16 @@ function WorkspacePage({
   hostId: string;
   hostName: string;
   workspaceId: string;
+  subagents?: SubagentsState;
+  overview?: React.ReactNode;
+  conversationActions?: React.ReactNode;
+  statusCenter?: React.ReactNode;
+  sessionId?: string;
+  lastTurnVersion?: string;
   conversationTitle: string;
   sidebarOpen: boolean;
   toggleSidebar?: () => void;
+  sidebarPreview?: SidebarPreview;
   project: Project;
   selected: boolean;
   active: boolean;
@@ -242,6 +312,18 @@ function WorkspacePage({
   };
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  useStatusIssues([
+    {
+      id: `workspace:${workspaceId}`,
+      title: "工作区操作未完成",
+      error: selected ? error : "",
+      pending: busy,
+      action: {
+        label: "知道了",
+        run: () => setError(""),
+      },
+    },
+  ]);
   const [menu, setMenu] = useState(false);
   const [revision, refresh] = useState(0);
   const trigger = useRef<HTMLButtonElement>(null);
@@ -393,21 +475,24 @@ function WorkspacePage({
   const title = (tab: Tab) =>
     tab.kind === "terminal"
       ? `${tab.terminal.title} · ${tab.hostName ?? hostName}`
-      : labels[tab.kind];
+      : tab.kind === "subagent"
+        ? (subagents?.tasks.find((task) => task.id === tab.taskId)?.title ??
+          tab.title)
+        : tab.kind === "turnChanges"
+          ? tab.title
+          : labels[tab.kind];
   return (
     <div
       className={`workspace-page${tabs.length ? "" : " empty"}`}
       hidden={!selected}
     >
       <header data-tauri-drag-region="deep">
+        {expanded && statusCenter}
         {expanded && !sidebarOpen && toggleSidebar && (
-          <button
-            className="icon-button"
-            aria-label="展开侧栏"
-            onClick={toggleSidebar}
-          >
-            <PanelLeft size={16} />
-          </button>
+          <>
+            <SidebarToggle toggle={toggleSidebar} preview={sidebarPreview} />
+            <span className="titlebar-divider" aria-hidden="true" />
+          </>
         )}
         <div
           ref={tablist}
@@ -475,6 +560,9 @@ function WorkspacePage({
           </button>
         )}
         <div className="workspace-header-space" data-tauri-drag-region />
+        {expanded && conversationActions}
+        {expanded && overview}
+        {expanded && <span className="titlebar-divider" aria-hidden="true" />}
         {!expanded && (
           <button
             className="icon-button"
@@ -505,19 +593,6 @@ function WorkspacePage({
           choose={(kind) => void add(kind)}
         />
       )}
-      {error && !conversationActive && (
-        <div className="terminal-notice" role="alert">
-          <span>{error}</span>
-          <button
-            onClick={() => {
-              setError("");
-              refresh((v) => v + 1);
-            }}
-          >
-            刷新
-          </button>
-        </div>
-      )}
       {tabs.map((tab) => (
         <section
           key={tab.id}
@@ -535,6 +610,41 @@ function WorkspacePage({
                 active && !conversationActive && current === tab.id && !busy
               }
               connected={connected}
+              onExited={() => void remove(tab)}
+            />
+          ) : tab.kind === "turnChanges" ? (
+            <TaskChangesView
+              hostId={hostId}
+              project={project}
+              sessionId={tab.sessionId}
+              requestId={tab.requestId}
+              initialPath={tab.file}
+              active={
+                active && !conversationActive && current === tab.id && connected
+              }
+            />
+          ) : tab.kind === "diff" ? (
+            <ChangesView
+              sessionId={sessionId}
+              lastTurnVersion={lastTurnVersion}
+              hostId={tab.hostId ?? hostId}
+              project={tab.project ?? project}
+              active={
+                active && !conversationActive && current === tab.id && connected
+              }
+            />
+          ) : tab.kind === "subagents" || tab.kind === "subagent" ? (
+            <SubagentsPanel
+              taskId={tab.kind === "subagent" ? tab.taskId : undefined}
+              onOpen={(task) => openSubagent(workspaceId, task)}
+              state={
+                subagents ?? {
+                  tasks: [],
+                  loading: false,
+                  error: "",
+                  truncated: false,
+                }
+              }
             />
           ) : (
             <WorkspaceFiles
@@ -558,19 +668,21 @@ function WorkspacePage({
       {!tabs.length && !conversationActive && (
         <div className="workspace-empty" aria-label="工作区入口">
           <div className="workspace-launchers">
-            {(["diff", "terminal", "files"] as const).map((kind) => {
-              const Icon = icons[kind];
-              return (
-                <button
-                  key={kind}
-                  disabled={!connected || busy}
-                  onClick={() => void add(kind)}
-                >
-                  <Icon size={18} />
-                  <span>{labels[kind]}</span>
-                </button>
-              );
-            })}
+            {(["diff", "terminal", "files", "subagents"] as const).map(
+              (kind) => {
+                const Icon = icons[kind];
+                return (
+                  <button
+                    key={kind}
+                    disabled={!connected || busy}
+                    onClick={() => void add(kind)}
+                  >
+                    <Icon size={18} />
+                    <span>{labels[kind]}</span>
+                  </button>
+                );
+              },
+            )}
           </div>
         </div>
       )}
@@ -650,7 +762,7 @@ function AddMenu({
         top: Math.min(rect.bottom + 6, window.innerHeight - 132),
       }}
     >
-      {(["diff", "terminal", "files"] as const).map((kind) => {
+      {(["diff", "terminal", "files", "subagents"] as const).map((kind) => {
         const Icon = icons[kind];
         return (
           <button

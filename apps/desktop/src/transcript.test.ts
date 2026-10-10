@@ -1,11 +1,48 @@
 import { describe, expect, it } from "vitest";
-import { appendEvents, transcript } from "./transcript";
-import type { Event, EventKind } from "./protocol";
+import { appendEvents, latestTurnChanges, transcript } from "./transcript";
+import type { Event, EventKind, TurnChanges } from "./protocol";
 const e = (seq: number, event: EventKind): Event => ({
   seq,
   event,
   at: 0,
   session_id: "s",
+});
+it("keeps the latest turn when an older turn's undo event arrives later", () => {
+  const change = (id: string, baseline: number | null): TurnChanges => ({
+    request_id: id,
+    summary: {
+      entries: [],
+      added: 0,
+      removed: 0,
+      binary_files: 0,
+      truncated: false,
+      baseline_at: baseline,
+      unavailable: null,
+    },
+    interrupted: false,
+    background_pending: false,
+    undo: "ready",
+  });
+  const first = change("r1", 1),
+    second = change("r2", 2);
+  expect(
+    latestTurnChanges([
+      e(1, { kind: "turn_changes", changes: first }),
+      e(2, { kind: "turn_changes", changes: second }),
+      e(3, { kind: "turn_changes", changes: { ...first, undo: "reverted" } }),
+    ]),
+  ).toEqual(second);
+  expect(
+    latestTurnChanges([
+      e(1, { kind: "turn_changes", changes: change("r1", null) }),
+      e(2, { kind: "turn_changes", changes: change("r2", null) }),
+      e(3, {
+        kind: "turn_changes",
+        changes: { ...change("r1", null), undo: "unknown" },
+      }),
+    ])?.request_id,
+  ).toBe("r2");
+  expect(latestTurnChanges([])).toBeUndefined();
 });
 describe("durable transcript projection", () => {
   it("deduplicates replay while preserving token order", () => {

@@ -1,12 +1,26 @@
 import { useSyncExternalStore } from "react";
-import type { Project, TerminalInfo } from "./protocol";
+import type { Project, TerminalInfo, Subagent } from "./protocol";
 
 export type WorkspaceTab = {
   hostId?: string;
   hostName?: string;
   project?: Project;
 } & (
-  | { id: string; kind: "files" | "diff"; path?: string; file?: string }
+  | {
+      id: string;
+      kind: "files" | "diff" | "subagents";
+      path?: string;
+      file?: string;
+    }
+  | {
+      id: string;
+      kind: "turnChanges";
+      requestId: string;
+      sessionId: string;
+      title: string;
+      file?: string;
+    }
+  | { id: string; kind: "subagent"; taskId: string; title: string }
   | { id: string; kind: "terminal"; terminal: TerminalInfo }
 );
 export interface WorkspaceState {
@@ -78,13 +92,27 @@ export function readWorkspace(key: string): WorkspaceState {
       const tabs: WorkspaceTab[] = saved.tabs.filter((tab: WorkspaceTab) => {
         if (!tab || typeof tab.id !== "string" || ids.has(tab.id)) return false;
         const valid =
-          tab.kind === "files" || tab.kind === "diff"
+          tab.kind === "files" ||
+          tab.kind === "diff" ||
+          tab.kind === "subagents"
             ? (tab.path === undefined || typeof tab.path === "string") &&
               (tab.file === undefined || typeof tab.file === "string")
-            : tab.kind === "terminal" &&
-              tab.terminal?.id === tab.id &&
-              typeof tab.terminal.project_id === "string" &&
-              typeof tab.terminal.title === "string";
+            : tab.kind === "turnChanges"
+              ? typeof tab.requestId === "string" &&
+                !!tab.requestId &&
+                tab.requestId.length <= 256 &&
+                typeof tab.sessionId === "string" &&
+                !!tab.sessionId &&
+                typeof tab.title === "string" &&
+                (tab.file === undefined || typeof tab.file === "string")
+              : tab.kind === "subagent"
+                ? typeof tab.taskId === "string" &&
+                  !!tab.taskId &&
+                  typeof tab.title === "string"
+                : tab.kind === "terminal" &&
+                  tab.terminal?.id === tab.id &&
+                  typeof tab.terminal.project_id === "string" &&
+                  typeof tab.terminal.title === "string";
         if (valid) ids.add(tab.id);
         return valid;
       });
@@ -93,7 +121,9 @@ export function readWorkspace(key: string): WorkspaceState {
         current: tabs.some((t) => t.id === saved.current)
           ? saved.current
           : (tabs.at(-1)?.id ?? ""),
-        visible: saved.visible !== false,
+        visible:
+          saved.visible !== false &&
+          !(saved.tabs.length > 0 && tabs.length === 0 && !saved.expanded),
         expanded: saved.expanded === true,
         conversationActive:
           saved.conversationActive === true ||
@@ -151,4 +181,71 @@ export function useWorkspaceState(key: string) {
     (update: Parameters<typeof updateWorkspace>[1]) =>
       updateWorkspace(key, update),
   ] as const;
+}
+
+export function openSubagents(workspaceId: string) {
+  updateWorkspace(workspaceId, (state) => ({
+    tabs: state.tabs.some((tab) => tab.id === "subagents")
+      ? state.tabs
+      : [...state.tabs, { id: "subagents", kind: "subagents" }],
+    current: "subagents",
+    visible: true,
+    conversationActive: false,
+  }));
+}
+
+export function openSubagent(workspaceId: string, task: Subagent) {
+  const id = `subagent:${task.id}`;
+  updateWorkspace(workspaceId, (state) => ({
+    tabs: state.tabs.some((tab) => tab.id === id)
+      ? state.tabs
+      : [
+          ...state.tabs,
+          { id, kind: "subagent", taskId: task.id, title: task.title },
+        ],
+    current: id,
+    visible: true,
+    conversationActive: false,
+  }));
+}
+
+export function openWorkspaceResource(
+  workspaceId: string,
+  kind: "files" | "diff",
+  location: { path?: string; file?: string } = {},
+) {
+  updateWorkspace(workspaceId, (state) => ({
+    tabs: state.tabs.some((tab) => tab.id === kind)
+      ? state.tabs.map((tab) =>
+          tab.id === kind ? { ...tab, ...location } : tab,
+        )
+      : [...state.tabs, { id: kind, kind, ...location }],
+    current: kind,
+    visible: true,
+    conversationActive: false,
+  }));
+}
+
+export function openTurnChanges(
+  workspaceId: string,
+  sessionId: string,
+  requestId: string,
+  at: number | null,
+  file?: string,
+) {
+  const id = `turnChanges:${requestId}`;
+  const title = at
+    ? `变更 · ${new Date(at).toLocaleTimeString("zh-CN", { hour12: false })}`
+    : "本轮变更";
+  updateWorkspace(workspaceId, (state) => ({
+    tabs: state.tabs.some((tab) => tab.id === id)
+      ? state.tabs.map((tab) => (tab.id === id ? { ...tab, file } : tab))
+      : [
+          ...state.tabs,
+          { id, kind: "turnChanges", requestId, sessionId, title, file },
+        ],
+    current: id,
+    visible: true,
+    conversationActive: false,
+  }));
 }

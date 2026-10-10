@@ -1,6 +1,6 @@
 import { useEffect, useId, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { Check, ChevronDown } from "lucide-react";
+import { Check, ChevronDown, Search } from "lucide-react";
 export interface SelectOption {
   value: string;
   label: string;
@@ -18,6 +18,8 @@ export function Select({
   align = "start",
   compact = false,
   menuTitle,
+  searchable = false,
+  searchPlaceholder = "搜索选项",
 }: {
   label: string;
   value: string;
@@ -28,8 +30,18 @@ export function Select({
   align?: "start" | "end";
   compact?: boolean;
   menuTitle?: string;
+  searchable?: boolean;
+  searchPlaceholder?: string;
 }) {
   const [open, setOpen] = useState(false);
+  const [query, setQuery] = useState("");
+  const filtered = searchable
+    ? options.filter((option) =>
+        `${option.label} ${option.description ?? ""}`
+          .toLowerCase()
+          .includes(query.trim().toLowerCase()),
+      )
+    : options;
   const [active, setActive] = useState(0);
   const [position, setPosition] = useState({
     left: 0,
@@ -39,11 +51,13 @@ export function Select({
   });
   const trigger = useRef<HTMLButtonElement>(null);
   const menu = useRef<HTMLDivElement>(null);
+  const search = useRef<HTMLInputElement>(null);
   const id = useId();
   useEffect(() => {
     if (disabled) setOpen(false);
   }, [disabled]);
   function show() {
+    setQuery("");
     setActive(
       Math.max(
         0,
@@ -53,7 +67,8 @@ export function Select({
     setOpen(true);
   }
   function choose(index: number) {
-    if (options[index]) onChange(options[index].value);
+    if (!filtered[index]) return;
+    onChange(filtered[index].value);
     setOpen(false);
     trigger.current?.focus();
   }
@@ -62,7 +77,10 @@ export function Select({
     const box = trigger.current.getBoundingClientRect();
     const height = Math.min(
       320,
-      options.length * (compact ? 36 : 56) + 10 + (menuTitle ? 28 : 0),
+      Math.max(1, filtered.length) * (compact ? 36 : 56) +
+        10 +
+        (menuTitle ? 28 : 0) +
+        (searchable ? 44 : 0),
     );
     const below = window.innerHeight - box.bottom - 12;
     const above = box.top - 12;
@@ -84,7 +102,18 @@ export function Select({
       width,
       maxHeight,
     });
-  }, [open, options.length, minMenuWidth, align, compact, menuTitle]);
+  }, [
+    open,
+    filtered.length,
+    minMenuWidth,
+    align,
+    compact,
+    menuTitle,
+    searchable,
+  ]);
+  useEffect(() => {
+    if (open && searchable) search.current?.focus();
+  }, [open, searchable]);
   useEffect(() => {
     if (!open) return;
     const outside = (e: PointerEvent) => {
@@ -96,6 +125,9 @@ export function Select({
     };
     const resize = () => setOpen(false);
     const key = (e: KeyboardEvent) => {
+      if (e.isComposing) return;
+      if (e.target === search.current && [" ", "Home", "End"].includes(e.key))
+        return;
       if (
         ![
           "ArrowDown",
@@ -115,16 +147,18 @@ export function Select({
         return;
       }
       e.preventDefault();
-      if (e.key === "Escape") setOpen(false);
-      else if (e.key === "Enter" || e.key === " ") choose(active);
-      else
+      if (e.key === "Escape") {
+        setOpen(false);
+        trigger.current?.focus();
+      } else if (e.key === "Enter" || e.key === " ") choose(active);
+      else if (filtered.length)
         setActive(
           e.key === "Home"
             ? 0
             : e.key === "End"
-              ? options.length - 1
-              : (active + (e.key === "ArrowDown" ? 1 : -1) + options.length) %
-                options.length,
+              ? filtered.length - 1
+              : (active + (e.key === "ArrowDown" ? 1 : -1) + filtered.length) %
+                filtered.length,
         );
     };
     document.addEventListener("pointerdown", outside);
@@ -135,12 +169,12 @@ export function Select({
       window.removeEventListener("keydown", key, true);
       window.removeEventListener("resize", resize);
     };
-  }, [open, active, options, onChange]);
+  }, [open, active, filtered, onChange]);
   useEffect(() => {
     menu.current
       ?.querySelectorAll<HTMLElement>('[role="option"]')
       [active]?.scrollIntoView({ block: "nearest" });
-  }, [active]);
+  }, [active, query]);
   return (
     <>
       <button
@@ -152,7 +186,9 @@ export function Select({
         title={options.find((option) => option.value === value)?.label}
         aria-expanded={open}
         aria-controls={open ? id : undefined}
-        aria-activedescendant={open ? `${id}-${active}` : undefined}
+        aria-activedescendant={
+          open && filtered.length ? `${id}-${active}` : undefined
+        }
         disabled={disabled}
         onClick={() => (open ? setOpen(false) : show())}
         onKeyDown={(e) => {
@@ -169,41 +205,76 @@ export function Select({
         createPortal(
           <div
             ref={menu}
-            id={id}
-            role="listbox"
-            aria-label={label}
             title={options.find((option) => option.value === value)?.label}
             className={`select-popover${compact ? " compact" : ""}`}
             style={position}
-            onMouseDown={(e) => e.preventDefault()}
+            onMouseDown={(e) => {
+              if (!(e.target instanceof HTMLInputElement)) e.preventDefault();
+            }}
           >
+            {searchable && (
+              <label className="select-search">
+                <Search size={15} />
+                <input
+                  ref={search}
+                  role="combobox"
+                  aria-label={searchPlaceholder}
+                  aria-controls={id}
+                  aria-expanded={true}
+                  aria-autocomplete="list"
+                  aria-activedescendant={
+                    filtered.length ? `${id}-${active}` : undefined
+                  }
+                  placeholder={searchPlaceholder}
+                  spellCheck={false}
+                  autoComplete="off"
+                  autoCapitalize="none"
+                  autoCorrect="off"
+                  value={query}
+                  onChange={(event) => {
+                    setQuery(event.target.value);
+                    setActive(0);
+                  }}
+                />
+              </label>
+            )}
             {menuTitle && (
               <div className="select-menu-title" role="presentation">
                 {menuTitle}
               </div>
             )}
-            {options.map((o, index) => (
-              <button
-                type="button"
-                role="option"
-                aria-selected={o.value === value}
-                id={`${id}-${index}`}
-                tabIndex={-1}
-                key={o.value}
-                title={compact ? o.label : undefined}
-                className={[active === index ? "highlighted" : "", o.tone ?? ""]
-                  .filter(Boolean)
-                  .join(" ")}
-                onMouseEnter={() => setActive(index)}
-                onClick={() => choose(index)}
-              >
-                <span>
-                  {o.label}
-                  {o.description && <small>{o.description}</small>}
-                </span>
-                {o.value === value && <Check size={15} />}
-              </button>
-            ))}
+            <div id={id} role="listbox" aria-label={label}>
+              {filtered.map((o, index) => (
+                <button
+                  type="button"
+                  role="option"
+                  aria-selected={o.value === value}
+                  id={`${id}-${index}`}
+                  tabIndex={-1}
+                  key={o.value}
+                  title={compact ? o.label : undefined}
+                  className={[
+                    active === index ? "highlighted" : "",
+                    o.tone ?? "",
+                  ]
+                    .filter(Boolean)
+                    .join(" ")}
+                  onMouseEnter={() => setActive(index)}
+                  onClick={() => choose(index)}
+                >
+                  <span>
+                    {o.label}
+                    {o.description && <small>{o.description}</small>}
+                  </span>
+                  {o.value === value && <Check size={15} />}
+                </button>
+              ))}
+            </div>
+            {!filtered.length && (
+              <p className="select-no-results" role="status">
+                没有匹配的选项
+              </p>
+            )}
           </div>,
           trigger.current?.closest<HTMLElement>('[role="dialog"]') ??
             document.body,

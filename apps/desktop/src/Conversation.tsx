@@ -1,3 +1,6 @@
+import { TurnChangesCard } from "./TurnChangesCard";
+import { SubagentSummary } from "./SubagentsPanel";
+import type { SubagentsState } from "./useSubagents";
 import { UserMessage } from "./UserMessage";
 import { WorkingStatus } from "./WorkingStatus";
 import {
@@ -13,8 +16,15 @@ import { ComposerAction } from "./ComposerAction";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { MessageContent } from "./MessageContent";
 import { DraftStore, useDraft, type Draft } from "./drafts";
-import { ArrowUp, ArrowDown, Bot, TriangleAlert } from "lucide-react";
-import type { AgentInfo, Effort, Event, Session } from "./protocol";
+import { useStatusIssues } from "./statusNotices";
+import { ArrowUp, ArrowDown, Bot } from "lucide-react";
+import type {
+  AgentInfo,
+  Effort,
+  Event,
+  Session,
+  TurnChanges,
+} from "./protocol";
 import type { Host } from "./api";
 import type { HostedProject } from "./projectCatalog";
 import { Composer } from "./Composer";
@@ -35,6 +45,9 @@ export const statusNames = {
   unknown: "状态待确认",
 };
 interface Props {
+  subagents?: SubagentsState;
+  openSubagents?: () => void;
+  openTurnChanges?: (changes: TurnChanges, path?: string) => void;
   drafts: DraftStore;
   agent?: AgentInfo;
   session?: Session;
@@ -69,11 +82,15 @@ interface Props {
     model: string | null,
     effort: Effort | null,
     permissionMode: string | null,
+    uiAction?: "subagents",
   ) => Promise<boolean>;
   cancel: () => void | Promise<boolean>;
   approve: (id: string, allow: boolean) => Promise<void>;
 }
 export function Conversation({
+  subagents,
+  openSubagents,
+  openTurnChanges,
   drafts,
   agent,
   session,
@@ -314,7 +331,10 @@ export function Conversation({
   useEffect(() => {
     if (!preparingHistory) onHistoryReady?.();
   }, [preparingHistory, historyScope, onHistoryReady]);
-  async function submit(prompt: string): Promise<boolean> {
+  async function submit(
+    prompt: string,
+    uiAction?: "subagents",
+  ): Promise<boolean> {
     if (
       !prompt.trim() ||
       sending ||
@@ -338,7 +358,13 @@ export function Conversation({
     submission.current = submitted;
     setSending(true);
     try {
-      submitted.accepted = await send(prompt, model, effort, permissionMode);
+      submitted.accepted = await send(
+        prompt,
+        model,
+        effort,
+        permissionMode,
+        uiAction,
+      );
       if (submitted.accepted) {
         drafts.clear(draftKey, draft);
         if (migrated.current) drafts.clear(migrated.current, draft);
@@ -372,6 +398,45 @@ export function Conversation({
       setApproving((current) => (current === submission ? null : current));
     }
   }
+  const hostName = hosts.find((host) => host.id === hostId)?.name ?? "主机";
+  useStatusIssues([
+    {
+      id: `connection:${hostId}`,
+      title: `${hostName} ${connectionLost ? "连接已断开" : "暂时无法连接"}`,
+      error: !connected && !connecting ? (connectionError ?? "") : "",
+      action: reconnect ? { label: "重新连接", run: reconnect } : undefined,
+    },
+    {
+      id: `agent-session:${draftKey}`,
+      title: "对话状态待确认",
+      error:
+        session &&
+        connected &&
+        liveSessionState &&
+        ["error", "unknown"].includes(liveSessionState)
+          ? agentSessionError || agentSessionLabels[liveSessionState]
+          : "",
+      action: reconnect
+        ? {
+            label: liveSessionState === "unknown" ? "重新连接" : "重新打开",
+            run: reconnect,
+          }
+        : undefined,
+    },
+    {
+      id: `preferences:${hostId}:${agentId}:${projectId}`,
+      title: "模型参数未能保存",
+      error: preferences.error,
+    },
+    {
+      id: `repeated-output:${draftKey}`,
+      title: "检测到重复输出",
+      level: "warning",
+      error: repeatedOutput ? "回复内容似乎在重复，可停止任务后重试。" : "",
+      pending: stopping,
+      action: { label: "停止当前任务", run: stop },
+    },
+  ]);
   return (
     <section
       className="conversation"
@@ -448,6 +513,9 @@ export function Conversation({
                   </button>
                 </div>
               )}
+              {subagents && openSubagents && (
+                <SubagentSummary state={subagents} open={openSubagents} />
+              )}
               <TurnTranscript events={events}>
                 {(item) =>
                   item.type === "user" ? (
@@ -466,6 +534,24 @@ export function Conversation({
                   ) : (
                     (() => {
                       const v = item.value;
+                      if (v.kind === "turn_changes" && openTurnChanges)
+                        return (
+                          <TurnChangesCard
+                            key={`${hostId}:${session?.id}:${item.key}`}
+                            hostId={hostId}
+                            sessionId={session?.id ?? ""}
+                            canUndo={
+                              connected &&
+                              !!session &&
+                              !["running", "waiting"].includes(
+                                session.status,
+                              ) &&
+                              latestRequestId(events) === v.changes.request_id
+                            }
+                            changes={v.changes}
+                            open={(path) => openTurnChanges(v.changes, path)}
+                          />
+                        );
                       if (v.kind === "approval")
                         return (
                           <ApprovalCard
@@ -513,37 +599,6 @@ export function Conversation({
         </div>
       </div>
       <div className="composer-wrap">
-        {session &&
-          connected &&
-          liveSessionState &&
-          !["open", "closed", "opening", "restoring"].includes(
-            liveSessionState,
-          ) && (
-            <div
-              className="agent-session-feedback"
-              title={agentSessionError}
-              role="status"
-            >
-              <span>{agentSessionLabels[liveSessionState]}</span>
-              <button
-                className="secondary"
-                onClick={reconnect}
-                disabled={!reconnect}
-              >
-                {liveSessionState === "unknown" ? "重新连接" : "重新打开"}
-              </button>
-            </div>
-          )}
-        {!connected && !connecting && connectionError && (
-          <div className="composer-connection-error" role="status">
-            <span title={connectionError}>
-              {connectionLost ? "连接已断开" : "暂时无法连接"}
-            </span>
-            <button type="button" className="text-button" onClick={reconnect}>
-              重新连接
-            </button>
-          </div>
-        )}
         <div className="composer-context">
           {!connected && (connecting || !connectionError) && text.trim() && (
             <WorkingStatus label="正在准备…" animated />
@@ -614,12 +669,6 @@ export function Conversation({
             ))}
           </section>
         )}
-        {repeatedOutput && (
-          <div className="repeated-output-warning" role="status">
-            <TriangleAlert size={16} aria-hidden="true" />
-            <span>回复内容似乎在重复，可停止任务后重试。</span>
-          </div>
-        )}
         <Composer
           referenceState={draft.references}
           onReferencesChange={(references) =>
@@ -636,6 +685,7 @@ export function Conversation({
           value={text}
           onChange={setText}
           onSubmit={submit}
+          onOpenSubagents={openSubagents}
           placeholder={
             !connected
               ? connecting || !connectionError
@@ -706,12 +756,14 @@ export function Conversation({
             </>
           )}
         />
-        {preferences.error && (
-          <p className="composer-notice" role="status">
-            {preferences.error}
-          </p>
-        )}
       </div>
     </section>
   );
+}
+
+function latestRequestId(events: Event[]) {
+  const event = [...events]
+    .reverse()
+    .find((event) => event.event.kind === "user")?.event;
+  return event?.kind === "user" ? event.request_id : undefined;
 }

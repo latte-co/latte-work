@@ -19,15 +19,25 @@ import { message, request } from "./api";
 import type { Workbench } from "./useWorkbench";
 import type { HostedSession } from "./sessionNavigation";
 import { conversationMarkdown, loadConversation } from "./sessionNavigation";
+import {
+  agentSessionLabels,
+  type AgentSessionState,
+} from "./agentSessionState";
 
 export function SessionActions({
   session,
+  agentState,
   point,
+  align = "start",
+  trigger,
   close,
   state,
 }: {
   session: HostedSession;
+  agentState: AgentSessionState;
   point: { x: number; y: number };
+  align?: "start" | "end";
+  trigger?: HTMLElement | null;
   close: () => void;
   state: Workbench;
 }) {
@@ -50,12 +60,19 @@ export function SessionActions({
   );
   const menuView = view === "menu" || view === "copy";
   const active = ["running", "waiting"].includes(session.status);
+  const canClose = agentState === "open";
   const previousView = useRef(view);
   useLayoutEffect(() => {
     if (!menu.current) return;
     const rect = menu.current.getBoundingClientRect();
     setPosition({
-      x: Math.max(8, Math.min(point.x, innerWidth - rect.width - 8)),
+      x: Math.max(
+        8,
+        Math.min(
+          point.x - (align === "end" ? rect.width : 0),
+          innerWidth - rect.width - 8,
+        ),
+      ),
       y: Math.max(8, Math.min(point.y, innerHeight - rect.height - 8)),
     });
     menu.current
@@ -66,7 +83,7 @@ export function SessionActions({
       )
       ?.focus();
     previousView.current = view;
-  }, [point, view]);
+  }, [point, align, view]);
   useEffect(() => {
     const key = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
@@ -119,7 +136,12 @@ export function SessionActions({
       ]?.focus();
     };
     const outside = (e: PointerEvent) => {
-      if (menuView && !busy && !menu.current?.contains(e.target as Node))
+      if (
+        menuView &&
+        !busy &&
+        !menu.current?.contains(e.target as Node) &&
+        !trigger?.contains(e.target as Node)
+      )
         close();
     };
     window.addEventListener("keydown", key, true);
@@ -128,7 +150,7 @@ export function SessionActions({
       window.removeEventListener("keydown", key, true);
       document.removeEventListener("pointerdown", outside);
     };
-  }, [close, busy, menuView, view]);
+  }, [close, busy, menuView, view, trigger]);
   async function perform(action: () => Promise<unknown>, dismiss = true) {
     setBusy(true);
     setError("");
@@ -270,9 +292,16 @@ export function SessionActions({
             )}
             <button
               role="menuitem"
-              disabled={busy}
-              title="关闭 Agent session，保留对话历史"
+              disabled={busy || !canClose}
+              title={
+                canClose
+                  ? "关闭对话，保留历史"
+                  : agentState === "closed"
+                    ? "此对话尚未打开"
+                    : agentSessionLabels[agentState]
+              }
               onClick={() =>
+                canClose &&
                 run({ method: "close_agent_session", session_id: id })
               }
             >

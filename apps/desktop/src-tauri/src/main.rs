@@ -4,6 +4,7 @@ mod paste;
 mod pending_close;
 mod providers;
 mod request_channels;
+mod source_preview;
 use latte_work_client::{Client, SshAuthentication};
 use latte_work_protocol::{Request, Response};
 use serde::{Deserialize, Serialize};
@@ -898,6 +899,8 @@ fn main() {
             save_hosts,
             choose_project_folder,
             choose_reference_path,
+            source_preview::system_preview,
+            source_preview::preview_pdf,
             paste::clipboard_file_paths,
             paste::paste_stage,
             paste::finish_paste_upload,

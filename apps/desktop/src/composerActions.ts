@@ -27,7 +27,8 @@ export function composerTrigger(
 export function referencePrompt(text: string, references: ComposerReference[]) {
   if (!references.length) return text.trim();
   return `${text.trim() || "请查看这些文件引用。"}\n\n文件引用（相对路径基于当前项目根目录；绝对路径位于当前执行主机。仅引用路径，按当前权限读取）：\n${JSON.stringify(
-    references.map(({ path, directory, attachmentKind, mimeType }) => ({
+    references.map(({ path, name, directory, attachmentKind, mimeType }) => ({
+      name,
       path,
       type: directory ? "directory" : "file",
       ...(attachmentKind ? { kind: attachmentKind } : {}),
@@ -36,6 +37,12 @@ export function referencePrompt(text: string, references: ComposerReference[]) {
     null,
     2,
   )}`;
+}
+
+export function isSubagentPanelCommand(text: string, agent: string) {
+  return (
+    agent === "claude" && /^\/(?:agents|list-agents|tasks)$/.test(text.trim())
+  );
 }
 
 const claudeCommandTitles: Record<string, string> = {

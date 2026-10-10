@@ -5,6 +5,7 @@ import {
   HOST_DISCONNECTED_EVENT,
   HostConnectionError,
 } from "./connectionErrors";
+import { updateWorkspace } from "./workspaceState";
 import { useWorkbench } from "./useWorkbench";
 import type { Request, Session } from "./protocol";
 const mocks = vi.hoisted(() => ({
@@ -184,6 +185,8 @@ it("initializes each host once and refreshes the selected host without a second 
   const hook = renderHook(useWorkbench);
   await act(async () => {});
   for (const host of ["local", "remote"]) {
+    expect(hook.result.current.hostConnectionStatus(host)).toBe("connected");
+    expect(hook.result.current.hostConnectionVersions[host]).toBe(1);
     expect(
       mocks.connect.mock.calls.filter(([h]) => h.id === host),
     ).toHaveLength(1);
@@ -205,6 +208,32 @@ it("initializes each host once and refreshes the selected host without a second 
     ),
   ).toHaveLength(2);
   expect(hook.result.current.connected).toBe(true);
+  expect(hook.result.current.hostConnectionVersions.local).toBe(2);
+  expect(hook.result.current.hostConnectionVersions.remote).toBe(1);
+});
+it("waits for the handshake before reading cached pinned history and reporting connection state", async () => {
+  let finish: (value: unknown) => void = () => {};
+  mocks.connect.mockImplementationOnce(
+    () =>
+      new Promise((resolve) => {
+        finish = resolve;
+      }),
+  );
+  const hook = renderHook(useWorkbench);
+  await act(async () => {});
+  expect(hook.result.current.hostConnectionStatus("local")).toBe("connecting");
+  expect(mocks.request).not.toHaveBeenCalled();
+  await act(async () =>
+    finish({ kind: "hello", server_id: "server-local", agents: [] }),
+  );
+  expect(hook.result.current.hostConnectionStatus("local")).toBe("connected");
+  expect(hook.result.current.hostErrors.local).toBe("");
+  expect(
+    mocks.request.mock.calls.some(([, r]) => r.method === "pinned_sessions"),
+  ).toBe(true);
+  expect(mocks.request.mock.calls.some(([, r]) => r.method === "send")).toBe(
+    false,
+  );
 });
 it("adding a host initializes it once and preserves other hosts' live connections", async () => {
   const hook = renderHook(useWorkbench);
@@ -380,14 +409,37 @@ it("automatically recovers a background host without reconnecting the selected h
   );
   expect(hook.result.current.connected).toBe(true);
   expect(hook.result.current.isHostConnected("remote")).toBe(false);
+  expect(hook.result.current.hostConnectionStatus("remote")).toBe("failed");
+  expect(hook.result.current.hostConnectionStatus("local")).toBe("connected");
   await act(async () => vi.advanceTimersByTimeAsync(5000));
   expect(hook.result.current.isHostConnected("remote")).toBe(true);
+  expect(hook.result.current.hostConnectionStatus("remote")).toBe("connected");
+  expect(hook.result.current.hostConnectionVersions.remote).toBe(2);
   expect(
     mocks.connect.mock.calls.filter(([h]) => h.id === "remote"),
   ).toHaveLength(2);
   expect(
     mocks.connect.mock.calls.filter(([h]) => h.id === "local"),
   ).toHaveLength(1);
+  expect(mocks.request.mock.calls.some(([, r]) => r.method === "send")).toBe(
+    false,
+  );
+});
+it("does not reuse a failed replacement and restores the connection indicator without replaying a prompt", async () => {
+  const hook = renderHook(useWorkbench);
+  await act(async () => {});
+  mocks.connect.mockRejectedValueOnce(new Error("SSH 握手失败"));
+  await act(async () =>
+    hook.result.current.refreshHost(hook.result.current.host),
+  );
+  expect(hook.result.current.hostConnectionStatus("local")).toBe("failed");
+  expect(hook.result.current.connected).toBe(false);
+  expect(hook.result.current.hostConnectionVersions.local).toBe(1);
+  await act(async () => vi.advanceTimersByTimeAsync(5000));
+  expect(hook.result.current.hostConnectionStatus("local")).toBe("connected");
+  expect(hook.result.current.connected).toBe(true);
+  expect(hook.result.current.hostConnectionVersions.local).toBe(2);
+  expect(mocks.connect).toHaveBeenCalledTimes(3);
   expect(mocks.request.mock.calls.some(([, r]) => r.method === "send")).toBe(
     false,
   );
@@ -996,4 +1048,110 @@ it("assembles a split final reply before revealing history without reading unrel
   expect(
     mocks.request.mock.calls.filter(([, r]) => r.method === "history"),
   ).toHaveLength(2);
+});
+
+it("preserves native subagent commands with explicit arguments and opens their UI after successful send", async () => {
+  const previous = mocks.request.getMockImplementation()!;
+  mocks.request.mockImplementation(async (host, request: Request) =>
+    request.method === "send"
+      ? { kind: "accepted", duplicate: false }
+      : previous(host, request),
+  );
+  const hook = renderHook(useWorkbench);
+  await act(async () => {});
+  await act(async () =>
+    hook.result.current.openSession({ ...session(), hostId: "local" }),
+  );
+  act(() =>
+    updateWorkspace(hook.result.current.workspaceId, {
+      tabs: [],
+      current: "",
+      visible: false,
+    }),
+  );
+  expect(hook.result.current.workspace.visible).toBe(false);
+  await act(async () =>
+    hook.result.current.send("/agents inspect", null, null, null, "subagents"),
+  );
+  expect(hook.result.current.workspace).toMatchObject({
+    visible: true,
+    current: "subagents",
+    conversationActive: false,
+  });
+});
+
+it("opens the persisted new conversation for a command with arguments, and leaves failed sends closed", async () => {
+  const previous = mocks.request.getMockImplementation()!;
+  const id = crypto.randomUUID();
+  mocks.request.mockImplementation(async (host, request: Request) => {
+    if (request.method === "create_session")
+      return { kind: "session", session: { ...session(), id } };
+    if (request.method === "send")
+      return { kind: "accepted", duplicate: false };
+    return previous(host, request);
+  });
+  const hook = renderHook(useWorkbench);
+  await act(async () => {});
+  await act(async () =>
+    hook.result.current.send("/agents inspect", null, null, null, "subagents"),
+  );
+  expect(hook.result.current.sessionId).toBe(id);
+  expect(hook.result.current.workspace).toMatchObject({
+    visible: true,
+    current: "subagents",
+  });
+  act(() =>
+    updateWorkspace(hook.result.current.workspaceId, {
+      tabs: [],
+      current: "",
+      visible: false,
+    }),
+  );
+  mocks.request.mockImplementation(async (host, request: Request) => {
+    if (request.method === "send") throw new Error("native command failed");
+    return previous(host, request);
+  });
+  await act(async () =>
+    hook.result.current.send("/agents inspect", null, null, null, "subagents"),
+  );
+  expect(hook.result.current.workspace.visible).toBe(false);
+});
+
+it.each(["/list-agents", "/agents", "/tasks"])(
+  "opens %s without creating a conversation or sending an agent request",
+  async (command) => {
+    const hook = renderHook(useWorkbench);
+    await act(async () => {});
+    const workspaceId = hook.result.current.workspaceId;
+    mocks.request.mockClear();
+    let accepted = false;
+    await act(async () => {
+      accepted = await hook.result.current.send(command, null, null, null);
+    });
+    expect(accepted).toBe(true);
+    expect(hook.result.current.sessionId).toBe("");
+    expect(hook.result.current.workspaceId).toBe(workspaceId);
+    expect(hook.result.current.workspace).toMatchObject({
+      visible: true,
+      current: "subagents",
+      conversationActive: false,
+    });
+    expect(mocks.request).not.toHaveBeenCalled();
+  },
+);
+
+it("keeps the selected conversation and its status unchanged when opening the local agent list", async () => {
+  const hook = renderHook(useWorkbench);
+  await act(async () => {});
+  await act(async () =>
+    hook.result.current.openSession({ ...session(), hostId: "local" }),
+  );
+  const before = hook.result.current.session;
+  mocks.request.mockClear();
+  await act(async () =>
+    hook.result.current.send("  /list-agents ", null, null, null),
+  );
+  expect(hook.result.current.session).toEqual(before);
+  expect(hook.result.current.workspace.current).toBe("subagents");
+  expect(mocks.request).not.toHaveBeenCalled();
 });

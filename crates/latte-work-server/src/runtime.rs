@@ -89,6 +89,9 @@ pub fn project_session_state(runs: &Runs, response: &mut Response) -> Result<()>
         | Response::Events { session, .. }
         | Response::History { session, .. } => project(session),
         Response::Sessions { sessions } => sessions.iter_mut().for_each(project),
+        Response::RecentSessions { sessions, .. } => sessions
+            .iter_mut()
+            .for_each(|entry| project(&mut entry.session)),
         _ => {}
     }
     Ok(())
@@ -216,6 +219,9 @@ impl TurnState {
     ) -> Result<Option<Outcome>> {
         for action in actions {
             match action {
+                Action::SourceUsed { id, name } => {
+                    db(database, |s| s.observe_tool(session_id, &id, &name))?
+                }
                 Action::Commands(_) => bail!("执行中的 Agent 返回了意外的命令目录"),
                 Action::Write(bytes) => write(input, &bytes).await?,
                 Action::Ready => self.ready = true,
@@ -295,6 +301,7 @@ struct Process {
     state: TurnState,
     session_open: Arc<AtomicBool>,
     config: LaunchConfig,
+    path: String,
     turn_active: bool,
     stopping: bool,
     interrupt_sent: bool,
@@ -357,6 +364,7 @@ impl Process {
             state: TurnState::default(),
             session_open,
             config,
+            path: path.into(),
             turn_active: false,
             stopping: false,
             interrupt_sent: false,
@@ -394,6 +402,14 @@ impl Process {
             } else {
                 (status, message.map(|s| self.config.redact(&s)))
             };
+            finish_turn(
+                database,
+                id,
+                &self.path,
+                status != Status::Completed,
+                !self.adapter.can_reconfigure(),
+            )
+            .await?;
             db(database, |s| s.state(id, status, message))?;
             self.stopping = false;
             self.interrupt_sent = false;
@@ -427,6 +443,42 @@ impl Process {
         let _ = killpg(Pid::from_raw(self.group.pid), Signal::SIGKILL);
         self.drain.abort();
     }
+}
+async fn finish_turn(
+    database: &Database,
+    id: &str,
+    path: &str,
+    interrupted: bool,
+    background_pending: bool,
+) -> Result<()> {
+    if let Some((request_id, before)) = db(database, |s| s.pending_turn(id))? {
+        let after = crate::task_changes::Snapshot::capture(std::path::Path::new(path))
+            .await
+            .unwrap_or_else(|e| crate::task_changes::Snapshot::unavailable(e.to_string()));
+        let turn = crate::task_changes::FrozenTurn::freeze(
+            request_id.clone(),
+            before,
+            after,
+            interrupted,
+            background_pending,
+        )
+        .await;
+        let turn = match turn {
+            Ok(turn) => turn,
+            Err(error) => {
+                crate::task_changes::FrozenTurn::freeze(
+                    request_id,
+                    crate::task_changes::Snapshot::unavailable(error.to_string()),
+                    crate::task_changes::Snapshot::unavailable(error.to_string()),
+                    interrupted,
+                    background_pending,
+                )
+                .await?
+            }
+        };
+        db(database, |s| s.finish_turn(id, &turn))?;
+    }
+    Ok(())
 }
 fn same_config(a: &LaunchConfig, b: &LaunchConfig) -> bool {
     a.model == b.model
@@ -499,6 +551,22 @@ async fn accept_turn(
     // After durable admission, all failures become explicit terminal events. The
     // accepted request ID still reconciles a lost transport response without replay.
     let result = async {
+        let baseline = crate::task_changes::Snapshot::capture(std::path::Path::new(path))
+            .await
+            .unwrap_or_else(|e| crate::task_changes::Snapshot::unavailable(e.to_string()));
+        db(database, |s| {
+            s.save_turn_baseline(&session.id, &turn.request_id, &baseline)
+        })?;
+        if db(database, |s| s.baseline(&session.id))?.is_none() {
+            let task_baseline = if db(database, |s| s.first_request(&session.id))? {
+                baseline
+            } else {
+                crate::task_changes::Snapshot::unavailable(
+                    "此历史任务没有记录文件基线，请查看工作区改动".into(),
+                )
+            };
+            db(database, |s| s.save_baseline(&session.id, &task_baseline))?;
+        }
         if process.is_none() {
             let current = db(database, |s| s.session(&session.id))?;
             *process = Some(Process::spawn(
@@ -542,7 +610,9 @@ async fn accept_turn(
             config.redact(&error.to_string())
         };
         *process = None;
+        finish_turn(database, &session.id, path, true, false).await?;
         db(database, |s| {
+            s.end_subagents(&session.id, latte_work_protocol::SubagentStatus::Unknown)?;
             s.state(&session.id, Status::Failed, Some(message))
         })?;
     }
@@ -634,8 +704,12 @@ async fn actor(
                         p.close().await;
                     }
                     process = None;
+                    if let Err(error) = finish_turn(&database, &session.id, &path, true, false).await {
+                        eprintln!("cannot freeze stopped turn: {error}");
+                    }
                     // Preserve completed history when merely closing an idle runtime.
                     let result = db(&database, |s| {
+                        s.end_subagents(&session.id, latte_work_protocol::SubagentStatus::Stopped)?;
                         if s.session(&session.id)?.status.active() {
                             s.state(
                                 &session.id,
@@ -731,7 +805,11 @@ async fn actor(
                 error.to_string()
             };
             process = None;
+            if let Err(error) = finish_turn(&database, &session.id, &path, true, false).await {
+                eprintln!("cannot freeze failed turn: {error}");
+            }
             if let Err(e) = db(&database, |s| {
+                s.end_subagents(&session.id, latte_work_protocol::SubagentStatus::Unknown)?;
                 s.state(&session.id, Status::Failed, Some(message))
             }) {
                 eprintln!("cannot persist terminal state: {e}");

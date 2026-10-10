@@ -1,13 +1,8 @@
 // @vitest-environment jsdom
-import {
-  act,
-  cleanup,
-  fireEvent,
-  render,
-  screen,
-} from "@testing-library/react";
+import { act, cleanup, fireEvent, screen } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { HostConnectionError } from "./connectionErrors";
+import { renderWithStatus as render } from "./test/renderWithStatus";
 import { PermissionPicker } from "./PermissionPicker";
 const mocks = vi.hoisted(() => ({ request: vi.fn() }));
 vi.mock("./api", () => ({ request: mocks.request, message: String }));
@@ -94,12 +89,10 @@ it("offers retry and explicit inheritance after discovery failure", async () => 
     .mockResolvedValue(catalog);
   render(<PermissionPicker {...props} />);
   await act(async () => {});
-  expect(
-    screen.getByRole("button", { name: "重新加载权限选项" }).title,
-  ).toContain("Host 旧版本");
+  expect(screen.queryByRole("button", { name: "重新加载权限选项" })).toBeNull();
+  fireEvent.click(screen.getByRole("button", { name: "状态提示（1）" }));
+  expect(screen.getByText("Error: Host 旧版本")).toBeTruthy();
   const retry = screen.getByRole("button", { name: "重新加载权限选项" });
-  expect(retry.textContent).toBe("");
-  expect(retry.title).toContain("权限加载失败，点击重试");
   fireEvent.click(retry);
   await act(async () => {});
   expect(screen.queryByRole("button", { name: "重新加载权限选项" })).toBeNull();
@@ -124,6 +117,7 @@ it("hides an old permission error while disconnected", async () => {
   mocks.request.mockRejectedValue(new Error("权限发现失败"));
   const view = render(<PermissionPicker {...props} />);
   await act(async () => {});
+  fireEvent.click(screen.getByRole("button", { name: "状态提示（1）" }));
   expect(screen.getByRole("button", { name: "重新加载权限选项" })).toBeTruthy();
   view.rerender(<PermissionPicker {...props} connected={false} />);
   expect(screen.queryByRole("button", { name: "重新加载权限选项" })).toBeNull();

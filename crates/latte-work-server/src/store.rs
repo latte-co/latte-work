@@ -1,6 +1,9 @@
 //! SQLite is the source of truth for sessions and replayable presentation events.
 use anyhow::{Context, Result, bail};
-use latte_work_protocol::{Effort, Event, EventKind, Project, Session, Status};
+use latte_work_protocol::{
+    Effort, Event, EventKind, Project, RecentCursor, RecentSession, Session, Status, Subagent,
+    SubagentStatus, SubagentUpdate,
+};
 use rusqlite::{Connection, OptionalExtension, params};
 use std::{
     path::Path,
@@ -25,7 +28,17 @@ impl Store {
         CREATE TABLE IF NOT EXISTS hidden_projects(project_id TEXT PRIMARY KEY REFERENCES projects(id));
         CREATE TABLE IF NOT EXISTS sessions(id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id), data TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS events(seq INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT NOT NULL REFERENCES sessions(id), at REAL NOT NULL, data TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS subagents(session_id TEXT NOT NULL REFERENCES sessions(id), id TEXT NOT NULL, native_id TEXT NOT NULL, tool_use_id TEXT, active INTEGER NOT NULL, at REAL NOT NULL, data TEXT NOT NULL, PRIMARY KEY(session_id,id));
+        CREATE INDEX IF NOT EXISTS subagents_session ON subagents(session_id,active,at);
+        CREATE INDEX IF NOT EXISTS subagents_native ON subagents(session_id,native_id);
+        CREATE INDEX IF NOT EXISTS subagents_tool ON subagents(session_id,tool_use_id);
         CREATE INDEX IF NOT EXISTS events_session ON events(session_id,seq);
+        CREATE INDEX IF NOT EXISTS events_recent_activity ON events(session_id,seq DESC) WHERE json_extract(data,'$.kind') IN ('user','text','tool','tool_result','approval','approval_resolved','subagent');
+        CREATE TABLE IF NOT EXISTS turn_changes(session_id TEXT NOT NULL REFERENCES sessions(id), request_id TEXT NOT NULL REFERENCES requests(id), baseline TEXT, data TEXT, PRIMARY KEY(session_id,request_id));
+        CREATE TABLE IF NOT EXISTS task_baselines(session_id TEXT PRIMARY KEY REFERENCES sessions(id), data TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS task_sources(session_id TEXT NOT NULL REFERENCES sessions(id), id TEXT NOT NULL, data TEXT NOT NULL, at REAL NOT NULL, PRIMARY KEY(session_id,id));
+        CREATE TABLE IF NOT EXISTS observed_tools(session_id TEXT NOT NULL REFERENCES sessions(id), id TEXT NOT NULL, PRIMARY KEY(session_id,id));
+        CREATE TABLE IF NOT EXISTS reference_access(project_id TEXT NOT NULL REFERENCES projects(id), path TEXT NOT NULL, directory INTEGER NOT NULL, PRIMARY KEY(project_id,path));
         CREATE TABLE IF NOT EXISTS requests(id TEXT PRIMARY KEY,session_id TEXT NOT NULL,text TEXT NOT NULL);")?;
         let columns = db
             .prepare("PRAGMA table_info(requests)")?
@@ -47,6 +60,48 @@ impl Store {
             db.execute("ALTER TABLE requests ADD COLUMN permission_mode TEXT", [])?;
         }
         let store = Self { db };
+        // Native child processes cannot survive a daemon restart, even if the main
+        // turn had already completed while background work continued.
+        let child_sessions = store
+            .db
+            .prepare("SELECT DISTINCT session_id FROM subagents WHERE active=1")?
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        for id in child_sessions {
+            store.end_subagents(&id, SubagentStatus::Unknown)?;
+        }
+        let pending = store
+            .db
+            .prepare("SELECT session_id,request_id FROM turn_changes WHERE baseline IS NOT NULL")?
+            .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        for (id, request_id) in pending {
+            let summary = latte_work_protocol::ChangeSummary {
+                entries: vec![],
+                added: 0,
+                removed: 0,
+                binary_files: 0,
+                truncated: false,
+                baseline_at: None,
+                unavailable: Some("Server 已重启，此轮结束时的文件快照未知；请核对工作区。".into()),
+            };
+            store.event(
+                &id,
+                EventKind::TurnChanges {
+                    changes: latte_work_protocol::TurnChanges {
+                        request_id: request_id.clone(),
+                        summary,
+                        interrupted: true,
+                        background_pending: false,
+                        undo: latte_work_protocol::TurnUndoStatus::Unknown,
+                    },
+                },
+            )?;
+            store.db.execute(
+                "UPDATE turn_changes SET baseline=NULL WHERE session_id=?1 AND request_id=?2",
+                params![id, request_id],
+            )?;
+        }
         let interrupted = store.all_sessions()?;
         for mut session in interrupted.into_iter().filter(|s| s.status.active()) {
             session.status = Status::Unknown;
@@ -181,6 +236,51 @@ impl Store {
             .take(500)
             .collect())
     }
+    pub fn recent_sessions(
+        &self,
+        before: Option<&RecentCursor>,
+    ) -> Result<(Vec<RecentSession>, Option<RecentCursor>)> {
+        if before.is_some_and(|cursor| {
+            !cursor.updated_at.is_finite()
+                || cursor.updated_at < 0.0
+                || cursor.id.is_empty()
+                || cursor.id.len() > 128
+        }) {
+            bail!("最近记录游标无效");
+        }
+        // Lifecycle/reading metadata does not make an old conversation recent.
+        // The partial event index also supports histories created before this feature.
+        let rows = self.db.prepare("WITH recent AS (
+            SELECT s.id,s.data,COALESCE((SELECT e.at FROM events e WHERE e.session_id=s.id
+                AND json_extract(e.data,'$.kind') IN ('user','text','tool','tool_result','approval','approval_resolved','subagent')
+                ORDER BY e.seq DESC LIMIT 1),json_extract(s.data,'$.created_at')) AS updated_at
+            FROM sessions s WHERE COALESCE(json_extract(s.data,'$.archived'),0)=0
+                AND s.project_id NOT IN (SELECT project_id FROM hidden_projects))
+            SELECT data,updated_at FROM recent
+            WHERE ?1 IS NULL OR updated_at<?1 OR (updated_at=?1 AND id<?2)
+            ORDER BY updated_at DESC,id DESC LIMIT 101")?
+            .query_map(params![before.map(|cursor|cursor.updated_at), before.map(|cursor|cursor.id.as_str())], |row| Ok((row.get::<_,String>(0)?, row.get::<_,f64>(1)?)))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        let mut sessions = rows
+            .into_iter()
+            .map(|(data, updated_at)| {
+                Ok(RecentSession {
+                    session: serde_json::from_str(&data)?,
+                    updated_at,
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let has_more = sessions.len() > 100;
+        sessions.truncate(100);
+        let next = has_more.then(|| {
+            let last = sessions.last().expect("full recent page");
+            RecentCursor {
+                updated_at: last.updated_at,
+                id: last.session.id.clone(),
+            }
+        });
+        Ok((sessions, next))
+    }
     pub fn session(&self, id: &str) -> Result<Session> {
         let data: String = self
             .db
@@ -278,12 +378,259 @@ impl Store {
         )?;
         Ok(())
     }
-    pub fn event(&self, id: &str, event: EventKind) -> Result<()> {
-        self.db.execute(
+    pub fn subagents(&self, id: &str) -> Result<(Vec<Subagent>, bool)> {
+        let mut tasks = self.db.prepare("SELECT data FROM subagents WHERE session_id=?1 ORDER BY active DESC,at DESC,id LIMIT 129")?.query_map([id], |row| row.get::<_, String>(0))?.map(|row| Ok(serde_json::from_str(&row?)?)).collect::<Result<Vec<Subagent>>>()?;
+        let truncated = tasks.len() > 128;
+        tasks.truncate(128);
+        Ok((tasks, truncated))
+    }
+    pub fn end_subagents(&self, id: &str, status: SubagentStatus) -> Result<()> {
+        let tasks = self
+            .db
+            .prepare("SELECT data FROM subagents WHERE session_id=?1 AND active=1")?
+            .query_map([id], |row| row.get::<_, String>(0))?
+            .map(|row| Ok(serde_json::from_str(&row?)?))
+            .collect::<Result<Vec<Subagent>>>()?;
+        for task in tasks {
+            self.event(
+                id,
+                EventKind::Subagent {
+                    update: SubagentUpdate {
+                        id: task.native_id,
+                        tool_use_id: task.tool_use_id,
+                        title: None,
+                        status: Some(status),
+                        summary: None,
+                        last_tool: None,
+                    },
+                },
+            )?;
+        }
+        Ok(())
+    }
+    pub fn event(&self, id: &str, mut event: EventKind) -> Result<()> {
+        let at = now();
+        let tx = self.db.unchecked_transaction()?;
+        if let EventKind::Subagent { update } = &mut event {
+            let data = tx.query_row("SELECT data FROM subagents WHERE session_id=?1 AND (id=?2 OR native_id=?2 OR (tool_use_id IS NOT NULL AND tool_use_id=?3)) ORDER BY at DESC LIMIT 1", params![id, update.id, update.tool_use_id], |row| row.get::<_, String>(0)).optional()?;
+            let mut task = if let Some(data) = data {
+                serde_json::from_str::<Subagent>(&data)?
+            } else {
+                Subagent {
+                    id: update.id.clone(),
+                    native_id: update.id.clone(),
+                    tool_use_id: update.tool_use_id.clone(),
+                    title: "子智能体".into(),
+                    status: SubagentStatus::Unknown,
+                    summary: None,
+                    last_tool: None,
+                    started_at: None,
+                    updated_at: at,
+                }
+            };
+            task.native_id = update.id.clone();
+            if let Some(tool) = &update.tool_use_id {
+                task.tool_use_id = Some(tool.clone());
+            }
+            if let Some(title) = &update.title {
+                task.title = title.clone();
+            }
+            if let Some(status) = update.status {
+                // Out-of-order progress cannot resurrect a confirmed terminal task.
+                if task.status.active()
+                    || task.status == SubagentStatus::Unknown
+                    || !status.active()
+                {
+                    task.status = status;
+                }
+                if status.active() && task.started_at.is_none() {
+                    task.started_at = Some(at);
+                }
+            }
+            if let Some(summary) = &update.summary {
+                task.summary = Some(summary.clone());
+            }
+            if let Some(tool) = &update.last_tool {
+                task.last_tool = Some(tool.clone());
+            }
+            task.updated_at = at;
+            tx.execute("INSERT INTO subagents(session_id,id,native_id,tool_use_id,active,at,data) VALUES (?1,?2,?3,?4,?5,?6,?7) ON CONFLICT(session_id,id) DO UPDATE SET native_id=excluded.native_id,tool_use_id=excluded.tool_use_id,active=excluded.active,at=excluded.at,data=excluded.data", params![id, task.id, task.native_id, task.tool_use_id, task.status.active(), at, serde_json::to_string(&task)?])?;
+            update.id = task.id;
+        }
+        tx.execute(
             "INSERT INTO events(session_id,at,data) VALUES (?1,?2,?3)",
-            params![id, now(), serde_json::to_string(&event)?],
+            params![id, at, serde_json::to_string(&event)?],
+        )?;
+        index_event(&tx, id, &event)?;
+        tx.commit()?;
+        Ok(())
+    }
+    pub fn baseline(&self, id: &str) -> Result<Option<crate::task_changes::Snapshot>> {
+        self.session(id)?;
+        self.db
+            .query_row(
+                "SELECT data FROM task_baselines WHERE session_id=?1",
+                [id],
+                |r| r.get::<_, String>(0),
+            )
+            .optional()?
+            .map(|s| serde_json::from_str(&s).map_err(Into::into))
+            .transpose()
+    }
+    pub fn save_baseline(&self, id: &str, snapshot: &crate::task_changes::Snapshot) -> Result<()> {
+        self.db.execute(
+            "INSERT OR IGNORE INTO task_baselines(session_id,data) VALUES (?1,?2)",
+            params![id, serde_json::to_string(snapshot)?],
         )?;
         Ok(())
+    }
+    pub fn save_turn_baseline(
+        &self,
+        id: &str,
+        request_id: &str,
+        baseline: &crate::task_changes::Snapshot,
+    ) -> Result<()> {
+        self.db.execute(
+            "INSERT OR IGNORE INTO turn_changes(session_id,request_id,baseline) VALUES (?1,?2,?3)",
+            params![id, request_id, serde_json::to_string(baseline)?],
+        )?;
+        Ok(())
+    }
+    pub fn pending_turn(
+        &self,
+        id: &str,
+    ) -> Result<Option<(String, crate::task_changes::Snapshot)>> {
+        self.db.query_row("SELECT request_id,baseline FROM turn_changes WHERE session_id=?1 AND baseline IS NOT NULL ORDER BY rowid DESC LIMIT 1",[id],
+            |r| Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?))).optional()?
+            .map(|(id,data)| Ok((id,serde_json::from_str(&data)?))).transpose()
+    }
+    pub fn finish_turn(&self, id: &str, turn: &crate::task_changes::FrozenTurn) -> Result<()> {
+        let tx = self.db.unchecked_transaction()?;
+        let updated = tx.execute("UPDATE turn_changes SET baseline=NULL,data=?3 WHERE session_id=?1 AND request_id=?2 AND baseline IS NOT NULL",
+            params![id,turn.changes.request_id,serde_json::to_string(turn)?])?;
+        if updated == 1 {
+            tx.execute(
+                "INSERT INTO events(session_id,at,data) VALUES (?1,?2,?3)",
+                params![
+                    id,
+                    now(),
+                    serde_json::to_string(&EventKind::TurnChanges {
+                        changes: turn.changes.clone()
+                    })?
+                ],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+    pub fn turn_changes(
+        &self,
+        id: &str,
+        request_id: &str,
+    ) -> Result<crate::task_changes::FrozenTurn> {
+        self.session(id)?;
+        let data: Option<String> = self
+            .db
+            .query_row(
+                "SELECT data FROM turn_changes WHERE session_id=?1 AND request_id=?2",
+                params![id, request_id],
+                |r| r.get(0),
+            )
+            .optional()?
+            .flatten();
+        serde_json::from_str(&data.context("此轮尚未结束或没有保存变更快照")?).map_err(Into::into)
+    }
+    pub fn last_turn_changes(&self, id: &str) -> Result<Option<crate::task_changes::FrozenTurn>> {
+        self.session(id)?;
+        let request_id: Option<String> = self.db.query_row(
+            "SELECT request_id FROM turn_changes WHERE session_id=?1 AND data IS NOT NULL ORDER BY rowid DESC LIMIT 1",
+            [id], |row| row.get(0),
+        ).optional()?;
+        request_id
+            .map(|request_id| self.turn_changes(id, &request_id))
+            .transpose()
+    }
+    pub fn latest_request(&self, id: &str) -> Result<String> {
+        self.db
+            .query_row(
+                "SELECT id FROM requests WHERE session_id=?1 ORDER BY rowid DESC LIMIT 1",
+                [id],
+                |r| r.get(0),
+            )
+            .map_err(Into::into)
+    }
+    pub fn update_turn(&self, id: &str, turn: &crate::task_changes::FrozenTurn) -> Result<()> {
+        let tx = self.db.unchecked_transaction()?;
+        if tx.execute("UPDATE turn_changes SET data=?3 WHERE session_id=?1 AND request_id=?2 AND data IS NOT NULL",
+            params![id,turn.changes.request_id,serde_json::to_string(turn)?])? != 1 { bail!("本轮变更记录缺失"); }
+        tx.execute(
+            "INSERT INTO events(session_id,at,data) VALUES (?1,?2,?3)",
+            params![
+                id,
+                now(),
+                serde_json::to_string(&EventKind::TurnChanges {
+                    changes: turn.changes.clone()
+                })?
+            ],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+    pub fn first_request(&self, id: &str) -> Result<bool> {
+        Ok(self.db.query_row(
+            "SELECT COUNT(*) FROM requests WHERE session_id=?1",
+            [id],
+            |r| r.get::<_, u32>(0),
+        )? == 1)
+    }
+    pub fn observe_tool(&self, session: &str, id: &str, name: &str) -> Result<()> {
+        let tx = self.db.unchecked_transaction()?;
+        index_tool(&tx, session, id, name)?;
+        tx.commit()?;
+        Ok(())
+    }
+    pub fn sources(&self, session: &str) -> Result<(Vec<latte_work_protocol::TaskSource>, bool)> {
+        self.session(session)?;
+        // Bounded lazy indexing supports older histories without inventing sources.
+        let history = self.db.prepare("SELECT data FROM events WHERE session_id=?1 AND json_extract(data,'$.kind') IN ('user','tool') ORDER BY seq DESC LIMIT 257")?.query_map([session], |r| r.get::<_,String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
+        let mut partial = history.len() > 256;
+        let tx = self.db.unchecked_transaction()?;
+        for data in history.iter().take(256).rev() {
+            let event: EventKind = serde_json::from_str(data)?;
+            index_event(&tx, session, &event)?;
+        }
+        tx.commit()?;
+        let rows = self
+            .db
+            .prepare(
+                "SELECT data FROM task_sources WHERE session_id=?1 ORDER BY at DESC,id LIMIT 129",
+            )?
+            .query_map([session], |r| r.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        partial |= rows.len() > 128;
+        Ok((
+            rows.iter()
+                .take(128)
+                .map(|row| serde_json::from_str(row).map_err(Into::into))
+                .collect::<Result<_>>()?,
+            partial,
+        ))
+    }
+    pub fn grant_reference(&self, project: &str, path: &str, directory: bool) -> Result<()> {
+        self.db.execute("INSERT INTO reference_access(project_id,path,directory) VALUES (?1,?2,?3) ON CONFLICT(project_id,path) DO UPDATE SET directory=excluded.directory", params![project,path,directory])?;
+        Ok(())
+    }
+    pub fn reference_allowed(&self, project: &str, target: &Path) -> Result<bool> {
+        let rows = self
+            .db
+            .prepare("SELECT path,directory FROM reference_access WHERE project_id=?1 LIMIT 512")?
+            .query_map([project], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, bool>(1)?))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows
+            .iter()
+            .any(|(path, dir)| target == Path::new(path) || (*dir && target.starts_with(path))))
     }
     pub fn state(&mut self, id: &str, status: Status, message: Option<String>) -> Result<()> {
         let mut session = self.session(id)?;
@@ -429,6 +776,7 @@ impl Store {
                 "INSERT INTO events(session_id,at,data) VALUES (?1,?2,?3)",
                 params![id, now(), serde_json::to_string(&event)?],
             )?;
+            index_event(&tx, id, &event)?;
         }
         tx.commit()?;
         Ok(true)
@@ -561,8 +909,238 @@ fn flush_history_text(events: &mut [Event], fragments: &mut Vec<String>) {
         *text = fragments.drain(..).rev().collect();
     }
 }
+fn index_event(tx: &rusqlite::Transaction<'_>, session: &str, event: &EventKind) -> Result<()> {
+    if let EventKind::Tool { id, name, .. } = event {
+        return index_tool(tx, session, id, name);
+    }
+    for source in crate::sources::event_sources(event) {
+        index_source(tx, session, source)?;
+    }
+    Ok(())
+}
+fn index_tool(tx: &rusqlite::Transaction<'_>, session: &str, id: &str, name: &str) -> Result<()> {
+    if id.is_empty() || id.len() > 512 {
+        return Ok(());
+    }
+    if tx.execute(
+        "INSERT OR IGNORE INTO observed_tools(session_id,id) VALUES (?1,?2)",
+        params![session, id],
+    )? == 0
+    {
+        return Ok(());
+    }
+    if let Some(source) = crate::sources::tool_source(name) {
+        index_source(tx, session, source)?;
+    }
+    Ok(())
+}
+fn index_source(
+    tx: &rusqlite::Transaction<'_>,
+    session: &str,
+    mut source: latte_work_protocol::TaskSource,
+) -> Result<()> {
+    if let Some(data) = tx
+        .query_row(
+            "SELECT data FROM task_sources WHERE session_id=?1 AND id=?2",
+            params![session, source.id],
+            |r| r.get::<_, String>(0),
+        )
+        .optional()?
+    {
+        let previous: latte_work_protocol::TaskSource = serde_json::from_str(&data)?;
+        source.uses = previous.uses.saturating_add(source.uses);
+        for tool in previous.tools {
+            if !source.tools.contains(&tool) && source.tools.len() < 64 {
+                source.tools.push(tool);
+            }
+        }
+    } else {
+        let count: u32 = tx.query_row(
+            "SELECT COUNT(*) FROM task_sources WHERE session_id=?1",
+            [session],
+            |r| r.get(0),
+        )?;
+        if count >= 512 {
+            return Ok(());
+        }
+    }
+    tx.execute("INSERT INTO task_sources(session_id,id,data,at) VALUES (?1,?2,?3,?4) ON CONFLICT(session_id,id) DO UPDATE SET data=excluded.data,at=excluded.at",params![session,source.id,serde_json::to_string(&source)?,now()])?;
+    Ok(())
+}
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn recent_history_pages_all_visible_projects_and_ignores_read_metadata() {
+        use super::*;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("recent.db");
+        let store = Store::open(&path).unwrap();
+        let project = store.add_project(dir.path()).unwrap();
+        let other_dir = dir.path().join("other");
+        std::fs::create_dir(&other_dir).unwrap();
+        let other = store.add_project(&other_dir).unwrap();
+        let mut ids = Vec::new();
+        for i in 0..105 {
+            let mut session = store
+                .create_session(
+                    if i % 2 == 0 {
+                        project.id.clone()
+                    } else {
+                        other.id.clone()
+                    },
+                    "claude".into(),
+                )
+                .unwrap();
+            session.created_at = 10.0;
+            store.save(&session).unwrap();
+            ids.push(session.id);
+        }
+        // Existing history is projected without rewriting session data.
+        store
+            .event(
+                &ids[0],
+                EventKind::Text {
+                    text: "older conversation, new reply".into(),
+                },
+            )
+            .unwrap();
+        store
+            .db
+            .execute("UPDATE events SET at=20 WHERE session_id=?1", [&ids[0]])
+            .unwrap();
+        store.mark_session_unread(&ids[1], false).unwrap();
+        store.rename_session(&ids[1], "metadata only").unwrap();
+        store.pin_session(&ids[1], true).unwrap();
+        store
+            .event(
+                &ids[1],
+                EventKind::State {
+                    status: Status::Ready,
+                    message: None,
+                },
+            )
+            .unwrap();
+        let (first, next) = store.recent_sessions(None).unwrap();
+        assert_eq!(first.len(), 100);
+        assert_eq!(first[0].session.id, ids[0]);
+        assert_eq!(first[0].updated_at, 20.0);
+        assert!(first.iter().any(|row| row.session.project_id == other.id));
+        let (second, end) = store.recent_sessions(next.as_ref()).unwrap();
+        assert_eq!(second.len(), 5);
+        assert!(end.is_none());
+        let loaded: std::collections::HashSet<_> = first
+            .iter()
+            .chain(second.iter())
+            .map(|row| row.session.id.clone())
+            .collect();
+        assert_eq!(loaded.len(), 105);
+        store.archive_session(&ids[0], true).unwrap();
+        store.remove_project(&other.id).unwrap();
+        let (visible, _) = store.recent_sessions(None).unwrap();
+        assert!(
+            visible
+                .iter()
+                .all(|row| row.session.project_id == project.id && !row.session.archived)
+        );
+        assert!(!visible.iter().any(|row| row.session.id == ids[0]));
+        assert!(
+            store
+                .recent_sessions(Some(&RecentCursor {
+                    updated_at: -1.0,
+                    id: "x".into()
+                }))
+                .is_err()
+        );
+        drop(store);
+        let store = Store::open(&path).unwrap();
+        assert_eq!(store.recent_sessions(None).unwrap().0.len(), visible.len());
+    }
+    #[test]
+    fn subagents_merge_native_identity_and_survive_history_windows_and_restart() {
+        use super::*;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("children.db");
+        let mut store = Store::open(&path).unwrap();
+        let project = store.add_project(dir.path()).unwrap();
+        let session = store
+            .create_session(project.id.clone(), "claude".into())
+            .unwrap();
+        let other = store
+            .create_session(project.id.clone(), "claude".into())
+            .unwrap();
+        let update = |id: &str, status| EventKind::Subagent {
+            update: SubagentUpdate {
+                id: id.into(),
+                tool_use_id: Some("tool".into()),
+                title: Some("检查代码".into()),
+                status: Some(status),
+                summary: None,
+                last_tool: None,
+            },
+        };
+        store
+            .event(&session.id, update("tool:tool", SubagentStatus::Running))
+            .unwrap();
+        store
+            .event(&session.id, update("native", SubagentStatus::Running))
+            .unwrap();
+        for _ in 0..140 {
+            store
+                .event(
+                    &session.id,
+                    EventKind::Notice {
+                        text: "later".into(),
+                    },
+                )
+                .unwrap();
+        }
+        let (tasks, _) = store.subagents(&session.id).unwrap();
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].id, "tool:tool");
+        assert_eq!(tasks[0].native_id, "native");
+        assert!(store.subagents(&other.id).unwrap().0.is_empty());
+        store.state(&session.id, Status::Completed, None).unwrap();
+        drop(store);
+        let store = Store::open(&path).unwrap();
+        assert_eq!(
+            store.subagents(&session.id).unwrap().0[0].status,
+            SubagentStatus::Unknown
+        );
+        store
+            .end_subagents(&session.id, SubagentStatus::Stopped)
+            .unwrap();
+        store
+            .event(&session.id, update("native", SubagentStatus::Completed))
+            .unwrap();
+        store
+            .event(&session.id, update("native", SubagentStatus::Running))
+            .unwrap();
+        assert_eq!(
+            store.subagents(&session.id).unwrap().0[0].status,
+            SubagentStatus::Completed
+        );
+        for n in 0..130 {
+            store
+                .event(
+                    &session.id,
+                    EventKind::Subagent {
+                        update: SubagentUpdate {
+                            id: format!("child-{n}"),
+                            tool_use_id: None,
+                            title: None,
+                            status: Some(SubagentStatus::Completed),
+                            summary: None,
+                            last_tool: None,
+                        },
+                    },
+                )
+                .unwrap();
+        }
+        let (tasks, truncated) = store.subagents(&session.id).unwrap();
+        assert_eq!(tasks.len(), 128);
+        assert!(truncated);
+    }
+
     #[test]
     fn history_compacts_stream_chunks_and_pages_with_raw_cursors_without_gaps() {
         let dir = tempfile::tempdir().unwrap();
@@ -1111,5 +1689,206 @@ mod tests {
                 .unwrap()
         );
         assert_eq!(store.session(&s.id).unwrap().effort, None);
+    }
+}
+
+#[cfg(test)]
+mod source_tests {
+    use super::*;
+    #[tokio::test]
+    async fn last_saved_turn_is_session_scoped_and_ignores_old_undo_updates_and_pending_turns() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("store.db");
+        let mut store = Store::open(&path).unwrap();
+        let project = store.add_project(dir.path()).unwrap();
+        let session = store
+            .create_session(project.id.clone(), "claude".into())
+            .unwrap();
+        let other = store.create_session(project.id, "claude".into()).unwrap();
+        assert!(store.last_turn_changes(&session.id).unwrap().is_none());
+        assert!(store.last_turn_changes("missing").is_err());
+        for id in ["first", "second"] {
+            store
+                .begin(&session.id, id, "edit", None, None, None, None)
+                .unwrap();
+            let before = crate::task_changes::Snapshot::unavailable("fixture".into());
+            store.save_turn_baseline(&session.id, id, &before).unwrap();
+            let turn = crate::task_changes::FrozenTurn::freeze(
+                id.into(),
+                before,
+                crate::task_changes::Snapshot::unavailable("fixture".into()),
+                false,
+                false,
+            )
+            .await
+            .unwrap();
+            store.finish_turn(&session.id, &turn).unwrap();
+            store.state(&session.id, Status::Completed, None).unwrap();
+        }
+        let mut older = store.turn_changes(&session.id, "first").unwrap();
+        older.changes.undo = latte_work_protocol::TurnUndoStatus::Reverted;
+        store.update_turn(&session.id, &older).unwrap();
+        store
+            .begin(&session.id, "pending", "edit", None, None, None, None)
+            .unwrap();
+        store
+            .save_turn_baseline(
+                &session.id,
+                "pending",
+                &crate::task_changes::Snapshot::unavailable("fixture".into()),
+            )
+            .unwrap();
+        assert_eq!(
+            store
+                .last_turn_changes(&session.id)
+                .unwrap()
+                .unwrap()
+                .changes
+                .request_id,
+            "second"
+        );
+        assert!(store.last_turn_changes(&other.id).unwrap().is_none());
+        drop(store);
+        let store = Store::open(&path).unwrap();
+        assert_eq!(
+            store
+                .last_turn_changes(&session.id)
+                .unwrap()
+                .unwrap()
+                .changes
+                .request_id,
+            "second"
+        );
+    }
+    #[tokio::test]
+    async fn turn_snapshots_and_uncertain_undo_persist_but_inflight_capture_recovers_as_unknown() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("project");
+        std::fs::create_dir(&root).unwrap();
+        assert!(
+            std::process::Command::new("git")
+                .current_dir(&root)
+                .args(["init", "-q"])
+                .status()
+                .unwrap()
+                .success()
+        );
+        std::fs::write(root.join("a.txt"), "before\n").unwrap();
+        let path = dir.path().join("store.db");
+        let mut store = Store::open(&path).unwrap();
+        let project = store.add_project(&root).unwrap();
+        let session = store.create_session(project.id, "claude".into()).unwrap();
+        store
+            .begin(&session.id, "r1", "edit", None, None, None, None)
+            .unwrap();
+        let before = crate::task_changes::Snapshot::capture(&root).await.unwrap();
+        store
+            .save_turn_baseline(&session.id, "r1", &before)
+            .unwrap();
+        store
+            .save_turn_baseline(
+                &session.id,
+                "r1",
+                &crate::task_changes::Snapshot::unavailable("duplicate".into()),
+            )
+            .unwrap();
+        std::fs::write(root.join("a.txt"), "after\n").unwrap();
+        let (_, saved) = store.pending_turn(&session.id).unwrap().unwrap();
+        let after = crate::task_changes::Snapshot::capture(&root).await.unwrap();
+        let mut turn =
+            crate::task_changes::FrozenTurn::freeze("r1".into(), saved, after, false, false)
+                .await
+                .unwrap();
+        store.finish_turn(&session.id, &turn).unwrap();
+        store.finish_turn(&session.id, &turn).unwrap();
+        store.state(&session.id, Status::Completed, None).unwrap();
+        turn.changes.undo = latte_work_protocol::TurnUndoStatus::Unknown;
+        store.update_turn(&session.id, &turn).unwrap();
+        drop(store);
+        let mut store = Store::open(&path).unwrap();
+        let saved = store.turn_changes(&session.id, "r1").unwrap();
+        assert_eq!(
+            saved.changes.undo,
+            latte_work_protocol::TurnUndoStatus::Unknown
+        );
+        assert!(saved.patch("a.txt").await.unwrap().0.contains("-before"));
+        assert!(store.pending_turn(&session.id).unwrap().is_none());
+        store
+            .begin(&session.id, "r2", "next", None, None, None, None)
+            .unwrap();
+        store
+            .save_turn_baseline(&session.id, "r2", &before)
+            .unwrap();
+        drop(store);
+        std::fs::write(root.join("a.txt"), "changed while offline\n").unwrap();
+        let store = Store::open(&path).unwrap();
+        assert_eq!(store.session(&session.id).unwrap().status, Status::Unknown);
+        assert!(store.pending_turn(&session.id).unwrap().is_none());
+        let events = store.events(&session.id, 0.).unwrap().0;
+        let changes: Vec<_> = events
+            .iter()
+            .filter_map(|e| {
+                if let EventKind::TurnChanges { changes } = &e.event {
+                    Some(changes)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        assert_eq!(
+            changes.iter().filter(|c| c.request_id == "r1").count(),
+            2,
+            "one result plus one unknown undo intent"
+        );
+        let unknown = changes.iter().find(|c| c.request_id == "r2").unwrap();
+        assert!(
+            unknown.interrupted
+                && unknown.summary.unavailable.is_some()
+                && unknown.summary.entries.is_empty()
+        );
+        assert!(store.turn_changes(&session.id, "r2").is_err());
+    }
+    #[test]
+    fn baselines_and_observed_sources_persist_without_recounting_tools() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("store.db");
+        let store = Store::open(&path).unwrap();
+        let project = store.add_project(dir.path()).unwrap();
+        let session = store
+            .create_session(project.id.clone(), "claude".into())
+            .unwrap();
+        let baseline = crate::task_changes::Snapshot::unavailable("legacy".into());
+        store.save_baseline(&session.id, &baseline).unwrap();
+        store
+            .save_baseline(
+                &session.id,
+                &crate::task_changes::Snapshot::unavailable("replacement".into()),
+            )
+            .unwrap();
+        store
+            .observe_tool(&session.id, "one", "mcp__docs__read")
+            .unwrap();
+        store
+            .observe_tool(&session.id, "one", "mcp__docs__read")
+            .unwrap();
+        store
+            .observe_tool(&session.id, "child:two", "mcp__docs__search")
+            .unwrap();
+        drop(store);
+        let store = Store::open(&path).unwrap();
+        assert_eq!(
+            store
+                .baseline(&session.id)
+                .unwrap()
+                .unwrap()
+                .unavailable
+                .as_deref(),
+            Some("legacy")
+        );
+        let (sources, truncated) = store.sources(&session.id).unwrap();
+        assert!(!truncated);
+        assert_eq!(sources.len(), 1);
+        assert_eq!(sources[0].uses, 2);
+        assert_eq!(sources[0].tools.len(), 2);
     }
 }

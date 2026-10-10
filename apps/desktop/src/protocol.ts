@@ -48,6 +48,8 @@ export type Session = {
    */
   agent_session_busy?: boolean;
 };
+export type RecentCursor = { updated_at: number; id: string };
+export type RecentSession = { session: Session; updated_at: number };
 export type ExecutionPhase = "waiting" | "thinking" | "replying";
 export type ContextUsage = {
   model: string;
@@ -62,7 +64,31 @@ export type TurnUsage = {
   model_time_ms: number | null;
   steps: number | null;
 };
+export type SubagentStatus =
+  "running" | "paused" | "completed" | "failed" | "stopped" | "unknown";
+export type SubagentUpdate = {
+  id: string;
+  tool_use_id: string | null;
+  title: string | null;
+  status: SubagentStatus | null;
+  summary: string | null;
+  last_tool: string | null;
+};
+export type Subagent = {
+  id: string;
+  native_id: string;
+  tool_use_id: string | null;
+  title: string;
+  status: SubagentStatus;
+  summary: string | null;
+  last_tool: string | null;
+  started_at: number | null;
+  updated_at: number;
+};
+export type AgentCommandUiAction = "subagents";
 export type EventKind =
+  | { kind: "turn_changes"; changes: TurnChanges }
+  | { kind: "subagent"; update: SubagentUpdate }
   | { kind: "progress"; phase: ExecutionPhase }
   | { kind: "usage"; context: ContextUsage | null; totals: TurnUsage | null }
   | { kind: "user"; text: string; request_id: string }
@@ -93,6 +119,68 @@ export type GitChange = {
   section: ChangeSection;
   status: string;
 };
+export type GitReviewScope = "branch" | "worktree" | "unstaged" | "staged";
+export type GitRef = { name: string; full_name: string };
+export type GitInfo = {
+  branch: string | null;
+  head: string | null;
+  default_base: string | null;
+  refs: Array<GitRef>;
+  truncated: boolean;
+};
+export type GitReviewFile = {
+  path: string;
+  previous_path: string | null;
+  status: string;
+  added: number | null;
+  removed: number | null;
+  binary: boolean;
+  untracked: boolean;
+};
+export type GitReview = {
+  /**
+   * Resolved commits pin a branch comparison even after refs move.
+   */
+  base: string | null;
+  head: string | null;
+  entries: Array<GitReviewFile>;
+  added: number;
+  removed: number;
+  truncated: boolean;
+};
+export type TaskChange = {
+  path: string;
+  status: string;
+  added: number | null;
+  removed: number | null;
+};
+export type ChangeSummary = {
+  entries: Array<TaskChange>;
+  added: number;
+  removed: number;
+  binary_files: number;
+  truncated: boolean;
+  baseline_at: number | null;
+  unavailable: string | null;
+};
+export type TurnUndoStatus = "ready" | "reverted" | "unknown";
+export type TurnChanges = {
+  request_id: string;
+  summary: ChangeSummary;
+  interrupted: boolean;
+  background_pending: boolean;
+  undo: TurnUndoStatus;
+};
+export type SourceKind = "file" | "directory" | "tool" | "connector";
+export type TaskSource = {
+  id: string;
+  name: string;
+  kind: SourceKind;
+  path: string | null;
+  mime_type: string | null;
+  tools: Array<string>;
+  uses: number;
+};
 export type AgentInfo = {
   id: string;
   name: string;
@@ -111,6 +199,10 @@ export type AgentSlashCommand = {
   display_name?: string | null;
   description: string;
   argument_hint: string;
+  /**
+   * Presentation hint supplied only for an advertised native command.
+   */
+  ui_action?: AgentCommandUiAction;
 };
 export type ProviderProtocol =
   "anthropic_messages" | "openai_chat" | "openai_responses";
@@ -215,6 +307,7 @@ export type Request =
   | { method: "browse_directories"; path: string | null }
   | { method: "sessions"; project_id: string }
   | { method: "pinned_sessions" }
+  | { method: "recent_sessions"; before: RecentCursor | null }
   | { method: "rename_session"; session_id: string; title: string }
   | { method: "pin_session"; session_id: string; pinned: boolean }
   | { method: "mark_session_unread"; session_id: string; unread: boolean }
@@ -245,6 +338,7 @@ export type Request =
     }
   | { method: "history"; session_id: string; before: number | null }
   | { method: "poll"; session_id: string; after: number }
+  | { method: "subagents"; session_id: string }
   | {
       method: "approve";
       session_id: string;
@@ -266,6 +360,41 @@ export type Request =
   | { method: "read_file"; project_id: string; path: string }
   | { method: "diff"; project_id: string }
   | { method: "changes"; project_id: string }
+  | { method: "git_info"; project_id: string }
+  | {
+      method: "git_review";
+      project_id: string;
+      scope: GitReviewScope;
+      base: string | null;
+    }
+  | {
+      method: "git_review_diff";
+      project_id: string;
+      scope: GitReviewScope;
+      base: string | null;
+      head: string | null;
+      path: string;
+      full_context: boolean;
+    }
+  | { method: "change_summary"; project_id: string; session_id: string | null }
+  | { method: "undo_turn_changes"; session_id: string; request_id: string }
+  | { method: "turn_change_summary"; session_id: string; request_id: string }
+  | { method: "last_turn_changes"; session_id: string }
+  | {
+      method: "turn_change_diff";
+      session_id: string;
+      request_id: string;
+      path: string;
+    }
+  | { method: "task_change_diff"; session_id: string; path: string }
+  | { method: "sources"; session_id: string }
+  | {
+      method: "preview_source";
+      project_id: string;
+      session_id: string | null;
+      path: string;
+      offset: number;
+    }
   | {
       method: "change_diff";
       project_id: string;
@@ -273,7 +402,28 @@ export type Request =
       section: ChangeSection;
     };
 export type Response =
+  | {
+      kind: "recent_sessions";
+      sessions: Array<RecentSession>;
+      next: RecentCursor | null;
+    }
+  | { kind: "last_turn_changes"; changes: TurnChanges | null }
+  | { kind: "turn_changes"; changes: TurnChanges }
+  | { kind: "change_summary"; summary: ChangeSummary }
+  | { kind: "sources"; entries: Array<TaskSource>; truncated: boolean }
+  | {
+      kind: "source_preview";
+      data: Array<number>;
+      mime_type: string;
+      size: number;
+      next: number;
+      has_more: boolean;
+    }
+  | { kind: "source_directory"; entries: Array<FileEntry>; truncated: boolean }
+  | { kind: "subagents"; tasks: Array<Subagent>; truncated: boolean }
   | { kind: "changes"; entries: Array<GitChange>; truncated: boolean }
+  | { kind: "git_info"; info: GitInfo }
+  | { kind: "git_review"; review: GitReview }
   | { kind: "agent_permissions"; modes: Array<AgentPermissionMode> }
   | { kind: "agent_commands"; commands: Array<AgentSlashCommand> }
   | { kind: "terminals"; terminals: Array<TerminalInfo> }

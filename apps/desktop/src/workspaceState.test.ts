@@ -5,8 +5,88 @@ import {
   readWorkspace,
   updateWorkspace,
   workspaceKey,
+  openSubagent,
 } from "./workspaceState";
 beforeEach(() => localStorage.clear());
+it("drops saved source tabs and selects a surviving file tab on restart", async () => {
+  const key = crypto.randomUUID();
+  localStorage.setItem(
+    "latte-work.conversation-workspace.v1:" + key,
+    JSON.stringify({
+      tabs: [
+        { id: "sources", kind: "sources" },
+        { id: "files", kind: "files", path: "src", file: "src/main.ts" },
+        {
+          id: "source:/outside/file.txt",
+          kind: "source",
+          source: { path: "/outside/file.txt", name: "file.txt" },
+        },
+      ],
+      current: "source:/outside/file.txt",
+      visible: true,
+      expanded: false,
+      width: 420,
+    }),
+  );
+  vi.resetModules();
+  const reloaded = await import("./workspaceState");
+  expect(reloaded.readWorkspace(key)).toMatchObject({
+    tabs: [{ id: "files", kind: "files", path: "src", file: "src/main.ts" }],
+    current: "files",
+    visible: true,
+    width: 420,
+  });
+});
+it.each([false, true])(
+  "removes source-only tabs and restores conversation in expanded=%s layout",
+  (expanded) => {
+    const key = crypto.randomUUID();
+    localStorage.setItem(
+      "latte-work.conversation-workspace.v1:" + key,
+      JSON.stringify({
+        tabs: [{ id: "sources", kind: "sources" }],
+        current: "sources",
+        visible: true,
+        expanded,
+        conversationActive: false,
+      }),
+    );
+    expect(readWorkspace(key)).toMatchObject({
+      tabs: [],
+      current: "",
+      visible: expanded,
+      expanded,
+      conversationActive: expanded,
+    });
+  },
+);
+it("restores named child tabs with stable IDs without sharing another conversation", async () => {
+  const key = crypto.randomUUID();
+  const task = {
+    id: "child",
+    native_id: "native",
+    tool_use_id: null,
+    title: "Child task",
+    status: "completed" as const,
+    summary: null,
+    last_tool: null,
+    started_at: 1,
+    updated_at: 2,
+  };
+  openSubagent(key, task);
+  openSubagent(key, task);
+  vi.resetModules();
+  const reloaded = await import("./workspaceState");
+  expect(reloaded.readWorkspace(key).tabs).toEqual([
+    {
+      id: "subagent:child",
+      kind: "subagent",
+      taskId: "child",
+      title: "Child task",
+    },
+  ]);
+  expect(reloaded.readWorkspace(crypto.randomUUID()).tabs).toEqual([]);
+});
 it("persists layout, selection and file navigation across a fresh module load", async () => {
   const key = workspaceKey(crypto.randomUUID());
   updateWorkspace(key, {

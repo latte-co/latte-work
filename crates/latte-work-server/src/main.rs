@@ -3,9 +3,12 @@ mod agent_environment;
 mod agents;
 mod attachments;
 mod files;
+mod git_review;
 mod providers;
 mod runtime;
+mod sources;
 mod store;
+mod task_changes;
 mod terminal;
 mod upgrade;
 use anyhow::{Context, Result, bail};
@@ -36,6 +39,7 @@ struct Service {
     database: Database,
     runs: Runs,
     command_probes: Arc<tokio::sync::Semaphore>,
+    file_admission: Arc<tokio::sync::RwLock<()>>,
     agent_binary: String,
     agent: AgentInfo,
     server_id: String,
@@ -167,6 +171,7 @@ async fn serve(dir: &Path) -> Result<()> {
         database,
         runs: Arc::new(Mutex::new(HashMap::new())),
         command_probes: Arc::new(tokio::sync::Semaphore::new(2)),
+        file_admission: Arc::new(tokio::sync::RwLock::new(())),
         agent_binary,
         agent,
         server_id: uuid::Uuid::new_v4().to_string(),
@@ -285,6 +290,26 @@ async fn connection(stream: UnixStream, service: Service) -> Result<()> {
     Ok(())
 }
 async fn dispatch(s: &Service, request: Request) -> Result<Response> {
+    // Undo holds exclusive admission until file restoration and its durable result.
+    // Ordinary turns retain concurrent admission; no request is replayed.
+    let undo = matches!(&request, Request::UndoTurnChanges { .. });
+    let _undo_guard = if undo {
+        Some(s.file_admission.write().await)
+    } else {
+        None
+    };
+    let _write_guard = if matches!(
+        &request,
+        Request::Send { .. }
+            | Request::OpenAgentSession { .. }
+            | Request::CreateTerminal { .. }
+            | Request::WriteTerminal { .. }
+            | Request::Approve { .. }
+    ) {
+        Some(s.file_admission.read().await)
+    } else {
+        None
+    };
     let closed_resource = match &request {
         Request::CloseAgentSession { session_id, .. } => {
             Some(upgrade::Resource::AgentSession(session_id.clone()))
@@ -539,6 +564,10 @@ async fn dispatch(s: &Service, request: Request) -> Result<Response> {
         Request::PinnedSessions => Response::Sessions {
             sessions: db(&s.database, |d| d.pinned_sessions())?,
         },
+        Request::RecentSessions { before } => {
+            let (sessions, next) = db(&s.database, |d| d.recent_sessions(before.as_ref()))?;
+            Response::RecentSessions { sessions, next }
+        }
         Request::RenameSession { session_id, title } => Response::Session {
             session: db(&s.database, |d| d.rename_session(&session_id, &title))?,
         },
@@ -707,6 +736,11 @@ async fn dispatch(s: &Service, request: Request) -> Result<Response> {
                 before,
             })
         })?,
+        Request::Subagents { session_id } => db(&s.database, |d| {
+            d.session(&session_id)?;
+            let (tasks, truncated) = d.subagents(&session_id)?;
+            Ok(Response::Subagents { tasks, truncated })
+        })?,
         Request::Poll { session_id, after } => db(&s.database, |d| {
             let session = d.session(&session_id)?;
             let (events, has_more) = d.events(&session_id, after)?;
@@ -792,9 +826,182 @@ async fn dispatch(s: &Service, request: Request) -> Result<Response> {
         }
         Request::ResolveReference { project_id, path } => {
             let p = db(&s.database, |d| d.project(&project_id))?;
-            Response::FileReference {
-                entry: files::reference(Path::new(&p.path), &path).await?,
+            let entry = files::reference(Path::new(&p.path), &path).await?;
+            if Path::new(&entry.path).is_absolute() {
+                db(&s.database, |d| {
+                    d.grant_reference(&project_id, &entry.path, entry.directory)
+                })?;
             }
+            Response::FileReference { entry }
+        }
+        Request::Sources { session_id } => {
+            let (entries, truncated) = db(&s.database, |d| d.sources(&session_id))?;
+            Response::Sources { entries, truncated }
+        }
+        Request::ChangeSummary {
+            project_id,
+            session_id,
+        } => {
+            let p = db(&s.database, |d| d.project(&project_id))?;
+            let summary = if let Some(id) = session_id {
+                let session = db(&s.database, |d| d.session(&id))?;
+                if session.project_id != project_id {
+                    bail!("任务不属于当前项目");
+                }
+                let baseline = db(&s.database, |d| d.baseline(&id))?.unwrap_or_else(|| {
+                    task_changes::Snapshot::unavailable(
+                        "此任务没有记录文件基线，请查看工作区改动".into(),
+                    )
+                });
+                baseline.summary(Path::new(&p.path)).await?
+            } else {
+                task_changes::workspace_summary(Path::new(&p.path)).await?
+            };
+            Response::ChangeSummary { summary }
+        }
+        Request::UndoTurnChanges {
+            session_id,
+            request_id,
+        } => {
+            use latte_work_protocol::TurnUndoStatus;
+            let mut turn = db(&s.database, |d| d.turn_changes(&session_id, &request_id))?;
+            if turn.changes.undo == TurnUndoStatus::Reverted {
+                return Ok(Response::TurnChanges {
+                    changes: turn.changes,
+                });
+            }
+            if db(&s.database, |d| d.latest_request(&session_id))? != request_id {
+                bail!("只能撤销此会话最近一轮的修改，请查看历史 diff 后手动调整");
+            }
+            if db(&s.database, |d| d.has_active_sessions())?
+                || s.runs
+                    .lock()
+                    .map_err(|_| anyhow::anyhow!("执行状态锁异常"))?
+                    .values()
+                    .any(|r| !r.safe_to_close.load(std::sync::atomic::Ordering::SeqCst))
+                || !s
+                    .terminals
+                    .lock()
+                    .map_err(|_| anyhow::anyhow!("终端锁异常"))?
+                    .is_empty()
+            {
+                bail!("此主机仍有运行任务、后台 Agent 或终端；请结束后再撤销");
+            }
+            let session = db(&s.database, |d| d.session(&session_id))?;
+            let project = db(&s.database, |d| d.project(&session.project_id))?;
+            let root = Path::new(&project.path);
+            turn.validate_undo(root)?;
+            // Close only idle runtimes in overlapping directories before restoration.
+            let running_ids: Vec<_> = s
+                .runs
+                .lock()
+                .map_err(|_| anyhow::anyhow!("执行状态锁异常"))?
+                .keys()
+                .cloned()
+                .collect();
+            for id in running_ids {
+                let session = db(&s.database, |d| d.session(&id))?;
+                let other = db(&s.database, |d| d.project(&session.project_id))?;
+                let other = Path::new(&other.path);
+                if root.starts_with(other) || other.starts_with(root) {
+                    runtime::close(&s.database, &s.runs, &session.id, true).await?;
+                }
+            }
+            turn.validate_undo(root)?;
+            turn.changes.undo = TurnUndoStatus::Unknown;
+            db(&s.database, |d| d.update_turn(&session_id, &turn))?;
+            turn.restore(root)
+                .context("撤销未能全部完成，状态待核对；请检查工作区，系统不会自动重试")?;
+            turn.changes.undo = TurnUndoStatus::Reverted;
+            db(&s.database, |d| d.update_turn(&session_id, &turn))?;
+            Response::TurnChanges {
+                changes: turn.changes,
+            }
+        }
+        Request::LastTurnChanges { session_id } => {
+            let turn = db(&s.database, |d| d.last_turn_changes(&session_id))?;
+            Response::LastTurnChanges {
+                changes: turn.map(|turn| turn.changes),
+            }
+        }
+        Request::TurnChangeSummary {
+            session_id,
+            request_id,
+        } => {
+            let turn = db(&s.database, |d| d.turn_changes(&session_id, &request_id))?;
+            Response::TurnChanges {
+                changes: turn.changes,
+            }
+        }
+        Request::TurnChangeDiff {
+            session_id,
+            request_id,
+            path,
+        } => {
+            let turn = db(&s.database, |d| d.turn_changes(&session_id, &request_id))?;
+            let (text, truncated) = turn.patch(&path).await?;
+            Response::Content { text, truncated }
+        }
+        Request::TaskChangeDiff { session_id, path } => {
+            let session = db(&s.database, |d| d.session(&session_id))?;
+            let project = db(&s.database, |d| d.project(&session.project_id))?;
+            let baseline =
+                db(&s.database, |d| d.baseline(&session_id))?.context("此任务没有记录文件基线")?;
+            let (text, truncated) = baseline.patch(Path::new(&project.path), &path).await?;
+            Response::Content { text, truncated }
+        }
+        Request::PreviewSource {
+            project_id,
+            session_id,
+            path,
+            offset,
+        } => {
+            let p = db(&s.database, |d| d.project(&project_id))?;
+            if path.len() > 4096 || path.contains('\0') {
+                bail!("来源路径无效");
+            }
+            let requested = if Path::new(&path).is_absolute() {
+                std::path::PathBuf::from(&path)
+            } else {
+                files::resolve(Path::new(&p.path), &path)?
+            };
+            let target = tokio::fs::canonicalize(&requested).await?;
+            let mut allowed = target.starts_with(&p.path)
+                || db(&s.database, |d| d.reference_allowed(&project_id, &target))?;
+            allowed |= s
+                .attachments
+                .lock()
+                .map_err(|_| anyhow::anyhow!("附件存储锁异常"))?
+                .is_completed(&target);
+            if let Some(id) = session_id {
+                let session = db(&s.database, |d| d.session(&id))?;
+                if session.project_id != project_id {
+                    bail!("来源不属于当前项目");
+                }
+                let (sources, _) = db(&s.database, |d| d.sources(&id))?;
+                for source in sources {
+                    if let Some(path) = source.path {
+                        let original = Path::new(&path);
+                        let original = if original.is_absolute() {
+                            original.to_path_buf()
+                        } else {
+                            Path::new(&p.path).join(original)
+                        };
+                        // An explicit canonical reference never follows a replacement symlink.
+                        if original == target
+                            || (source.kind == latte_work_protocol::SourceKind::Directory
+                                && target.starts_with(&original))
+                        {
+                            allowed = true;
+                            break;
+                        }
+                    }
+                }
+            }
+            if !allowed {
+                bail!("请先将项目外文件或目录添加为此项目的来源");
+            }
+            sources::preview(&target, offset).await?
         }
         Request::ReadFile { project_id, path } => {
             let p = db(&s.database, |d| d.project(&project_id))?;
@@ -805,6 +1012,42 @@ async fn dispatch(s: &Service, request: Request) -> Result<Response> {
             let p = db(&s.database, |d| d.project(&project_id))?;
             let (entries, truncated) = files::changes(Path::new(&p.path)).await?;
             Response::Changes { entries, truncated }
+        }
+        Request::GitInfo { project_id } => {
+            let p = db(&s.database, |d| d.project(&project_id))?;
+            Response::GitInfo {
+                info: git_review::info(Path::new(&p.path)).await?,
+            }
+        }
+        Request::GitReview {
+            project_id,
+            scope,
+            base,
+        } => {
+            let p = db(&s.database, |d| d.project(&project_id))?;
+            Response::GitReview {
+                review: git_review::review(Path::new(&p.path), scope, base.as_deref()).await?,
+            }
+        }
+        Request::GitReviewDiff {
+            project_id,
+            scope,
+            base,
+            head,
+            path,
+            full_context,
+        } => {
+            let p = db(&s.database, |d| d.project(&project_id))?;
+            let (text, truncated) = git_review::diff(
+                Path::new(&p.path),
+                scope,
+                base.as_deref(),
+                head.as_deref(),
+                &path,
+                full_context,
+            )
+            .await?;
+            Response::Content { text, truncated }
         }
         Request::ChangeDiff {
             project_id,

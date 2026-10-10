@@ -1,4 +1,28 @@
-import type { Event } from "./protocol";
+import type { Event, TurnChanges } from "./protocol";
+/** Undo/status events for older turns must not replace the latest turn. */
+export function latestTurnChanges(events: Event[]): TurnChanges | undefined {
+  type RecordedTurn = { changes: TurnChanges; at: number; seq: number };
+  const turns = new Map<string, RecordedTurn>();
+  for (const { event, at, seq } of events) {
+    if (event.kind !== "turn_changes") continue;
+    const changes = event.changes;
+    const previous = turns.get(changes.request_id);
+    turns.set(changes.request_id, {
+      changes,
+      at: changes.summary.baseline_at ?? previous?.at ?? at,
+      seq: previous?.seq ?? seq,
+    });
+  }
+  return [...turns.values()].reduce<RecordedTurn | undefined>(
+    (latest, turn) =>
+      !latest ||
+      turn.at > latest.at ||
+      (turn.at === latest.at && turn.seq > latest.seq)
+        ? turn
+        : latest,
+    undefined,
+  )?.changes;
+}
 export type Item =
   | { key: number; type: "user"; text: string; at: number }
   | { key: number; type: "assistant"; text: string }
@@ -31,8 +55,32 @@ export function transcript(events: Event[]): Item[] {
         !["running", "waiting"].includes(e.event.status),
     )
     .map((e) => e.seq);
+  const turnChanges = new Map(
+    events.flatMap(({ event }) =>
+      event.kind === "turn_changes"
+        ? [[event.changes.request_id, event] as const]
+        : [],
+    ),
+  );
+  const renderedChanges = new Set<string>();
   for (const { seq, event, at } of events) {
-    if (event.kind === "usage" || event.kind === "progress") continue;
+    if (event.kind === "turn_changes") {
+      if (!renderedChanges.has(event.changes.request_id)) {
+        items.push({
+          key: seq,
+          type: "event",
+          value: turnChanges.get(event.changes.request_id)!,
+        });
+        renderedChanges.add(event.changes.request_id);
+      }
+      continue;
+    }
+    if (
+      event.kind === "usage" ||
+      event.kind === "progress" ||
+      event.kind === "subagent"
+    )
+      continue;
     if (event.kind === "user")
       items.push({ key: seq, type: "user", text: event.text, at });
     else if (event.kind === "text") {

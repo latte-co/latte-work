@@ -6,10 +6,12 @@ import {
   clampWorkspaceWidth,
   CONVERSATION_MIN_WIDTH,
   copyWorkspace,
+  openSubagents,
   useWorkspaceState,
   workspaceKey,
 } from "./workspaceState";
 import { useEffect, useRef, useState } from "react";
+import { isSubagentPanelCommand } from "./composerActions";
 import {
   connect,
   disconnect,
@@ -177,6 +179,9 @@ export function useWorkbench() {
   const [agent, setAgent] = useState<AgentInfo>();
   const [catalog, setCatalog] = useState(readCatalog);
   const [hostErrors, setHostErrors] = useState<Record<string, string>>({});
+  const [hostConnectionVersions, setHostConnectionVersions] = useState<
+    Record<string, number>
+  >({});
   const projects = hostedProjects(
     catalog,
     hosts.map((h) => h.id),
@@ -206,6 +211,16 @@ export function useWorkbench() {
     id: string;
   } | null>(null);
   const pinned = pinnedSessions(pinCache, projects, hostId, sessions);
+  const pinnedHosts = JSON.stringify(
+    hosts
+      .filter(
+        (target) => liveHosts.current.has(target.id) && !hostErrors[target.id],
+      )
+      .map((target) => ({
+        id: target.id,
+        version: hostConnectionVersions[target.id] ?? 0,
+      })),
+  );
   useEffect(() => {
     try {
       localStorage.setItem(
@@ -220,7 +235,8 @@ export function useWorkbench() {
     if (!native) return;
     let disposed = false;
     const timers = new Map<string, ReturnType<typeof setTimeout>>();
-    for (const target of hosts) {
+    const targets: { id: string }[] = JSON.parse(pinnedHosts);
+    for (const target of targets) {
       const pollPins = async () => {
         try {
           const result = await request(target.id, {
@@ -244,7 +260,7 @@ export function useWorkbench() {
       disposed = true;
       timers.forEach((timer) => clearTimeout(timer));
     };
-  }, [hosts]);
+  }, [pinnedHosts]);
   const [events, setEvents] = useState<Event[]>([]);
   const [hasEarlierHistory, setHasEarlierHistory] = useState(false);
   const [earlierHistoryLoading, setEarlierHistoryLoading] = useState(false);
@@ -381,6 +397,10 @@ export function useWorkbench() {
         throw new Error(hello.kind === "error" ? hello.message : "连接失败");
       const result = await request(target.id, { method: "projects" });
       if (result.kind !== "projects") throw new Error("无法加载主机项目");
+      setHostConnectionVersions((old) => ({
+        ...old,
+        [target.id]: (old[target.id] ?? 0) + 1,
+      }));
       return { hello, projects: result.projects, reused: false };
     })().finally(() => {
       if (initializingHosts.current.get(key) === promise)
@@ -401,7 +421,12 @@ export function useWorkbench() {
         setRetry((v) => v + 1);
       }
     } catch (e) {
+      liveHosts.current.delete(target.id);
       setHostErrors((old) => ({ ...old, [target.id]: message(e) }));
+      if (target.id === selection.current.hostId) {
+        setConnected(false);
+        setError(message(e));
+      }
     }
   }
   // Discover each saved host independently; one offline host cannot hide the others.
@@ -481,7 +506,11 @@ export function useWorkbench() {
         );
       })
       .catch((e) => {
-        if (!disposed) setError(message(e));
+        if (!disposed) {
+          liveHosts.current.delete(host.id);
+          setHostErrors((old) => ({ ...old, [host.id]: message(e) }));
+          setError(message(e));
+        }
       })
       .finally(() => {
         if (!disposed) setConnecting(false);
@@ -995,7 +1024,15 @@ export function useWorkbench() {
     model: string | null,
     effort: Effort | null,
     permission_mode: string | null,
+    uiAction?: "subagents",
   ): Promise<boolean> {
+    if (
+      project &&
+      isSubagentPanelCommand(text, session?.agent ?? agent?.id ?? "claude")
+    ) {
+      openSubagents(workspaceId);
+      return true;
+    }
     if (!connected || !text.trim() || sending.current) return false;
     sending.current = true;
     try {
@@ -1043,6 +1080,8 @@ export function useWorkbench() {
             : s,
         ),
       );
+      if (uiAction === "subagents" && selectedSessionId.current === target.id)
+        openSubagents(workspaceKey(target.id));
       setError("");
       return true;
     } catch (e) {
@@ -1276,6 +1315,15 @@ export function useWorkbench() {
     isHostConnected: (id: string) =>
       (id === hostId ? connected : liveHosts.current.has(id)) &&
       !hostErrors[id],
+    hostConnectionStatus: (
+      id: string,
+    ): "connected" | "failed" | "connecting" =>
+      hostErrors[id]
+        ? "failed"
+        : liveHosts.current.has(id)
+          ? "connected"
+          : "connecting",
+    hostConnectionVersions,
     connecting,
     serverId,
     agent,

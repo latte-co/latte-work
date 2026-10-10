@@ -185,26 +185,24 @@ export function UsageIndicator({
             <section>
               <h3>
                 上下文{" "}
-                <span>
-                  {percent == null
-                    ? "占比未知"
-                    : `${Math.round(percent)}% 已用`}
-                </span>
+                {percent != null && <span>{Math.round(percent)}% 已用</span>}
               </h3>
               <dl>
-                <dt>已用 / 总容量</dt>
+                <dt>{percent == null ? "已用 Token" : "已用 / 总容量"}</dt>
                 <dd>
-                  {number(context?.used_tokens)} /{" "}
-                  {number(context?.window_tokens)}
+                  {context ? number(context.used_tokens) : "暂无用量数据"}
+                  {percent != null && <> / {number(context?.window_tokens)}</>}
                 </dd>
               </dl>
-              <div className="usage-track" aria-hidden="true">
-                <i
-                  style={{
-                    width: `${Math.min(100, Math.max(0, percent ?? 0))}%`,
-                  }}
-                />
-              </div>
+              {percent != null && (
+                <div className="usage-track" aria-hidden="true">
+                  <i
+                    style={{
+                      width: `${Math.min(100, Math.max(0, percent))}%`,
+                    }}
+                  />
+                </div>
+              )}
             </section>
             <section>
               <h3>

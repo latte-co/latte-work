@@ -272,6 +272,7 @@ pub fn quit(app: tauri::AppHandle) {
             let _ = crate::pending_close::persist(&app, &state).await;
         }
         state.close_ack.lock().await.take();
+        crate::source_preview::close().await;
         exit(&app);
     });
 }

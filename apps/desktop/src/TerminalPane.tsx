@@ -7,23 +7,27 @@ import "@xterm/xterm/css/xterm.css";
 import { APPEARANCE_EVENT } from "./appearance";
 import { request, message } from "./api";
 import type { TerminalInfo } from "./protocol";
+import { useStatusIssues } from "./statusNotices";
 
 export function TerminalPane({
   hostId,
   terminal,
   active: visible,
   connected,
+  onExited,
 }: {
   hostId: string;
   terminal: TerminalInfo;
   active: boolean;
   connected: boolean;
+  onExited: () => void;
 }) {
   const container = useRef<HTMLDivElement>(null);
   const instance = useRef<{ term: Terminal; fit: FitAddon } | null>(null);
   const cursor = useRef(0);
   const polling = useRef(false);
   const exited = useRef(false);
+  const exitReported = useRef(false);
   const writable = useRef(false);
   const pending = useRef(0);
   const chain = useRef(Promise.resolve());
@@ -33,7 +37,30 @@ export function TerminalPane({
   const [finished, setFinished] = useState(false);
   const [lost, setLost] = useState(false);
   const [closing, setClosing] = useState(false);
+  const [retrying, setRetrying] = useState(false);
   const active = visible && !closing;
+  useStatusIssues([
+    {
+      id: `terminal:${hostId}:${terminal.id}`,
+      title: `${terminal.title} 暂不可用`,
+      error: active && connected ? error : "",
+      pending: active && connected && retrying,
+      action: {
+        label: "重新连接",
+        run: () => {
+          setRetrying(true);
+          setError("");
+          retry((value) => value + 1);
+        },
+      },
+    },
+    {
+      id: `terminal-output:${hostId}:${terminal.id}`,
+      title: `${terminal.title} 的较早输出已超出缓存`,
+      level: "info",
+      error: active && lost ? "只显示最近的输出，终端仍可继续使用。" : "",
+    },
+  ]);
   useAppClose(
     `终端 ${terminal.title} · ${hostId}`,
     async () => {
@@ -51,6 +78,13 @@ export function TerminalPane({
   );
   writable.current =
     !closing && connected && !error && ready && !finished && !terminal.exited;
+
+  useEffect(() => {
+    if ((!finished && !terminal.exited) || closing || exitReported.current)
+      return;
+    exitReported.current = true;
+    onExited();
+  }, [finished, terminal.exited, closing, onExited]);
 
   useEffect(
     () => () => {
@@ -229,6 +263,7 @@ export function TerminalPane({
         if (!disposed) setError(message(e));
       } finally {
         polling.current = false;
+        if (!disposed) setRetrying(false);
       }
     };
     void poll();
@@ -239,39 +274,11 @@ export function TerminalPane({
   }, [active, connected, ready, hostId, terminal.id, revision]);
   return (
     <div className="terminal-pane">
-      {!connected && (
-        <div className="terminal-notice" role="status">
-          连接已断开，重连后恢复输出。
-        </div>
-      )}
-      {lost && (
-        <div className="terminal-notice">
-          较早的输出已超出缓存，只显示最近的内容。
-        </div>
-      )}
-      {error && (
-        <div className="terminal-notice" role="alert">
-          <span>{error}</span>
-          <button
-            onClick={() => {
-              setError("");
-              retry((v) => v + 1);
-            }}
-          >
-            重新连接
-          </button>
-        </div>
-      )}
       <div
         className="terminal-screen"
         ref={container}
         aria-label="交互式终端"
       />
-      {finished && (
-        <div className="terminal-notice" role="status">
-          Shell 已退出。可关闭此标签，或点击 ＋ 新建终端。
-        </div>
-      )}
     </div>
   );
 }
