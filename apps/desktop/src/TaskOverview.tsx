@@ -5,6 +5,7 @@ import { request, message } from "./api";
 import type { Project } from "./protocol";
 import type { SubagentsState } from "./useSubagents";
 import { subagentCounts } from "./SubagentsPanel";
+import { useStatusIssues } from "./statusNotices";
 
 export function TaskOverview({
   hostId,
@@ -32,6 +33,26 @@ export function TaskOverview({
     truncated?: boolean;
     error?: string;
   }>({});
+  useStatusIssues([
+    {
+      id: `overview-changes:${hostId}:${project?.id}`,
+      title: "变更概览暂不可用",
+      error: connected ? (changes.error ?? "") : "",
+      pending:
+        open &&
+        connected &&
+        !!project &&
+        changes.count === undefined &&
+        !changes.error,
+      action: {
+        label: "查看变更",
+        run: () => {
+          setOpen(false);
+          openChanges();
+        },
+      },
+    },
+  ]);
   const close = () => setOpen(false);
   useEffect(() => {
     if (!open) return;
@@ -167,13 +188,11 @@ export function TaskOverview({
               <GitCompareArrows size={18} />
               <strong>变更</strong>
               <span>
-                {!connected
-                  ? "未连接"
-                  : changes.error
-                    ? "读取失败"
-                    : changes.count === undefined
-                      ? "读取中…"
-                      : `${changes.count} 个文件${changes.truncated ? " · 部分记录" : ""}`}
+                {!connected || changes.error
+                  ? "—"
+                  : changes.count === undefined
+                    ? "读取中…"
+                    : `${changes.count} 个文件${changes.truncated ? " · 部分记录" : ""}`}
               </span>
             </button>
             {changes.count !== undefined && !changes.error && (

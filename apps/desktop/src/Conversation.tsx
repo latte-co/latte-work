@@ -16,7 +16,8 @@ import { ComposerAction } from "./ComposerAction";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { MessageContent } from "./MessageContent";
 import { DraftStore, useDraft, type Draft } from "./drafts";
-import { ArrowUp, ArrowDown, Bot, TriangleAlert } from "lucide-react";
+import { useStatusIssues } from "./statusNotices";
+import { ArrowUp, ArrowDown, Bot } from "lucide-react";
 import type {
   AgentInfo,
   Effort,
@@ -397,6 +398,45 @@ export function Conversation({
       setApproving((current) => (current === submission ? null : current));
     }
   }
+  const hostName = hosts.find((host) => host.id === hostId)?.name ?? "主机";
+  useStatusIssues([
+    {
+      id: `connection:${hostId}`,
+      title: `${hostName} ${connectionLost ? "连接已断开" : "暂时无法连接"}`,
+      error: !connected && !connecting ? (connectionError ?? "") : "",
+      action: reconnect ? { label: "重新连接", run: reconnect } : undefined,
+    },
+    {
+      id: `agent-session:${draftKey}`,
+      title: "对话状态待确认",
+      error:
+        session &&
+        connected &&
+        liveSessionState &&
+        ["error", "unknown"].includes(liveSessionState)
+          ? agentSessionError || agentSessionLabels[liveSessionState]
+          : "",
+      action: reconnect
+        ? {
+            label: liveSessionState === "unknown" ? "重新连接" : "重新打开",
+            run: reconnect,
+          }
+        : undefined,
+    },
+    {
+      id: `preferences:${hostId}:${agentId}:${projectId}`,
+      title: "模型参数未能保存",
+      error: preferences.error,
+    },
+    {
+      id: `repeated-output:${draftKey}`,
+      title: "检测到重复输出",
+      level: "warning",
+      error: repeatedOutput ? "回复内容似乎在重复，可停止任务后重试。" : "",
+      pending: stopping,
+      action: { label: "停止当前任务", run: stop },
+    },
+  ]);
   return (
     <section
       className="conversation"
@@ -559,37 +599,6 @@ export function Conversation({
         </div>
       </div>
       <div className="composer-wrap">
-        {session &&
-          connected &&
-          liveSessionState &&
-          !["open", "closed", "opening", "restoring"].includes(
-            liveSessionState,
-          ) && (
-            <div
-              className="agent-session-feedback"
-              title={agentSessionError}
-              role="status"
-            >
-              <span>{agentSessionLabels[liveSessionState]}</span>
-              <button
-                className="secondary"
-                onClick={reconnect}
-                disabled={!reconnect}
-              >
-                {liveSessionState === "unknown" ? "重新连接" : "重新打开"}
-              </button>
-            </div>
-          )}
-        {!connected && !connecting && connectionError && (
-          <div className="composer-connection-error" role="status">
-            <span title={connectionError}>
-              {connectionLost ? "连接已断开" : "暂时无法连接"}
-            </span>
-            <button type="button" className="text-button" onClick={reconnect}>
-              重新连接
-            </button>
-          </div>
-        )}
         <div className="composer-context">
           {!connected && (connecting || !connectionError) && text.trim() && (
             <WorkingStatus label="正在准备…" animated />
@@ -659,12 +668,6 @@ export function Conversation({
               />
             ))}
           </section>
-        )}
-        {repeatedOutput && (
-          <div className="repeated-output-warning" role="status">
-            <TriangleAlert size={16} aria-hidden="true" />
-            <span>回复内容似乎在重复，可停止任务后重试。</span>
-          </div>
         )}
         <Composer
           referenceState={draft.references}
@@ -753,11 +756,6 @@ export function Conversation({
             </>
           )}
         />
-        {preferences.error && (
-          <p className="composer-notice" role="status">
-            {preferences.error}
-          </p>
-        )}
       </div>
     </section>
   );

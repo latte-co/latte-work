@@ -9,6 +9,7 @@ import {
   within,
 } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
+import { renderWithStatus } from "./test/renderWithStatus";
 import { Conversation } from "./Conversation";
 import { DraftStore } from "./drafts";
 import type { Event, Session } from "./protocol";
@@ -413,7 +414,7 @@ const repeatedEvents = (): Event[] => [
 ];
 const repetitionWarning = "回复内容似乎在重复，可停止任务后重试。";
 
-it("warns above the composer without hiding prose or automatically stopping", async () => {
+it("reports repetition in the status center without hiding prose or automatically stopping", async () => {
   const p = props();
   let rejectStop!: (value: boolean) => void;
   p.cancel.mockImplementation(
@@ -423,18 +424,22 @@ it("warns above the composer without hiding prose or automatically stopping", as
       }),
   );
   const running = { ...session("s"), status: "running" as const };
-  const view = render(
+  const view = renderWithStatus(
     <Conversation {...p} session={running} events={repeatedEvents()} />,
   );
+  fireEvent.click(await screen.findByRole("button", { name: "状态提示（1）" }));
   const warning = await screen.findByText(repetitionWarning);
-  expect(warning.closest(".composer-wrap")).not.toBeNull();
+  expect(warning.closest(".status-center-popover")).not.toBeNull();
   expect(warning.closest(".conversation-history")).toBeNull();
   expect(screen.getByText("[890]: (remaining tool results)")).toBeTruthy();
   expect(screen.getByText("[901]: (remaining tool results)")).toBeTruthy();
   expect(p.cancel).not.toHaveBeenCalled();
-  fireEvent.click(screen.getByRole("button", { name: "停止任务" }));
+  fireEvent.click(screen.getByRole("button", { name: "停止当前任务" }));
   expect(p.cancel).toHaveBeenCalledTimes(1);
-  expect(screen.queryByText(repetitionWarning)).toBeNull();
+  expect(
+    (screen.getByRole("button", { name: "处理中…" }) as HTMLButtonElement)
+      .disabled,
+  ).toBe(true);
   await act(async () => rejectStop(false));
   expect(await screen.findByText(repetitionWarning)).toBeTruthy();
   view.rerender(
@@ -451,9 +456,10 @@ it("clears repetition feedback on disconnect, history loading, completion and sc
   const p = props();
   const running = { ...session("s"), status: "running" as const };
   const repeated = repeatedEvents();
-  const view = render(
+  const view = renderWithStatus(
     <Conversation {...p} session={running} events={repeated} />,
   );
+  fireEvent.click(await screen.findByRole("button", { name: "状态提示（1）" }));
   expect(await screen.findByText(repetitionWarning)).toBeTruthy();
   view.rerender(
     <Conversation
@@ -561,10 +567,10 @@ it("keeps reading positions across session switches and resets only on reopening
   expect(screen.queryByRole("button", { name: "回到最新" })).toBeNull();
 });
 
-it("keeps connection progress near the composer, preserves drafts, and offers a concise retry after failure", () => {
+it("keeps connection failures in the status center, preserves drafts, and offers a concise retry after failure", () => {
   const p = props();
   const reconnect = vi.fn();
-  const view = render(
+  const view = renderWithStatus(
     <Conversation
       {...p}
       connected={false}
@@ -592,10 +598,9 @@ it("keeps connection progress near the composer, preserves drafts, and offers a 
     />,
   );
   expect(input().value).toBe("keep draft");
-  expect(screen.getByText("暂时无法连接").getAttribute("title")).toBe(
-    "无法确认本机后台版本",
-  );
   expect(screen.queryByText("无法确认本机后台版本")).toBeNull();
+  fireEvent.click(screen.getByRole("button", { name: "状态提示（1）" }));
+  expect(screen.getByText("无法确认本机后台版本")).toBeTruthy();
   fireEvent.click(screen.getByRole("button", { name: "重新连接" }));
   expect(reconnect).toHaveBeenCalledOnce();
   view.rerender(
@@ -659,7 +664,7 @@ it("keeps history concealed until it is fully loaded and positioned at the botto
 it("shows one reconnect action for a lost connection and preserves the draft", () => {
   const p = props();
   const reconnect = vi.fn();
-  const view = render(<Conversation {...p} session={session("a")} />);
+  const view = renderWithStatus(<Conversation {...p} session={session("a")} />);
   fireEvent.change(input(), { target: { value: "保留未发送的消息" } });
   view.rerender(
     <Conversation
@@ -671,8 +676,9 @@ it("shows one reconnect action for a lost connection and preserves the draft", (
       reconnect={reconnect}
     />,
   );
-  expect(screen.getByText("连接已断开").title).toContain("请求可能已执行");
   expect(screen.queryByText("连接已失效；请求可能已执行")).toBeNull();
+  fireEvent.click(screen.getByRole("button", { name: "状态提示（1）" }));
+  expect(screen.getByText("连接已失效；请求可能已执行")).toBeTruthy();
   fireEvent.click(screen.getByRole("button", { name: "重新连接" }));
   expect(reconnect).toHaveBeenCalledOnce();
   view.rerender(<Conversation {...p} session={session("a")} />);

@@ -3,11 +3,11 @@ import {
   act,
   cleanup,
   fireEvent,
-  render,
   screen,
   waitFor,
   within,
 } from "@testing-library/react";
+import { renderWithStatus as render } from "./test/renderWithStatus";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { ChangesView } from "./ChangesView";
 import type { Request, TurnChanges } from "./protocol";
@@ -209,9 +209,10 @@ it("fences stale host reads, performs no reads while hidden and reports unsuppor
   view.unmount();
   mocks.request.mockResolvedValue({ kind: "ok" });
   render(<ChangesView {...props} />);
-  expect((await screen.findByRole("alert")).textContent).toContain(
-    "不支持分支审阅",
-  );
+  fireEvent.click(await screen.findByRole("button", { name: /^状态提示（/ }));
+  expect(
+    screen.getByRole("dialog", { name: "状态提示" }).textContent,
+  ).toContain("不支持分支审阅");
 });
 it("distinguishes an empty branch from a filter with no matching files", async () => {
   render(<ChangesView {...props} />);
@@ -261,7 +262,7 @@ it("reads the saved last turn outside Git, preserves its status and refreshes on
     throw new Error(`unexpected ${req.method}`);
   });
   const view = render(<ChangesView {...props} sessionId="s1" />);
-  await screen.findByRole("alert");
+  await screen.findByRole("button", { name: /^状态提示（/ });
   mocks.request.mockClear();
   await scope("上一轮");
   await screen.findByText("+saved");
@@ -335,9 +336,10 @@ it("uses the server's empty snapshot result and reports unsupported responses", 
   });
   mocks.request.mockResolvedValue({ kind: "ok" });
   fireEvent.click(screen.getByRole("button", { name: "刷新变更" }));
-  expect((await screen.findByRole("alert")).textContent).toContain(
-    "不支持回合快照",
-  );
+  fireEvent.click(await screen.findByRole("button", { name: /^状态提示（/ }));
+  expect(
+    screen.getByRole("dialog", { name: "状态提示" }).textContent,
+  ).toContain("不支持回合快照");
 });
 it("reconciles an undo event for the same last turn without changing its saved diff", async () => {
   let saved = {

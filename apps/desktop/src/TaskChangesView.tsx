@@ -4,6 +4,7 @@ import { message, request } from "./api";
 import type { ChangeSummary, Project, TaskChange } from "./protocol";
 import { ChangesView } from "./ChangesView";
 import { CodeView } from "./CodeView";
+import { useStatusIssues } from "./statusNotices";
 export function TaskChangesView({
   hostId,
   project,
@@ -27,6 +28,15 @@ export function TaskChangesView({
   const [loading, setLoading] = useState(false);
   const [partial, setPartial] = useState(false);
   const [revision, refresh] = useState(0);
+  useStatusIssues([
+    {
+      id: `turn-changes:${hostId}:${sessionId}:${requestId}`,
+      title: "本轮变更未能读取",
+      error: active ? error : "",
+      pending: active && loading,
+      action: { label: "重试", run: () => refresh((value) => value + 1) },
+    },
+  ]);
   const [turnNote, setTurnNote] = useState("");
   useEffect(() => {
     select(
@@ -171,11 +181,6 @@ export function TaskChangesView({
             </button>
           )}
           {loading && <p className="muted">正在读取变更…</p>}
-          {error && (
-            <p className="notice failure" role="alert">
-              {error}
-            </p>
-          )}
           {!selected && !loading && summary?.unavailable && (
             <p className="muted">{summary.unavailable}</p>
           )}

@@ -2,23 +2,32 @@ import { useEffect, useRef, useState } from "react";
 import { message, request } from "./api";
 import type { RecentCursor, RecentSession } from "./protocol";
 
+class UnsupportedRecentHistory extends Error {}
+
 export interface RecentHost {
   sessions: RecentSession[];
   next: RecentCursor | null;
   loaded: boolean;
   loading: boolean;
   error: string;
+  errorKind: "initial" | "refresh" | "more" | "unsupported" | null;
 }
-export function useRecentSessions(hostIds: string[], active: boolean) {
+export function useRecentSessions(
+  readyHostIds: string[],
+  active: boolean,
+  connectionVersions: Record<string, number> = {},
+) {
   const [hosts, setHosts] = useState<Record<string, RecentHost>>({});
   const readers = useRef(new Map<string, (more?: boolean) => Promise<void>>());
   const depths = useRef(new Map<string, number>());
-  const scope = JSON.stringify(hostIds);
+  const scope = JSON.stringify(
+    readyHostIds.map((id) => [id, connectionVersions[id] ?? 0]),
+  );
   useEffect(() => {
     if (!active) return;
     let disposed = false;
     const timers = new Map<string, ReturnType<typeof setTimeout>>();
-    const targets: string[] = JSON.parse(scope);
+    const targets = (JSON.parse(scope) as [string, number][]).map(([id]) => id);
     for (const hostId of targets) {
       let pending = false;
       let reloadQueued = false;
@@ -40,10 +49,12 @@ export function useRecentSessions(hostIds: string[], active: boolean) {
               next: null,
               loaded: false,
               error: "",
+              errorKind: null,
             }),
             loading: true,
           },
         }));
+        let retryAutomatically = true;
         try {
           const sessions: RecentSession[] = [];
           let next: RecentCursor | null = null;
@@ -54,7 +65,7 @@ export function useRecentSessions(hostIds: string[], active: boolean) {
             });
             if (disposed) return;
             if (result.kind !== "recent_sessions")
-              throw new Error("此主机不支持最近记录，请更新 Server");
+              throw new UnsupportedRecentHistory();
             if (
               result.next &&
               JSON.stringify(result.next) === JSON.stringify(next)
@@ -73,9 +84,15 @@ export function useRecentSessions(hostIds: string[], active: boolean) {
               loaded: true,
               loading: false,
               error: "",
+              errorKind: null,
             },
           }));
         } catch (cause) {
+          const detail = message(cause);
+          const unsupported =
+            cause instanceof UnsupportedRecentHistory ||
+            detail.includes("unknown variant `recent_sessions`");
+          retryAutomatically = !unsupported;
           if (!disposed)
             setHosts((previous) => ({
               ...previous,
@@ -86,7 +103,16 @@ export function useRecentSessions(hostIds: string[], active: boolean) {
                   loaded: false,
                 }),
                 loading: false,
-                error: message(cause),
+                error: unsupported
+                  ? "此主机的 Server 不支持最近记录，请更新 Server 后重试"
+                  : detail,
+                errorKind: unsupported
+                  ? "unsupported"
+                  : more
+                    ? "more"
+                    : previous[hostId]?.loaded
+                      ? "refresh"
+                      : "initial",
               },
             }));
         } finally {
@@ -95,7 +121,7 @@ export function useRecentSessions(hostIds: string[], active: boolean) {
             if (reloadQueued) {
               reloadQueued = false;
               void read();
-            } else
+            } else if (retryAutomatically)
               timers.set(
                 hostId,
                 setTimeout(() => void read(), 5000),

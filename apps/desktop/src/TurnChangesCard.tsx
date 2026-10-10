@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { request, message } from "./api";
 import { SquarePlus, Undo2 } from "lucide-react";
 import type { TurnChanges } from "./protocol";
+import { useStatusIssues } from "./statusNotices";
 
 export function TurnChangesCard({
   changes: saved,
@@ -19,6 +20,15 @@ export function TurnChangesCard({
   const [changes, setChanges] = useState(saved);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  useStatusIssues([
+    {
+      id: `turn-undo:${hostId}:${sessionId}:${saved.request_id}`,
+      title: "撤销本轮修改未完成",
+      error: changes.undo === "reverted" ? "" : error,
+      pending: busy,
+      action: { label: "查看变更", run: () => open() },
+    },
+  ]);
   const mounted = useRef(false);
   useEffect(() => {
     mounted.current = true;
@@ -132,11 +142,6 @@ export function TurnChangesCard({
         <button className="turn-changes-more" onClick={() => open()}>
           查看其余 {summary.entries.length - 8} 个文件
         </button>
-      )}
-      {error && (
-        <p className="turn-changes-note notice failure" role="alert">
-          {error}
-        </p>
       )}
       {(summary.unavailable ||
         summary.truncated ||

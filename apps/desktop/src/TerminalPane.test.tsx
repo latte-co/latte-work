@@ -1,7 +1,8 @@
 // @vitest-environment jsdom
-import { act, cleanup, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, screen } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { APPEARANCE_EVENT } from "./appearance";
+import { renderWithStatus as render } from "./test/renderWithStatus";
 import { TerminalPane } from "./TerminalPane";
 import type { Request, Response, TerminalInfo } from "./protocol";
 const mocks = vi.hoisted(() => ({
@@ -154,7 +155,8 @@ it("does not replay ambiguous input or queued commands on retry", async () => {
     mocks.input?.("command one\r");
     mocks.input?.("command two\r");
   });
-  expect(screen.getByRole("alert").textContent).toContain("未自动重发");
+  fireEvent.click(screen.getByRole("button", { name: "状态提示（1）" }));
+  expect(screen.getByRole("dialog").textContent).toContain("未自动重发");
   expect(
     mocks.request.mock.calls.filter((c) => c[1].method === "write_terminal"),
   ).toHaveLength(1);
@@ -323,8 +325,10 @@ it("keeps a live terminal after nested-shell logout, read failure, or disconnect
   await act(async () => {
     await vi.advanceTimersByTimeAsync(100);
   });
-  expect(screen.getByRole("alert").textContent).toContain("transport lost");
+  fireEvent.click(screen.getByRole("button", { name: "状态提示（1）" }));
+  expect(screen.getByRole("dialog").textContent).toContain("transport lost");
   view.rerender(<TerminalPane {...props} connected={false} />);
-  expect(screen.getByRole("status").textContent).toContain("连接已断开");
+  expect(screen.queryByText("transport lost")).toBeNull();
+  expect(screen.getByRole("button", { name: "状态提示" })).toBeTruthy();
   expect(mocks.onExited).not.toHaveBeenCalled();
 });

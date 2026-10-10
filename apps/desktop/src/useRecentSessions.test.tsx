@@ -64,6 +64,35 @@ it("reports unsupported servers instead of a fabricated empty history", async ()
     expect(result.current.hosts.local.error).toContain("更新 Server"),
   );
   expect(result.current.hosts.local.loaded).toBe(false);
+  expect(result.current.hosts.local.errorKind).toBe("unsupported");
+});
+it("identifies the legacy server's command rejection and waits for retry or a new connection", async () => {
+  vi.useFakeTimers();
+  mocks.request.mockRejectedValueOnce(
+    new Error(
+      "unknown variant `recent_sessions`, expected one of `hello`, `projects`, `sessions`",
+    ),
+  );
+  const view = renderHook(
+    ({ version }) => useRecentSessions(["remote"], true, { remote: version }),
+    { initialProps: { version: 1 } },
+  );
+  await act(async () => {});
+  expect(view.result.current.hosts.remote.errorKind).toBe("unsupported");
+  expect(view.result.current.hosts.remote.error).toContain("更新 Server");
+  expect(view.result.current.hosts.remote.loaded).toBe(false);
+  await act(async () => vi.advanceTimersByTimeAsync(15000));
+  expect(mocks.request).toHaveBeenCalledTimes(1);
+  mocks.request.mockResolvedValueOnce({
+    kind: "recent_sessions",
+    sessions: [],
+    next: null,
+  });
+  view.rerender({ version: 2 });
+  await act(async () => {});
+  expect(view.result.current.hosts.remote.loaded).toBe(true);
+  expect(view.result.current.hosts.remote.errorKind).toBeNull();
+  expect(mocks.request).toHaveBeenCalledTimes(2);
 });
 it("reconciles a mutation immediately after an already pending read", async () => {
   let finish: (value: unknown) => void = () => {};
@@ -85,5 +114,64 @@ it("reconciles a mutation immediately after an already pending read", async () =
     }),
   );
   await waitFor(() => expect(result.current.hosts.local.sessions).toEqual([]));
+  expect(mocks.request).toHaveBeenCalledTimes(2);
+});
+it("retains the previous error until a retry succeeds and preserves successfully loaded rows", async () => {
+  let finish: (value: unknown) => void = () => {};
+  mocks.request
+    .mockResolvedValueOnce({
+      kind: "recent_sessions",
+      sessions: [{ session: { id: "saved" }, updated_at: 1 }],
+      next: null,
+    })
+    .mockRejectedValueOnce(new Error("刷新失败"))
+    .mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          finish = resolve;
+        }),
+    );
+  const { result } = renderHook(() => useRecentSessions(["remote"], true));
+  await waitFor(() => expect(result.current.hosts.remote.loaded).toBe(true));
+  act(() => result.current.reload("remote"));
+  await waitFor(() =>
+    expect(result.current.hosts.remote.errorKind).toBe("refresh"),
+  );
+  act(() => result.current.reload("remote"));
+  expect(result.current.hosts.remote.loading).toBe(true);
+  expect(result.current.hosts.remote.error).toContain("刷新失败");
+  expect(result.current.hosts.remote.errorKind).toBe("refresh");
+  expect(result.current.hosts.remote.sessions[0].session.id).toBe("saved");
+  await act(async () =>
+    finish({ kind: "recent_sessions", sessions: [], next: null }),
+  );
+  expect(result.current.hosts.remote.loading).toBe(false);
+  expect(result.current.hosts.remote.error).toBe("");
+});
+it("ignores late failures from a replaced connection after the new connection succeeds", async () => {
+  let failOld: (error: Error) => void = () => {};
+  mocks.request
+    .mockImplementationOnce(
+      () =>
+        new Promise((_resolve, reject) => {
+          failOld = reject;
+        }),
+    )
+    .mockResolvedValueOnce({
+      kind: "recent_sessions",
+      sessions: [{ session: { id: "new" }, updated_at: 1 }],
+      next: null,
+    });
+  const view = renderHook(
+    ({ version }) => useRecentSessions(["remote"], true, { remote: version }),
+    { initialProps: { version: 1 } },
+  );
+  view.rerender({ version: 2 });
+  await waitFor(() =>
+    expect(view.result.current.hosts.remote.loaded).toBe(true),
+  );
+  await act(async () => failOld(new Error("旧连接已关闭")));
+  expect(view.result.current.hosts.remote.error).toBe("");
+  expect(view.result.current.hosts.remote.sessions[0].session.id).toBe("new");
   expect(mocks.request).toHaveBeenCalledTimes(2);
 });

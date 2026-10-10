@@ -185,6 +185,8 @@ it("initializes each host once and refreshes the selected host without a second 
   const hook = renderHook(useWorkbench);
   await act(async () => {});
   for (const host of ["local", "remote"]) {
+    expect(hook.result.current.hostConnectionStatus(host)).toBe("connected");
+    expect(hook.result.current.hostConnectionVersions[host]).toBe(1);
     expect(
       mocks.connect.mock.calls.filter(([h]) => h.id === host),
     ).toHaveLength(1);
@@ -206,6 +208,32 @@ it("initializes each host once and refreshes the selected host without a second 
     ),
   ).toHaveLength(2);
   expect(hook.result.current.connected).toBe(true);
+  expect(hook.result.current.hostConnectionVersions.local).toBe(2);
+  expect(hook.result.current.hostConnectionVersions.remote).toBe(1);
+});
+it("waits for the handshake before reading cached pinned history and reporting connection state", async () => {
+  let finish: (value: unknown) => void = () => {};
+  mocks.connect.mockImplementationOnce(
+    () =>
+      new Promise((resolve) => {
+        finish = resolve;
+      }),
+  );
+  const hook = renderHook(useWorkbench);
+  await act(async () => {});
+  expect(hook.result.current.hostConnectionStatus("local")).toBe("connecting");
+  expect(mocks.request).not.toHaveBeenCalled();
+  await act(async () =>
+    finish({ kind: "hello", server_id: "server-local", agents: [] }),
+  );
+  expect(hook.result.current.hostConnectionStatus("local")).toBe("connected");
+  expect(hook.result.current.hostErrors.local).toBe("");
+  expect(
+    mocks.request.mock.calls.some(([, r]) => r.method === "pinned_sessions"),
+  ).toBe(true);
+  expect(mocks.request.mock.calls.some(([, r]) => r.method === "send")).toBe(
+    false,
+  );
 });
 it("adding a host initializes it once and preserves other hosts' live connections", async () => {
   const hook = renderHook(useWorkbench);
@@ -381,14 +409,37 @@ it("automatically recovers a background host without reconnecting the selected h
   );
   expect(hook.result.current.connected).toBe(true);
   expect(hook.result.current.isHostConnected("remote")).toBe(false);
+  expect(hook.result.current.hostConnectionStatus("remote")).toBe("failed");
+  expect(hook.result.current.hostConnectionStatus("local")).toBe("connected");
   await act(async () => vi.advanceTimersByTimeAsync(5000));
   expect(hook.result.current.isHostConnected("remote")).toBe(true);
+  expect(hook.result.current.hostConnectionStatus("remote")).toBe("connected");
+  expect(hook.result.current.hostConnectionVersions.remote).toBe(2);
   expect(
     mocks.connect.mock.calls.filter(([h]) => h.id === "remote"),
   ).toHaveLength(2);
   expect(
     mocks.connect.mock.calls.filter(([h]) => h.id === "local"),
   ).toHaveLength(1);
+  expect(mocks.request.mock.calls.some(([, r]) => r.method === "send")).toBe(
+    false,
+  );
+});
+it("does not reuse a failed replacement and restores the connection indicator without replaying a prompt", async () => {
+  const hook = renderHook(useWorkbench);
+  await act(async () => {});
+  mocks.connect.mockRejectedValueOnce(new Error("SSH 握手失败"));
+  await act(async () =>
+    hook.result.current.refreshHost(hook.result.current.host),
+  );
+  expect(hook.result.current.hostConnectionStatus("local")).toBe("failed");
+  expect(hook.result.current.connected).toBe(false);
+  expect(hook.result.current.hostConnectionVersions.local).toBe(1);
+  await act(async () => vi.advanceTimersByTimeAsync(5000));
+  expect(hook.result.current.hostConnectionStatus("local")).toBe("connected");
+  expect(hook.result.current.connected).toBe(true);
+  expect(hook.result.current.hostConnectionVersions.local).toBe(2);
+  expect(mocks.connect).toHaveBeenCalledTimes(3);
   expect(mocks.request.mock.calls.some(([, r]) => r.method === "send")).toBe(
     false,
   );

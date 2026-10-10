@@ -1,9 +1,10 @@
 import { useEffect, useState } from "react";
 import { HostConnectionError } from "./connectionErrors";
-import { Shield, ShieldAlert, RefreshCw } from "lucide-react";
+import { Shield, ShieldAlert } from "lucide-react";
 import { request, message } from "./api";
 import { Select, type SelectOption } from "./Select";
 import type { AgentPermissionMode } from "./protocol";
+import { useStatusIssues } from "./statusNotices";
 
 export function PermissionPicker({
   hostId,
@@ -30,12 +31,26 @@ export function PermissionPicker({
   const [failure, setFailure] = useState<{ scope: string; message: string }>();
   const error = failure?.scope === scope ? failure.message : "";
   const [retry, setRetry] = useState(0);
+  const [loading, setLoading] = useState(false);
+  useStatusIssues([
+    {
+      id: `permissions:${hostId}:${agent}`,
+      title: "权限选项暂不可用",
+      error: connected && !hidden ? error : "",
+      pending: connected && !hidden && loading,
+      action: {
+        label: "重新加载权限选项",
+        run: () => setRetry((value) => value + 1),
+      },
+    },
+  ]);
   const modes = loaded?.scope === scope ? loaded.modes : undefined;
   useEffect(() => {
     if (!connected || hidden) return;
     let disposed = false;
     setLoaded(undefined);
     setFailure(undefined);
+    setLoading(true);
     void request(hostId, { method: "agent_permissions", agent })
       .then((result) => {
         if (result.kind !== "agent_permissions")
@@ -45,6 +60,9 @@ export function PermissionPicker({
       .catch((e) => {
         if (!disposed && !(e instanceof HostConnectionError))
           setFailure({ scope, message: message(e) });
+      })
+      .finally(() => {
+        if (!disposed) setLoading(false);
       });
     return () => {
       disposed = true;
@@ -85,18 +103,6 @@ export function PermissionPicker({
         minMenuWidth={340}
         menuTitle="如何批准 Agent 的操作？"
       />
-      {error && connected && !hidden && (
-        <button
-          className="icon-button permission-retry"
-          type="button"
-          title={`权限加载失败，点击重试\n${error}`}
-          aria-label="重新加载权限选项"
-          disabled={disabled || !connected || hidden}
-          onClick={() => setRetry((v) => v + 1)}
-        >
-          <RefreshCw size={14} aria-hidden="true" />
-        </button>
-      )}
     </div>
   );
 }

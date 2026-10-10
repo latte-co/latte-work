@@ -42,14 +42,18 @@ for line in sys.stdin:
             emit({'type':'assistant','message':{'content':[{'type':'text','text':output}]}})
             emit({'type':'result','subtype':'success','is_error':False})
             continue
-        if text=='usage':
+        if text in ('usage','usage-alias','usage-unknown'):
+            alias=text!='usage'
+            response_model='model_api/experimental_0812' if alias else 'fixture-model'
+            accounting_model=next((arg.split('=',1)[1] for arg in sys.argv if arg.startswith('--model=')),None) if alias else 'fixture-model'
+            request_usage={'input_tokens':12345,'cache_read_input_tokens':57347,'cache_creation_input_tokens':0,'output_tokens':80} if alias else {'input_tokens':100,'cache_read_input_tokens':600,'cache_creation_input_tokens':300,'output_tokens':80}
             emit({'type':'stream_event','event':{'type':'content_block_delta','delta':{'type':'thinking_delta','thinking':'private fixture reasoning'}}})
             emit({'type':'stream_event','event':{'type':'content_block_stop'}})
-            emit({'type':'stream_event','event':{'type':'message_start','message':{'model':'fixture-model','usage':{'input_tokens':0,'output_tokens':0}}}})
-            emit({'type':'assistant','message':{'model':'fixture-model','usage':{'input_tokens':0,'output_tokens':0},'content':[{'type':'text','text':'usage fixture'}]}})
-            emit({'type':'stream_event','event':{'type':'message_delta','usage':{'input_tokens':100,'cache_read_input_tokens':600,'cache_creation_input_tokens':300,'output_tokens':80}}})
+            emit({'type':'stream_event','event':{'type':'message_start','message':{'model':response_model,'usage':{'input_tokens':0,'output_tokens':0}}}})
+            emit({'type':'assistant','message':{'model':response_model,'usage':{'input_tokens':0,'output_tokens':0},'content':[{'type':'text','text':'usage fixture'}]}})
+            emit({'type':'stream_event','event':{'type':'message_delta','usage':request_usage}})
             emit({'type':'stream_event','event':{'type':'message_stop'}})
-            emit({'type':'result','subtype':'success','is_error':False,'modelUsage':{'fixture-model':{'contextWindow':200000,'inputTokens':900000}},'usage':{'input_tokens':200,'cache_read_input_tokens':1200,'cache_creation_input_tokens':600,'output_tokens':80},'duration_api_ms':52500,'num_turns':2})
+            emit({'type':'result','subtype':'success','is_error':False,'modelUsage':None if text=='usage-unknown' else {accounting_model:{'contextWindow':200000,'inputTokens':900000},'experimental_0812[1m]':{'contextWindow':1000000}},'usage':{'input_tokens':200,'cache_read_input_tokens':1200,'cache_creation_input_tokens':600,'output_tokens':80},'duration_api_ms':52500,'num_turns':2})
             continue
         if text=='malformed': print('this is not json',flush=True);sys.exit(0)
         if text=='exit': sys.exit(2)

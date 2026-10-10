@@ -12,7 +12,6 @@ import {
   Settings2,
   Pin,
   Archive,
-  MessageCirclePlus,
   PanelLeft,
   SquarePen,
   MoreHorizontal,
@@ -26,6 +25,7 @@ import { useHistoryLoadingIndicator } from "./useHistoryLoadingIndicator";
 import { SessionActions } from "./SessionActions";
 import { recentSessions, type HostedSession } from "./sessionNavigation";
 import { useRecentSessions } from "./useRecentSessions";
+import { useStatusIssues, type StatusIssue } from "./statusNotices";
 import { ProjectActions } from "./ProjectActions";
 import { RemoteProjectIcon } from "./RemoteProjectIcon";
 import type { HostedProject } from "./projectCatalog";
@@ -33,13 +33,22 @@ import { message, request } from "./api";
 import { statusNames } from "./Conversation";
 import type { Session } from "./protocol";
 import type { Workbench } from "./useWorkbench";
+import type { SidebarPreview } from "./useSidebarPreview";
+const PROJECT_SESSION_LIMIT = 5;
 export function Sidebar({
   state,
   historyPending = state.historyLoading,
+  preview,
+  onInteractionChange,
+  statusCenter,
 }: {
   state: Workbench;
   historyPending?: boolean;
+  preview?: SidebarPreview;
+  onInteractionChange?: (active: boolean) => void;
+  statusCenter?: React.ReactNode;
 }) {
+  const visible = state.sidebarOpen || !!preview?.visible;
   const loadingScope = JSON.stringify([
     state.hostId,
     state.sessionId,
@@ -55,7 +64,21 @@ export function Sidebar({
     project: HostedProject;
     point: { x: number; y: number };
   } | null>(null);
+  const interactionActive = !!sessionContext || !!context;
+  useEffect(() => {
+    onInteractionChange?.(interactionActive);
+    return () => onInteractionChange?.(false);
+  }, [interactionActive, onInteractionChange]);
+  useEffect(() => {
+    if (!visible) {
+      setSessionContext(null);
+      setContext(null);
+    }
+  }, [visible]);
   const [expandedProjects, setExpandedProjects] = useState<
+    Record<string, boolean>
+  >({});
+  const [showAllProjects, setShowAllProjects] = useState<
     Record<string, boolean>
   >({});
   const [sessionCache, setSessionCache] = useState<Record<string, Session[]>>(
@@ -127,9 +150,26 @@ export function Sidebar({
     sessionId,
     setModal,
   } = state;
+  const connectionStatus = (id: string) =>
+    state.hostConnectionStatus?.(id) ??
+    (hostErrors[id]
+      ? "failed"
+      : (state.isHostConnected?.(id) ?? (id === hostId && connected))
+        ? "connected"
+        : "connecting");
+  useEffect(() => {
+    if (!projectId || sections.recent) return;
+    const key = `${hostId}:${projectId}`;
+    setExpandedProjects((old) =>
+      old[key] === undefined ? { ...old, [key]: true } : old,
+    );
+  }, [hostId, projectId, sections.recent]);
   const recent = useRecentSessions(
-    hosts.map((host) => host.id),
-    sections.recent && state.sidebarOpen,
+    hosts
+      .filter((host) => connectionStatus(host.id) === "connected")
+      .map((host) => host.id),
+    sections.recent && visible,
+    state.hostConnectionVersions,
   );
   const recentRows = recentSessions(
     Object.fromEntries(
@@ -147,8 +187,16 @@ export function Sidebar({
   }, [hostId, projectId, connected, sessions]);
   const backgroundProjects = JSON.stringify(
     projects
-      .filter((p) => p.hostId !== hostId || p.id !== projectId)
-      .map((p) => ({ hostId: p.hostId, id: p.id })),
+      .filter(
+        (p) =>
+          (p.hostId !== hostId || p.id !== projectId) &&
+          connectionStatus(p.hostId) === "connected",
+      )
+      .map((p) => ({
+        hostId: p.hostId,
+        id: p.id,
+        connectionVersion: state.hostConnectionVersions?.[p.hostId] ?? 0,
+      })),
   );
   useEffect(() => {
     let disposed = false;
@@ -206,6 +254,50 @@ export function Sidebar({
       setLoadingProjects((old) => ({ ...old, [key]: false }));
     }
   }
+  useStatusIssues([
+    ...hosts
+      .filter((host) => connectionStatus(host.id) === "connected")
+      .map((host): StatusIssue => {
+        const data = recent.hosts[host.id];
+        const unsupported = data?.errorKind === "unsupported";
+        return {
+          id: `recent:${host.id}`,
+          title: `${host.name} 的${unsupported ? "完整历史暂不可用" : data?.errorKind === "more" ? "更早记录未能加载" : data?.errorKind === "refresh" ? "历史未能刷新" : "历史未能加载"}`,
+          error: unsupported
+            ? "连接正常，仍可从项目列表打开对话。当前服务版本不支持跨项目汇总历史；更新此主机上的服务并重新连接后会自动显示。"
+            : (data?.error ?? ""),
+          level: unsupported ? "warning" : "error",
+          pending: data?.loading && sections.recent && visible,
+          action: unsupported
+            ? {
+                label: "连接设置",
+                run: () => {
+                  state.setSettingsTab("ssh");
+                  setModal("settings");
+                },
+              }
+            : {
+                label: sections.recent && visible ? "重试" : "查看最近",
+                run: () => {
+                  if (sections.recent && visible) recent.reload(host.id);
+                  else {
+                    setSections((old) => ({ ...old, recent: true }));
+                    if (!visible) state.toggleSidebar();
+                  }
+                },
+              },
+        };
+      }),
+    ...projects
+      .filter((p) => connectionStatus(p.hostId) === "connected")
+      .map((p): StatusIssue => ({
+        id: `project-history:${p.hostId}:${p.id}`,
+        title: `${p.name} 的对话未能加载`,
+        error: projectErrors[`${p.hostId}:${p.id}`] ?? "",
+        pending: loadingProjects[`${p.hostId}:${p.id}`],
+        action: { label: "重试", run: () => loadProjectSessions(p) },
+      })),
+  ]);
   const liveSessionState = (s: HostedSession) =>
     state.agentSessionState?.(s) ??
     agentSessionState(
@@ -440,24 +532,28 @@ export function Sidebar({
   return (
     <aside
       id="project-sidebar"
-      className="sidebar"
-      hidden={!state.sidebarOpen}
+      className={`sidebar${preview?.visible ? " sidebar-preview" : ""}`}
+      hidden={!visible}
+      ref={preview?.panel}
+      {...preview?.panelProps}
       data-tauri-drag-region="deep"
     >
       <div className="window-drag" data-tauri-drag-region>
+        {statusCenter}
         <button
           className="panel-toggle icon-button"
-          title="收起侧栏"
-          aria-label="收起侧栏"
+          data-sidebar-toggle
+          title={preview?.visible ? "固定侧栏" : "收起侧栏"}
+          aria-label={preview?.visible ? "固定侧栏" : "收起侧栏"}
           aria-expanded={true}
           aria-controls="project-sidebar"
-          onClick={state.toggleSidebar}
+          onClick={preview?.visible ? preview.pin : state.toggleSidebar}
         >
           <PanelLeft size={16} />
         </button>
       </div>
       <div className="brand">
-        <div className="brand-mark">
+        <div className="brand-mark" aria-hidden="true">
           L<span>••</span>
         </div>
         <span className="brand-name">
@@ -466,9 +562,10 @@ export function Sidebar({
       </div>
       <button
         className="new-task"
+        title="新任务（⌘ N）"
         onClick={() => void createSession().catch((e) => setError(message(e)))}
       >
-        <MessageCirclePlus size={16} />
+        <SquarePen size={16} />
         新任务<span>⌘ N</span>
       </button>
       <div className="sidebar-navigation">
@@ -507,11 +604,20 @@ export function Sidebar({
           {projects.map((p) => {
             const key = `${p.hostId}:${p.id}`;
             const selected = p.id === projectId && p.hostId === hostId;
-            const expanded =
-              expandedProjects[key] ?? (selected && !sections.recent);
+            const expanded = expandedProjects[key] ?? false;
             const projectSessions = selected
               ? sessions
               : (sessionCache[key] ?? []);
+            const listedSessions = projectSessions.filter(
+              (s) =>
+                !s.archived &&
+                s.pinned_at === null &&
+                !state.pinned.some(
+                  (pinned) => pinned.hostId === p.hostId && pinned.id === s.id,
+                ),
+            );
+            const showAll = showAllProjects[key] ?? false;
+            const additionalSessionsId = `additional-sessions-${key}`;
             const allSessions = Array.from(
               new Map(
                 [
@@ -537,6 +643,13 @@ export function Sidebar({
                 : null;
             const projectHost =
               hosts.find((h) => h.id === p.hostId)?.name ?? p.hostId;
+            const connectionState = connectionStatus(p.hostId);
+            const connectionLabel =
+              connectionState === "connected"
+                ? "已连接"
+                : connectionState === "failed"
+                  ? "连接失败"
+                  : "正在连接";
             const noSessions =
               !projectSessions.some((s) => !s.archived) &&
               !state.pinned.some(
@@ -604,7 +717,7 @@ export function Sidebar({
                       aria-label={p.name}
                       aria-expanded={expanded}
                       aria-controls={`sessions-${key}`}
-                      aria-description={`${p.path} · ${projectHost}`}
+                      aria-description={`${p.path} · ${projectHost}${p.hostId !== "local" ? ` · ${connectionLabel}` : ""}`}
                     >
                       <span className="project-folder">
                         {p.hostId !== "local" ? (
@@ -618,7 +731,16 @@ export function Sidebar({
                       <span className="project-name">{p.name}</span>
                       {p.hostId !== "local" && (
                         <small className="project-host">
-                          {hosts.find((h) => h.id === p.hostId)?.name}
+                          <span className="project-host-name">
+                            {projectHost}
+                          </span>
+                          <span
+                            className="project-connection-state"
+                            data-state={connectionState}
+                            role="img"
+                            aria-label={`${projectHost} ${connectionLabel}`}
+                            title={`${projectHost} · ${connectionLabel}${hostErrors[p.hostId] ? `：${hostErrors[p.hostId]}` : ""}`}
+                          />
                         </small>
                       )}
                       <span className="row-status">
@@ -681,34 +803,40 @@ export function Sidebar({
                 <div id={`sessions-${key}`} hidden={!expanded}>
                   {expanded && (
                     <div className="session-list">
-                      {projectSessions
-                        .filter(
-                          (s) =>
-                            !s.archived &&
-                            s.pinned_at === null &&
-                            !state.pinned.some(
-                              (pinned) =>
-                                pinned.hostId === p.hostId &&
-                                pinned.id === s.id,
-                            ),
-                        )
+                      {listedSessions
+                        .slice(0, PROJECT_SESSION_LIMIT)
                         .map((s) => sessionRow({ ...s, hostId: p.hostId }))}
-                      {noSessions &&
-                        (projectErrors[key] ? (
+                      {listedSessions.length > PROJECT_SESSION_LIMIT && (
+                        <>
+                          <div id={additionalSessionsId} hidden={!showAll}>
+                            {showAll &&
+                              listedSessions
+                                .slice(PROJECT_SESSION_LIMIT)
+                                .map((s) =>
+                                  sessionRow({ ...s, hostId: p.hostId }),
+                                )}
+                          </div>
                           <button
-                            className="no-sessions"
-                            title={projectErrors[key]}
-                            onClick={() => void loadProjectSessions(p)}
+                            className="project-sessions-toggle"
+                            aria-label={`${showAll ? "收起显示" : "展开显示"} ${p.name} 的对话`}
+                            aria-expanded={showAll}
+                            aria-controls={additionalSessionsId}
+                            onClick={() =>
+                              setShowAllProjects((old) => ({
+                                ...old,
+                                [key]: !showAll,
+                              }))
+                            }
                           >
-                            加载失败 · 重试
+                            {showAll ? "收起显示" : "展开显示"}
                           </button>
-                        ) : (
-                          <span className="no-sessions">
-                            {loadingProjects[key]
-                              ? "正在加载任务…"
-                              : "还没有任务"}
-                          </span>
-                        ))}
+                        </>
+                      )}
+                      {noSessions &&
+                        !projectErrors[key] &&
+                        !loadingProjects[key] && (
+                          <span className="no-sessions">还没有任务</span>
+                        )}
                     </div>
                   )}
                 </div>
@@ -734,38 +862,28 @@ export function Sidebar({
                 {recentRows.length === 0 &&
                   hosts.every(
                     (host) =>
+                      connectionStatus(host.id) === "connected" &&
                       recent.hosts[host.id]?.loaded &&
                       !recent.hosts[host.id]?.error &&
                       !recent.hosts[host.id]?.next,
                   ) && <p className="recent-notice">暂无历史对话</p>}
                 {hosts.map((host) => {
                   const data = recent.hosts[host.id];
+                  const ready = connectionStatus(host.id) === "connected";
                   return (
                     <div key={host.id}>
-                      {!data?.loaded && !data?.error && (
-                        <p className="recent-notice" role="status">
-                          正在加载 {host.name} 的历史…
-                        </p>
-                      )}
-                      {data?.error && (
-                        <button
-                          className="recent-notice"
-                          title={data.error}
-                          onClick={() => recent.reload(host.id)}
-                        >
-                          {host.name} 加载失败 · 重试
-                        </button>
-                      )}
-                      {data?.next && (
-                        <button
-                          className="recent-notice"
-                          disabled={data.loading}
-                          onClick={() => recent.more(host.id)}
-                        >
-                          加载更早的对话
-                          {hosts.length > 1 ? ` · ${host.name}` : ""}
-                        </button>
-                      )}
+                      {ready &&
+                        data?.next &&
+                        data.errorKind !== "unsupported" && (
+                          <button
+                            className="recent-notice"
+                            disabled={data.loading}
+                            onClick={() => recent.more(host.id)}
+                          >
+                            加载更早的对话
+                            {hosts.length > 1 ? ` · ${host.name}` : ""}
+                          </button>
+                        )}
                     </div>
                   );
                 })}
@@ -773,20 +891,6 @@ export function Sidebar({
             )}
           </div>
         </section>
-        {hosts
-          .filter((h) => hostErrors[h.id])
-          .map((h) => (
-            <button
-              className="host-unavailable"
-              key={h.id}
-              title={hostErrors[h.id]}
-              onClick={() => {
-                void state.refreshHost(h);
-              }}
-            >
-              {h.name} 暂时无法连接 · 重试
-            </button>
-          ))}
       </div>
       <div className="sidebar-footer">
         <button onClick={() => setModal("settings")}>

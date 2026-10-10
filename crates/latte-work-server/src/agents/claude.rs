@@ -172,6 +172,7 @@ pub struct Claude {
     streamed: bool,
     emitted_text: bool,
     context: Option<ContextUsage>,
+    accounting_model: Option<String>,
     progress: Option<ExecutionPhase>,
     stream_model: Option<String>,
     stream_usage: Value,
@@ -197,7 +198,26 @@ fn model_key(model: &str) -> &str {
         .next()
         .unwrap_or(model)
 }
+fn model_usage<'a>(models: &'a Value, model: &str) -> Option<&'a Value> {
+    if let Some(exact) = models.get(model) {
+        return Some(exact);
+    }
+    let mut matching = models
+        .as_object()?
+        .iter()
+        .filter(|(name, _)| model_key(name) == model_key(model));
+    let (_, usage) = matching.next()?;
+    matching.next().is_none().then_some(usage)
+}
 impl Claude {
+    fn set_accounting_model(&mut self, model: Option<String>) {
+        if self.accounting_model != model
+            && let Some(context) = &mut self.context
+        {
+            context.window_tokens = None;
+        }
+        self.accounting_model = model;
+    }
     fn update_context(&mut self, model: &str, usage: &Value) {
         if let Some(input) = count(usage, "input_tokens") {
             let used = input
@@ -295,6 +315,12 @@ impl AgentAdapter for Claude {
         resume: Option<&str>,
         config: &LaunchConfig,
     ) -> Result<AgentCommand> {
+        self.set_accounting_model(
+            config
+                .model
+                .clone()
+                .or_else(|| config.provider.as_ref().map(|p| p.metadata.model.clone())),
+        );
         let mut command = crate::agent_environment::command(binary);
         command.args([
             "-p",
@@ -543,9 +569,12 @@ impl Claude {
                     }
                 }
             }
-            "system" if m["subtype"] == "init" => {
+            "system" if m["subtype"] == "init" && m["parent_tool_use_id"].is_null() => {
                 if let Some(id) = m["session_id"].as_str() {
                     output.push(Action::NativeSession(id.into()));
+                }
+                if let Some(model) = bounded_field(&m, "model", 256) {
+                    self.set_accounting_model(Some(model));
                 }
             }
             "system" if m["subtype"] == "session_state_changed" => {
@@ -915,18 +944,28 @@ impl Claude {
                 }
                 self.phase = Phase::BetweenTurns;
                 if let Some(context) = &mut self.context {
-                    let models = m["modelUsage"].as_object();
-                    let exact = m["modelUsage"].get(&context.model);
-                    let matching: Vec<_> = models
-                        .into_iter()
-                        .flat_map(|models| models.iter())
-                        .filter(|(name, _)| model_key(name) == model_key(&context.model))
-                        .map(|(_, usage)| usage)
-                        .collect();
-                    context.window_tokens = exact
-                        .or_else(|| (matching.len() == 1).then(|| matching[0]))
-                        .and_then(|usage| count(usage, "contextWindow"))
-                        .filter(|v| *v > 0.0);
+                    // CLI accounting uses the requested model; gateways may
+                    // return an entirely different model name in API messages.
+                    // Use the explicit launch/init identity, never another entry
+                    // chosen from cumulative (including subagent) billing usage.
+                    let models = &m["modelUsage"];
+                    if !models.is_null() {
+                        context.window_tokens = models
+                            .get(&context.model)
+                            .or_else(|| {
+                                self.accounting_model
+                                    .as_deref()
+                                    .and_then(|model| models.get(model))
+                            })
+                            .or_else(|| model_usage(models, &context.model))
+                            .or_else(|| {
+                                self.accounting_model
+                                    .as_deref()
+                                    .and_then(|model| model_usage(models, model))
+                            })
+                            .and_then(|usage| count(usage, "contextWindow"))
+                            .filter(|v| *v > 0.0);
+                    }
                 }
                 let usage = &m["usage"];
                 if self.context.is_some() || usage.is_object() {
@@ -1254,6 +1293,64 @@ mod tests {
             .unwrap();
         assert!(
             matches!(&result[0],Action::Event(EventKind::Usage {context:Some(c),..}) if c.window_tokens.is_none())
+        );
+    }
+
+    #[test]
+    fn usage_matches_explicit_launch_alias_without_using_child_capacity() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = crate::providers::LaunchConfig {
+            provider: None,
+            model: Some("relay/seed-0812".into()),
+            effort: None,
+            permission_mode: None,
+            settings_dir: dir.path().into(),
+        };
+        let mut agent = Claude::default();
+        let _launch = agent.command("claude", "/tmp", None, &config).unwrap();
+        agent.phase = Phase::Running;
+        agent.decode(json!({"type":"system","subtype":"init","parent_tool_use_id":"child","model":"child-model"})).unwrap();
+        agent.decode(json!({"type":"assistant","message":{"model":"model_api/experimental_0812","usage":{"input_tokens":12345,"cache_read_input_tokens":57347}}})).unwrap();
+        agent.decode(json!({"type":"result","parent_tool_use_id":"child","modelUsage":{"relay/seed-0812":{"contextWindow":1000000}}})).unwrap();
+        assert!(agent.context.as_ref().unwrap().window_tokens.is_none());
+        let result = agent.decode(json!({"type":"result","modelUsage":{"relay/seed-0812":{"contextWindow":200000},"experimental_0812[1m]":{"contextWindow":1000000}}})).unwrap();
+        assert!(
+            matches!(&result[0], Action::Event(EventKind::Usage {context:Some(c),..}) if c.model == "model_api/experimental_0812" && c.used_tokens == 69692.0 && c.window_tokens == Some(200000.0))
+        );
+    }
+
+    #[test]
+    fn usage_tracks_cli_resolved_model_and_keeps_capacity_only_until_model_changes() {
+        let mut agent = Claude {
+            phase: Phase::Running,
+            ..Default::default()
+        };
+        agent
+            .decode(json!({"type":"system","subtype":"init","model":"relay/seed-0812"}))
+            .unwrap();
+        agent.decode(json!({"type":"assistant","message":{"model":"model_api/experimental_0812","usage":{"input_tokens":100}}})).unwrap();
+        agent
+            .decode(
+                json!({"type":"result","modelUsage":{"relay/seed-0812":{"contextWindow":200000}}}),
+            )
+            .unwrap();
+        agent.decode(json!({"type":"assistant","message":{"model":"model_api/experimental_0812","usage":{"input_tokens":200}}})).unwrap();
+        let result = agent.decode(json!({"type":"result"})).unwrap();
+        assert!(
+            matches!(&result[0], Action::Event(EventKind::Usage {context:Some(c),..}) if c.used_tokens == 200.0 && c.window_tokens == Some(200000.0))
+        );
+        agent
+            .decode(json!({"type":"system","subtype":"init","model":"relay/new-model"}))
+            .unwrap();
+        assert!(agent.context.as_ref().unwrap().window_tokens.is_none());
+        agent.decode(json!({"type":"assistant","message":{"model":"model_api/experimental_0812","usage":{"input_tokens":300}}})).unwrap();
+        let result = agent
+            .decode(
+                json!({"type":"result","modelUsage":{"relay/seed-0812":{"contextWindow":200000}}}),
+            )
+            .unwrap();
+        assert!(
+            matches!(&result[0], Action::Event(EventKind::Usage {context:Some(c),..}) if c.used_tokens == 300.0 && c.window_tokens.is_none())
         );
     }
 

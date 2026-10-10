@@ -2835,6 +2835,57 @@ async fn usage_snapshot_survives_bridge_reconnect_without_billing_inflation() {
 }
 
 #[tokio::test]
+async fn usage_alias_capacity_is_persisted_and_replayed() {
+    let host = Host::start().await;
+    let mut client = host.client().await;
+    let project = tempfile::tempdir().unwrap();
+    let id = session(&mut client, project.path()).await;
+    assert!(matches!(
+        ask(
+            &mut client,
+            Request::Send {
+                session_id: id.clone(),
+                request_id: "usage-alias-request".into(),
+                text: "usage-alias".into(),
+                model: Some("relay/seed-0812".into()),
+                provider: Some(latte_work_protocol::TurnProvider::Snapshot(
+                    serde_json::from_value(serde_json::json!({
+                        "provider": {
+                            "id": "usage-provider", "name": "Usage fixture",
+                            "protocol": "anthropic_messages", "base_url": "https://example.test",
+                            "model": "relay/seed-0812", "models": [], "model_labels": {},
+                            "auth": "bearer", "has_credential": true, "revision": "fixture"
+                        },
+                        "credential": "fixture-only-key"
+                    }))
+                    .unwrap()
+                )),
+                effort: None,
+                permission_mode: None,
+            }
+        )
+        .await,
+        Response::Accepted { duplicate: false }
+    ));
+    let events = wait(&mut client, &id, Status::Completed).await;
+    let latest = events
+        .iter()
+        .rev()
+        .find(|e| matches!(e.event, EventKind::Usage { .. }))
+        .unwrap();
+    assert!(
+        matches!(&latest.event, EventKind::Usage {context:Some(c),..} if c.model == "model_api/experimental_0812" && c.used_tokens == 69692.0 && c.window_tokens == Some(200000.0))
+    );
+    drop(client);
+    let mut reconnected = host.client().await;
+    let replay = wait(&mut reconnected, &id, Status::Completed).await;
+    assert_eq!(
+        serde_json::to_value(&events).unwrap(),
+        serde_json::to_value(&replay).unwrap()
+    );
+}
+
+#[tokio::test]
 async fn native_idle_shutdown_preserves_busy_terminal_then_exits_after_close() {
     let mut host = Host::start().await;
     let mut client = host.client().await;

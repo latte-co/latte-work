@@ -3,12 +3,15 @@ import {
   act,
   cleanup,
   fireEvent,
-  render,
   screen,
   within,
 } from "@testing-library/react";
+import { renderWithStatus as render } from "./test/renderWithStatus";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { Workspace } from "./Workspace";
+import { useState } from "react";
+import { useSidebarPreview } from "./useSidebarPreview";
+import { StatusCenter } from "./StatusCenter";
 import { updateWorkspace, readWorkspace } from "./workspaceState";
 import type { Request, Response, TerminalInfo } from "./protocol";
 const mocks = vi.hoisted(() => ({
@@ -81,6 +84,90 @@ beforeEach(() => {
   );
 });
 afterEach(cleanup);
+it.each([true, false])(
+  "provides the unified status entry in a merged workspace (project=%s)",
+  async (hasProject) => {
+    updateWorkspace(props.workspaceId, { expanded: true });
+    // Use the native slot, without the test wrapper's separate entry.
+    const { render: renderWorkspace } = await import("@testing-library/react");
+    renderWorkspace(
+      <Workspace
+        {...props}
+        project={hasProject ? project : undefined}
+        sidebarOpen={false}
+        toggleSidebar={() => {}}
+        statusCenter={<StatusCenter />}
+        conversationActions={<button>当前对话操作</button>}
+        overview={<button>对话概览</button>}
+      />,
+    );
+    await act(async () => {});
+    expect(screen.getAllByRole("button", { name: "状态提示" })).toHaveLength(1);
+    const buttons = Array.from(
+      screen.getByRole("button", { name: "状态提示" }).parentElement!.children,
+    ).filter((element) => element.tagName === "BUTTON");
+    expect(buttons.slice(0, 2)).toEqual([
+      screen.getByRole("button", { name: "状态提示" }),
+      screen.getByRole("button", { name: "展开侧栏" }),
+    ]);
+    expect(
+      screen.getAllByRole("button", { name: "当前对话操作" }),
+    ).toHaveLength(1);
+    const header = screen.getByRole("button", {
+      name: "分离右侧栏",
+    }).parentElement!;
+    expect(header.querySelectorAll(".titlebar-divider")).toHaveLength(2);
+    expect(
+      screen.getByRole("button", { name: "对话概览" }).nextElementSibling
+        ?.className,
+    ).toBe("titlebar-divider");
+  },
+);
+it.each([true, false])(
+  "supports hover preview and click-to-pin in merged workspace headers (project=%s)",
+  (hasProject) => {
+    vi.useFakeTimers();
+    try {
+      updateWorkspace(props.workspaceId, { expanded: true });
+      function PreviewWorkspace() {
+        const [open, setOpen] = useState(false);
+        const preview = useSidebarPreview({
+          open,
+          enabled: true,
+          interactionLocked: false,
+          toggle: () => setOpen((old) => !old),
+        });
+        return (
+          <>
+            <aside
+              ref={preview.panel}
+              aria-label="导航"
+              hidden={!open && !preview.visible}
+              {...preview.panelProps}
+            />
+            <Workspace
+              {...props}
+              project={hasProject ? project : undefined}
+              sidebarOpen={open}
+              toggleSidebar={() => {}}
+              sidebarPreview={preview}
+            />
+          </>
+        );
+      }
+      render(<PreviewWorkspace />);
+      fireEvent.pointerEnter(screen.getByRole("button", { name: "展开侧栏" }));
+      act(() => vi.advanceTimersByTime(200));
+      expect(screen.getByLabelText("导航").hidden).toBe(false);
+      fireEvent.click(screen.getByRole("button", { name: "固定侧栏" }));
+      expect(screen.queryByRole("button", { name: "展开侧栏" })).toBeNull();
+      expect(screen.getByLabelText("导航").hidden).toBe(false);
+    } finally {
+      cleanup();
+      vi.useRealTimers();
+    }
+  },
+);
 it("opens independent child tabs, reuses a selected child, retains the list and closes without stopping", async () => {
   updateWorkspace(props.workspaceId, {
     tabs: [{ id: "subagents", kind: "subagents" }],
@@ -303,7 +390,10 @@ it("keeps an exited tab after failed cleanup for explicit retry without replay",
   );
   render(<Workspace {...props} />);
   await act(async () => {});
-  expect(screen.getByRole("alert").textContent).toContain("offline");
+  fireEvent.click(screen.getByRole("button", { name: /^状态提示（/ }));
+  expect(
+    screen.getByRole("dialog", { name: "状态提示" }).textContent,
+  ).toContain("offline");
   expect(screen.getByRole("tab", { name: "sh · 本机" })).toBeTruthy();
   expect(
     mocks.request.mock.calls.filter(([, r]) => r.method === "close_terminal"),
@@ -360,7 +450,10 @@ it("keeps a terminal tab when closing fails and scopes host project restoration"
   await act(async () => {
     fireEvent.click(screen.getByRole("button", { name: "关闭sh · 本机" }));
   });
-  expect(screen.getByRole("alert").textContent).toContain("offline");
+  fireEvent.click(screen.getByRole("button", { name: /^状态提示（/ }));
+  expect(
+    screen.getByRole("dialog", { name: "状态提示" }).textContent,
+  ).toContain("offline");
   expect(screen.getByRole("tab", { name: "sh · 本机" })).toBeTruthy();
   view.rerender(
     <Workspace

@@ -104,17 +104,14 @@ export function SubagentsPanel({
         <p className="subagent-empty">
           {state.loading
             ? "正在读取子智能体…"
-            : state.error || "此子智能体记录暂不可用"}
+            : state.error
+              ? null
+              : "此子智能体记录暂不可用"}
         </p>
       </div>
     );
   return (
     <div className="subagents-panel">
-      {state.error && (
-        <p role="alert" className="notice failure">
-          {state.error}
-        </p>
-      )}
       {state.loading && !state.tasks.length && (
         <WorkingStatus label="正在读取子智能体…" animated />
       )}

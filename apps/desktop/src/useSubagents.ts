@@ -7,6 +7,7 @@ export interface SubagentsState {
   loading: boolean;
   error: string;
   truncated: boolean;
+  reload?: () => void;
 }
 export function useSubagents(
   hostId: string,
@@ -14,6 +15,8 @@ export function useSubagents(
   connected: boolean,
   events: Event[],
 ): SubagentsState {
+  const [reloadVersion, setReloadVersion] = useState(0);
+  const reload = () => setReloadVersion((value) => value + 1);
   const scope = JSON.stringify([hostId, sessionId]);
   const revision = events
     .filter((e) => e.session_id === sessionId && e.event.kind === "subagent")
@@ -58,16 +61,18 @@ export function useSubagents(
     return () => {
       disposed = true;
     };
-  }, [scope, hostId, sessionId, connected, revision]);
+  }, [scope, hostId, sessionId, connected, revision, reloadVersion]);
   if (!sessionId || state.scope !== scope)
     return {
       tasks: [],
       loading: !!sessionId && connected,
       error: "",
       truncated: false,
+      reload,
     };
   return {
     ...state,
+    reload,
     tasks: connected
       ? state.tasks
       : state.tasks.map((task) =>

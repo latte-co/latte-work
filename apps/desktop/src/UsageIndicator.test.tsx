@@ -74,9 +74,36 @@ it("shows only a ring until clicked, dismisses with Escape and outside clicks", 
 it("unknown capacity is not displayed as zero and session change closes the panel", () => {
   const view = render(<UsageIndicator events={[]} sessionId="s" />);
   fireEvent.click(screen.getByRole("button", { name: "上下文与用量统计" }));
-  expect(screen.getByText("占比未知")).toBeTruthy();
+  expect(screen.getByText("暂无用量数据")).toBeTruthy();
+  expect(screen.queryByText("占比未知")).toBeNull();
+  expect(screen.getByRole("dialog").querySelector(".usage-track")).toBeNull();
   view.rerender(<UsageIndicator events={[]} sessionId="other" />);
   expect(screen.queryByRole("dialog")).toBeNull();
+});
+
+it("shows only measured usage when a gateway or old history has no capacity", () => {
+  render(
+    <UsageIndicator
+      events={[
+        event(1, {
+          ...usage,
+          context: {
+            model: "model_api/experimental_0812",
+            used_tokens: 69692,
+            window_tokens: null,
+          },
+        }),
+      ]}
+      sessionId="s"
+    />,
+  );
+  fireEvent.click(screen.getByRole("button", { name: "上下文与用量统计" }));
+  const panel = screen.getByRole("dialog");
+  expect(screen.getByText("已用 Token")).toBeTruthy();
+  expect(screen.getByText("69,692")).toBeTruthy();
+  expect(screen.queryByText("已用 / 总容量")).toBeNull();
+  expect(screen.queryByText("占比未知")).toBeNull();
+  expect(panel.querySelector(".usage-track")).toBeNull();
 });
 
 it("retains live totals across context updates and rejects legacy zero placeholders", () => {

@@ -21,6 +21,7 @@ import { request, message } from "./api";
 import { ReviewOptions } from "./ReviewOptions";
 import { ReviewDiff } from "./ReviewDiff";
 import { Select } from "./Select";
+import { useStatusIssues } from "./statusNotices";
 const scopes = [
   { value: "lastTurn", label: "上一轮" },
   { value: "branch", label: "分支" },
@@ -90,6 +91,22 @@ export function ChangesView({
   const [content, setContent] = useState("");
   const [partial, setPartial] = useState(false);
   const [revision, refresh] = useState(0);
+  useStatusIssues([
+    {
+      id: `changes:${hostId}:${project.id}:${scope}`,
+      title: `${project.name} 的变更未能读取`,
+      error: active ? error : "",
+      pending: active && loading,
+      action: { label: "重试", run: () => refresh((value) => value + 1) },
+    },
+    {
+      id: `change-diff:${hostId}:${project.id}:${selected}`,
+      title: `${selected} 的差异未能读取`,
+      error: active ? diffError : "",
+      pending: active && diffLoading,
+      action: { label: "重试", run: () => refresh((value) => value + 1) },
+    },
+  ]);
   const [split, setSplit] = useState(false);
   const [filesVisible, setFilesVisible] = useState(true);
   const [fullContext, setFullContext] = useState(false);
@@ -425,11 +442,6 @@ export function ChangesView({
           close={closeMore}
         />
       )}
-      {error && (
-        <p className="panel-error" role="alert">
-          {error}
-        </p>
-      )}
       {turn &&
         (turn.undo === "reverted" ||
           turn.undo === "unknown" ||
@@ -465,7 +477,7 @@ export function ChangesView({
             <p className="panel-empty" role="status">
               正在读取变更…
             </p>
-          ) : !review?.entries.length ? (
+          ) : error ? null : !review?.entries.length ? (
             <p className="panel-empty">
               {error
                 ? "无法读取变更"
@@ -497,11 +509,7 @@ export function ChangesView({
                 <p className="panel-empty" role="status">
                   正在读取差异…
                 </p>
-              ) : diffError ? (
-                <p className="panel-error" role="alert">
-                  {diffError}
-                </p>
-              ) : content ? (
+              ) : diffError ? null : content ? (
                 <ReviewDiff content={content} split={split} wrap={wrap} />
               ) : (
                 <p className="panel-empty">

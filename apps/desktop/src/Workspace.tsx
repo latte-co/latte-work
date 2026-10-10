@@ -17,7 +17,6 @@ import {
   PanelRight,
   Maximize2,
   MessageCircle,
-  PanelLeft,
 } from "lucide-react";
 import type { Project } from "./protocol";
 import { request, message } from "./api";
@@ -25,6 +24,9 @@ import { WorkspaceFiles } from "./WorkspaceFiles";
 import { SubagentsPanel } from "./SubagentsPanel";
 import type { SubagentsState } from "./useSubagents";
 import { TerminalPane } from "./TerminalPane";
+import { SidebarToggle } from "./SidebarToggle";
+import { useStatusIssues } from "./statusNotices";
+import type { SidebarPreview } from "./useSidebarPreview";
 
 function ConversationTab({
   title,
@@ -79,11 +81,14 @@ export function Workspace({
   workspaceId,
   subagents,
   overview,
+  conversationActions,
+  statusCenter,
   sessionId,
   lastTurnVersion,
   conversationTitle = "对话",
   sidebarOpen = true,
   toggleSidebar,
+  sidebarPreview,
   hostId,
   hostName,
   project,
@@ -94,11 +99,14 @@ export function Workspace({
   workspaceId: string;
   subagents?: SubagentsState;
   overview?: React.ReactNode;
+  conversationActions?: React.ReactNode;
+  statusCenter?: React.ReactNode;
   sessionId?: string;
   lastTurnVersion?: string;
   conversationTitle?: string;
   sidebarOpen?: boolean;
   toggleSidebar?: () => void;
+  sidebarPreview?: SidebarPreview;
   hostId: string;
   hostName: string;
   project?: Project;
@@ -142,11 +150,14 @@ export function Workspace({
             workspaceId={page.key}
             subagents={selected ? subagents : undefined}
             overview={selected ? overview : undefined}
+            conversationActions={selected ? conversationActions : undefined}
+            statusCenter={selected ? statusCenter : undefined}
             sessionId={selected ? sessionId : page.sessionId}
             lastTurnVersion={selected ? lastTurnVersion : undefined}
             conversationTitle={conversationTitle}
             sidebarOpen={sidebarOpen}
             toggleSidebar={toggleSidebar}
+            sidebarPreview={sidebarPreview}
             hostId={selected ? hostId : page.hostId}
             hostName={selected ? hostName : page.hostName}
             project={selected ? project! : page.project}
@@ -162,14 +173,15 @@ export function Workspace({
       {!project && (
         <div className="workspace-page empty">
           <header data-tauri-drag-region="deep">
+            {expanded && statusCenter}
             {expanded && !sidebarOpen && toggleSidebar && (
-              <button
-                className="icon-button"
-                aria-label="展开侧栏"
-                onClick={toggleSidebar}
-              >
-                <PanelLeft size={16} />
-              </button>
+              <>
+                <SidebarToggle
+                  toggle={toggleSidebar}
+                  preview={sidebarPreview}
+                />
+                <span className="titlebar-divider" aria-hidden="true" />
+              </>
             )}
             {expanded && (
               <div
@@ -185,7 +197,11 @@ export function Workspace({
               </div>
             )}
             <div className="workspace-header-space" data-tauri-drag-region />
+            {expanded && conversationActions}
             {expanded && overview}
+            {expanded && (
+              <span className="titlebar-divider" aria-hidden="true" />
+            )}
             <button
               className="icon-button"
               aria-label={expanded ? "分离右侧栏" : "收起工作区"}
@@ -224,11 +240,14 @@ function WorkspacePage({
   workspaceId,
   subagents,
   overview,
+  conversationActions,
+  statusCenter,
   sessionId,
   lastTurnVersion,
   conversationTitle,
   sidebarOpen,
   toggleSidebar,
+  sidebarPreview,
   hostId,
   hostName,
   project,
@@ -244,11 +263,14 @@ function WorkspacePage({
   workspaceId: string;
   subagents?: SubagentsState;
   overview?: React.ReactNode;
+  conversationActions?: React.ReactNode;
+  statusCenter?: React.ReactNode;
   sessionId?: string;
   lastTurnVersion?: string;
   conversationTitle: string;
   sidebarOpen: boolean;
   toggleSidebar?: () => void;
+  sidebarPreview?: SidebarPreview;
   project: Project;
   selected: boolean;
   active: boolean;
@@ -290,6 +312,18 @@ function WorkspacePage({
   };
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  useStatusIssues([
+    {
+      id: `workspace:${workspaceId}`,
+      title: "工作区操作未完成",
+      error: selected ? error : "",
+      pending: busy,
+      action: {
+        label: "知道了",
+        run: () => setError(""),
+      },
+    },
+  ]);
   const [menu, setMenu] = useState(false);
   const [revision, refresh] = useState(0);
   const trigger = useRef<HTMLButtonElement>(null);
@@ -453,14 +487,12 @@ function WorkspacePage({
       hidden={!selected}
     >
       <header data-tauri-drag-region="deep">
+        {expanded && statusCenter}
         {expanded && !sidebarOpen && toggleSidebar && (
-          <button
-            className="icon-button"
-            aria-label="展开侧栏"
-            onClick={toggleSidebar}
-          >
-            <PanelLeft size={16} />
-          </button>
+          <>
+            <SidebarToggle toggle={toggleSidebar} preview={sidebarPreview} />
+            <span className="titlebar-divider" aria-hidden="true" />
+          </>
         )}
         <div
           ref={tablist}
@@ -528,7 +560,9 @@ function WorkspacePage({
           </button>
         )}
         <div className="workspace-header-space" data-tauri-drag-region />
+        {expanded && conversationActions}
         {expanded && overview}
+        {expanded && <span className="titlebar-divider" aria-hidden="true" />}
         {!expanded && (
           <button
             className="icon-button"
@@ -558,19 +592,6 @@ function WorkspacePage({
           }}
           choose={(kind) => void add(kind)}
         />
-      )}
-      {error && !conversationActive && (
-        <div className="terminal-notice" role="alert">
-          <span>{error}</span>
-          <button
-            onClick={() => {
-              setError("");
-              refresh((v) => v + 1);
-            }}
-          >
-            刷新
-          </button>
-        </div>
       )}
       {tabs.map((tab) => (
         <section

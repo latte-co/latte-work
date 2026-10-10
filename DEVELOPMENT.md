@@ -320,8 +320,11 @@ text. The composer exposes one neutral ring with a click/keyboard statistics pan
 Claude assistant input + cache-read + cache-write tokens describe the latest
 main-agent request input snapshot, not a live tokenizer or cumulative context.
 Per-step output tokens are placeholders and are excluded. Result `modelUsage`
-provides contextWindow only for the exact reported model; its cumulative token
-counts and subagent totals are never used for context occupancy. Compaction/reset
+provides contextWindow for the reported model or the explicit main-agent model
+resolved at launch/init, allowing Provider aliases that differ from API model
+names. Exact identities take precedence; normalized aliases must match uniquely.
+Unrelated billing entries and subagent totals are never used for context occupancy.
+Changing the main-agent model invalidates the previous capacity. Compaction/reset
 invalidates the snapshot until a subsequent request. Result usage and API duration
 are displayed for the latest submitted turn; sending clears those totals.
 Cache hit rate = cache-read / (uncached input + cache-read + cache-write).

@@ -2,11 +2,13 @@ import { useEffect, useState } from "react";
 import { ChevronDown, ChevronRight, FileText, Folder } from "lucide-react";
 import { message, request } from "./api";
 import type { FileEntry } from "./protocol";
+import { useStatusIssues } from "./statusNotices";
 
 interface TreeProps {
   hostId: string;
   projectId: string;
   file: string;
+  directoryPath?: string;
   active: boolean;
   revision: number;
   openFile: (path: string) => void;
@@ -47,18 +49,21 @@ function Directory({
       disposed = true;
     };
   }, [hostId, projectId, path, active, expanded, revision, retry]);
+  useStatusIssues([
+    {
+      id: `file-tree:${hostId}:${projectId}:${path}`,
+      title: `${path || "项目目录"} 未能读取`,
+      error: active && expanded ? error : "",
+      pending: active && expanded && loading,
+      action: { label: "重试", run: () => setRetry((value) => value + 1) },
+    },
+  ]);
   if (!expanded) return null;
   return (
     <ul className="file-tree-list">
       {loading && (
         <li className="file-tree-notice" role="status">
           正在读取…
-        </li>
-      )}
-      {error && (
-        <li className="file-tree-notice" role="alert">
-          <span>{error}</span>
-          <button onClick={() => setRetry((value) => value + 1)}>重试</button>
         </li>
       )}
       {entries.map((entry) => (
@@ -72,11 +77,14 @@ function Directory({
 }
 
 function Entry({ entry, ...props }: TreeProps & { entry: FileEntry }) {
-  const containsFile = props.file.startsWith(`${entry.path}/`);
+  const containsFile =
+    props.file.startsWith(`${entry.path}/`) ||
+    props.directoryPath === entry.path ||
+    !!props.directoryPath?.startsWith(`${entry.path}/`);
   const [expanded, setExpanded] = useState(containsFile);
   useEffect(() => {
     if (containsFile) setExpanded(true);
-  }, [props.file, containsFile]);
+  }, [props.file, props.directoryPath, containsFile]);
   return (
     <li>
       <button
