@@ -194,6 +194,7 @@ export function ChangesView({
           },
     )
       .then((response) => {
+        if (disposed) return;
         if (
           scope === "lastTurn" &&
           response.kind === "last_turn_changes" &&

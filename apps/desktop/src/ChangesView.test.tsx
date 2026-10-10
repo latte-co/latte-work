@@ -378,57 +378,67 @@ it("reconciles an undo event for the same last turn without changing its saved d
     path: "saved.txt",
   });
 });
-it("fences old session snapshots and never reads them in the new session", async () => {
-  let finish!: (value: unknown) => void;
-  mocks.request.mockImplementation(async (_host, req) => {
-    if (req.method === "git_info") return { kind: "git_info", info };
-    if (req.method === "git_review") return { kind: "git_review", review };
-    if (req.method === "last_turn_changes") {
-      if (req.session_id === "s1")
-        return new Promise((resolve) => {
-          finish = resolve;
-        });
+it.each([false, true])(
+  "fences old session snapshots, including empty results (%s)",
+  async (empty) => {
+    let finish!: (value: unknown) => void;
+    mocks.request.mockImplementation(async (_host, req) => {
+      if (req.method === "git_info") return { kind: "git_info", info };
+      if (req.method === "git_review") return { kind: "git_review", review };
+      if (req.method === "last_turn_changes") {
+        if (req.session_id === "s1")
+          return new Promise((resolve) => {
+            finish = resolve;
+          });
+        return {
+          kind: "last_turn_changes",
+          changes: { ...turn, request_id: "r2" },
+        };
+      }
       return {
-        kind: "last_turn_changes",
-        changes: { ...turn, request_id: "r2" },
+        kind: "content",
+        text: "@@ -1 +1 @@\n+new session\n",
+        truncated: false,
       };
-    }
-    return {
-      kind: "content",
-      text: "@@ -1 +1 @@\n+new session\n",
-      truncated: false,
-    };
-  });
-  const view = render(
-    <ChangesView {...props} sessionId="s1" lastTurnVersion="r1" />,
-  );
-  await screen.findByRole("region", { name: "统一文件差异" });
-  await scope("上一轮");
-  view.rerender(<ChangesView {...props} sessionId="s2" lastTurnVersion="r2" />);
-  await screen.findByText("+new session");
-  await act(async () =>
-    finish({
-      kind: "last_turn_changes",
-      changes: {
-        ...turn,
-        summary: {
-          ...turn.summary,
-          entries: [{ path: "stale.txt", status: "A", added: 1, removed: 0 }],
-        },
+    });
+    const view = render(
+      <ChangesView {...props} sessionId="s1" lastTurnVersion="r1" />,
+    );
+    await screen.findByRole("region", { name: "统一文件差异" });
+    await scope("上一轮");
+    view.rerender(
+      <ChangesView {...props} sessionId="s2" lastTurnVersion="r2" />,
+    );
+    await screen.findByText("+new session");
+    await act(async () =>
+      finish({
+        kind: "last_turn_changes",
+        changes: empty
+          ? null
+          : {
+              ...turn,
+              summary: {
+                ...turn.summary,
+                entries: [
+                  { path: "stale.txt", status: "A", added: 1, removed: 0 },
+                ],
+              },
+            },
+      }),
+    );
+    expect(screen.queryByText("stale.txt")).toBeNull();
+    expect(screen.getByText("+new session")).toBeTruthy();
+    expect(
+      mocks.request.mock.calls
+        .filter(([, req]) => req.method === "turn_change_diff")
+        .map(([, req]) => req),
+    ).toEqual([
+      {
+        method: "turn_change_diff",
+        session_id: "s2",
+        request_id: "r2",
+        path: "saved.txt",
       },
-    }),
-  );
-  expect(screen.queryByText("stale.txt")).toBeNull();
-  expect(
-    mocks.request.mock.calls
-      .filter(([, req]) => req.method === "turn_change_diff")
-      .map(([, req]) => req),
-  ).toEqual([
-    {
-      method: "turn_change_diff",
-      session_id: "s2",
-      request_id: "r2",
-      path: "saved.txt",
-    },
-  ]);
-});
+    ]);
+  },
+);
