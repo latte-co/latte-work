@@ -259,6 +259,8 @@ export function BrowserTools({
             className="browser-find"
             onSubmit={(event) => {
               event.preventDefault();
+              // Portals keep React ancestry: do not submit the address form.
+              event.stopPropagation();
               void findNext(false);
             }}
           >

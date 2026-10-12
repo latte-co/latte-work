@@ -85,6 +85,38 @@ it("submits a bare domain as an HTTPS navigation from the address field", async 
   );
   expect((address as HTMLInputElement).value).toBe("https://www.baidu.com/");
 });
+it("find submissions do not navigate through the address form across the portal", async () => {
+  mocks.invoke.mockImplementation(async (command: string) =>
+    command === "browser_find" ? true : undefined,
+  );
+  render(<BrowserPane {...props} />);
+  await waitFor(() =>
+    expect(
+      (screen.getByRole("textbox", { name: "网页地址" }) as HTMLInputElement)
+        .disabled,
+    ).toBe(false),
+  );
+  fireEvent.click(screen.getByRole("button", { name: "浏览器菜单" }));
+  fireEvent.click(screen.getByRole("menuitem", { name: /在页面中查找/ }));
+  const search = screen.getByRole("textbox", { name: "在页面中查找" });
+  fireEvent.change(search, { target: { value: "needle" } });
+  await act(async () => fireEvent.submit(search.closest("form")!));
+  await act(async () =>
+    fireEvent.click(screen.getByRole("button", { name: "下一个匹配" })),
+  );
+  await act(async () =>
+    fireEvent.keyDown(search, { key: "Enter", shiftKey: true }),
+  );
+  expect(
+    mocks.invoke.mock.calls
+      .filter(([command]) => command === "browser_find")
+      .map(([, args]) => args.backwards),
+  ).toEqual([false, false, true]);
+  expect(mocks.invoke).not.toHaveBeenCalledWith(
+    "browser_action",
+    expect.objectContaining({ action: "navigate" }),
+  );
+});
 it("creates lazily, hides on tab changes and overlays, and closes hidden surfaces on Quit", async () => {
   const view = render(<BrowserPane {...props} active={false} />);
   expect(mocks.invoke).not.toHaveBeenCalledWith(
