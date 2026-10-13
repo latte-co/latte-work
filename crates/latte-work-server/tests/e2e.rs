@@ -4569,7 +4569,31 @@ async fn complete_child_history_recovers_every_native_page_and_long_report_witho
     )
     .await;
     wait(&mut client, &id, Status::Completed).await;
-    tokio::time::sleep(Duration::from_millis(400)).await;
+    // Main completion precedes the background child and its native file flush.
+    // Wait for live idle evidence; a fixed sleep races large records on Linux.
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        let Response::Events { session, .. } = ask(
+            &mut client,
+            Request::Poll {
+                session_id: id.clone(),
+                after: 0.0,
+            },
+        )
+        .await
+        else {
+            panic!("session status");
+        };
+        if session.agent_session_busy == Some(false) {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "background child never became idle"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
     assert!(matches!(
         ask(
             &mut client,
