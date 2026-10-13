@@ -548,10 +548,10 @@ it("shows remote connection states independently of history results and selectio
   expect(
     screen
       .getAllByRole("img", { name: "Devbox 连接失败" })
-      .map((dot) => dot.title),
+      .map((icon) => icon.querySelector("title")!.textContent),
   ).toEqual([
-    "Devbox · 连接失败：SSH 连接已关闭",
-    "Devbox · 连接失败：SSH 连接已关闭",
+    "远程项目 · Devbox · 连接失败：SSH 连接已关闭",
+    "远程项目 · Devbox · 连接失败：SSH 连接已关闭",
   ]);
   connection = "connected";
   view.rerender(<Sidebar state={{ ...props }} />);

@@ -724,7 +724,11 @@ export function Sidebar({
                     >
                       <span className="project-folder">
                         {p.hostId !== "local" ? (
-                          <RemoteProjectIcon />
+                          <RemoteProjectIcon
+                            state={connectionState}
+                            label={`${projectHost} ${connectionLabel}`}
+                            title={`远程项目 · ${projectHost} · ${connectionLabel}${hostErrors[p.hostId] ? `：${hostErrors[p.hostId]}` : ""}`}
+                          />
                         ) : expanded ? (
                           <FolderOpen size={15} />
                         ) : (
@@ -737,13 +741,6 @@ export function Sidebar({
                           <span className="project-host-name">
                             {projectHost}
                           </span>
-                          <span
-                            className="project-connection-state"
-                            data-state={connectionState}
-                            role="img"
-                            aria-label={`${projectHost} ${connectionLabel}`}
-                            title={`${projectHost} · ${connectionLabel}${hostErrors[p.hostId] ? `：${hostErrors[p.hostId]}` : ""}`}
-                          />
                         </small>
                       )}
                       <span className="row-status">

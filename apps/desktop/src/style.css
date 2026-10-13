@@ -355,6 +355,12 @@ button.recent-notice {
 .project-remote-globe {
   stroke: var(--color-success);
 }
+.project-folder svg[data-state="connecting"] .project-remote-globe {
+  stroke: var(--color-text-muted);
+}
+.project-remote-error {
+  stroke: var(--color-danger);
+}
 .project-name {
   min-width: 0;
   flex: 1;
@@ -2722,19 +2728,6 @@ button.recent-notice {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-}
-.project-connection-state {
-  width: 8px;
-  height: 8px;
-  flex: none;
-  border-radius: 50%;
-  background: var(--color-text-muted);
-}
-.project-connection-state[data-state="connected"] {
-  background: var(--color-success);
-}
-.project-connection-state[data-state="failed"] {
-  background: var(--color-danger);
 }
 .host-unavailable {
   margin: var(--space-1) var(--space-3);
