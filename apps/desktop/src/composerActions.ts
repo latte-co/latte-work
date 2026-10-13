@@ -64,9 +64,26 @@ export function isNativeSubagentCommand(command: AgentSlashCommand) {
   );
 }
 
+export type AppCommandAction = "subagents" | "model" | "effort";
+export type ComposerCommand = Omit<AgentSlashCommand, "ui_action"> & {
+  ui_action?: AppCommandAction;
+};
+
+/** App-owned names take precedence even with an older or unavailable catalog. */
+export function appCommandAction(
+  text: string,
+  commands: AgentSlashCommand[] = [],
+): AppCommandAction | null {
+  const name = /^\/([^\s]+)(?:\s|$)/.exec(text.trim())?.[1];
+  if (!name) return null;
+  if (name === "model" || name === "effort") return name;
+  if (subagentPanelAliases.includes(name)) return "subagents";
+  return commands.find((command) => command.name === name)?.ui_action ?? null;
+}
+
 export function unifiedComposerCommands(
   commands: AgentSlashCommand[],
-): AgentSlashCommand[] {
+): ComposerCommand[] {
   return [
     {
       name: "agents",
@@ -75,7 +92,26 @@ export function unifiedComposerCommands(
       argument_hint: "",
       ui_action: "subagents",
     },
-    ...commands.filter((command) => !isNativeSubagentCommand(command)),
+    {
+      name: "model",
+      display_name: "选择模型",
+      description: "打开 Latte Work 模型菜单",
+      argument_hint: "",
+      ui_action: "model",
+    },
+    {
+      name: "effort",
+      display_name: "思考强度",
+      description: "打开 Latte Work 思考强度菜单",
+      argument_hint: "",
+      ui_action: "effort",
+    },
+    ...commands.filter(
+      (command) =>
+        !isNativeSubagentCommand(command) &&
+        command.name !== "model" &&
+        command.name !== "effort",
+    ),
   ];
 }
 
@@ -102,7 +138,7 @@ const claudeCommandTitles: Record<string, string> = {
   goal: "设置目标",
 };
 export function commandTitle(
-  command: AgentSlashCommand,
+  command: Omit<AgentSlashCommand, "ui_action">,
   agent: string,
 ): string {
   const label = command.display_name?.trim();

@@ -22,7 +22,8 @@ import type { AgentSlashCommand, FileEntry } from "./protocol";
 import {
   commandTitle,
   composerTrigger,
-  isSubagentPanelCommand,
+  appCommandAction,
+  type AppCommandAction,
   hasCommandArguments,
   isNativeSubagentCommand,
   subagentPanelAliases,
@@ -60,10 +61,11 @@ interface Props {
   placeholder: string;
   onSubmit: (prompt: string, uiAction?: "subagents") => Promise<boolean>;
   onOpenSubagents?: () => void;
+  onOpenModelSettings?: (target: "model" | "effort") => string | null;
   toolbar: (
     submit: () => void,
     hasContent: boolean,
-    localNavigation: boolean,
+    localNavigation: AppCommandAction | null,
   ) => ReactNode;
 }
 type Option = {
@@ -325,13 +327,7 @@ export function Composer(props: Props) {
     ...subagentPanelAliases,
     ...commands.filter(isNativeSubagentCommand).map((command) => command.name),
   ];
-  const localNavigation =
-    isSubagentPanelCommand(value) ||
-    commands.some(
-      (command) =>
-        isNativeSubagentCommand(command) &&
-        value.trim().split(/\s/)[0] === `/${command.name}`,
-    );
+  const localNavigation = appCommandAction(value, commands);
   const options: Option[] =
     mode === "commands"
       ? unifiedComposerCommands(commands)
@@ -344,8 +340,7 @@ export function Composer(props: Props) {
             (a, b) =>
               Number(b.name.toLowerCase() === query.toLowerCase()) -
                 Number(a.name.toLowerCase() === query.toLowerCase()) ||
-              Number(b.ui_action === "subagents") -
-                Number(a.ui_action === "subagents"),
+              Number(!!b.ui_action) - Number(!!a.ui_action),
           )
           .map((item) => ({
             id: item.name,
@@ -518,7 +513,7 @@ export function Composer(props: Props) {
   async function submit() {
     if (disabled || sending || submitting.current || pasteBusy.current) return;
     if (localNavigation) {
-      openSubagentPanel();
+      openAppCommand(localNavigation);
       return;
     }
     if (value.trimStart().startsWith("/") && attached.length) {
@@ -551,11 +546,9 @@ export function Composer(props: Props) {
         )
           return;
       }
-      const uiAction = catalog.find(
-        (command) => command.name === nativeCommand,
-      )?.ui_action;
-      if (uiAction === "subagents") {
-        openSubagentPanel();
+      const uiAction = appCommandAction(value, catalog);
+      if (uiAction) {
+        openAppCommand(uiAction);
         return;
       }
       const prompt = referencePrompt(value, attached);
@@ -570,14 +563,29 @@ export function Composer(props: Props) {
       submitting.current = false;
     }
   }
-  function openSubagentPanel() {
+  function openAppCommand(action: AppCommandAction) {
     close();
-    if (!props.onOpenSubagents) {
-      setNotice("无法打开子智能体面板");
-      return;
+    if (action === "subagents") {
+      if (!props.onOpenSubagents) {
+        setNotice("无法打开子智能体面板");
+        return;
+      }
+      props.onOpenSubagents();
+    } else {
+      const error =
+        props.onOpenModelSettings?.(action) ??
+        (props.onOpenModelSettings ? null : "无法打开模型设置");
+      if (error) {
+        setNotice(error);
+        return;
+      }
     }
-    props.onOpenSubagents();
-    if (hasCommandArguments(value)) setNotice(subagentPanelArgumentNotice);
+    if (hasCommandArguments(value))
+      setNotice(
+        action === "subagents"
+          ? subagentPanelArgumentNotice
+          : `已打开${action === "model" ? "模型" : "思考强度"}菜单；请在菜单中选择，输入内容已保留。`,
+      );
     else {
       onChange("");
       setNotice("");

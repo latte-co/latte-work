@@ -131,6 +131,13 @@ The existing send request ID, persistence, resume, cancellation and approval flo
 shared by native commands. Terminal-only commands absent from the native SDK catalog
 are not synthesized. Agent command effects and configuration scope remain native;
 Latte's explicit model/effort selections continue to apply on each launched turn.
+App-owned `/agents` (and listing aliases), `/model` and `/effort` are resolved before
+native command discovery or turn admission. The latter two open the existing model
+selector or effort submenu; they never change native configuration via a CLI command.
+Arguments are retained in the draft with a menu-selection notice. A disabled/unready
+selector reports its reason without clearing the draft or stopping a running turn.
+Namespaced project commands remain native. The workbench send boundary also rejects
+model/effort commands if a caller bypasses composer navigation.
 
 The `@` picker reuses the server's bounded, canonical project-file listing for local
 and SSH hosts. It attaches relative path references for the Agent to read, not file

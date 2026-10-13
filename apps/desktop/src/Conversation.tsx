@@ -31,7 +31,7 @@ import { Composer } from "./Composer";
 import { useAgentPreferences } from "./useAgentPreferences";
 import { PermissionPicker } from "./PermissionPicker";
 import { UsageIndicator } from "./UsageIndicator";
-import { ModelPicker } from "./ModelPicker";
+import { ModelPicker, type ModelPickerHandle } from "./ModelPicker";
 import { TaskProjectPicker } from "./TaskProjectPicker";
 import { TurnTranscript } from "./TurnTranscript";
 import { ToolGroup, ToolRow } from "./ToolActivity";
@@ -129,6 +129,7 @@ export function Conversation({
   const text = draft.text;
   const setText = (text: string) => drafts.update(draftKey, { text });
   const root = useRef<HTMLElement>(null);
+  const modelPicker = useRef<ModelPickerHandle>(null);
   const [sending, setSending] = useState(false);
   const previousDraftKey = useRef(draftKey);
   const migrated = useRef<string | null>(null);
@@ -686,6 +687,10 @@ export function Conversation({
           onChange={setText}
           onSubmit={submit}
           onOpenSubagents={openSubagents}
+          onOpenModelSettings={(target) =>
+            modelPicker.current?.openMenu(target) ??
+            (modelPicker.current ? null : "无法打开模型设置。")
+          }
           placeholder={
             !connected
               ? connecting || !connectionError
@@ -718,6 +723,7 @@ export function Conversation({
                 hidden={settingsOpen}
               />
               <ModelPicker
+                ref={modelPicker}
                 onReadyChange={setModelReadiness}
                 hostId={hostId}
                 projectId={projectId}
@@ -735,7 +741,15 @@ export function Conversation({
               />
               <ComposerAction
                 active={!!active && !localNavigation}
-                label={localNavigation ? "打开子智能体" : undefined}
+                label={
+                  localNavigation === "subagents"
+                    ? "打开子智能体"
+                    : localNavigation === "model"
+                      ? "选择模型"
+                      : localNavigation === "effort"
+                        ? "思考强度"
+                        : undefined
+                }
                 sending={sending}
                 disabled={
                   localNavigation

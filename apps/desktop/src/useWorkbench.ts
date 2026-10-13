@@ -13,6 +13,7 @@ import {
 import { useEffect, useRef, useState } from "react";
 import {
   isSubagentPanelCommand,
+  appCommandAction,
   hasCommandArguments,
   subagentPanelArgumentNotice,
 } from "./composerActions";
@@ -1039,6 +1040,11 @@ export function useWorkbench() {
       }
       setError("");
       return true;
+    }
+    const appAction = appCommandAction(text);
+    if (appAction === "model" || appAction === "effort") {
+      setError("请通过输入区的模型菜单选择模型或思考强度。");
+      return false;
     }
     if (!connected || !text.trim() || sending.current) return false;
     sending.current = true;

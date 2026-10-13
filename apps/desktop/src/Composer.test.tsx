@@ -27,6 +27,7 @@ const mocks = vi.hoisted(() => ({
   send: vi.fn(),
   choose: vi.fn(),
   openSubagents: vi.fn(),
+  openModelSettings: vi.fn(),
 }));
 vi.mock("./api", () => ({
   request: mocks.request,
@@ -56,6 +57,7 @@ function Harness({
       onChange={setText}
       onSubmit={mocks.send}
       onOpenSubagents={mocks.openSubagents}
+      onOpenModelSettings={mocks.openModelSettings}
       placeholder="任务"
       toolbar={(submit, content) => (
         <button disabled={!content} onClick={submit}>
@@ -80,6 +82,7 @@ beforeEach(() => {
     return 0;
   });
   mocks.send.mockResolvedValue(false);
+  mocks.openModelSettings.mockReset().mockReturnValue(null);
   mocks.choose.mockReset().mockResolvedValue(null);
   mocks.request.mockImplementation(async (_host, request) =>
     request.method === "agent_commands"
@@ -538,7 +541,7 @@ it("shows one local subagent entry and hides native listing variants", async () 
   type("/");
   await waitFor(() => expect(mocks.request).toHaveBeenCalled());
   await screen.findByRole("option", { name: /压缩上下文/ });
-  expect(screen.getAllByRole("option")).toHaveLength(2);
+  expect(screen.getAllByRole("option")).toHaveLength(4);
   expect(
     screen.getByRole("option", { name: /子智能体/ }).textContent,
   ).toContain("/agents");
@@ -709,6 +712,95 @@ it("preserves attached references when a local panel command clears only its tex
   fireEvent.click(screen.getByText("发送"));
   expect(mocks.openSubagents).toHaveBeenCalledOnce();
   expect(mocks.send).not.toHaveBeenCalled();
+  expect(
+    screen.getByRole("button", { name: "移除引用 README.md" }),
+  ).toBeTruthy();
+});
+
+it.each(["model", "effort"] as const)(
+  "routes /%s to App settings without discovery or submission",
+  (target) => {
+    render(<Harness agent="another" />);
+    type(` /${target}  `);
+    fireEvent.click(screen.getByText("发送"));
+    expect(mocks.openModelSettings).toHaveBeenCalledWith(target);
+    expect(mocks.send).not.toHaveBeenCalled();
+    expect(mocks.request).not.toHaveBeenCalled();
+    expect((screen.getByRole("textbox") as HTMLTextAreaElement).value).toBe("");
+  },
+);
+
+it.each(["/model opus", "/effort high", "/model\n检查项目"])(
+  "never dispatches App command parameters in %s",
+  (command) => {
+    render(<Harness />);
+    type(command);
+    fireEvent.click(screen.getByText("发送"));
+    expect(mocks.send).not.toHaveBeenCalled();
+    expect(mocks.request).not.toHaveBeenCalled();
+    expect((screen.getByRole("textbox") as HTMLTextAreaElement).value).toBe(
+      command,
+    );
+    expect(screen.getByText(/请在菜单中选择/)).toBeTruthy();
+  },
+);
+
+it("preserves the draft when the App model settings are unavailable", () => {
+  mocks.openModelSettings.mockReturnValue("当前 Agent 不支持调整思考强度。");
+  render(<Harness />);
+  type("/effort ");
+  fireEvent.click(screen.getByText("发送"));
+  expect(screen.getByText(/不支持调整思考强度/)).toBeTruthy();
+  expect((screen.getByRole("textbox") as HTMLTextAreaElement).value).toBe(
+    "/effort ",
+  );
+  expect(mocks.send).not.toHaveBeenCalled();
+});
+
+it("unifies native model and effort entries while retaining namespaced project commands", async () => {
+  mocks.request.mockResolvedValue({
+    kind: "agent_commands",
+    commands: [
+      { name: "model", description: "native model", argument_hint: "<id>" },
+      {
+        name: "effort",
+        description: "native effort",
+        argument_hint: "<level>",
+      },
+      {
+        name: "project:model",
+        description: "project model",
+        argument_hint: "",
+      },
+    ],
+  });
+  render(<Harness />);
+  type("/");
+  await screen.findByRole("option", { name: /project model/ });
+  expect(screen.getAllByRole("option")).toHaveLength(4);
+  expect(
+    screen.queryByRole("option", { name: /native model|native effort/ }),
+  ).toBeNull();
+  fireEvent.click(screen.getByRole("option", { name: /选择模型/ }));
+  expect(mocks.openModelSettings).not.toHaveBeenCalled();
+  fireEvent.keyDown(screen.getByRole("textbox"), { key: "Enter" });
+  expect(mocks.openModelSettings).toHaveBeenCalledWith("model");
+  expect(mocks.send).not.toHaveBeenCalled();
+});
+
+it("opens App settings when command discovery fails and preserves references", async () => {
+  render(<Harness />);
+  type("@README");
+  fireEvent.click(await screen.findByRole("option", { name: /README.md/ }));
+  mocks.request.mockRejectedValue(new Error("catalog unavailable"));
+  type("/effort");
+  await screen.findByText(/catalog unavailable/);
+  fireEvent.click(screen.getByRole("option", { name: /思考强度/ }));
+  mocks.request.mockClear();
+  fireEvent.click(screen.getByText("发送"));
+  expect(mocks.openModelSettings).toHaveBeenCalledWith("effort");
+  expect(mocks.send).not.toHaveBeenCalled();
+  expect(mocks.request).not.toHaveBeenCalled();
   expect(
     screen.getByRole("button", { name: "移除引用 README.md" }),
   ).toBeTruthy();

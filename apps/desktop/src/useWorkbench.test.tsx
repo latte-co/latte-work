@@ -1142,3 +1142,20 @@ it("keeps the selected conversation and its status unchanged when opening the lo
   expect(hook.result.current.workspace.current).toBe("subagents");
   expect(mocks.request).not.toHaveBeenCalled();
 });
+
+it.each(["/model", "/effort high"])(
+  "guards %s before session persistence even if a caller bypasses the composer",
+  async (text) => {
+    const hook = renderHook(useWorkbench);
+    await act(async () => {});
+    mocks.request.mockClear();
+    await act(async () => {
+      expect(await hook.result.current.send(text, null, null, null)).toBe(
+        false,
+      );
+    });
+    expect(hook.result.current.sessionId).toBe("");
+    expect(hook.result.current.error).toContain("模型菜单");
+    expect(mocks.request).not.toHaveBeenCalled();
+  },
+);
