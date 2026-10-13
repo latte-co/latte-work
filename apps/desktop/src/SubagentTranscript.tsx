@@ -1,7 +1,8 @@
 import { Fragment } from "react";
 import { ChevronRight } from "lucide-react";
 import { activityTranscript, type ActivityItem } from "./activity";
-import { MessageContent, CopyButton } from "./MessageContent";
+import { MessageContent } from "./MessageContent";
+import { ReplyActions } from "./ReplyActions";
 import { ToolRow, ToolGroup } from "./ToolActivity";
 import { ProcessDisclosure } from "./TurnTranscript";
 import type { Event, Subagent } from "./protocol";
@@ -84,9 +85,7 @@ export function SubagentTranscript({
           <article className="markdown subagent-result">
             <MessageContent text={final} />
           </article>
-          <div className="final-reply-actions">
-            <CopyButton text={final} label="复制回复" iconOnly />
-          </div>
+          <ReplyActions text={final} at={task.updated_at} />
         </>
       ) : task.summary ? (
         <article className="markdown subagent-result">

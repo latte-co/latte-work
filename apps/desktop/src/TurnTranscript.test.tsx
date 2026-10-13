@@ -198,10 +198,10 @@ it("hides model metadata, preserves other notices and copies only the final answ
   expect(formatElapsed(-1)).toBe("执行过程");
 });
 it("keeps copy for a completed direct answer without a process", () => {
-  render(
-    <TurnTranscript
-      events={events(user("q"), text("final"), state("completed"))}
-    >
+  const rows = events(user("q"), text("final"), state("completed"));
+  rows[2].at = Date.parse("2026-10-13T08:35:00Z");
+  const view = render(
+    <TurnTranscript events={rows}>
       {(item) => (
         <span key={item.key}>
           {item.type === "assistant" ? item.text : null}
@@ -210,6 +210,31 @@ it("keeps copy for a completed direct answer without a process", () => {
     </TurnTranscript>,
   );
   expect(screen.getByRole("button", { name: "复制回复" })).toBeTruthy();
+  expect(view.container.querySelector("time")!.dateTime).toBe(
+    "2026-10-13T08:35:00.000Z",
+  );
+  view.rerender(
+    <TurnTranscript
+      events={[
+        ...rows,
+        {
+          seq: 3,
+          session_id: "s",
+          at: Date.parse("2026-10-14T08:35:00Z"),
+          event: { kind: "notice", text: "later metadata" },
+        },
+      ]}
+    >
+      {(item) => (
+        <span key={item.key}>
+          {item.type === "assistant" ? item.text : null}
+        </span>
+      )}
+    </TurnTranscript>,
+  );
+  expect(view.container.querySelector("time")!.dateTime).toBe(
+    "2026-10-13T08:35:00.000Z",
+  );
 });
 it("does not treat text before an approval-backed tool as a final answer", () => {
   const turns = turnTranscript(

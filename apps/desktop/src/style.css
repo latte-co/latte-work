@@ -1519,7 +1519,15 @@ button.recent-notice {
   margin-bottom: var(--space-2);
 }
 .final-reply-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
   margin: 0 0 var(--space-6);
+  color: var(--color-text-muted);
+  font-size: var(--text-sm);
+}
+.final-reply-actions time {
+  white-space: nowrap;
 }
 .conversation-turn > :last-child {
   margin-bottom: 0;

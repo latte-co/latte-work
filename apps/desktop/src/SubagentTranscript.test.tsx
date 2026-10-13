@@ -32,6 +32,7 @@ it("shows live child prose and native tool input/output, then folds it on comple
     <SubagentTranscript task={task} events={events} elapsed="1s" />,
   );
   expect(screen.getByText("child progress")).toBeTruthy();
+  expect(view.container.querySelector("time")).toBeNull();
   expect(screen.getByText("native read output")).toBeTruthy();
   expect(screen.getByText(/"file_path": "child.txt"/)).toBeTruthy();
   view.rerender(
@@ -43,6 +44,9 @@ it("shows live child prose and native tool input/output, then folds it on comple
   );
   expect(screen.queryByText("child progress")).toBeNull();
   expect(screen.getByText("child final").closest("details")).toBeNull();
+  expect(view.container.querySelector("time")!.dateTime).toBe(
+    new Date(task.updated_at).toISOString(),
+  );
   expect(screen.getAllByRole("button", { name: "复制回复" })).toHaveLength(1);
   const details = screen.getByText("用时 3s").closest("details")!;
   expect(details.open).toBe(false);

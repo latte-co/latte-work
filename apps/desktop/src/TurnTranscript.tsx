@@ -1,6 +1,6 @@
 import { Fragment, useMemo, useState, type ReactNode } from "react";
 import { ChevronRight } from "lucide-react";
-import { CopyButton } from "./MessageContent";
+import { ReplyActions } from "./ReplyActions";
 import type { Event } from "./protocol";
 import { activityTranscript, type ActivityItem } from "./activity";
 
@@ -73,6 +73,7 @@ export function turnTranscript(events: Event[]) {
       outcomeKey: end?.seq,
       user,
       finalKey: hasFinal ? lastAssistant?.key : undefined,
+      finalAt: hasFinal ? end?.at : undefined,
       stopped,
       elapsed,
       process: stopped
@@ -124,9 +125,7 @@ export function TurnTranscript({
         <Fragment key={item.key}>
           {children(item)}
           {item.key === turn.finalKey && item.type === "assistant" && (
-            <div className="final-reply-actions">
-              <CopyButton text={item.text} label="复制回复" iconOnly />
-            </div>
+            <ReplyActions text={item.text} at={turn.finalAt} />
           )}
         </Fragment>
       ))}
