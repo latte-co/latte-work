@@ -4,7 +4,7 @@ use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
 use std::{
     fs::OpenOptions,
-    io::{Read, Seek, SeekFrom, Write},
+    io::{BufRead, BufReader, Read, Seek, SeekFrom, Write},
     os::unix::fs::{MetadataExt, OpenOptionsExt},
     path::{Path, PathBuf},
 };
@@ -148,8 +148,7 @@ pub(super) fn read_child(cwd: &Path, parent: &str, child: &str) -> Result<Option
     read_child_path(&parent_path, child)
 }
 
-fn read_child_path(parent: &Path, child: &str) -> Result<Option<ChildBytes>> {
-    const LIMIT: u64 = 512 * 1024;
+fn open_child_path(parent: &Path, child: &str) -> Result<Option<std::fs::File>> {
     let session_dir = parent.with_extension("");
     let directory = session_dir.join("subagents");
     for path in [&session_dir, &directory] {
@@ -170,7 +169,7 @@ fn read_child_path(parent: &Path, child: &str) -> Result<Option<ChildBytes>> {
     if directory.canonicalize()? != directory || path.canonicalize()? != path {
         bail!("拒绝读取子会话目录外的记录");
     }
-    let mut file = OpenOptions::new()
+    let file = OpenOptions::new()
         .read(true)
         .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_NONBLOCK)
         .open(&path)?;
@@ -182,7 +181,14 @@ fn read_child_path(parent: &Path, child: &str) -> Result<Option<ChildBytes>> {
     {
         bail!("子会话记录身份已改变");
     }
-    let start = metadata.len().saturating_sub(LIMIT);
+    Ok(Some(file))
+}
+fn read_child_path(parent: &Path, child: &str) -> Result<Option<ChildBytes>> {
+    const LIMIT: u64 = 512 * 1024;
+    let Some(mut file) = open_child_path(parent, child)? else {
+        return Ok(None);
+    };
+    let start = file.metadata()?.len().saturating_sub(LIMIT);
     file.seek(SeekFrom::Start(start))?;
     let mut bytes = Vec::new();
     file.take(LIMIT).read_to_end(&mut bytes)?;
@@ -190,6 +196,81 @@ fn read_child_path(parent: &Path, child: &str) -> Result<Option<ChildBytes>> {
         bytes,
         start,
         truncated: start != 0,
+    }))
+}
+
+pub(super) struct ChildPageBytes {
+    pub bytes: Vec<u8>,
+    pub cursor: super::ChildHistoryCursor,
+    pub has_more: bool,
+}
+/// Read whole records in bounded forward pages. A partial last line is retried
+/// after the producer appends its newline, never skipped or treated as complete.
+pub(super) fn read_child_page(
+    cwd: &Path,
+    parent: &str,
+    child: &str,
+    cursor: super::ChildHistoryCursor,
+) -> Result<Option<ChildPageBytes>> {
+    if child.is_empty()
+        || child.len() > 128
+        || !child
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_'))
+    {
+        return Ok(None);
+    }
+    let Some(parent_path) = locate_in(&projects()?, cwd, parent)? else {
+        return Ok(None);
+    };
+    read_child_page_path(&parent_path, child, cursor)
+}
+fn read_child_page_path(
+    parent: &Path,
+    child: &str,
+    mut cursor: super::ChildHistoryCursor,
+) -> Result<Option<ChildPageBytes>> {
+    let Some(mut file) = open_child_path(parent, child)? else {
+        return Ok(None);
+    };
+    let metadata = file.metadata()?;
+    let identity = format!("{}:{}", metadata.dev(), metadata.ino());
+    if !cursor.identity.is_empty() && cursor.identity != identity {
+        bail!("子会话原始文件已替换，请核对记录");
+    }
+    if cursor.offset > metadata.len() {
+        bail!("子会话原始记录缩短，请核对记录");
+    }
+    cursor.identity = identity;
+    file.seek(SeekFrom::Start(cursor.offset))?;
+    let mut reader = BufReader::new(file.take(metadata.len() - cursor.offset));
+    let mut bytes = Vec::new();
+    let mut partial_tail = false;
+    while bytes.len() < 512 * 1024 {
+        let mut line = Vec::new();
+        // Each native record is independently bounded, with an explicit error
+        // instead of silently clipping its text or skipping its remaining bytes.
+        (&mut reader)
+            .take((latte_work_protocol::MAX_FRAME - 4096 + 1) as u64)
+            .read_until(b'\n', &mut line)?;
+        if line.is_empty() {
+            break;
+        }
+        if line.len() > latte_work_protocol::MAX_FRAME - 4096 {
+            bail!("子会话单条原始记录超出安全读取范围，内容未截断");
+        }
+        if !line.ends_with(b"\n") {
+            partial_tail = true;
+            break;
+        }
+        bytes.extend(line);
+    }
+    cursor.pending_tail = partial_tail;
+    let has_more = !partial_tail && cursor.offset + (bytes.len() as u64) < metadata.len();
+    Ok(Some(ChildPageBytes {
+        bytes,
+        cursor,
+        has_more,
     }))
 }
 pub fn rename(cwd: &Path, id: &str, title: &str) -> Result<String> {
@@ -261,6 +342,47 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
+    }
+    #[test]
+    fn child_pages_cover_entire_file_and_retry_partial_tail_without_skipping() {
+        let dir = tempfile::tempdir().unwrap();
+        let parent = dir.path().canonicalize().unwrap().join("parent.jsonl");
+        std::fs::write(&parent, "").unwrap();
+        let children = parent.with_extension("").join("subagents");
+        std::fs::create_dir_all(&children).unwrap();
+        let path = children.join("agent-a123.jsonl");
+        let records = (0..700)
+            .map(|i| format!("{{\"n\":{i},\"text\":\"{}\"}}\n", "x".repeat(1024)))
+            .collect::<String>();
+        std::fs::write(&path, format!("{records}{{\"partial\":true}}")).unwrap();
+        let mut cursor = super::super::ChildHistoryCursor::default();
+        let mut found = Vec::new();
+        loop {
+            let page = super::read_child_page_path(&parent, "a123", cursor)
+                .unwrap()
+                .unwrap();
+            cursor = page.cursor;
+            cursor.offset += page.bytes.len() as u64;
+            found.extend(page.bytes);
+            if !page.has_more {
+                break;
+            }
+        }
+        assert_eq!(found, records.as_bytes());
+        assert_eq!(cursor.offset, records.len() as u64);
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap()
+            .write_all(b"\n")
+            .unwrap();
+        let page = super::read_child_page_path(&parent, "a123", cursor)
+            .unwrap()
+            .unwrap();
+        assert_eq!(page.bytes, b"{\"partial\":true}\n");
+        let mut invalid = page.cursor;
+        invalid.identity = "replaced".into();
+        assert!(super::read_child_page_path(&parent, "a123", invalid).is_err());
     }
     use super::*;
     #[test]

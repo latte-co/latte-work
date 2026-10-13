@@ -13,9 +13,13 @@ import { openSubagents, readWorkspace } from "./workspaceState";
 afterEach(cleanup);
 vi.mock("./api", () => ({
   request: vi.fn(async () => ({
-    kind: "subagent_transcript",
+    kind: "subagent_history",
     events: [],
-    truncated: false,
+    incomplete: false,
+    has_more: false,
+    source_has_more: false,
+    source: "stream",
+    after: null,
   })),
   message: String,
 }));

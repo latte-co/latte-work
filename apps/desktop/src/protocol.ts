@@ -341,6 +341,14 @@ export type Request =
   | { method: "subagents"; session_id: string }
   | { method: "subagent_transcript"; session_id: string; task_id: string }
   | {
+      method: "subagent_history";
+      provider?: TurnProvider;
+      session_id: string;
+      task_id: string;
+      after: number | null;
+      source: string | null;
+    }
+  | {
       method: "approve";
       session_id: string;
       request_id: string;
@@ -423,6 +431,15 @@ export type Response =
   | { kind: "source_directory"; entries: Array<FileEntry>; truncated: boolean }
   | { kind: "subagents"; tasks: Array<Subagent>; truncated: boolean }
   | { kind: "subagent_transcript"; events: Array<Event>; truncated: boolean }
+  | {
+      kind: "subagent_history";
+      events: Array<Event>;
+      has_more: boolean;
+      after: number | null;
+      source_has_more: boolean;
+      incomplete: boolean;
+      source: string;
+    }
   | { kind: "changes"; entries: Array<GitChange>; truncated: boolean }
   | { kind: "git_info"; info: GitInfo }
   | { kind: "git_review"; review: GitReview }

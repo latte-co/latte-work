@@ -1213,6 +1213,109 @@ fn bounded_field(value: &Value, key: &str, limit: usize) -> Option<String> {
         .filter(|s| !s.is_empty())
         .map(|s| s.chars().take(limit).collect())
 }
+/// Full native history is indexed page by page; page limits never trim fields.
+pub(super) fn parse_child_history(
+    raw: super::claude_sessions::ChildPageBytes,
+    parent: &str,
+    child: &str,
+    session_id: &str,
+    config: &LaunchConfig,
+) -> Result<super::ChildHistoryPage> {
+    let mut cursor = raw.cursor;
+    let mut events = Vec::new();
+    let at = crate::store::now();
+    for line in raw.bytes.split_inclusive(|b| *b == b'\n') {
+        let base = cursor.offset;
+        cursor.offset += line.len() as u64;
+        let value: Value =
+            serde_json::from_slice(line).context("子会话原始记录格式无效，未跳过内容")?;
+        if !matches!(value["type"].as_str(), Some("assistant" | "user")) {
+            continue;
+        }
+        if value["sessionId"] != parent || value["agentId"] != child || value["isSidechain"] != true
+        {
+            bail!("原生子会话记录不属于此任务");
+        }
+        let Some(blocks) = value["message"]["content"].as_array() else {
+            continue;
+        };
+        if blocks.len() > 2048 || base > 9_007_199_254_740_991 / 4096 {
+            bail!("子会话记录标识超出范围，内容未截断");
+        }
+        for (index, block) in blocks.iter().enumerate() {
+            let seq = (base * 4096 + index as u64 * 2) as f64;
+            let event = match (value["type"].as_str(), block["type"].as_str()) {
+                (Some("assistant"), Some("text")) => block["text"]
+                    .as_str()
+                    .map(|text| EventKind::Text { text: text.into() }),
+                (Some("assistant"), Some("tool_use")) => block["id"]
+                    .as_str()
+                    .zip(block["name"].as_str())
+                    .map(|(id, name)| EventKind::Tool {
+                        id: id.into(),
+                        name: name.into(),
+                        input: block["input"].clone(),
+                    }),
+                (Some("user"), Some("tool_result")) => {
+                    block["tool_use_id"]
+                        .as_str()
+                        .map(|id| EventKind::ToolResult {
+                            id: id.into(),
+                            content: block["content"].clone(),
+                            is_error: block["is_error"].as_bool().unwrap_or(false),
+                        })
+                }
+                _ => None,
+            };
+            let Some(event) = event else {
+                continue;
+            };
+            let event = config.redact_event(event)?;
+            let mut report = None;
+            match &event {
+                EventKind::Tool { id, name, input } if name == "SubagentHandback" => {
+                    if let Some(text) = input["message"].as_str() {
+                        cursor.handbacks.insert(id.clone(), text.into());
+                    }
+                    if cursor.handbacks.len() > 128
+                        || cursor.handbacks.values().map(String::len).sum::<usize>()
+                            > latte_work_protocol::MAX_FRAME
+                    {
+                        bail!("待确认报告超出安全范围，内容未截断");
+                    }
+                }
+                EventKind::ToolResult { id, .. } => {
+                    let pending = cursor.handbacks.remove(id);
+                    if handback_delivered(block) {
+                        report = pending;
+                    }
+                }
+                _ => {}
+            }
+            events.push(latte_work_protocol::Event {
+                seq,
+                session_id: session_id.into(),
+                at,
+                event,
+            });
+            if let Some(text) = report {
+                events.push(latte_work_protocol::Event {
+                    seq: seq + 1.0,
+                    session_id: session_id.into(),
+                    at,
+                    event: EventKind::Text { text },
+                });
+            }
+        }
+    }
+    cursor.has_more = raw.has_more;
+    Ok(super::ChildHistoryPage {
+        events,
+        cursor,
+        has_more: raw.has_more,
+    })
+}
+
 pub(super) fn parse_child_transcript(
     raw: super::claude_sessions::ChildBytes,
     parent: &str,
@@ -1426,6 +1529,27 @@ pub(super) fn normalize_child_transcript(
         events.into_iter().map(|(event, _)| event).collect(),
         truncated,
     ))
+}
+
+pub(super) fn confirmed_child_report(tool: &EventKind, result: &EventKind) -> Option<String> {
+    let EventKind::Tool { id, name, input } = tool else {
+        return None;
+    };
+    let EventKind::ToolResult {
+        id: result_id,
+        content,
+        is_error,
+    } = result
+    else {
+        return None;
+    };
+    if name != "SubagentHandback"
+        || id != result_id
+        || !handback_delivered(&json!({"content":content,"is_error":is_error}))
+    {
+        return None;
+    }
+    input["message"].as_str().map(str::to_owned)
 }
 
 fn handback_delivered(block: &Value) -> bool {
@@ -1668,6 +1792,47 @@ mod tests {
         );
     }
     #[test]
+    fn complete_child_history_preserves_long_reports_and_cross_page_confirmation() {
+        use super::*;
+        let config = LaunchConfig {
+            provider: None,
+            settings_dir: PathBuf::from("/tmp"),
+            model: None,
+            effort: None,
+            permission_mode: None,
+        };
+        let report = "完整报告".repeat(20_000);
+        let record = |kind: &str, content: Value| json!({"type":kind,"sessionId":"parent","agentId":"a123","isSidechain":true,"message":{"content":content}});
+        let bytes = |r: Value| format!("{r}\n").into_bytes();
+        let first=parse_child_history(super::super::claude_sessions::ChildPageBytes{bytes:bytes(record("assistant",json!([{"type":"thinking","thinking":"hidden"},{"type":"tool_use","id":"h","name":"SubagentHandback","input":{"message":report}}]))),cursor:Default::default(),has_more:true},"parent","a123","public",&config).unwrap();
+        assert!(first.has_more);
+        let EventKind::Tool { input, .. } = &first.events[0].event else {
+            panic!("tool");
+        };
+        assert_eq!(input["message"], report);
+        // The pending report survives a page boundary and restart of its cursor.
+        let cursor = serde_json::from_str(&serde_json::to_string(&first.cursor).unwrap()).unwrap();
+        let next=parse_child_history(super::super::claude_sessions::ChildPageBytes{bytes:bytes(record("user",json!([{"type":"tool_result","tool_use_id":"h","content":"{\"success\":true}","is_error":false}]))),cursor,has_more:false},"parent","a123","public",&config).unwrap();
+        assert!(next.cursor.handbacks.is_empty());
+        assert!(matches!(&next.events[1].event,EventKind::Text{text} if text==&report));
+        assert!(next.events[1].seq > next.events[0].seq);
+        assert!(
+            !serde_json::to_string(&first.events)
+                .unwrap()
+                .contains("hidden")
+        );
+        let wrong = super::super::claude_sessions::ChildPageBytes {
+            bytes: bytes(record(
+                "assistant",
+                json!([{"type":"text","text":"wrong owner"}]),
+            )),
+            cursor: Default::default(),
+            has_more: false,
+        };
+        assert!(parse_child_history(wrong, "other", "a123", "public", &config).is_err());
+    }
+
+    #[test]
     fn native_child_records_validate_identity_and_redact_before_truncation() {
         use super::*;
         let secret = "fixture-provider-secret";
@@ -1692,6 +1857,23 @@ mod tests {
                 && !encoded.contains("private reasoning")
         );
         assert!(encoded.contains("[redacted]"));
+        let full = parse_child_history(
+            super::super::claude_sessions::ChildPageBytes {
+                bytes: raw().bytes,
+                cursor: Default::default(),
+                has_more: false,
+            },
+            "parent",
+            "a123",
+            "public",
+            &config,
+        )
+        .unwrap();
+        let encoded_full = serde_json::to_string(&full.events).unwrap();
+        assert!(!encoded_full.contains(secret) && !encoded_full.contains("private reasoning"));
+        assert!(
+            matches!(&full.events[0].event,EventKind::Text{text:actual} if actual==&config.redact(&text))
+        );
         assert!(parse_child_transcript(raw(), "other-parent", "a123", "public", &config).is_err());
         assert!(parse_child_transcript(raw(), "parent", "other-child", "public", &config).is_err());
     }

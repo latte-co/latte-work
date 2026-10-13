@@ -524,6 +524,15 @@ pub enum Request {
         session_id: String,
         task_id: String,
     },
+    SubagentHistory {
+        #[serde(default)]
+        #[ts(optional)]
+        provider: Option<TurnProvider>,
+        session_id: String,
+        task_id: String,
+        after: Option<f64>,
+        source: Option<String>,
+    },
     Approve {
         session_id: String,
         request_id: String,
@@ -772,6 +781,14 @@ pub enum Response {
     SubagentTranscript {
         events: Vec<Event>,
         truncated: bool,
+    },
+    SubagentHistory {
+        events: Vec<Event>,
+        has_more: bool,
+        after: Option<f64>,
+        source_has_more: bool,
+        incomplete: bool,
+        source: String,
     },
     Changes {
         entries: Vec<GitChange>,

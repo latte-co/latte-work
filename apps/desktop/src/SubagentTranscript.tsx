@@ -2,6 +2,7 @@ import { Fragment } from "react";
 import { ChevronRight } from "lucide-react";
 import { activityTranscript, type ActivityItem } from "./activity";
 import { MessageContent } from "./MessageContent";
+import { WorkingStatus } from "./WorkingStatus";
 import { ReplyActions } from "./ReplyActions";
 import { ToolRow, ToolGroup } from "./ToolActivity";
 import { ProcessDisclosure } from "./TurnTranscript";
@@ -25,12 +26,14 @@ export function SubagentTranscript({
   task,
   events,
   elapsed,
-  truncated = false,
+  incomplete = false,
+  readingMore = false,
 }: {
   task: Subagent;
   events: Event[];
   elapsed: string;
-  truncated?: boolean;
+  incomplete?: boolean;
+  readingMore?: boolean;
 }) {
   const items = activityTranscript(events);
   if (!["running", "paused"].includes(task.status)) {
@@ -41,7 +44,7 @@ export function SubagentTranscript({
         if (tool.status === "pending") tool.status = "unconfirmed";
     }
   }
-  const completed = task.status === "completed";
+  const completed = task.status === "completed" && !readingMore;
   const lastAssistant = [...items]
     .reverse()
     .find((item) => item.type === "assistant");
@@ -87,16 +90,17 @@ export function SubagentTranscript({
           </article>
           <ReplyActions text={final} at={task.updated_at} />
         </>
-      ) : task.summary ? (
+      ) : !readingMore && task.summary ? (
         <article className="markdown subagent-result">
           <MessageContent text={task.summary} />
         </article>
       ) : completed ? (
         <p className="subagent-empty">未收到最终输出</p>
       ) : null}
-      {truncated && (
+      {readingMore && <WorkingStatus label="正在读取完整记录…" animated />}
+      {incomplete && (
         <p className="subagent-empty">
-          仅显示采集范围，部分过程或内容超出显示上限。
+          部分原始记录暂不可读取，当前保留已保存的内容。
         </p>
       )}
     </div>

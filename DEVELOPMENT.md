@@ -467,28 +467,43 @@ Transport reconnect neither starts children nor replays their prompts.
 The conversation summary opens a closeable Subagents workspace tab, grouped by
 active, completed and other states. Selecting a task opens a separate named tab,
 keyed by stable child ID; repeated selection reuses it and leaves the list intact.
-The child tab reads a dedicated `subagent_transcript` snapshot: native child text,
-tool inputs and tool results are persisted separately from parent events, joined
-by the task's native tool-use ID and stable projected ID. Text deltas coalesce on
-write; snapshots return at most 500 records / 256 KiB with explicit truncation,
-and oversized fields are bounded and marked partial. Claude filters child text
-from parent stdout, so the owning Runtime can also read its native child JSONL.
-Paths derive only from the registered cwd, parent UUID and native child ID; raw
-output_file paths are ignored. Reads are capped to a 512 KiB tail, use no-follow
-regular-file checks, reject symlink directories and verify every accepted record's
-parent/child/sidechain identity. Hidden thinking blocks are excluded. The original
-launch context redacts provider credentials before truncation and caching. Terminal
-child notifications capture that snapshot before the context can be replaced.
-Successful native `SubagentHandback` delivery promotes its `message` into shared
-text events after the matching result explicitly confirms success. The adapter
-does this before tool-input clipping; reports retain up to 128 KiB with explicit
-report truncation. Already-redacted historical snapshots are normalized in memory
-on read, so a saved complete report can replace a delivery receipt after restart.
-Pending, failed and unmatched handbacks never claim a delivered report. A partial
-process history can still contain a complete final report.
+The child tab reads dedicated `subagent_history` forward pages. Full redacted
+stdout events and native child records persist separately from parent events,
+joined by the task's stable ID. The legacy `subagent_transcript` bounded snapshot
+remains available for old clients, but its limits do not govern the child UI.
+History pages contain at most 128 events / roughly 256 KiB; a larger individual
+event remains intact within the protocol frame limit. The client reads successive
+pages while visible, including after completion, and joins the complete final
+answer before marking it final or folding the process. Hiding a tab stops further
+page reads; reopening or reconnecting resumes from persisted records without
+executing an Agent or replaying a prompt. Cursor progress is validated.
+Claude filters child text from parent stdout, so the owning Runtime also indexes
+its native JSONL from the beginning in forward pages. Paths derive only from the
+registered cwd, parent UUID and native child ID; output_file paths are ignored.
+Each scan reads about 512 KiB of complete records, individually bounded by the 2 MiB protocol frame with reserved envelope space;
+oversized or malformed records fail explicitly instead of being silently clipped
+or skipped. No-follow regular-file checks reject symlink directories and changed
+file identities. Every accepted record verifies parent/child/sidechain identity;
+hidden thinking blocks remain excluded. Partial last lines are retried after the
+producer appends a newline. SQLite persists the file cursor and redacted pending
+handback messages, so confirmations can cross page boundaries. A capture cannot
+regress a newer persisted cursor. Terminal notifications also index full pages
+under a three-second total budget before the original context can be replaced;
+subsequent visible reads continue an unfinished capture. After a runtime closes,
+the desktop can supply the same ephemeral Provider snapshot through the native
+client bridge. Recovery compares its digest with the accepted parent request
+before the child started; unknown or changed contexts only serve redacted caches.
+Matching historical reads index the original file without opening an Agent or
+replaying any request. Only a digest enters the durable request ledger.
+Successful native `SubagentHandback` delivery promotes its full `message` only
+after the matching result explicitly confirms success. Tool fields and final
+prose have no legacy 16 / 32 / 128 KiB clipping. Source credentials are redacted
+before storage. Pre-upgrade snapshots are still usable without execution; if
+fields were already discarded and the owning original record cannot be read,
+the UI explicitly marks missing source evidence instead of a display-size limit.
 Native reads have a three-second deadline and a shared two-reader limit; stopped
-runtimes serve only persisted snapshots or already recorded stdout events, without
-opening or replaying an Agent. No untrusted transcript paths are read. The visible child list refreshes independently of parent
+runtimes serve persisted records or recover native pages only with a verified
+historical redaction context, without opening or replaying an Agent. No untrusted transcript paths are read. The visible child list refreshes independently of parent
 events, and active child transcripts use the same 650 ms polling gap as the main
 conversation. Reads are serialized; metadata revisions coalesce into one queued
 refresh without invalidating an in-flight read. Completion queues a final read

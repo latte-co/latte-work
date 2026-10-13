@@ -746,6 +746,93 @@ async fn dispatch(s: &Service, request: Request) -> Result<Response> {
             let (tasks, truncated) = d.subagents(&session_id)?;
             Ok(Response::Subagents { tasks, truncated })
         })?,
+        Request::SubagentHistory {
+            provider,
+            session_id,
+            task_id,
+            after,
+            source,
+        } => {
+            db(&s.database, |d| d.subagent(&session_id, &task_id))?;
+            let control = s
+                .runs
+                .lock()
+                .map_err(|_| anyhow::anyhow!("run lock poisoned"))?
+                .get(&session_id)
+                .map(|run| run.control.clone());
+            let mut source_has_more = false;
+            if let Some(control) = control {
+                let permit = agents::child_read_permit()?;
+                let (reply, receive) = oneshot::channel();
+                if control
+                    .send(Control::SubagentHistory {
+                        task_id: task_id.clone(),
+                        permit,
+                        reply,
+                    })
+                    .await
+                    .is_ok()
+                {
+                    source_has_more = tokio::time::timeout(Duration::from_secs(10), receive)
+                        .await??
+                        .map_err(anyhow::Error::msg)?;
+                }
+            }
+            let cursor = db(&s.database, |d| {
+                d.child_history_cursor(&session_id, &task_id)
+            })?;
+            if !source_has_more && (cursor.identity.is_empty() || cursor.has_more) {
+                let fingerprint = providers::turn_fingerprint(provider.as_ref())?;
+                let accepted = db(&s.database, |d| {
+                    d.child_provider_fingerprint(&session_id, &task_id)
+                })?;
+                let session = db(&s.database, |d| d.session(&session_id))?;
+                let config = s
+                    .providers
+                    .lock()
+                    .map_err(|_| anyhow::anyhow!("Provider 配置锁异常"))?
+                    .turn_config(&session.agent, None, provider)?;
+                // A legacy request with no snapshot is only safe when it also
+                // used native defaults. A changed/unknown context serves cache.
+                if accepted == Some(fingerprint.clone())
+                    && (fingerprint.is_some() || config.provider.is_none())
+                    && let Some(parent) = session.native_id
+                {
+                    let (child, cwd) = db(&s.database, |d| {
+                        Ok((
+                            d.subagent(&session_id, &task_id)?,
+                            d.project(&session.project_id)?.path,
+                        ))
+                    })?;
+                    let permit = agents::child_read_permit()?;
+                    if let Some(page) = agents::child_history(
+                        std::path::PathBuf::from(cwd),
+                        parent,
+                        child.native_id,
+                        session_id.clone(),
+                        config,
+                        cursor,
+                        permit,
+                    )
+                    .await?
+                    {
+                        source_has_more = page.has_more;
+                        db(&s.database, |d| {
+                            d.cache_child_history(&session_id, &task_id, &page)
+                        })?;
+                    }
+                }
+            }
+            db(&s.database, |d| {
+                d.subagent_history(
+                    &session_id,
+                    &task_id,
+                    after,
+                    source.as_deref(),
+                    source_has_more,
+                )
+            })?
+        }
         Request::SubagentTranscript {
             session_id,
             task_id,

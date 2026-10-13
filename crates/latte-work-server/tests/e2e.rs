@@ -4541,3 +4541,151 @@ async fn git_review_wire_preserves_scope_and_branch_snapshot_after_reconnect() {
         Response::Error { .. }
     ));
 }
+
+#[tokio::test]
+async fn complete_child_history_recovers_every_native_page_and_long_report_without_agent_replay() {
+    let host = Host::start_with_environment(&[
+        ("LATTE_FIXTURE_CHILD_NATIVE_FILE", std::ffi::OsStr::new("1")),
+        (
+            "LATTE_FIXTURE_CHILD_HISTORY_LONG",
+            std::ffi::OsStr::new("1"),
+        ),
+    ])
+    .await;
+    let mut client = host.client().await;
+    let project = tempfile::tempdir().unwrap();
+    let id = session(&mut client, project.path()).await;
+    ask(
+        &mut client,
+        Request::Send {
+            provider: Some(latte_work_protocol::TurnProvider::Cli),
+            session_id: id.clone(),
+            request_id: "full-history".into(),
+            text: "subagent-process".into(),
+            model: None,
+            effort: None,
+            permission_mode: None,
+        },
+    )
+    .await;
+    wait(&mut client, &id, Status::Completed).await;
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    assert!(matches!(
+        ask(
+            &mut client,
+            Request::CloseAgentSession {
+                session_id: id.clone(),
+                only_if_idle: Some(true)
+            }
+        )
+        .await,
+        Response::Ok
+    ));
+    // Simulate a pre-upgrade daemon: only the legacy clipped snapshot exists.
+    // Recovery must read the owned native file without opening an Agent.
+    let database = rusqlite::Connection::open(host.directory.path().join("state.sqlite")).unwrap();
+    database
+        .execute("DELETE FROM subagent_history WHERE session_id=?1", [&id])
+        .unwrap();
+    database
+        .execute(
+            "DELETE FROM subagent_history_sources WHERE session_id=?1",
+            [&id],
+        )
+        .unwrap();
+    drop(database);
+    let read = |after, source| Request::SubagentHistory {
+        provider: Some(latte_work_protocol::TurnProvider::Cli),
+        session_id: id.clone(),
+        task_id: "tool:process-agent".into(),
+        after,
+        source,
+    };
+    let changed_context = Request::SubagentHistory {
+        provider: None,
+        session_id: id.clone(),
+        task_id: "tool:process-agent".into(),
+        after: None,
+        source: None,
+    };
+    assert!(
+        matches!(ask(&mut client,changed_context).await,Response::SubagentHistory{incomplete:true,source,..} if source=="legacy")
+    );
+    let (mut after, mut source, mut found) = (None, None, Vec::new());
+    for _ in 0..30 {
+        let response = ask(&mut client, read(after, source.clone())).await;
+        assert!(serde_json::to_vec(&response).unwrap().len() < latte_work_protocol::MAX_FRAME);
+        let Response::SubagentHistory {
+            events,
+            has_more,
+            after: next,
+            source_has_more,
+            incomplete,
+            source: new_source,
+        } = response
+        else {
+            panic!("history");
+        };
+        assert!(!incomplete);
+        found.extend(events);
+        after = next;
+        source = Some(new_source);
+        if !has_more && !source_has_more {
+            break;
+        }
+    }
+    assert_eq!(
+        found
+            .iter()
+            .filter(|e| matches!(&e.event,EventKind::Tool{id,..} if id.starts_with("long-read-")))
+            .count(),
+        700
+    );
+    let expected = format!(
+        "COMPLETE_NATIVE_REPORT\n{}COMPLETE_REPORT_END",
+        "full-report-segment\n".repeat(70000)
+    );
+    assert!(
+        found
+            .iter()
+            .any(|e| matches!(&e.event,EventKind::Text{text} if text==&expected))
+    );
+    assert!(found.windows(2).all(|p| p[0].seq < p[1].seq));
+    assert!(matches!(
+        ask(
+            &mut client,
+            Request::CloseAgentSession {
+                session_id: id.clone(),
+                only_if_idle: Some(true)
+            }
+        )
+        .await,
+        Response::Ok
+    ));
+    let target = tokio::sync::Mutex::new(host.client().await);
+    assert!(
+        matches!(latte_work_client::request_with_app_provider(&target,read(Some(found[found.len()-2].seq),Some("native".into())),|_|async {Ok(None)}).await.unwrap(),Response::SubagentHistory{events,..} if events.iter().any(|e|matches!(&e.event,EventKind::Text{text} if text==&expected)))
+    );
+    let mut reconnected = host.client().await;
+    let Response::SubagentHistory {
+        events,
+        has_more: false,
+        incomplete: false,
+        ..
+    } = ask(
+        &mut reconnected,
+        read(Some(found[found.len() - 2].seq), Some("native".into())),
+    )
+    .await
+    else {
+        panic!("persisted report");
+    };
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(&e.event,EventKind::Text{text} if text==&expected))
+    );
+    assert!(
+        matches!(ask(&mut reconnected,Request::Poll{session_id:id,after:0.0}).await,Response::Events{session,events,..} if session.agent_session_open==Some(false) && events.iter().filter(|e|matches!(e.event,EventKind::User{..})).count()==1)
+    );
+}

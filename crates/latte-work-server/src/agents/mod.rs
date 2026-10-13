@@ -6,6 +6,49 @@ mod claude_sessions;
 pub use adapter::{Action, AgentAdapter, AgentCommand, Input};
 use anyhow::{Result, bail};
 pub type ChildTranscript = (Vec<latte_work_protocol::Event>, bool);
+pub fn confirmed_child_report(
+    tool: &latte_work_protocol::EventKind,
+    result: &latte_work_protocol::EventKind,
+) -> Option<String> {
+    claude::confirmed_child_report(tool, result)
+}
+#[derive(Default, serde::Serialize, serde::Deserialize)]
+pub struct ChildHistoryCursor {
+    pub offset: u64,
+    pub identity: String,
+    #[serde(default)]
+    pub has_more: bool,
+    #[serde(default)]
+    pub pending_tail: bool,
+    pub handbacks: std::collections::HashMap<String, String>,
+}
+pub struct ChildHistoryPage {
+    pub events: Vec<latte_work_protocol::Event>,
+    pub cursor: ChildHistoryCursor,
+    pub has_more: bool,
+}
+pub async fn child_history(
+    cwd: std::path::PathBuf,
+    parent: String,
+    child: String,
+    session_id: String,
+    config: crate::providers::LaunchConfig,
+    cursor: ChildHistoryCursor,
+    permit: tokio::sync::OwnedSemaphorePermit,
+) -> Result<Option<ChildHistoryPage>> {
+    tokio::time::timeout(
+        std::time::Duration::from_secs(3),
+        tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            let Some(raw) = claude_sessions::read_child_page(&cwd, &parent, &child, cursor)? else {
+                return Ok(None);
+            };
+            claude::parse_child_history(raw, &parent, &child, &session_id, &config).map(Some)
+        }),
+    )
+    .await
+    .map_err(|_| anyhow::anyhow!("读取子智能体过程超时"))??
+}
 pub fn normalize_child_transcript(
     agent: &str,
     snapshot: ChildTranscript,

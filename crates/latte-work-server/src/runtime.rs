@@ -44,6 +44,11 @@ pub struct SendTurn {
     pub config: LaunchConfig,
 }
 pub enum Control {
+    SubagentHistory {
+        task_id: String,
+        permit: tokio::sync::OwnedSemaphorePermit,
+        reply: oneshot::Sender<Result<bool, String>>,
+    },
     SubagentTranscript {
         task_id: String,
         permit: tokio::sync::OwnedSemaphorePermit,
@@ -392,9 +397,9 @@ impl TurnState {
                         });
                         if let Ok((child, Some(parent), cwd)) = source {
                             let snapshot = agents::child_transcript(
-                                std::path::PathBuf::from(cwd),
-                                parent,
-                                child.native_id,
+                                std::path::PathBuf::from(&cwd),
+                                parent.clone(),
+                                child.native_id.clone(),
                                 session_id.into(),
                                 config.clone(),
                                 permit,
@@ -413,6 +418,49 @@ impl TurnState {
                                     config.redact(&error.to_string())
                                 ),
                                 _ => {}
+                            }
+                            // Index whole records while the owning redaction context
+                            // is still available. The total capture budget is bounded;
+                            // a visible history read resumes its persisted cursor.
+                            let deadline = std::time::Instant::now() + Duration::from_secs(3);
+                            while std::time::Instant::now() < deadline {
+                                let Ok(permit) = agents::child_read_permit() else {
+                                    break;
+                                };
+                                let result = async {
+                                    let cursor = db(database, |d| {
+                                        d.child_history_cursor(session_id, &child.id)
+                                    })?;
+                                    let page = agents::child_history(
+                                        std::path::PathBuf::from(&cwd),
+                                        parent.clone(),
+                                        child.native_id.clone(),
+                                        session_id.into(),
+                                        config.clone(),
+                                        cursor,
+                                        permit,
+                                    )
+                                    .await?;
+                                    if let Some(page) = page {
+                                        db(database, |d| {
+                                            d.cache_child_history(session_id, &child.id, &page)
+                                        })?;
+                                        return Ok(page.has_more);
+                                    }
+                                    Ok::<_, anyhow::Error>(false)
+                                }
+                                .await;
+                                match result {
+                                    Ok(true) => {}
+                                    Ok(false) => break,
+                                    Err(error) => {
+                                        eprintln!(
+                                            "child history capture: {}",
+                                            config.redact(&error.to_string())
+                                        );
+                                        break;
+                                    }
+                                }
                             }
                         }
                     }
@@ -905,6 +953,24 @@ async fn actor(
                         let _ = reply.send(Ok(()));
                         Ok(())
                     }
+                }
+                Some(Control::SubagentHistory { task_id, permit, reply }) => {
+                    let source=db(&database,|d|Ok((d.subagent(&session.id,&task_id)?,d.session(&session.id)?.native_id,d.child_history_cursor(&session.id,&task_id)?))).map(|(child,parent,cursor)|{
+                        let config=process.as_ref().filter(|p|p.adapter.knows_subagent(&child.native_id)).map(|p|p.config.clone());
+                        (child,parent,cursor,config)
+                    });
+                    let result=async {
+                        let (child,parent,cursor,config)=source?;
+                        let (Some(config),Some(parent))=(config,parent) else {return Ok(false);};
+                        let page=agents::child_history(std::path::PathBuf::from(&path),parent,child.native_id,session.id.clone(),config,cursor,permit).await?;
+                        if let Some(page)=page {
+                            db(&database,|d|d.cache_child_history(&session.id,&task_id,&page))?;
+                            return Ok(page.has_more);
+                        }
+                        Ok::<_,anyhow::Error>(false)
+                    }.await;
+                    let _=reply.send(result.map_err(|e|e.to_string()));
+                    Ok(())
                 }
                 Some(Control::SubagentTranscript { task_id, permit, reply }) => {
                     let source = db(&database, |d| Ok((d.subagent(&session.id, &task_id)?, d.session(&session.id)?.native_id))).map(|(child,parent)| {

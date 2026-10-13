@@ -166,7 +166,8 @@ export function SubagentsPanel({
                   task={selected}
                   events={transcript.events}
                   elapsed={age(selected)}
-                  truncated={transcript.truncated}
+                  incomplete={transcript.incomplete}
+                  readingMore={transcript.readingMore}
                 />
               ) : selected.summary ? (
                 <article className="markdown subagent-result">

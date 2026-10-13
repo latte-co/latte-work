@@ -105,6 +105,11 @@ for line in sys.stdin:
                 def child_record(kind,content):
                     return {'type':kind,'sessionId':native_id,'agentId':'process-native','isSidechain':True,'message':{'content':content}}
                 child_native_file.write_text(json.dumps(child_record('assistant',[{'type':'text','text':'text only in native file'},{'type':'tool_use','id':'child-read','name':'Read','input':{'file_path':'child.txt'}}]))+'\n'+json.dumps(child_record('user',[{'type':'tool_result','tool_use_id':'child-read','content':'child read output','is_error':False}]))+'\n')
+                if os.environ.get('LATTE_FIXTURE_CHILD_HISTORY_LONG'):
+                    with child_native_file.open('a') as f:
+                        for i in range(700):
+                            f.write(json.dumps(child_record('assistant',[{'type':'tool_use','id':f'long-read-{i}','name':'Read','input':{'step':i,'text':'process evidence '+('x'*1024)}}]))+'\n')
+
             emit({'type':'assistant','message':{'content':[{'type':'tool_use','id':'process-agent','name':'Agent','input':{'description':'Inspect with process'}}]}})
             emit({'type':'system','subtype':'task_started','task_id':'process-native','task_type':'local_agent','tool_use_id':'process-agent','description':'Inspect with process'})
             for part in ['child ', 'progress']:
@@ -118,6 +123,12 @@ for line in sys.stdin:
                 time.sleep(.2)
                 if child_native_file:
                     with child_native_file.open('a') as f:f.write(json.dumps(child_record('assistant',[{'type':'text','text':'native file final'}]))+'\n')
+                    if os.environ.get('LATTE_FIXTURE_CHILD_HISTORY_LONG'):
+                        with child_native_file.open('a') as f:
+                            report='COMPLETE_NATIVE_REPORT\n'+('full-report-segment\n'*70000)+'COMPLETE_REPORT_END'
+                            f.write(json.dumps(child_record('assistant',[{'type':'tool_use','id':'complete-report','name':'SubagentHandback','input':{'message':report}}]))+'\n')
+                            f.write(json.dumps(child_record('user',[{'type':'tool_result','tool_use_id':'complete-report','content':'{"success":true}','is_error':False}]))+'\n')
+
                 emit({'type':'assistant','parent_tool_use_id':'process-agent','message':{'content':[{'type':'text','text':'child final'}]}})
                 emit({'type':'system','subtype':'task_notification','task_id':'process-native','status':'completed','summary':'child final'})
                 emit({'type':'system','subtype':'session_state_changed','state':'idle'})

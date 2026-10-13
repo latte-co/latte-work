@@ -82,7 +82,7 @@ it("does not claim a missing tool result succeeded after completion and marks pa
       task={{ ...task, status: "completed" }}
       events={events.slice(0, 2)}
       elapsed="3s"
-      truncated
+      incomplete
     />,
   );
   expect(screen.getByText("未收到最终输出")).toBeTruthy();
@@ -90,7 +90,7 @@ it("does not claim a missing tool result succeeded after completion and marks pa
   details.open = true;
   fireEvent(details, new window.Event("toggle"));
   expect(screen.getByText("结果待确认")).toBeTruthy();
-  expect(screen.getByText(/部分过程或内容超出显示上限/)).toBeTruthy();
+  expect(screen.getByText(/部分原始记录暂不可读取/)).toBeTruthy();
 });
 it("shows the normalized delivered report instead of the task delivery receipt", () => {
   const receipt =
@@ -115,11 +115,44 @@ it("shows the normalized delivered report instead of the task delivery receipt",
         { kind: "text", text: "正文" },
       )}
       elapsed="3s"
-      truncated
+      incomplete
     />,
   );
   expect(screen.getByText("历史报告正文").closest("details")).toBeNull();
   expect(screen.queryByText(receipt)).toBeNull();
   expect(screen.getByRole("button", { name: "复制回复" })).toBeTruthy();
   expect(screen.getByText("用时 3s").closest("details")!.open).toBe(false);
+});
+
+it("reads all pages before claiming a final answer or folding the process", () => {
+  const view = render(
+    <SubagentTranscript
+      task={{ ...task, status: "completed", summary: "delivery receipt" }}
+      events={events}
+      elapsed="3s"
+      readingMore
+    />,
+  );
+  expect(screen.getByText("正在读取完整记录")).toBeTruthy();
+  expect(screen.queryByText("delivery receipt")).toBeNull();
+  expect(screen.queryByRole("button", { name: "复制回复" })).toBeNull();
+  expect(screen.getByText("child progress").closest("details")).toBeNull();
+  view.rerender(
+    <SubagentTranscript
+      task={{ ...task, status: "completed", summary: "delivery receipt" }}
+      events={[
+        ...events,
+        {
+          seq: 9,
+          session_id: "s",
+          at: 1,
+          event: { kind: "text", text: "完整最终正文" },
+        },
+      ]}
+      elapsed="3s"
+    />,
+  );
+  expect(screen.getByText("完整最终正文").closest("details")).toBeNull();
+  expect(screen.getByText("用时 3s").closest("details")!.open).toBe(false);
+  expect(screen.queryByText(/显示上限/)).toBeNull();
 });
