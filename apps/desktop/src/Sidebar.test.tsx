@@ -612,7 +612,7 @@ it("refreshes collapsed background projects even while the current view rerender
   let status: Session["status"] = "running";
   mocks.request.mockImplementation(async () => ({
     kind: "sessions",
-    sessions: [{ ...session(status), project_id: "other" }],
+    sessions: [{ ...session(status, true), project_id: "other" }],
   }));
   const props = () => {
     const s = state([]);
@@ -634,7 +634,88 @@ it("refreshes collapsed background projects even while the current view rerender
   expect(
     within(project).queryByRole("img", { name: "项目中有对话执行中" }),
   ).toBeNull();
+  expect(
+    within(project).getByRole("img", { name: "项目中有未读完成回复" }),
+  ).toBeTruthy();
   expect(mocks.request).toHaveBeenCalledTimes(2);
+});
+
+it("aggregates unread completions under collapsed projects with running and waiting priority", () => {
+  const completed = session("completed", true);
+  const running = { ...session("running"), id: "running" };
+  const waiting = { ...session("waiting"), id: "waiting" };
+  const view = render(<Sidebar state={state([completed])} />);
+  const project = screen.getByRole("button", { name: "Project" });
+  expect(
+    within(project).queryByRole("img", { name: "项目中有未读完成回复" }),
+  ).toBeNull();
+  fireEvent.click(project);
+  expect(
+    within(project).getByRole("img", { name: "项目中有未读完成回复" }),
+  ).toBeTruthy();
+  view.rerender(<Sidebar state={state([completed, waiting, running])} />);
+  expect(
+    within(project).getByRole("img", { name: "项目中有对话执行中" }),
+  ).toBeTruthy();
+  expect(
+    within(project).queryByRole("img", { name: "项目中有未读完成回复" }),
+  ).toBeNull();
+  view.rerender(<Sidebar state={state([completed, waiting])} />);
+  expect(
+    within(project).getByRole("img", { name: "项目中有对话等待确认" }),
+  ).toBeTruthy();
+  view.rerender(<Sidebar state={state([completed])} />);
+  expect(
+    within(project).getByRole("img", { name: "项目中有未读完成回复" }),
+  ).toBeTruthy();
+  view.rerender(<Sidebar state={state([{ ...completed, unread: false }])} />);
+  expect(
+    within(project).queryByRole("img", { name: "项目中有未读完成回复" }),
+  ).toBeNull();
+  view.rerender(
+    <Sidebar
+      state={state([
+        { ...completed, archived: true },
+        { ...running, archived: true },
+      ])}
+    />,
+  );
+  expect(within(project).queryByRole("img", { name: /项目中有/ })).toBeNull();
+});
+
+it("includes pinned completions without mixing projects from different hosts", () => {
+  const completed = {
+    ...session("completed", true),
+    pinned_at: 1,
+    hostId: "local",
+  };
+  const base = state([]);
+  const props = {
+    ...base,
+    sessionId: "",
+    pinned: [completed],
+    hosts: [
+      ...base.hosts,
+      { id: "remote", name: "Remote", ssh: "remote", server_path: null },
+    ],
+    projects: [
+      ...base.projects,
+      { id: "p", hostId: "remote", name: "Remote project", path: "/remote" },
+    ],
+  };
+  mocks.request.mockResolvedValue({ kind: "sessions", sessions: [] });
+  render(<Sidebar state={props} />);
+  const project = screen.getByRole("button", { name: "Project" });
+  fireEvent.click(project);
+  expect(
+    within(project).getByRole("img", { name: "项目中有未读完成回复" }),
+  ).toBeTruthy();
+  expect(
+    within(screen.getByRole("button", { name: "Remote project" })).queryByRole(
+      "img",
+      { name: "项目中有未读完成回复" },
+    ),
+  ).toBeNull();
 });
 it("opens row menus without selecting a conversation and keeps the trigger marked open", () => {
   const s = state([session("running")]);

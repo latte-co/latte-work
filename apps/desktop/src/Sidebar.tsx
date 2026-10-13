@@ -664,8 +664,11 @@ export function Sidebar({
               !loadingProjects[key] &&
               !projectErrors[key] &&
               noSessions;
-            const running = projectSessions.some((s) => s.status === "running");
-            const waiting = projectSessions.some((s) => s.status === "waiting");
+            const running = allSessions.some((s) => s.status === "running");
+            const waiting = allSessions.some((s) => s.status === "waiting");
+            const unreadCompleted = allSessions.some(
+              (s) => s.status === "completed" && s.unread,
+            );
             const toggle = () => {
               setExpandedProjects((old) => ({ ...old, [key]: !expanded }));
               if (!expanded && !selected) void loadProjectSessions(p);
@@ -762,6 +765,13 @@ export function Sidebar({
                               size={14}
                               role="img"
                               aria-label="项目中有对话等待确认"
+                            />
+                          ) : unreadCompleted ? (
+                            <span
+                              className="unread-dot project-activity"
+                              role="img"
+                              aria-label="项目中有未读完成回复"
+                              title="有已完成对话尚未阅读"
                             />
                           ) : null)}
                       </span>
