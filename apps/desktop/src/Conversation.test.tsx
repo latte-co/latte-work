@@ -759,3 +759,89 @@ it("opens the subagent panel instead of sending a chat message for list-agents",
   expect(state.send).not.toHaveBeenCalled();
   expect(input().value).toBe("");
 });
+
+it.each(["running", "waiting", "completed"] as const)(
+  "opens local navigation during %s without sending or stopping the agent",
+  (status) => {
+    const state = props();
+    const openSubagents = vi.fn();
+    render(
+      <Conversation
+        {...state}
+        session={{ ...session("s"), status }}
+        openSubagents={openSubagents}
+      />,
+    );
+    fireEvent.change(input(), { target: { value: "/agents " } });
+    const button = screen.getByRole("button", { name: "打开子智能体" });
+    expect((button as HTMLButtonElement).disabled).toBe(false);
+    fireEvent.click(button);
+    expect(openSubagents).toHaveBeenCalledOnce();
+    expect(state.send).not.toHaveBeenCalled();
+    expect(state.cancel).not.toHaveBeenCalled();
+    expect(input().value).toBe("");
+  },
+);
+
+it("opens the local panel even without a connected available agent", () => {
+  const state = props();
+  const openSubagents = vi.fn();
+  render(
+    <Conversation
+      {...state}
+      connected={false}
+      available={false}
+      agentSessionState="unknown"
+      session={session("s")}
+      openSubagents={openSubagents}
+    />,
+  );
+  fireEvent.change(input(), { target: { value: "/list-agents " } });
+  const button = screen.getByRole("button", { name: "打开子智能体" });
+  expect((button as HTMLButtonElement).disabled).toBe(false);
+  fireEvent.click(button);
+  expect(openSubagents).toHaveBeenCalledOnce();
+  expect(state.send).not.toHaveBeenCalled();
+  expect(state.cancel).not.toHaveBeenCalled();
+});
+
+it("keeps a pending send disabled when polling reports running, then sends the next turn once", async () => {
+  const p = props();
+  let finish!: (value: boolean) => void;
+  p.send.mockImplementationOnce(
+    () =>
+      new Promise<boolean>((resolve) => {
+        finish = resolve;
+      }),
+  );
+  const view = render(<Conversation {...p} session={session("s")} />);
+  fireEvent.change(input(), { target: { value: "first" } });
+  fireEvent.click(screen.getByRole("button", { name: "发送任务" }));
+  view.rerender(
+    <Conversation {...p} session={{ ...session("s"), status: "running" }} />,
+  );
+  const pending = screen.getByRole("button", {
+    name: "正在发送任务",
+  }) as HTMLButtonElement;
+  expect(pending.disabled).toBe(true);
+  fireEvent.click(pending);
+  expect(p.cancel).not.toHaveBeenCalled();
+  expect(p.send).toHaveBeenCalledTimes(1);
+  await act(async () => finish(true));
+  view.rerender(
+    <Conversation {...p} session={{ ...session("s"), status: "completed" }} />,
+  );
+  fireEvent.change(input(), { target: { value: "second" } });
+  await act(async () =>
+    fireEvent.click(screen.getByRole("button", { name: "发送任务" })),
+  );
+  expect(p.send).toHaveBeenCalledTimes(2);
+  expect(p.send).toHaveBeenLastCalledWith(
+    "second",
+    null,
+    null,
+    null,
+    undefined,
+  );
+  expect(input().value).toBe("");
+});

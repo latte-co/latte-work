@@ -51,7 +51,7 @@ it("opens task baseline diffs and labels legacy tasks without invented changes",
   });
   render(<TaskChangesView {...props} />);
   await screen.findByText("此任务没有记录文件基线");
-  expect(screen.queryByText("本任务尚无可确认的文件变更")).toBeNull();
+  expect(screen.queryByText("本任务没有文件变更")).toBeNull();
 });
 it("loads frozen turn diffs and fences responses after switching turns", async () => {
   let finish!: (value: unknown) => void;
@@ -85,3 +85,34 @@ it("loads frozen turn diffs and fences responses after switching turns", async (
   });
   expect(screen.queryByRole("button", { name: "工作区" })).toBeNull();
 });
+
+it.each([false, true])(
+  "does not show zero totals for an empty saved turn (partial=%s)",
+  async (truncated) => {
+    mocks.request.mockReset().mockResolvedValue({
+      kind: "turn_changes",
+      changes: {
+        request_id: "r1",
+        undo: "ready",
+        interrupted: false,
+        background_pending: false,
+        summary: {
+          entries: [],
+          added: 0,
+          removed: 0,
+          binary_files: 0,
+          baseline_at: 1,
+          unavailable: null,
+          truncated,
+        },
+      },
+    });
+    render(<TaskChangesView {...props} requestId="r1" />);
+    await screen.findByText(
+      truncated ? "采集范围内没有已记录的文件变更" : "本轮没有文件变更",
+    );
+    expect(screen.queryByText("+0")).toBeNull();
+    expect(screen.queryByText("-0")).toBeNull();
+    expect(screen.queryByText(/后台任务/)).toBeNull();
+  },
+);

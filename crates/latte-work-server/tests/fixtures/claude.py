@@ -1,13 +1,27 @@
 #!/usr/bin/env python3
 """Deterministic native-protocol fixture. Never connects to a model."""
-import sys,json,time,os,subprocess,threading
+import sys,json,time,os,subprocess,threading,pathlib,re
 if '--version' in sys.argv:
     print('fixture-claude 1.0');sys.exit(0)
 if '--help' in sys.argv:
+    if os.environ.get('LATTE_FIXTURE_PERMISSION_HELP') in ('hidden', 'unsupported'):
+        if any(arg.startswith('--permission-mode=') for arg in sys.argv):
+            if os.environ['LATTE_FIXTURE_PERMISSION_HELP']=='hidden':
+                print("error: option '--permission-mode <mode>' argument 'latteWorkPermissionProbe' is invalid. Allowed choices are acceptEdits, auto, bypassPermissions, manual, dontAsk, plan.",file=sys.stderr)
+            else:
+                print("error: unknown option '--permission-mode'",file=sys.stderr)
+            sys.exit(1)
+        print('Usage: claude [options]\n  -h, --help Display help for command');sys.exit(0)
     print('--permission-mode <mode> (choices: "default", "acceptEdits", "plan", "dontAsk", "bypassPermissions")');sys.exit(0)
 output_lock=threading.Lock()
 def emit(value):
     with output_lock: print(json.dumps(value),flush=True)
+native_id='11111111-1111-4111-8111-111111111111'
+store=pathlib.Path(os.environ['CLAUDE_CONFIG_DIR'])/'projects'/re.sub(r'[^a-zA-Z0-9]','-',os.path.realpath(os.getcwd()))/(native_id+'.jsonl')
+name=next((arg.split('=',1)[1] for arg in sys.argv if arg.startswith('--name=')),None)
+def metadata(value):
+    store.parent.mkdir(parents=True,exist_ok=True)
+    with store.open('a') as f:f.write(json.dumps(value)+'\n')
 turns=0
 child=None
 background=None
@@ -15,6 +29,16 @@ resumed=any(arg.startswith('--resume=') for arg in sys.argv)
 for line in sys.stdin:
     value=json.loads(line)
     if value['type']=='control_request':
+        if value['request']['subtype']=='rename_session':
+            title=value['request']['title']
+            if title=='FAIL_TITLE':
+                emit({'type':'control_response','response':{'subtype':'error','request_id':value['request_id'],'error':'fixture rename rejected'}})
+            else:
+                name=title
+                metadata({'type':'custom-title','customTitle':title,'sessionId':native_id})
+                emit({'type':'system','subtype':'session_title_changed','title':title,'session_id':native_id})
+                emit({'type':'control_response','response':{'subtype':'success','request_id':value['request_id']}})
+            continue
         if value['request']['subtype']=='interrupt':
             if child is not None:
                 child.terminate();child.wait();child=None
@@ -29,13 +53,25 @@ for line in sys.stdin:
         text=value['message']['content']
         resumed=resumed or turns>0
         turns+=1
-        emit({'type':'system','subtype':'init','session_id':'11111111-1111-4111-8111-111111111111'})
+        metadata({'type':'user','message':{'content':text},'sessionId':native_id})
+        if name: metadata({'type':'custom-title','customTitle':name,'sessionId':native_id})
+        emit({'type':'system','subtype':'init','session_id':native_id})
+        if text=='native-title':
+            if not name:
+                metadata({'type':'ai-title','aiTitle':'Agent generated title','sessionId':native_id})
+                emit({'type':'system','subtype':'session_title_changed','title':'Agent generated title','session_id':native_id})
+            emit({'type':'assistant','message':{'content':[{'type':'text','text':'TITLE_OK'}]}})
+            emit({'type':'result','subtype':'success','is_error':False})
+            continue
+
         if text.startswith('task-edit'):
+            emit({'type':'system','subtype':'session_state_changed','state':'busy'})
             with open('task.txt','w') as f:f.write('third line\n' if text.startswith('task-edit-second') else 'agent change\nsecond line\n')
             emit({'type':'assistant','message':{'content':[{'type':'tool_use','id':'edit-1','name':'Edit','input':{'file_path':'task.txt'}},{'type':'tool_use','id':'connector-1','name':'mcp__fixture_docs__read','input':{}}]}})
             emit({'type':'assistant','parent_tool_use_id':'child-agent','message':{'content':[{'type':'tool_use','id':'child-read','name':'mcp__fixture_docs__search','input':{}}]}})
             emit({'type':'assistant','message':{'content':[{'type':'text','text':'TASK_EDIT_OK'}]}})
             emit({'type':'result','subtype':'success','is_error':False})
+            emit({'type':'system','subtype':'session_state_changed','state':'idle'})
             continue
         if text=='environment':
             output=subprocess.check_output(['latte-env-fixture'],text=True)
@@ -61,7 +97,32 @@ for line in sys.stdin:
             child=subprocess.Popen(['sleep','120'])
             emit({'type':'assistant','message':{'content':[{'type':'text','text':f'child:{child.pid}'}]}})
             continue
-        if text=='subagents':
+        if text=='subagent-process':
+            child_native_file=None
+            if os.environ.get('LATTE_FIXTURE_CHILD_NATIVE_FILE'):
+                child_native_file=store.with_suffix('')/'subagents/agent-process-native.jsonl'
+                child_native_file.parent.mkdir(parents=True,exist_ok=True)
+                def child_record(kind,content):
+                    return {'type':kind,'sessionId':native_id,'agentId':'process-native','isSidechain':True,'message':{'content':content}}
+                child_native_file.write_text(json.dumps(child_record('assistant',[{'type':'text','text':'text only in native file'},{'type':'tool_use','id':'child-read','name':'Read','input':{'file_path':'child.txt'}}]))+'\n'+json.dumps(child_record('user',[{'type':'tool_result','tool_use_id':'child-read','content':'child read output','is_error':False}]))+'\n')
+            emit({'type':'assistant','message':{'content':[{'type':'tool_use','id':'process-agent','name':'Agent','input':{'description':'Inspect with process'}}]}})
+            emit({'type':'system','subtype':'task_started','task_id':'process-native','task_type':'local_agent','tool_use_id':'process-agent','description':'Inspect with process'})
+            for part in ['child ', 'progress']:
+                emit({'type':'stream_event','parent_tool_use_id':'process-agent','event':{'type':'content_block_delta','delta':{'type':'text_delta','text':part}}})
+            emit({'type':'assistant','parent_tool_use_id':'process-agent','message':{'content':[{'type':'text','text':'child progress'},{'type':'tool_use','id':'child-read','name':'Read','input':{'file_path':'child.txt'}}]}})
+            emit({'type':'user','parent_tool_use_id':'process-agent','message':{'content':[{'type':'tool_result','tool_use_id':'child-read','content':'child read output','is_error':False}]}})
+            emit({'type':'user','message':{'content':[{'type':'tool_result','tool_use_id':'process-agent','content':'Launched in background'}]}})
+            emit({'type':'assistant','message':{'content':[{'type':'text','text':'parent final'}]}})
+            emit({'type':'result','subtype':'success','is_error':False})
+            def finish_process_child():
+                time.sleep(.2)
+                if child_native_file:
+                    with child_native_file.open('a') as f:f.write(json.dumps(child_record('assistant',[{'type':'text','text':'native file final'}]))+'\n')
+                emit({'type':'assistant','parent_tool_use_id':'process-agent','message':{'content':[{'type':'text','text':'child final'}]}})
+                emit({'type':'system','subtype':'task_notification','task_id':'process-native','status':'completed','summary':'child final'})
+                emit({'type':'system','subtype':'session_state_changed','state':'idle'})
+            threading.Thread(target=finish_process_child,daemon=True).start()
+        elif text=='subagents':
             emit({'type':'assistant','message':{'content':[{'type':'tool_use','id':'agent-tool','name':'Agent','input':{'description':'Inspect project'}}]}})
             emit({'type':'system','subtype':'task_started','task_id':'native-child','task_type':'local_agent','tool_use_id':'agent-tool','description':'Inspect project'})
             emit({'type':'system','subtype':'task_progress','task_id':'native-child','description':'Inspect project','last_tool_name':'Read'})

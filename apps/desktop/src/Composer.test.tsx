@@ -36,14 +36,16 @@ vi.mock("./api", () => ({
 function Harness({
   hostId = "remote",
   projectId = "p",
+  agent = "claude",
 }: {
   hostId?: string;
   projectId?: string;
+  agent?: string;
 }) {
   const [text, setText] = useState("");
   return (
     <Composer
-      agent="claude"
+      agent={agent}
       hostId={hostId}
       projectId={projectId}
       connected
@@ -500,34 +502,94 @@ it("keeps pasted text authoritative when a clipboard manager restores older file
   expect(pasteMocks.importFile).not.toHaveBeenCalled();
 });
 
-it("passes a native subagent UI action with exact pasted command arguments, without sending on selection", async () => {
+it("shows one local subagent entry and hides native listing variants", async () => {
   mocks.request.mockResolvedValue({
     kind: "agent_commands",
     commands: [
       {
         name: "agents",
-        description: "Native agents",
+        display_name: "Manage native agents",
+        description: "Native wizard",
+        argument_hint: "",
+        ui_action: "subagents",
+      },
+      {
+        name: "list-agents",
+        description: "Native list",
+        argument_hint: "",
+        ui_action: "subagents",
+      },
+      {
+        name: "tasks",
+        description: "Native tasks",
+        argument_hint: "",
+        ui_action: "subagents",
+      },
+      {
+        name: "native-list",
+        description: "Other adapter's native list",
+        argument_hint: "",
+        ui_action: "subagents",
+      },
+      { name: "compact", description: "压缩上下文", argument_hint: "" },
+    ],
+  });
+  render(<Harness agent="another" />);
+  type("/");
+  await waitFor(() => expect(mocks.request).toHaveBeenCalled());
+  await screen.findByRole("option", { name: /压缩上下文/ });
+  expect(screen.getAllByRole("option")).toHaveLength(2);
+  expect(
+    screen.getByRole("option", { name: /子智能体/ }).textContent,
+  ).toContain("/agents");
+  expect(
+    screen.queryByRole("option", {
+      name: /list-agents|Native wizard|Native list|Native tasks/,
+    }),
+  ).toBeNull();
+  fireEvent.click(screen.getByRole("option", { name: /子智能体/ }));
+  expect(mocks.openSubagents).not.toHaveBeenCalled();
+  expect(mocks.send).not.toHaveBeenCalled();
+  mocks.request.mockClear();
+  fireEvent.click(screen.getByText("发送"));
+  expect(mocks.openSubagents).toHaveBeenCalledOnce();
+  expect(mocks.request).not.toHaveBeenCalled();
+  expect(mocks.send).not.toHaveBeenCalled();
+});
+
+it("keeps local navigation available when native command discovery fails", async () => {
+  mocks.request.mockRejectedValue(new Error("catalog unavailable"));
+  render(<Harness agent="another" />);
+  type("/");
+  await screen.findByText(/catalog unavailable/);
+  fireEvent.click(screen.getByRole("option", { name: /子智能体/ }));
+  mocks.request.mockClear();
+  fireEvent.click(screen.getByText("发送"));
+  expect(mocks.openSubagents).toHaveBeenCalledOnce();
+  expect(mocks.request).not.toHaveBeenCalled();
+  expect(mocks.send).not.toHaveBeenCalled();
+});
+
+it("does not submit an adapter-specific navigation command discovered from pasted text", async () => {
+  mocks.request.mockResolvedValue({
+    kind: "agent_commands",
+    commands: [
+      {
+        name: "native-list",
+        description: "",
         argument_hint: "",
         ui_action: "subagents",
       },
     ],
   });
-  render(<Harness />);
-  type("/ag");
-  await screen.findByRole("option", { name: /agents/ });
-  fireEvent.keyDown(screen.getByRole("textbox"), { key: "Enter" });
-  expect(mocks.send).not.toHaveBeenCalled();
-  type("/agents 保留原生参数");
+  render(<Harness agent="another" />);
+  type("/native-list ");
   fireEvent.click(screen.getByText("发送"));
-  await waitFor(() =>
-    expect(mocks.send).toHaveBeenCalledWith(
-      "/agents 保留原生参数",
-      "subagents",
-    ),
-  );
+  await waitFor(() => expect(mocks.openSubagents).toHaveBeenCalledOnce());
+  expect(mocks.send).not.toHaveBeenCalled();
 });
 
-it("discovers a fully pasted native command and fences a late discovery after changing projects", async () => {
+it("fences a late discovery of adapter-specific navigation after changing projects", async () => {
   let finish!: (value: unknown) => void;
   mocks.request.mockImplementation(
     () =>
@@ -536,22 +598,16 @@ it("discovers a fully pasted native command and fences a late discovery after ch
       }),
   );
   const view = render(<Harness />);
-  type("/agents 参数");
+  type("/native-list ");
   fireEvent.click(screen.getByText("发送"));
-  await waitFor(() =>
-    expect(mocks.request).toHaveBeenCalledWith("remote", {
-      method: "agent_commands",
-      agent: "claude",
-      project_id: "p",
-    }),
-  );
+  await waitFor(() => expect(mocks.request).toHaveBeenCalled());
   view.rerender(<Harness projectId="other" />);
   await act(async () =>
     finish({
       kind: "agent_commands",
       commands: [
         {
-          name: "agents",
+          name: "native-list",
           description: "",
           argument_hint: "",
           ui_action: "subagents",
@@ -559,8 +615,30 @@ it("discovers a fully pasted native command and fences a late discovery after ch
       ],
     }),
   );
+  expect(mocks.openSubagents).not.toHaveBeenCalled();
   expect(mocks.send).not.toHaveBeenCalled();
 });
+
+it.each([
+  "/agents inspect",
+  "/list-agents all",
+  "/tasks 参数",
+  "/agents\n请继续检查",
+])(
+  "never forwards navigation parameters in %s, and preserves the draft",
+  async (command) => {
+    render(<Harness agent="another" />);
+    type(command);
+    fireEvent.click(screen.getByText("发送"));
+    expect(mocks.openSubagents).toHaveBeenCalledOnce();
+    expect(mocks.send).not.toHaveBeenCalled();
+    expect(mocks.request).not.toHaveBeenCalled();
+    expect((screen.getByRole("textbox") as HTMLTextAreaElement).value).toBe(
+      command,
+    );
+    expect(screen.getByText(/此命令不接受参数/)).toBeTruthy();
+  },
+);
 
 it("prioritizes the exact native command over matches in other command descriptions", async () => {
   mocks.request.mockResolvedValue({
@@ -585,7 +663,7 @@ it("prioritizes the exact native command over matches in other command descripti
   expect(mocks.send).not.toHaveBeenCalled();
 });
 
-it.each(["/list-agents", "/agents", "/tasks"])(
+it.each(["/list-agents", "/agents", "/tasks", "/subagents"])(
   "routes %s directly to the local panel without discovery or submission",
   async (command) => {
     render(<Harness />);
@@ -598,7 +676,7 @@ it.each(["/list-agents", "/agents", "/tasks"])(
   },
 );
 
-it("opens the local panel after selecting list-agents from the native menu", async () => {
+it("maps a typed native alias to the single local menu entry", async () => {
   mocks.request.mockResolvedValue({
     kind: "agent_commands",
     commands: [
@@ -612,7 +690,7 @@ it("opens the local panel after selecting list-agents from the native menu", asy
   });
   render(<Harness />);
   type("/list-ag");
-  await screen.findByRole("option", { name: /list-agents/ });
+  await screen.findByRole("option", { name: /子智能体/ });
   fireEvent.keyDown(screen.getByRole("textbox"), { key: "Enter" });
   expect(mocks.openSubagents).not.toHaveBeenCalled();
   expect(mocks.send).not.toHaveBeenCalled();

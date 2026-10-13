@@ -23,6 +23,11 @@ import {
   commandTitle,
   composerTrigger,
   isSubagentPanelCommand,
+  hasCommandArguments,
+  isNativeSubagentCommand,
+  subagentPanelAliases,
+  subagentPanelArgumentNotice,
+  unifiedComposerCommands,
   referencePrompt,
   type ComposerTrigger,
 } from "./composerActions";
@@ -55,7 +60,11 @@ interface Props {
   placeholder: string;
   onSubmit: (prompt: string, uiAction?: "subagents") => Promise<boolean>;
   onOpenSubagents?: () => void;
-  toolbar: (submit: () => void, hasContent: boolean) => ReactNode;
+  toolbar: (
+    submit: () => void,
+    hasContent: boolean,
+    localNavigation: boolean,
+  ) => ReactNode;
 }
 type Option = {
   id: string;
@@ -312,18 +321,31 @@ export function Composer(props: Props) {
     replaceTrigger(`/${name} `);
     close();
   }
+  const panelAliases = [
+    ...subagentPanelAliases,
+    ...commands.filter(isNativeSubagentCommand).map((command) => command.name),
+  ];
+  const localNavigation =
+    isSubagentPanelCommand(value) ||
+    commands.some(
+      (command) =>
+        isNativeSubagentCommand(command) &&
+        value.trim().split(/\s/)[0] === `/${command.name}`,
+    );
   const options: Option[] =
     mode === "commands"
-      ? commands
+      ? unifiedComposerCommands(commands)
           .filter((item) =>
-            `${item.name} ${commandTitle(item, agent)} ${item.description}`
+            `${item.name} ${commandTitle(item, agent)} ${item.description} ${item.ui_action === "subagents" ? panelAliases.join(" ") : ""}`
               .toLowerCase()
               .includes(query.toLowerCase()),
           )
           .sort(
             (a, b) =>
               Number(b.name.toLowerCase() === query.toLowerCase()) -
-              Number(a.name.toLowerCase() === query.toLowerCase()),
+                Number(a.name.toLowerCase() === query.toLowerCase()) ||
+              Number(b.ui_action === "subagents") -
+                Number(a.ui_action === "subagents"),
           )
           .map((item) => ({
             id: item.name,
@@ -495,13 +517,8 @@ export function Composer(props: Props) {
   }
   async function submit() {
     if (disabled || sending || submitting.current || pasteBusy.current) return;
-    if (isSubagentPanelCommand(value, agent)) {
-      close();
-      if (props.onOpenSubagents) {
-        props.onOpenSubagents();
-        onChange("");
-        setNotice("");
-      } else setNotice("无法打开子智能体面板");
+    if (localNavigation) {
+      openSubagentPanel();
       return;
     }
     if (value.trimStart().startsWith("/") && attached.length) {
@@ -537,8 +554,12 @@ export function Composer(props: Props) {
       const uiAction = catalog.find(
         (command) => command.name === nativeCommand,
       )?.ui_action;
+      if (uiAction === "subagents") {
+        openSubagentPanel();
+        return;
+      }
       const prompt = referencePrompt(value, attached);
-      if (await (uiAction ? onSubmit(prompt, uiAction) : onSubmit(prompt))) {
+      if (await onSubmit(prompt)) {
         if (!props.referenceState && currentScope.current === owner)
           setReferences({ scope: owner, entries: [] });
         setNotice("");
@@ -547,6 +568,19 @@ export function Composer(props: Props) {
       if (currentScope.current === owner) setNotice(message(cause));
     } finally {
       submitting.current = false;
+    }
+  }
+  function openSubagentPanel() {
+    close();
+    if (!props.onOpenSubagents) {
+      setNotice("无法打开子智能体面板");
+      return;
+    }
+    props.onOpenSubagents();
+    if (hasCommandArguments(value)) setNotice(subagentPanelArgumentNotice);
+    else {
+      onChange("");
+      setNotice("");
     }
   }
   function keys(event: React.KeyboardEvent) {
@@ -927,6 +961,7 @@ export function Composer(props: Props) {
         {toolbar(
           () => void submit(),
           !pasting && (!!value.trim() || !!attached.length),
+          localNavigation,
         )}
       </div>
     </div>

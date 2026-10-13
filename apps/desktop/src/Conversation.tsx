@@ -697,7 +697,7 @@ export function Conversation({
                   ? "描述任务，@ 添加引用，/ 调用 Agent 命令…"
                   : "先添加或选择一个项目"
           }
-          toolbar={(submit, hasContent) => (
+          toolbar={(submit, hasContent, localNavigation) => (
             <>
               <PermissionPicker
                 key={JSON.stringify([hostId, agentId])}
@@ -734,24 +734,27 @@ export function Conversation({
                 }
               />
               <ComposerAction
-                active={!!active}
+                active={!!active && !localNavigation}
+                label={localNavigation ? "打开子智能体" : undefined}
                 sending={sending}
                 disabled={
-                  active
-                    ? !connected
-                    : !!session?.archived ||
-                      !modelReady ||
-                      liveSessionState === "opening" ||
-                      liveSessionState === "restoring" ||
-                      liveSessionState === "error" ||
-                      liveSessionState === "unknown" ||
-                      !hasContent ||
-                      !projectName ||
-                      !connected ||
-                      !available ||
-                      sending
+                  localNavigation
+                    ? !!session?.archived || !projectName || sending
+                    : active
+                      ? !connected
+                      : !!session?.archived ||
+                        !modelReady ||
+                        liveSessionState === "opening" ||
+                        liveSessionState === "restoring" ||
+                        liveSessionState === "error" ||
+                        liveSessionState === "unknown" ||
+                        !hasContent ||
+                        !projectName ||
+                        !connected ||
+                        !available ||
+                        sending
                 }
-                onClick={active ? stop : submit}
+                onClick={active && !localNavigation ? stop : submit}
               />
             </>
           )}

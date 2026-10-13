@@ -11,7 +11,11 @@ import {
   workspaceKey,
 } from "./workspaceState";
 import { useEffect, useRef, useState } from "react";
-import { isSubagentPanelCommand } from "./composerActions";
+import {
+  isSubagentPanelCommand,
+  hasCommandArguments,
+  subagentPanelArgumentNotice,
+} from "./composerActions";
 import {
   connect,
   disconnect,
@@ -1026,11 +1030,13 @@ export function useWorkbench() {
     permission_mode: string | null,
     uiAction?: "subagents",
   ): Promise<boolean> {
-    if (
-      project &&
-      isSubagentPanelCommand(text, session?.agent ?? agent?.id ?? "claude")
-    ) {
+    if (project && (uiAction === "subagents" || isSubagentPanelCommand(text))) {
       openSubagents(workspaceId);
+      if (hasCommandArguments(text)) {
+        setError(subagentPanelArgumentNotice);
+        return false;
+      }
+      setError("");
       return true;
     }
     if (!connected || !text.trim() || sending.current) return false;
@@ -1080,8 +1086,6 @@ export function useWorkbench() {
             : s,
         ),
       );
-      if (uiAction === "subagents" && selectedSessionId.current === target.id)
-        openSubagents(workspaceKey(target.id));
       setError("");
       return true;
     } catch (e) {

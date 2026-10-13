@@ -21,6 +21,7 @@ pub fn lane(request: &Request) -> Lane {
         | Request::AgentPermissions { .. }
         | Request::Models { .. }
         | Request::ReadFile { .. }
+        | Request::SubagentTranscript { .. }
         | Request::Diff { .. }
         | Request::Changes { .. }
         | Request::ChangeDiff { .. }

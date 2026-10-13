@@ -1,9 +1,12 @@
-import { useEffect, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { Bot, ChevronRight } from "lucide-react";
 import { MessageContent } from "./MessageContent";
 import { WorkingStatus } from "./WorkingStatus";
 import type { Subagent, SubagentStatus } from "./protocol";
 import type { SubagentsState } from "./useSubagents";
+import { useSubagentTranscript } from "./useSubagentTranscript";
+import { SubagentTranscript } from "./SubagentTranscript";
+import { useStatusIssues } from "./statusNotices";
 
 export const subagentLabels: Record<SubagentStatus, string> = {
   running: "处理中",
@@ -55,10 +58,16 @@ export function SubagentsPanel({
   state,
   onOpen,
   taskId,
+  hostId = "",
+  sessionId,
+  active = false,
 }: {
   state: SubagentsState;
   onOpen?: (task: Subagent) => void;
   taskId?: string;
+  hostId?: string;
+  sessionId?: string;
+  active?: boolean;
 }) {
   const [now, setNow] = useState(Date.now());
   const counts = subagentCounts(state.tasks);
@@ -68,6 +77,37 @@ export function SubagentsPanel({
     return () => clearInterval(timer);
   }, [counts.active]);
   const selected = state.tasks.find((task) => task.id === taskId);
+  const transcript = useSubagentTranscript(
+    hostId,
+    sessionId,
+    taskId,
+    active && !!selected,
+    !!selected && ["running", "paused"].includes(selected.status),
+    selected?.updated_at,
+    state.connectionVersion,
+  );
+  const root = useRef<HTMLDivElement>(null);
+  const follow = useRef(true);
+  useLayoutEffect(() => {
+    follow.current = true;
+  }, [hostId, sessionId, taskId]);
+  useLayoutEffect(() => {
+    if (selected && root.current && follow.current)
+      root.current.scrollTop = root.current.scrollHeight;
+  }, [transcript.events, selected?.id]);
+  useStatusIssues(
+    active && selected
+      ? [
+          {
+            id: `subagent-transcript:${hostId}:${sessionId}:${taskId}`,
+            title: `${selected.title} 的过程无法读取`,
+            error: transcript.error,
+            pending: transcript.loading,
+            action: { label: "重试", run: transcript.reload },
+          },
+        ]
+      : [],
+  );
   const age = (task: Subagent) => {
     if (task.started_at === null) return "";
     const end = ["running", "paused"].includes(task.status)
@@ -77,7 +117,15 @@ export function SubagentsPanel({
   };
   if (selected)
     return (
-      <div className="subagents-panel">
+      <div
+        className="subagents-panel"
+        ref={root}
+        onScroll={(e) => {
+          const el = e.currentTarget;
+          follow.current =
+            el.scrollHeight - el.clientHeight - el.scrollTop < 80;
+        }}
+      >
         <div className="subagent-detail-heading">
           <Bot size={20} />
           <h2>{selected.title}</h2>
@@ -89,7 +137,14 @@ export function SubagentsPanel({
         {selected.last_tool && (
           <p className="subagent-last-tool">最近工具：{selected.last_tool}</p>
         )}
-        {selected.summary ? (
+        {sessionId ? (
+          <SubagentTranscript
+            task={selected}
+            events={transcript.events}
+            elapsed={age(selected)}
+            truncated={transcript.truncated}
+          />
+        ) : selected.summary ? (
           <article className="markdown subagent-result">
             <MessageContent text={selected.summary} />
           </article>

@@ -44,6 +44,15 @@ pub struct SendTurn {
     pub config: LaunchConfig,
 }
 pub enum Control {
+    SubagentTranscript {
+        task_id: String,
+        permit: tokio::sync::OwnedSemaphorePermit,
+        reply: oneshot::Sender<Result<Option<agents::ChildTranscript>, String>>,
+    },
+    RenameTitle {
+        title: String,
+        reply: oneshot::Sender<Result<String, String>>,
+    },
     Open {
         config: LaunchConfig,
         reply: oneshot::Sender<Result<(), String>>,
@@ -117,6 +126,120 @@ pub async fn submit(
         .context("会话接收超时，请核对请求状态；消息不会自动重发")??
         .map_err(anyhow::Error::msg)
 }
+pub async fn rename_title(
+    database: &Database,
+    runs: &Runs,
+    session: Session,
+    path: String,
+    title: String,
+) -> Result<Session> {
+    Store::validate_session_title(&title)?;
+    let control = runs
+        .lock()
+        .map_err(|_| anyhow::anyhow!("执行状态锁异常"))?
+        .get(&session.id)
+        .map(|run| run.control.clone());
+    if let Some(control) = control {
+        let (reply, receive) = oneshot::channel();
+        control
+            .try_send(Control::RenameTitle { title, reply })
+            .context("会话正在关闭或请求队列已满，标题未修改")?;
+        tokio::time::timeout(Duration::from_secs(10), receive)
+            .await
+            .context("原生标题修改结果待确认，请核对后重试")??
+            .map_err(anyhow::Error::msg)?;
+        return db(database, |s| s.session(&session.id));
+    }
+    if let Some(id) = session.native_id.clone() {
+        let agent = session.agent.clone();
+        let actual = tokio::task::spawn_blocking(move || {
+            agents::rename_saved_session(&agent, std::path::Path::new(&path), &id, &title)
+        })
+        .await??;
+        return db(database, |s| s.rename_session(&session.id, &actual));
+    }
+    // No native session exists yet. Persist the requested initial title, and pass it
+    // at native creation; never create a fake transcript or send a naming prompt.
+    db(database, |s| s.rename_session(&session.id, &title))
+}
+
+pub async fn refresh_titles(
+    database: &Database,
+    runs: &Runs,
+    response: &mut Response,
+) -> Result<()> {
+    let sessions: Vec<Session> = match response {
+        Response::Session { session }
+        | Response::Events { session, .. }
+        | Response::History { session, .. } => vec![session.clone()],
+        Response::Sessions { sessions } => sessions.clone(),
+        Response::RecentSessions { sessions, .. } => {
+            sessions.iter().map(|entry| entry.session.clone()).collect()
+        }
+        _ => return Ok(()),
+    };
+    let open_ids: std::collections::HashSet<String> = runs
+        .lock()
+        .map_err(|_| anyhow::anyhow!("执行状态锁异常"))?
+        .keys()
+        .cloned()
+        .collect();
+    let candidates = db(database, |s| {
+        sessions
+            .into_iter()
+            .filter(|session| session.native_id.is_some() && !open_ids.contains(&session.id))
+            .map(|session| {
+                s.project(&session.project_id)
+                    .map(|project| (session, project.path))
+            })
+            .collect::<Result<Vec<_>>>()
+    })?;
+    let titles = tokio::task::spawn_blocking(move || {
+        candidates
+            .into_iter()
+            .filter_map(|(session, path)| {
+                agents::session_title(
+                    &session.agent,
+                    std::path::Path::new(&path),
+                    session.native_id.as_deref()?,
+                )
+                .ok()
+                .flatten()
+                .map(|title| (session.id, title))
+            })
+            .collect::<Vec<_>>()
+    })
+    .await?;
+    for (id, title) in titles {
+        db(database, |s| {
+            s.sync_native_title(&id, &title.text, title.custom)
+        })?;
+    }
+    let update = |session: &mut Session| -> Result<()> {
+        let fresh = db(database, |s| s.session(&session.id))?;
+        session.title = fresh.title;
+        session.custom_title = fresh.custom_title;
+        Ok(())
+    };
+    match response {
+        Response::Session { session }
+        | Response::Events { session, .. }
+        | Response::History { session, .. } => update(session)?,
+        Response::Sessions { sessions } => {
+            for session in sessions {
+                update(session)?;
+            }
+        }
+        Response::RecentSessions { sessions, .. } => {
+            for entry in sessions {
+                update(&mut entry.session)?;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
 fn control_for(
     database: Database,
     runs: Runs,
@@ -219,6 +342,10 @@ impl TurnState {
     ) -> Result<Option<Outcome>> {
         for action in actions {
             match action {
+                Action::Title(title) => {
+                    db(database, |s| s.sync_live_native_title(session_id, &title))?;
+                }
+                Action::TitleRenamed(_) => bail!("未处理的原生标题确认"),
                 Action::SourceUsed { id, name } => {
                     db(database, |s| s.observe_tool(session_id, &id, &name))?
                 }
@@ -237,8 +364,61 @@ impl TurnState {
                     current.native_id = Some(id);
                     s.save(&current)
                 })?,
-                Action::Event(event) => db(database, |s| {
-                    s.event(session_id, config.redact_event(event)?)
+                Action::Event(event) => {
+                    let terminal_child = match &event {
+                        EventKind::Subagent { update }
+                            if update.status.is_some_and(|status| !status.active()) =>
+                        {
+                            Some(update.id.clone())
+                        }
+                        _ => None,
+                    };
+                    db(database, |s| {
+                        s.event(session_id, config.redact_event(event)?)
+                    })?;
+                    // Capture a completed child's full native output before this
+                    // process/redaction context can be replaced by a later turn.
+                    if let Some(native_id) = terminal_child
+                        && let Ok(permit) = agents::child_read_permit()
+                    {
+                        let source = db(database, |d| {
+                            let session = d.session(session_id)?;
+                            let cwd = d.project(&session.project_id)?.path;
+                            Ok((
+                                d.native_subagent(session_id, &native_id)?,
+                                session.native_id,
+                                cwd,
+                            ))
+                        });
+                        if let Ok((child, Some(parent), cwd)) = source {
+                            let snapshot = agents::child_transcript(
+                                std::path::PathBuf::from(cwd),
+                                parent,
+                                child.native_id,
+                                session_id.into(),
+                                config.clone(),
+                                permit,
+                            )
+                            .await;
+                            match snapshot {
+                                Ok(Some(snapshot)) if !snapshot.0.is_empty() => {
+                                    db(database, |d| {
+                                        d.cache_subagent_transcript(
+                                            session_id, &child.id, &snapshot,
+                                        )
+                                    })?;
+                                }
+                                Err(error) => eprintln!(
+                                    "child transcript capture: {}",
+                                    config.redact(&error.to_string())
+                                ),
+                                _ => {}
+                            }
+                        }
+                    }
+                }
+                Action::SubagentEvent { tool_use_id, event } => db(database, |s| {
+                    s.subagent_event(session_id, &tool_use_id, config.redact_event(event)?)
                 })?,
                 Action::Approval {
                     id,
@@ -293,6 +473,7 @@ impl Drop for Group {
 type Output = FramedRead<tokio::process::ChildStdout, LinesCodec>;
 struct Process {
     adapter: Box<dyn agents::AgentAdapter>,
+    rename_reply: Option<oneshot::Sender<Result<String, String>>>,
     group: Group,
     input: tokio::process::ChildStdin,
     output: Output,
@@ -324,6 +505,9 @@ impl Process {
         session_open: Arc<AtomicBool>,
     ) -> Result<Self> {
         let mut adapter = agents::create(&session.agent)?;
+        adapter.set_initial_title(
+            (session.custom_title && session.native_id.is_none()).then(|| session.title.clone()),
+        );
         let prepared = adapter.command(binary, path, session.native_id.as_deref(), &config)?;
         let mut command = prepared.command;
         command
@@ -356,6 +540,7 @@ impl Process {
         });
         Ok(Self {
             adapter,
+            rename_reply: None,
             group,
             input,
             output,
@@ -374,6 +559,22 @@ impl Process {
         })
     }
     async fn apply(&mut self, actions: Vec<Action>, database: &Database, id: &str) -> Result<()> {
+        let mut remaining = Vec::new();
+        for action in actions {
+            if let Action::TitleRenamed(result) = action {
+                let result = result.and_then(|title| {
+                    db(database, |s| s.sync_native_title(id, &title, true))
+                        .map(|session| session.title)
+                        .map_err(|e| e.to_string())
+                });
+                if let Some(reply) = self.rename_reply.take() {
+                    let _ = reply.send(result);
+                }
+            } else {
+                remaining.push(action);
+            }
+        }
+        let actions = remaining;
         let became_ready = actions.iter().any(|a| matches!(a, Action::Ready));
         if actions.iter().any(|a| matches!(a, Action::TurnStarted)) {
             self.turn_active = true;
@@ -407,7 +608,7 @@ impl Process {
                 id,
                 &self.path,
                 status != Status::Completed,
-                !self.adapter.can_reconfigure(),
+                self.adapter.has_background_work(),
             )
             .await?;
             db(database, |s| s.state(id, status, message))?;
@@ -428,6 +629,9 @@ impl Process {
         Ok(())
     }
     async fn close(&mut self) {
+        if let Some(reply) = self.rename_reply.take() {
+            let _ = reply.send(Err("原生会话已关闭，标题修改结果待确认".into()));
+        }
         self.session_open.store(false, Ordering::SeqCst);
         // Closing stdin alone lets some CLI versions wait indefinitely for background work.
         // Explicit stop/shutdown terminates and reaps the entire owned process group.
@@ -642,6 +846,19 @@ async fn actor(
             .map(|p| p.turn_deadline);
         let result: Result<()> = tokio::select! {
             control = controls.recv() => match control {
+                Some(Control::RenameTitle {title,reply}) => {
+                    safe_to_close.store(false, Ordering::SeqCst);
+                    if let Some(p)=process.as_mut().filter(|p|p.state.ready) {
+                        if p.rename_reply.is_some() {let _=reply.send(Err("标题修改结果待确认，请稍后重试".into()));Ok(())}
+                        else {
+                            let id=uuid::Uuid::new_v4().to_string();
+                            match p.adapter.advance(Input::RenameTitle {id:&id,title:&title}) {
+                                Ok(actions)=>{p.rename_reply=Some(reply);p.apply(actions,&database,&session.id).await}
+                                Err(error)=>{let _=reply.send(Err(error.to_string()));Ok(())}
+                            }
+                        }
+                    } else {let _=reply.send(Err("原生会话尚未就绪，标题未修改".into()));Ok(())}
+                }
                 Some(Control::Open { config, reply }) => {
                     let result = async {
                         if process.is_none() {
@@ -688,6 +905,23 @@ async fn actor(
                         let _ = reply.send(Ok(()));
                         Ok(())
                     }
+                }
+                Some(Control::SubagentTranscript { task_id, permit, reply }) => {
+                    let source = db(&database, |d| Ok((d.subagent(&session.id, &task_id)?, d.session(&session.id)?.native_id))).map(|(child,parent)| {
+                        let config = process.as_ref().filter(|p| p.adapter.knows_subagent(&child.native_id)).map(|p| p.config.clone());
+                        (child, parent, config)
+                    });
+                    let result = async {
+                        let (child, parent, config) = source?;
+                        let (Some(config), Some(parent)) = (config, parent) else { return Ok(None); };
+                        let snapshot = agents::child_transcript(std::path::PathBuf::from(&path), parent, child.native_id, session.id.clone(), config, permit).await?;
+                        if let Some(snapshot) = &snapshot && !snapshot.0.is_empty() {
+                            db(&database, |d| d.cache_subagent_transcript(&session.id, &task_id, snapshot))?;
+                        }
+                        Ok::<_, anyhow::Error>(snapshot.filter(|s| !s.0.is_empty()))
+                    }.await;
+                    let _ = reply.send(result.map_err(|e| e.to_string()));
+                    Ok(())
                 }
                 Some(Control::Send { turn, reply }) => {
                     safe_to_close.store(false, Ordering::SeqCst);

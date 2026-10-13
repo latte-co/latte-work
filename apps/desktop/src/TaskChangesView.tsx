@@ -89,7 +89,7 @@ export function TaskChangesView({
               : response.changes.undo === "unknown"
                 ? "撤销状态待核对，以下显示原始变更快照。"
                 : response.changes.background_pending
-                  ? "后台任务仍在执行，快照记录主任务结束时的修改。"
+                  ? "采集快照时后台任务尚未结束，此处保留当时已记录的修改。"
                   : response.changes.interrupted
                     ? "本轮已中断，快照保留中断时已记录的修改。"
                     : "",
@@ -141,12 +141,14 @@ export function TaskChangesView({
           <div className="workspace-file-heading">
             <span>
               {requestId ? "本轮变更" : "任务变更"}{" "}
-              {summary && !summary.unavailable && (
-                <span className="change-totals">
-                  <b>+{summary.added}</b>
-                  <em>-{summary.removed}</em>
-                </span>
-              )}
+              {summary &&
+                !summary.unavailable &&
+                summary.entries.length > 0 && (
+                  <span className="change-totals">
+                    <b>+{summary.added}</b>
+                    <em>-{summary.removed}</em>
+                  </span>
+                )}
             </span>
             <button
               className="icon-button"
@@ -190,7 +192,9 @@ export function TaskChangesView({
             !summary?.entries.length &&
             !error && (
               <p className="muted">
-                {requestId ? "本轮" : "本任务"}尚无可确认的文件变更
+                {summary?.truncated
+                  ? "采集范围内没有已记录的文件变更"
+                  : `${requestId ? "本轮" : "本任务"}没有文件变更`}
               </p>
             )}
           {!selected &&

@@ -138,3 +138,31 @@ it("keeps the changes card outside folded execution and replaces undo updates in
     value: { changes: { undo: "reverted" } },
   });
 });
+
+it.each([
+  { truncated: false, unavailable: null },
+  { truncated: true, unavailable: null },
+  { truncated: false, unavailable: "无法读取 Git 状态，请确认项目是 Git 仓库" },
+])(
+  "hides empty snapshots regardless of collection limits or Git availability (%j)",
+  (patch) => {
+    render(
+      <TurnChangesCard
+        {...props}
+        changes={{
+          ...changes,
+          background_pending: true,
+          summary: {
+            ...changes.summary,
+            entries: [],
+            added: 0,
+            removed: 0,
+            ...patch,
+          },
+        }}
+      />,
+    );
+    expect(screen.queryByRole("region", { name: "本轮文件变更" })).toBeNull();
+    expect(screen.queryByText(/已编辑|本轮变更未能记录/)).toBeNull();
+  },
+);

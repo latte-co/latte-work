@@ -76,7 +76,13 @@ export default function App() {
     interactionLocked: sidebarInteraction || statusOpen,
     toggle: toggleSidebar,
   });
-  const subagents = useSubagents(hostId, session?.id, connected, events);
+  const subagents = useSubagents(
+    hostId,
+    session?.id,
+    connected,
+    events,
+    workbench.hostConnectionVersions?.[hostId] ?? 0,
+  );
   const lastTurn = latestTurnChanges(events);
   const lastTurnVersion = lastTurn
     ? JSON.stringify([

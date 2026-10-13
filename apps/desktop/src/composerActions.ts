@@ -39,10 +39,44 @@ export function referencePrompt(text: string, references: ComposerReference[]) {
   )}`;
 }
 
-export function isSubagentPanelCommand(text: string, agent: string) {
+export const subagentPanelAliases = [
+  "agents",
+  "list-agents",
+  "tasks",
+  "subagents",
+];
+export const subagentPanelArgumentNotice =
+  "已打开子智能体面板；此命令不接受参数，输入内容已保留。";
+
+export function isSubagentPanelCommand(text: string) {
+  const name = /^\/([^\s]+)(?:\s|$)/.exec(text.trim())?.[1];
+  return !!name && subagentPanelAliases.includes(name);
+}
+
+export function hasCommandArguments(text: string) {
+  return /^\/[^\s]+\s+\S/.test(text.trim());
+}
+
+export function isNativeSubagentCommand(command: AgentSlashCommand) {
   return (
-    agent === "claude" && /^\/(?:agents|list-agents|tasks)$/.test(text.trim())
+    command.ui_action === "subagents" ||
+    subagentPanelAliases.includes(command.name)
   );
+}
+
+export function unifiedComposerCommands(
+  commands: AgentSlashCommand[],
+): AgentSlashCommand[] {
+  return [
+    {
+      name: "agents",
+      display_name: "子智能体",
+      description: "打开 Latte Work 子智能体面板",
+      argument_hint: "",
+      ui_action: "subagents",
+    },
+    ...commands.filter((command) => !isNativeSubagentCommand(command)),
+  ];
 }
 
 const claudeCommandTitles: Record<string, string> = {
@@ -66,8 +100,6 @@ const claudeCommandTitles: Record<string, string> = {
   insights: "使用洞察",
   recap: "会话回顾",
   goal: "设置目标",
-  agents: "管理智能体",
-  "list-agents": "智能体列表",
 };
 export function commandTitle(
   command: AgentSlashCommand,

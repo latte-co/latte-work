@@ -520,6 +520,10 @@ pub enum Request {
     Subagents {
         session_id: String,
     },
+    SubagentTranscript {
+        session_id: String,
+        task_id: String,
+    },
     Approve {
         session_id: String,
         request_id: String,
@@ -763,6 +767,10 @@ pub enum Response {
     },
     Subagents {
         tasks: Vec<Subagent>,
+        truncated: bool,
+    },
+    SubagentTranscript {
+        events: Vec<Event>,
         truncated: bool,
     },
     Changes {

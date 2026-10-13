@@ -1059,6 +1059,107 @@ async fn models_select_per_turn_validate_and_persist_without_changing_provider()
 }
 
 #[tokio::test]
+async fn native_session_titles_sync_both_ways_without_sending_or_stopping_turns() {
+    let host = Host::start().await;
+    let mut client = host.client().await;
+    let project = tempfile::tempdir().unwrap();
+    let id = session(&mut client, project.path()).await;
+    send(&mut client, &id, "title-r1", "native-title").await;
+    let events = wait(&mut client, &id, Status::Completed).await;
+    let before = events
+        .iter()
+        .filter(|e| matches!(e.event, EventKind::User { .. }))
+        .count();
+    assert!(
+        matches!(ask(&mut client,Request::Session{session_id:id.clone()}).await,Response::Session{session} if session.title=="Agent generated title" && !session.custom_title)
+    );
+    let rename = |title: &str| Request::RenameSession {
+        session_id: id.clone(),
+        title: title.into(),
+    };
+    assert!(
+        matches!(ask(&mut client,rename("Manual title")).await,Response::Session{session} if session.title=="Manual title" && session.custom_title)
+    );
+    assert!(matches!(
+        ask(&mut client, rename("FAIL_TITLE")).await,
+        Response::Error { .. }
+    ));
+    assert!(
+        matches!(ask(&mut client,Request::Poll{session_id:id.clone(),after:0.0}).await,Response::Events{session,events,..} if session.title=="Manual title" && session.status==Status::Completed && events.iter().filter(|e|matches!(e.event,EventKind::User{..})).count()==before)
+    );
+    send(&mut client, &id, "title-r2", "native-title").await;
+    wait(&mut client, &id, Status::Completed).await;
+    assert!(
+        matches!(ask(&mut client,Request::Session{session_id:id.clone()}).await,Response::Session{session} if session.title=="Manual title")
+    );
+    // Live rename while work is running must not end the turn or create a prompt.
+    send(&mut client, &id, "title-hang", "hang").await;
+    assert!(
+        matches!(ask(&mut client,rename("While running")).await,Response::Session{session} if session.title=="While running" && session.status==Status::Running)
+    );
+    ask(
+        &mut client,
+        Request::Cancel {
+            session_id: id.clone(),
+        },
+    )
+    .await;
+    wait(&mut client, &id, Status::Stopped).await;
+    assert!(matches!(
+        ask(
+            &mut client,
+            Request::CloseAgentSession {
+                session_id: id.clone(),
+                only_if_idle: None,
+            },
+        )
+        .await,
+        Response::Ok
+    ));
+    assert!(
+        matches!(ask(&mut client,rename("Closed title")).await,Response::Session{session} if session.title=="Closed title" && session.agent_session_open==Some(false))
+    );
+    let cwd = project.path().canonicalize().unwrap();
+    let name: String = cwd
+        .to_string_lossy()
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect();
+    let native = host
+        .directory
+        .path()
+        .join("claude-config/projects")
+        .join(name)
+        .join("11111111-1111-4111-8111-111111111111.jsonl");
+    let saved = std::fs::read_to_string(&native).unwrap();
+    assert!(saved.contains("Closed title"));
+    // An external native rename is reflected on read, including across reconnect.
+    use std::io::Write;
+    let mut file = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&native)
+        .unwrap();
+    writeln!(file,"{}",serde_json::json!({"type":"custom-title","customTitle":"External title","sessionId":"11111111-1111-4111-8111-111111111111"})).unwrap();
+    let mut reconnect = host.client().await;
+    assert!(
+        matches!(ask(&mut reconnect,Request::Session{session_id:id.clone()}).await,Response::Session{session} if session.title=="External title" && session.custom_title)
+    );
+    ask(
+        &mut reconnect,
+        Request::OpenAgentSession {
+            session_id: id.clone(),
+            provider: None,
+        },
+    )
+    .await;
+    send(&mut reconnect, &id, "title-r3", "identity").await;
+    wait(&mut reconnect, &id, Status::Completed).await;
+    assert!(
+        matches!(ask(&mut reconnect,Request::Session{session_id:id}).await,Response::Session{session} if session.title=="External title")
+    );
+}
+
+#[tokio::test]
 async fn session_menu_metadata_is_durable_and_host_scoped() {
     let host = Host::start().await;
     let mut client = host.client().await;
@@ -2388,6 +2489,236 @@ async fn agent_commands_discovery_dispatch_resume_and_unsupported_are_native() {
     assert!(!events.iter().any(
         |event| matches!(&event.event, EventKind::Text { text } if text.contains("not-supported"))
     ));
+}
+
+#[tokio::test]
+async fn native_child_transcript_is_cached_without_reopening_an_agent_or_replaying_a_prompt() {
+    let host = Host::start_with_environment(&[(
+        "LATTE_FIXTURE_CHILD_NATIVE_FILE",
+        std::ffi::OsStr::new("1"),
+    )])
+    .await;
+    let mut client = host.client().await;
+    let project = tempfile::tempdir().unwrap();
+    let id = session(&mut client, project.path()).await;
+    send(&mut client, &id, "native-child-process", "subagent-process").await;
+    wait(&mut client, &id, Status::Completed).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let Response::Subagents { tasks, .. } = ask(
+        &mut client,
+        Request::Subagents {
+            session_id: id.clone(),
+        },
+    )
+    .await
+    else {
+        panic!("tasks")
+    };
+    let task = &tasks[0];
+    let read = Request::SubagentTranscript {
+        session_id: id.clone(),
+        task_id: task.id.clone(),
+    };
+    assert!(matches!(
+        ask(
+            &mut client,
+            Request::CloseAgentSession {
+                session_id: id.clone(),
+                only_if_idle: Some(true),
+            },
+        )
+        .await,
+        Response::Ok
+    ));
+    let Response::SubagentTranscript { events, truncated } = ask(&mut client, read.clone()).await
+    else {
+        panic!("native child")
+    };
+    assert!(!truncated);
+    assert!(events.iter().any(
+        |e| matches!(&e.event, EventKind::Text { text } if text == "text only in native file")
+    ));
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(&e.event, EventKind::Text { text } if text == "native file final"))
+    );
+    let mut reconnected = host.client().await;
+    let Response::SubagentTranscript {
+        events: restored, ..
+    } = ask(&mut reconnected, read).await
+    else {
+        panic!("cached child")
+    };
+    assert_eq!(events.len(), restored.len());
+    assert!(
+        matches!(ask(&mut reconnected, Request::Poll { session_id: id, after: 0.0 }).await, Response::Events { session, events, .. } if session.agent_session_open == Some(false) && events.iter().filter(|e| matches!(e.event, EventKind::User { .. })).count() == 1)
+    );
+}
+
+#[tokio::test]
+async fn subagent_process_history_survives_reconnect_without_entering_parent_transcript() {
+    let host = Host::start().await;
+    let mut client = host.client().await;
+    let project = tempfile::tempdir().unwrap();
+    let id = session(&mut client, project.path()).await;
+    send(&mut client, &id, "child-process", "subagent-process").await;
+    let parent = wait(&mut client, &id, Status::Completed).await;
+    assert!(
+        !parent.iter().any(
+            |e| matches!(&e.event, EventKind::Text { text } if text.contains("child progress"))
+        )
+    );
+    assert!(
+        !parent
+            .iter()
+            .any(|e| matches!(&e.event, EventKind::Tool { name, .. } if name == "Read"))
+    );
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let task = loop {
+        let Response::Subagents { tasks, .. } = ask(
+            &mut client,
+            Request::Subagents {
+                session_id: id.clone(),
+            },
+        )
+        .await
+        else {
+            panic!("tasks")
+        };
+        if let Some(task) = tasks
+            .into_iter()
+            .find(|t| t.status == latte_work_protocol::SubagentStatus::Completed)
+        {
+            break task;
+        }
+        assert!(Instant::now() < deadline);
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    };
+    assert_eq!(task.native_id, "process-native");
+    let mut reconnected = host.client().await;
+    let Response::SubagentTranscript { events, truncated } = ask(
+        &mut reconnected,
+        Request::SubagentTranscript {
+            session_id: id.clone(),
+            task_id: task.id,
+        },
+    )
+    .await
+    else {
+        panic!("child transcript")
+    };
+    assert!(!truncated);
+    assert_eq!(
+        events
+            .iter()
+            .filter(|e| matches!(&e.event, EventKind::Text { text } if text == "child progress"))
+            .count(),
+        1
+    );
+    assert!(events.iter().any(|e| matches!(&e.event, EventKind::Tool { name, input, .. } if name == "Read" && input["file_path"] == "child.txt")));
+    assert!(events.iter().any(|e| matches!(&e.event, EventKind::ToolResult { content, .. } if content == "child read output")));
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(&e.event, EventKind::Text { text } if text == "child final"))
+    );
+    assert!(matches!(
+        ask(
+            &mut reconnected,
+            Request::SubagentTranscript {
+                session_id: id.clone(),
+                task_id: "unrelated".into()
+            }
+        )
+        .await,
+        Response::Error { .. }
+    ));
+    assert!(
+        matches!(ask(&mut reconnected, Request::Poll { session_id: id, after: 0.0 }).await, Response::Events { session, .. } if session.status == Status::Completed)
+    );
+}
+
+#[tokio::test]
+async fn permission_hidden_help_still_accepts_first_and_followup_sends() {
+    let host = Host::start_with_environment(&[(
+        "LATTE_FIXTURE_PERMISSION_HELP",
+        std::ffi::OsStr::new("hidden"),
+    )])
+    .await;
+    let mut client = host.client().await;
+    let project = tempfile::tempdir().unwrap();
+    let id = session(&mut client, project.path()).await;
+    assert!(matches!(
+        ask(&mut client, Request::AgentPermissions { agent: "claude".into() }).await,
+        Response::AgentPermissions { modes } if modes.len() == 6 && modes.iter().any(|m| m.id == "manual") && modes.iter().any(|m| m.id == "bypassPermissions" && m.elevated)
+    ));
+    for request_id in ["first", "followup"] {
+        let request = Request::Send {
+            provider: None,
+            session_id: id.clone(),
+            request_id: request_id.into(),
+            text: "permission".into(),
+            model: None,
+            effort: None,
+            permission_mode: Some("bypassPermissions".into()),
+        };
+        assert!(matches!(
+            ask(&mut client, request.clone()).await,
+            Response::Accepted { duplicate: false }
+        ));
+        let events = wait(&mut client, &id, Status::Completed).await;
+        assert!(events.iter().any(
+            |e| matches!(&e.event, EventKind::Text { text } if text.ends_with(":bypassPermissions"))
+        ));
+        assert!(matches!(
+            ask(&mut client, request).await,
+            Response::Accepted { duplicate: true }
+        ));
+        assert_eq!(events.iter().filter(|e| matches!(&e.event, EventKind::User { request_id: recorded, .. } if recorded == request_id)).count(), 1);
+    }
+}
+
+#[tokio::test]
+async fn permission_hidden_help_without_native_choices_remains_unsupported() {
+    let host = Host::start_with_environment(&[(
+        "LATTE_FIXTURE_PERMISSION_HELP",
+        std::ffi::OsStr::new("unsupported"),
+    )])
+    .await;
+    let mut client = host.client().await;
+    let project = tempfile::tempdir().unwrap();
+    let id = session(&mut client, project.path()).await;
+    assert!(matches!(
+        ask(
+            &mut client,
+            Request::AgentPermissions {
+                agent: "claude".into()
+            }
+        )
+        .await,
+        Response::Error { .. }
+    ));
+    assert!(matches!(
+        ask(
+            &mut client,
+            Request::Send {
+                provider: None,
+                session_id: id.clone(),
+                request_id: "unsupported".into(),
+                text: "must not send".into(),
+                model: None,
+                effort: None,
+                permission_mode: Some("bypassPermissions".into()),
+            }
+        )
+        .await,
+        Response::Error { .. }
+    ));
+    assert!(
+        matches!(ask(&mut client, Request::Poll { session_id: id, after: 0.0 }).await,
+        Response::Events { events, .. } if !events.iter().any(|e| matches!(e.event, EventKind::User { .. })))
+    );
 }
 
 #[tokio::test]
@@ -3748,6 +4079,96 @@ async fn task_baselines_and_sources_integrate_with_real_process_reconnect_and_bo
         panic!()
     };
     assert_eq!(later.baseline_at, baseline_at);
+}
+
+#[tokio::test]
+async fn ordinary_directory_turn_changes_survive_followup_and_reconnect() {
+    let host = Host::start().await;
+    let mut client = host.client().await;
+    let project = tempfile::tempdir().unwrap();
+    let root = project.path().canonicalize().unwrap();
+    std::fs::write(root.join("task.txt"), "existing\n").unwrap();
+    let id = session(&mut client, &root).await;
+    assert!(matches!(
+        ask(
+            &mut client,
+            Request::OpenAgentSession {
+                session_id: id.clone(),
+                provider: None
+            }
+        )
+        .await,
+        Response::Ok
+    ));
+    send(&mut client, &id, "empty", "identity").await;
+    let events = wait(&mut client, &id, Status::Completed).await;
+    assert!(events.iter().any(|e| matches!(&e.event, EventKind::TurnChanges {changes} if changes.request_id == "empty" && changes.summary.entries.is_empty() && changes.summary.unavailable.is_none() && !changes.background_pending)));
+    for (request_id, prompt) in [
+        ("ordinary-r1", "task-edit"),
+        ("ordinary-r2", "task-edit-second"),
+    ] {
+        assert!(matches!(
+            send(&mut client, &id, request_id, prompt).await,
+            Response::Accepted { duplicate: false }
+        ));
+        wait(&mut client, &id, Status::Completed).await;
+        let Response::TurnChanges { changes } = ask(
+            &mut client,
+            Request::TurnChangeSummary {
+                session_id: id.clone(),
+                request_id: request_id.into(),
+            },
+        )
+        .await
+        else {
+            panic!()
+        };
+        assert_eq!(changes.summary.entries.len(), 1);
+        assert_eq!(changes.summary.entries[0].path, "task.txt");
+        assert!(changes.summary.unavailable.is_none());
+        assert!(
+            !changes.background_pending,
+            "busy session telemetry is not a background task"
+        );
+    }
+    let mut reconnect = host.client().await;
+    let Response::Content { text, .. } = ask(
+        &mut reconnect,
+        Request::TurnChangeDiff {
+            session_id: id.clone(),
+            request_id: "ordinary-r1".into(),
+            path: "task.txt".into(),
+        },
+    )
+    .await
+    else {
+        panic!()
+    };
+    assert!(
+        text.contains("-existing")
+            && text.contains("+agent change")
+            && !text.contains("third line")
+    );
+    assert!(matches!(
+        send(&mut reconnect, &id, "ordinary-r2", "task-edit-second").await,
+        Response::Accepted { duplicate: true }
+    ));
+    let Response::TurnChanges { changes } = ask(
+        &mut reconnect,
+        Request::UndoTurnChanges {
+            session_id: id.clone(),
+            request_id: "ordinary-r2".into(),
+        },
+    )
+    .await
+    else {
+        panic!()
+    };
+    assert_eq!(changes.undo, latte_work_protocol::TurnUndoStatus::Reverted);
+    assert_eq!(
+        std::fs::read_to_string(root.join("task.txt")).unwrap(),
+        "agent change\nsecond line\n"
+    );
 }
 
 #[tokio::test]

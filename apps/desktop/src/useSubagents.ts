@@ -3,6 +3,7 @@ import { message, request } from "./api";
 import type { Event, Subagent } from "./protocol";
 
 export interface SubagentsState {
+  connectionVersion?: number;
   tasks: Subagent[];
   loading: boolean;
   error: string;
@@ -14,10 +15,11 @@ export function useSubagents(
   sessionId: string | undefined,
   connected: boolean,
   events: Event[],
+  connectionVersion = 0,
 ): SubagentsState {
   const [reloadVersion, setReloadVersion] = useState(0);
   const reload = () => setReloadVersion((value) => value + 1);
-  const scope = JSON.stringify([hostId, sessionId]);
+  const scope = JSON.stringify([hostId, sessionId, connectionVersion]);
   const revision = events
     .filter((e) => e.session_id === sessionId && e.event.kind === "subagent")
     .at(-1)?.seq;
@@ -69,9 +71,11 @@ export function useSubagents(
       error: "",
       truncated: false,
       reload,
+      connectionVersion,
     };
   return {
     ...state,
+    connectionVersion,
     reload,
     tasks: connected
       ? state.tasks

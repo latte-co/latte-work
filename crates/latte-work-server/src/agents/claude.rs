@@ -45,32 +45,62 @@ pub fn effort_levels(model: Option<&str>) -> &'static [latte_work_protocol::Effo
 pub(super) async fn permission_modes(
     binary: &str,
 ) -> Result<Vec<latte_work_protocol::AgentPermissionMode>> {
+    let (success, help, _) = permission_output(binary, &["--help"]).await?;
+    if !success {
+        bail!("Agent 权限能力读取失败");
+    }
+    if let Ok(modes) = modes_from_help(&help) {
+        return Ok(modes);
+    }
+    // Modern Claude hides some supported flags from --help. An invalid value
+    // makes its argument parser disclose the enum before help/session startup.
+    // Never infer support from an exit code or substitute a permission mode.
+    let flag = format!("--permission-mode={PERMISSION_PROBE}");
+    let (success, _, diagnostic) = permission_output(binary, &[&flag, "--help"]).await?;
+    if success {
+        bail!("无法确认此 CLI 支持的权限模式");
+    }
+    modes_from_diagnostic(&diagnostic)
+}
+
+const PERMISSION_PROBE: &str = "latteWorkPermissionProbe";
+
+async fn permission_output(binary: &str, args: &[&str]) -> Result<(bool, String, String)> {
     use tokio::io::AsyncReadExt;
+    const LIMIT: u64 = 128 * 1024;
     let mut child = crate::agent_environment::command(binary)
-        .arg("--help")
+        .args(args)
         .env("NO_COLOR", "1")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
+        .stderr(Stdio::piped())
         .kill_on_drop(true)
         .spawn()
         .context("无法读取 Agent 权限选项")?;
     let result = tokio::time::timeout(Duration::from_secs(5), async {
-        let mut bytes = Vec::new();
-        child
+        let mut stdout = child
             .stdout
             .take()
             .context("Agent 未提供帮助输出")?
-            .take(128 * 1024 + 1)
-            .read_to_end(&mut bytes)
-            .await?;
-        if bytes.len() > 128 * 1024 {
+            .take(LIMIT + 1);
+        let mut stderr = child
+            .stderr
+            .take()
+            .context("Agent 未提供参数诊断")?
+            .take(LIMIT + 1);
+        let (mut bytes, mut diagnostic) = (Vec::new(), Vec::new());
+        tokio::try_join!(
+            stdout.read_to_end(&mut bytes),
+            stderr.read_to_end(&mut diagnostic)
+        )?;
+        if bytes.len() + diagnostic.len() > LIMIT as usize {
             bail!("Agent 帮助输出超出限制");
         }
-        if !child.wait().await?.success() {
-            bail!("Agent 权限能力读取失败");
-        }
-        modes_from_help(std::str::from_utf8(&bytes)?)
+        Ok((
+            child.wait().await?.success(),
+            String::from_utf8(bytes)?,
+            String::from_utf8(diagnostic)?,
+        ))
     })
     .await
     .context("读取 Agent 权限选项超时")
@@ -94,6 +124,25 @@ fn modes_from_help(help: &str) -> Result<Vec<latte_work_protocol::AgentPermissio
         .nth(1)
         .and_then(|part| part.split(')').next())
         .context("此 CLI 未公布权限模式列表")?;
+    modes_from_choices(choices)
+}
+
+fn modes_from_diagnostic(
+    diagnostic: &str,
+) -> Result<Vec<latte_work_protocol::AgentPermissionMode>> {
+    let choices = diagnostic
+        .lines()
+        .find(|line| {
+            line.contains("--permission-mode <mode>")
+                && line.contains(PERMISSION_PROBE)
+                && line.contains("is invalid.")
+        })
+        .and_then(|line| line.split("Allowed choices are ").nth(1))
+        .context("无法确认此 CLI 支持的权限模式；请检查 Agent 安装或稍后重试")?;
+    modes_from_choices(choices.trim_end_matches('.'))
+}
+
+fn modes_from_choices(choices: &str) -> Result<Vec<latte_work_protocol::AgentPermissionMode>> {
     let ids: Vec<_> = choices
         .split(',')
         .map(|value| value.trim().trim_matches('"').trim_matches(char::from(39)))
@@ -169,7 +218,12 @@ fn count(value: &Value, key: &str) -> Option<f64> {
 
 #[derive(Default)]
 pub struct Claude {
+    initial_title: Option<String>,
+    native_session_id: Option<String>,
+    renaming: Option<(String, String)>,
+    rename_result_title: Option<String>,
     streamed: bool,
+    streamed_children: HashSet<String>,
     emitted_text: bool,
     context: Option<ContextUsage>,
     accounting_model: Option<String>,
@@ -301,8 +355,18 @@ fn write_action(value: Value) -> Result<Action> {
 }
 
 impl AgentAdapter for Claude {
+    fn set_initial_title(&mut self, title: Option<String>) {
+        self.initial_title = title;
+    }
+    fn has_background_work(&self) -> bool {
+        !self.tasks.is_empty() || !self.foreground_agents.is_empty()
+    }
+    fn knows_subagent(&self, native_id: &str) -> bool {
+        self.agent_tasks.contains_key(native_id)
+    }
     fn can_reconfigure(&self) -> bool {
         matches!(self.phase, Phase::BetweenTurns)
+            && self.renaming.is_none()
             && self.tasks.is_empty()
             && self.foreground_agents.is_empty()
             && (self.session_state.as_deref() == Some("idle")
@@ -315,6 +379,7 @@ impl AgentAdapter for Claude {
         resume: Option<&str>,
         config: &LaunchConfig,
     ) -> Result<AgentCommand> {
+        self.native_session_id = resume.map(str::to_owned);
         self.set_accounting_model(
             config
                 .model
@@ -322,6 +387,9 @@ impl AgentAdapter for Claude {
                 .or_else(|| config.provider.as_ref().map(|p| p.metadata.model.clone())),
         );
         let mut command = crate::agent_environment::command(binary);
+        if let Some(title) = &self.initial_title {
+            command.arg(format!("--name={title}"));
+        }
         command.args([
             "-p",
             "--input-format",
@@ -420,6 +488,19 @@ impl AgentAdapter for Claude {
     }
     fn advance(&mut self, input: Input<'_>) -> Result<Vec<Action>> {
         match input {
+            Input::RenameTitle { id, title } => {
+                if !matches!(self.phase, Phase::Running | Phase::BetweenTurns) {
+                    bail!("原生会话尚未就绪，标题未修改");
+                }
+                if self.renaming.is_some() {
+                    bail!("原生标题修改结果待确认，请稍后重试");
+                }
+                self.renaming = Some((id.into(), title.into()));
+                self.rename_result_title = None;
+                Ok(vec![write_action(
+                    json!({"type":"control_request","request_id":id,"request":{"subtype":"rename_session","title":title,"source":"host"}}),
+                )?])
+            }
             Input::Open => {
                 if !matches!(self.phase, Phase::Idle) {
                     bail!("Claude 已经启动");
@@ -506,8 +587,101 @@ impl Claude {
         };
         json!({"type":"control_response","response":{"subtype":"success","request_id":id,"response":response}})
     }
+    fn child_message(&mut self, m: &Value, parent: &str) -> Result<Vec<Action>> {
+        let native = self
+            .agent_tasks
+            .iter()
+            .find(|(_, tool)| tool.as_deref() == Some(parent))
+            .map(|(id, _)| id.clone());
+        let known = native.is_some() || self.foreground_agents.contains(parent);
+        let capture = |event| Action::SubagentEvent {
+            tool_use_id: parent.into(),
+            event,
+        };
+        let mut output = Vec::new();
+        match m["type"].as_str() {
+            Some("stream_event") if known => {
+                let event = &m["event"];
+                if event["type"] == "content_block_delta"
+                    && event["delta"]["type"] == "text_delta"
+                    && let Some(text) = event["delta"]["text"].as_str()
+                {
+                    if self.streamed_children.len() >= 512
+                        && !self.streamed_children.contains(parent)
+                    {
+                        bail!("子智能体输出数量超出限制");
+                    }
+                    self.streamed_children.insert(parent.into());
+                    output.push(capture(EventKind::Text { text: text.into() }));
+                }
+            }
+            Some("assistant") => {
+                let streamed = self.streamed_children.remove(parent);
+                if let Some(blocks) = m["message"]["content"].as_array() {
+                    for block in blocks {
+                        match block["type"].as_str() {
+                            Some("text") if known && !streamed => {
+                                if let Some(text) = block["text"].as_str() {
+                                    output.push(capture(EventKind::Text { text: text.into() }));
+                                }
+                            }
+                            Some("tool_use") => {
+                                if let (Some(id), Some(name)) =
+                                    (block["id"].as_str(), block["name"].as_str())
+                                {
+                                    output.push(Action::SourceUsed {
+                                        id: format!("{parent}:{id}"),
+                                        name: name.into(),
+                                    });
+                                    if known {
+                                        output.push(subagent_action(
+                                            native.as_deref().unwrap_or(&format!("tool:{parent}")),
+                                            Some(parent.into()),
+                                            &json!({"last_tool_name":name}),
+                                            None,
+                                        ));
+                                        output.push(capture(EventKind::Tool {
+                                            id: id.into(),
+                                            name: name.into(),
+                                            input: block["input"].clone(),
+                                        }));
+                                    }
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+            Some("user") if known => {
+                if let Some(blocks) = m["message"]["content"].as_array() {
+                    for block in blocks {
+                        if block["type"] == "tool_result"
+                            && let Some(id) = block["tool_use_id"].as_str()
+                        {
+                            output.push(capture(EventKind::ToolResult {
+                                id: id.into(),
+                                content: block["content"].clone(),
+                                is_error: block["is_error"].as_bool().unwrap_or(false),
+                            }));
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+        Ok(output)
+    }
     fn decode(&mut self, m: Value) -> Result<Vec<Action>> {
         let mut output = Vec::new();
+        if let Some(parent) = m["parent_tool_use_id"].as_str()
+            && matches!(
+                m["type"].as_str(),
+                Some("assistant" | "stream_event" | "user")
+            )
+        {
+            return self.child_message(&m, parent);
+        }
         if matches!(self.phase, Phase::BetweenTurns)
             && matches!(m["type"].as_str(), Some("assistant" | "stream_event"))
             && m["parent_tool_use_id"].is_null()
@@ -515,6 +689,48 @@ impl Claude {
             self.reset_turn();
             self.phase = Phase::Running;
             output.push(Action::TurnStarted);
+        }
+        if m["type"] == "control_response"
+            && self
+                .renaming
+                .as_ref()
+                .is_some_and(|(id, _)| m["response"]["request_id"] == *id)
+        {
+            let (_, requested) = self.renaming.take().expect("checked rename");
+            let result = if m["response"]["subtype"] == "success" {
+                Ok(self.rename_result_title.take().unwrap_or(requested))
+            } else {
+                Err(format!(
+                    "原生会话标题修改失败：{}",
+                    m["response"]["error"]
+                        .as_str()
+                        .unwrap_or("当前 Agent 不支持此操作")
+                ))
+            };
+            return Ok(vec![Action::TitleRenamed(result)]);
+        }
+        if m["type"] == "system"
+            && m["subtype"] == "session_title_changed"
+            && self.native_session_id.as_ref().is_some_and(|id| {
+                m["session_id"]
+                    .as_str()
+                    .is_some_and(|incoming| incoming != id)
+            })
+        {
+            return Ok(output);
+        }
+        if m["type"] == "system"
+            && m["subtype"] == "session_title_changed"
+            && m["parent_tool_use_id"].is_null()
+        {
+            if let Some(title) = bounded_field(&m, "title", 800) {
+                if self.renaming.is_some() {
+                    self.rename_result_title = Some(title);
+                } else {
+                    output.push(Action::Title(title));
+                }
+            }
+            return Ok(output);
         }
         match m["type"].as_str().unwrap_or_default() {
             "control_response" if m["response"]["request_id"] == "latte-interrupt" => {
@@ -571,6 +787,7 @@ impl Claude {
             }
             "system" if m["subtype"] == "init" && m["parent_tool_use_id"].is_null() => {
                 if let Some(id) = m["session_id"].as_str() {
+                    self.native_session_id = Some(id.into());
                     output.push(Action::NativeSession(id.into()));
                 }
                 if let Some(model) = bounded_field(&m, "model", 256) {
@@ -811,30 +1028,6 @@ impl Claude {
                                 }
                             }
                             "tool_use" => {
-                                if let Some(parent) = m["parent_tool_use_id"].as_str() {
-                                    if let (Some(id), Some(name)) =
-                                        (block["id"].as_str(), block["name"].as_str())
-                                    {
-                                        output.push(Action::SourceUsed {
-                                            id: format!("{parent}:{id}"),
-                                            name: name.into(),
-                                        });
-                                    }
-                                    let native = self
-                                        .agent_tasks
-                                        .iter()
-                                        .find(|(_, tool)| tool.as_deref() == Some(parent))
-                                        .map(|(id, _)| id.clone());
-                                    if native.is_some() || self.foreground_agents.contains(parent) {
-                                        output.push(subagent_action(
-                                            &native.unwrap_or_else(|| format!("tool:{parent}")),
-                                            Some(parent.into()),
-                                            &json!({"last_tool_name":block["name"]}),
-                                            None,
-                                        ));
-                                    }
-                                    continue;
-                                }
                                 if matches!(block["name"].as_str(), Some("Agent" | "Task")) {
                                     self.delegated = true;
                                     if m["parent_tool_use_id"].is_null() {
@@ -906,6 +1099,7 @@ impl Claude {
                         .is_some_and(|s| s.starts_with("error"));
                 // Child completions must not finish (or restart) the parent turn.
                 if let Some(parent) = m["parent_tool_use_id"].as_str().filter(|id| !id.is_empty()) {
+                    self.streamed_children.remove(parent);
                     let native = self
                         .agent_tasks
                         .iter()
@@ -1019,6 +1213,99 @@ fn bounded_field(value: &Value, key: &str, limit: usize) -> Option<String> {
         .filter(|s| !s.is_empty())
         .map(|s| s.chars().take(limit).collect())
 }
+pub(super) fn parse_child_transcript(
+    raw: super::claude_sessions::ChildBytes,
+    parent: &str,
+    child: &str,
+    session_id: &str,
+    config: &LaunchConfig,
+) -> Result<super::ChildTranscript> {
+    use std::collections::VecDeque;
+    let (mut events, mut bytes, mut offset, mut truncated) =
+        (VecDeque::new(), 0usize, raw.start, raw.truncated);
+    let at = crate::store::now();
+    for (line_index, line) in raw.bytes.split_inclusive(|b| *b == b'\n').enumerate() {
+        let base = offset;
+        offset += line.len() as u64;
+        if line_index == 0 && raw.start != 0 {
+            continue;
+        }
+        let value: Value = match serde_json::from_slice(line) {
+            Ok(value) => value,
+            Err(_) => {
+                if line.ends_with(b"\n") {
+                    truncated = true;
+                }
+                continue;
+            }
+        };
+        if !matches!(value["type"].as_str(), Some("assistant" | "user")) {
+            continue;
+        }
+        if value["sessionId"] != parent || value["agentId"] != child || value["isSidechain"] != true
+        {
+            bail!("原生子会话记录不属于此任务");
+        }
+        let Some(blocks) = value["message"]["content"].as_array() else {
+            continue;
+        };
+        if base > 9_007_199_254_740_991 / 128 {
+            bail!("原生子会话记录过大");
+        }
+        truncated |= blocks.len() > 128;
+        for (index, block) in blocks.iter().take(128).enumerate() {
+            let event = match (value["type"].as_str(), block["type"].as_str()) {
+                (Some("assistant"), Some("text")) => block["text"]
+                    .as_str()
+                    .map(|text| EventKind::Text { text: text.into() }),
+                (Some("assistant"), Some("tool_use")) => block["id"]
+                    .as_str()
+                    .zip(block["name"].as_str())
+                    .map(|(id, name)| EventKind::Tool {
+                        id: id.into(),
+                        name: name.into(),
+                        input: block["input"].clone(),
+                    }),
+                (Some("user"), Some("tool_result")) => {
+                    block["tool_use_id"]
+                        .as_str()
+                        .map(|id| EventKind::ToolResult {
+                            id: id.into(),
+                            content: block["content"].clone(),
+                            is_error: block["is_error"].as_bool().unwrap_or(false),
+                        })
+                }
+                _ => None,
+            };
+            let Some(event) = event else {
+                continue;
+            };
+            let (event, partial) =
+                crate::store::bounded_subagent_event(config.redact_event(event)?)?;
+            truncated |= partial;
+            let size = serde_json::to_vec(&event)?.len() + 128;
+            events.push_back((
+                latte_work_protocol::Event {
+                    seq: (base * 128 + index as u64) as f64,
+                    session_id: session_id.into(),
+                    at,
+                    event,
+                },
+                size,
+            ));
+            bytes += size;
+            while events.len() > 500 || bytes > 256 * 1024 {
+                bytes -= events.pop_front().expect("bounded nonempty events").1;
+                truncated = true;
+            }
+        }
+    }
+    Ok((
+        events.into_iter().map(|(event, _)| event).collect(),
+        truncated,
+    ))
+}
+
 fn subagent_action(
     id: &str,
     tool_use_id: Option<String>,
@@ -1086,6 +1373,62 @@ fn parse_commands(value: &Value) -> Result<Vec<latte_work_protocol::AgentSlashCo
 #[cfg(test)]
 mod tests {
     #[test]
+    fn native_title_events_and_rename_acknowledgements_never_start_a_turn() {
+        use super::*;
+        let mut adapter = Claude {
+            phase: Phase::BetweenTurns,
+            ..Default::default()
+        };
+        let automatic = adapter
+            .decode(json!({"type":"system","subtype":"session_title_changed","title":"Generated"}))
+            .unwrap();
+        assert!(matches!(&automatic[..],[Action::Title(title)] if title=="Generated"));
+        let actions = adapter
+            .advance(Input::RenameTitle {
+                id: "rename-1",
+                title: "Manual",
+            })
+            .unwrap();
+        assert!(
+            matches!(&actions[..],[Action::Write(bytes)] if String::from_utf8_lossy(bytes).contains("rename_session"))
+        );
+        assert!(
+            adapter
+                .decode(json!({"type":"system","subtype":"session_title_changed","title":"Manual"}))
+                .unwrap()
+                .is_empty()
+        );
+        let ack=adapter.decode(json!({"type":"control_response","response":{"request_id":"rename-1","subtype":"success"}})).unwrap();
+        assert!(matches!(&ack[..],[Action::TitleRenamed(Ok(title))] if title=="Manual"));
+        assert!(matches!(adapter.phase, Phase::BetweenTurns));
+        adapter
+            .advance(Input::RenameTitle {
+                id: "rename-2",
+                title: "Rejected",
+            })
+            .unwrap();
+        let error=adapter.decode(json!({"type":"control_response","response":{"request_id":"rename-2","subtype":"error","error":"unsupported"}})).unwrap();
+        assert!(matches!(&error[..], [Action::TitleRenamed(Err(_))]));
+        assert!(matches!(adapter.phase, Phase::BetweenTurns));
+    }
+    #[test]
+    fn background_work_requires_native_tasks_not_a_stale_busy_session_state() {
+        use super::*;
+        let mut adapter = Claude {
+            phase: Phase::BetweenTurns,
+            session_state: Some("busy".into()),
+            ..Default::default()
+        };
+        assert!(!adapter.can_reconfigure());
+        assert!(!adapter.has_background_work());
+        adapter.tasks.insert("child".into());
+        assert!(adapter.has_background_work());
+        adapter.decode(json!({"type":"system","subtype":"task_notification","task_id":"child","status":"completed"})).unwrap();
+        assert!(!adapter.has_background_work());
+        adapter.foreground_agents.insert("foreground".into());
+        assert!(adapter.has_background_work());
+    }
+    #[test]
     fn child_and_idle_results_never_fail_or_finish_the_parent() {
         use super::*;
         let mut adapter = Claude {
@@ -1143,6 +1486,76 @@ mod tests {
                 .decode(json!({"type":"result","is_error":false}))
                 .is_err()
         );
+    }
+    #[test]
+    fn child_output_streams_and_tool_results_never_modify_parent_stream_accounting() {
+        use super::*;
+        let mut adapter = Claude {
+            phase: Phase::BetweenTurns,
+            streamed: true,
+            ..Default::default()
+        };
+        adapter.foreground_agents.insert("parent-tool".into());
+        let streamed = adapter.decode(json!({"type":"stream_event","parent_tool_use_id":"parent-tool","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"child progress"}}})).unwrap();
+        assert!(
+            matches!(&streamed[..], [Action::SubagentEvent { event: EventKind::Text { text }, .. }] if text == "child progress")
+        );
+        let message = adapter.decode(json!({"type":"assistant","parent_tool_use_id":"parent-tool","message":{"content":[{"type":"text","text":"child progress"},{"type":"tool_use","id":"read","name":"Read","input":{"file_path":"child.txt"}}]}})).unwrap();
+        assert_eq!(
+            message
+                .iter()
+                .filter(|a| matches!(
+                    a,
+                    Action::SubagentEvent {
+                        event: EventKind::Tool { .. },
+                        ..
+                    }
+                ))
+                .count(),
+            1
+        );
+        assert!(!message.iter().any(|a| matches!(
+            a,
+            Action::SubagentEvent {
+                event: EventKind::Text { .. },
+                ..
+            } | Action::TurnStarted
+                | Action::Finished { .. }
+        )));
+        assert!(adapter.streamed);
+        assert!(matches!(adapter.phase, Phase::BetweenTurns));
+        let result = adapter.decode(json!({"type":"user","parent_tool_use_id":"parent-tool","message":{"content":[{"type":"tool_result","tool_use_id":"read","content":"native output","is_error":true}]}})).unwrap();
+        assert!(
+            matches!(&result[..], [Action::SubagentEvent { tool_use_id, event: EventKind::ToolResult { is_error: true, content, .. } }] if tool_use_id == "parent-tool" && content == "native output")
+        );
+    }
+    #[test]
+    fn native_child_records_validate_identity_and_redact_before_truncation() {
+        use super::*;
+        let secret = "fixture-provider-secret";
+        let config = LaunchConfig {
+            provider: Some(crate::providers::ResolvedProvider { metadata: serde_json::from_value(json!({"id":"p","name":"fixture","protocol":"anthropic_messages","base_url":"http://127.0.0.1","model":"m","models":[],"model_labels":{},"auth":"bearer","has_credential":true,"revision":"1"})).unwrap(), credential: secret.into() }),
+            settings_dir: PathBuf::from("/tmp"), model: None, effort: None, permission_mode: None,
+        };
+        let text = format!("{}{secret}{}", "x".repeat(16_370), "z".repeat(32_768));
+        let record = json!({"type":"assistant","sessionId":"parent","agentId":"a123","isSidechain":true,"message":{"content":[{"type":"thinking","thinking":"private reasoning"},{"type":"text","text":text},{"type":"tool_use","id":"t","name":"Read","input":{"file_path":"a.txt","credential":secret}}]}});
+        let raw = || super::super::claude_sessions::ChildBytes {
+            bytes: format!("{record}\n").into_bytes(),
+            start: 0,
+            truncated: false,
+        };
+        let (events, truncated) =
+            parse_child_transcript(raw(), "parent", "a123", "public", &config).unwrap();
+        let encoded = serde_json::to_string(&events).unwrap();
+        assert!(truncated && events.iter().all(|e| e.session_id == "public"));
+        assert!(
+            !encoded.contains(secret)
+                && !encoded.contains("fixture-provider")
+                && !encoded.contains("private reasoning")
+        );
+        assert!(encoded.contains("[redacted]"));
+        assert!(parse_child_transcript(raw(), "other-parent", "a123", "public", &config).is_err());
+        assert!(parse_child_transcript(raw(), "parent", "other-child", "public", &config).is_err());
     }
 
     #[test]
@@ -1406,6 +1819,41 @@ mod tests {
         );
         assert!(
             super::modes_from_help("--permission-mode <mode> (choices: \"future-mode\")").is_err()
+        );
+    }
+
+    #[test]
+    fn permission_choices_require_the_native_invalid_argument_diagnostic() {
+        let diagnostic = format!(
+            "error: option '--permission-mode <mode>' argument '{}' is invalid. Allowed choices are acceptEdits, auto, bypassPermissions, manual, dontAsk, plan, future-mode.\n",
+            super::PERMISSION_PROBE
+        );
+        let modes = super::modes_from_diagnostic(&diagnostic).unwrap();
+        assert_eq!(
+            modes.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(),
+            [
+                "manual",
+                "acceptEdits",
+                "plan",
+                "auto",
+                "dontAsk",
+                "bypassPermissions"
+            ]
+        );
+        assert!(modes.last().unwrap().elevated);
+        for invalid in [
+            "error: unknown option '--permission-mode'",
+            "Allowed choices are bypassPermissions.",
+            "error: option '--permission-mode <mode>' argument 'different-request' is invalid. Allowed choices are bypassPermissions.",
+        ] {
+            assert!(super::modes_from_diagnostic(invalid).is_err());
+        }
+        assert!(
+            super::modes_from_diagnostic(&diagnostic.replace(
+                "acceptEdits, auto, bypassPermissions, manual, dontAsk, plan, future-mode",
+                "future-mode"
+            ))
+            .is_err()
         );
     }
 

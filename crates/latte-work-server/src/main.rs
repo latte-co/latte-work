@@ -568,9 +568,14 @@ async fn dispatch(s: &Service, request: Request) -> Result<Response> {
             let (sessions, next) = db(&s.database, |d| d.recent_sessions(before.as_ref()))?;
             Response::RecentSessions { sessions, next }
         }
-        Request::RenameSession { session_id, title } => Response::Session {
-            session: db(&s.database, |d| d.rename_session(&session_id, &title))?,
-        },
+        Request::RenameSession { session_id, title } => {
+            let session = db(&s.database, |d| d.session(&session_id))?;
+            let project = db(&s.database, |d| d.project(&session.project_id))?;
+            Response::Session {
+                session: runtime::rename_title(&s.database, &s.runs, session, project.path, title)
+                    .await?,
+            }
+        }
         Request::PinSession { session_id, pinned } => Response::Session {
             session: db(&s.database, |d| d.pin_session(&session_id, pinned))?,
         },
@@ -741,6 +746,39 @@ async fn dispatch(s: &Service, request: Request) -> Result<Response> {
             let (tasks, truncated) = d.subagents(&session_id)?;
             Ok(Response::Subagents { tasks, truncated })
         })?,
+        Request::SubagentTranscript {
+            session_id,
+            task_id,
+        } => {
+            db(&s.database, |d| d.subagent(&session_id, &task_id))?;
+            let control = s
+                .runs
+                .lock()
+                .map_err(|_| anyhow::anyhow!("run lock poisoned"))?
+                .get(&session_id)
+                .map(|run| run.control.clone());
+            if let Some(control) = control {
+                let permit = agents::child_read_permit()?;
+                let (reply, receive) = oneshot::channel();
+                if control
+                    .send(Control::SubagentTranscript {
+                        task_id: task_id.clone(),
+                        permit,
+                        reply,
+                    })
+                    .await
+                    .is_ok()
+                {
+                    tokio::time::timeout(Duration::from_secs(10), receive)
+                        .await??
+                        .map_err(anyhow::Error::msg)?;
+                }
+            }
+            let (events, truncated) = db(&s.database, |d| {
+                d.subagent_transcript(&session_id, &task_id)
+            })?;
+            Response::SubagentTranscript { events, truncated }
+        }
         Request::Poll { session_id, after } => db(&s.database, |d| {
             let session = d.session(&session_id)?;
             let (events, has_more) = d.events(&session_id, after)?;
@@ -1069,6 +1107,7 @@ async fn dispatch(s: &Service, request: Request) -> Result<Response> {
     {
         s.lifecycle.forget(&resource)?;
     }
+    runtime::refresh_titles(&s.database, &s.runs, &mut response).await?;
     runtime::project_session_state(&s.runs, &mut response)?;
     Ok(response)
 }

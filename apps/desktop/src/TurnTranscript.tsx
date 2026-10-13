@@ -69,7 +69,8 @@ export function turnTranscript(events: Event[]) {
           !item.resolved,
       );
     return {
-      key: events[0].seq,
+      key: `${events[0].session_id}:${events[0].seq}`,
+      outcomeKey: end?.seq,
       user,
       finalKey: hasFinal ? lastAssistant?.key : undefined,
       stopped,
@@ -100,7 +101,7 @@ export function TurnTranscript({
     <div className="conversation-turn" key={turn.key}>
       {turn.user && children(turn.user)}
       {turn.process.length > 0 && (
-        <LazyProcess>
+        <ProcessDisclosure key={turn.outcomeKey}>
           <summary
             title={turn.stopped ? "已执行的文件改动不会撤销。" : undefined}
           >
@@ -112,7 +113,7 @@ export function TurnTranscript({
               {turn.process.map(children)}
             </div>
           )}
-        </LazyProcess>
+        </ProcessDisclosure>
       )}
       {turn.stopped && turn.process.length === 0 && (
         <div className="turn-stop-summary" title="已执行的文件改动不会撤销。">
@@ -133,7 +134,11 @@ export function TurnTranscript({
   ));
 }
 
-function LazyProcess({ children }: { children: [ReactNode, () => ReactNode] }) {
+export function ProcessDisclosure({
+  children,
+}: {
+  children: [ReactNode, () => ReactNode];
+}) {
   const [open, setOpen] = useState(false);
   return (
     <details

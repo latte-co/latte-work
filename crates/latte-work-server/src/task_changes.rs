@@ -10,6 +10,110 @@ use tokio::{io::AsyncReadExt, process::Command};
 const FILE_LIMIT: usize = 512 * 1024;
 const TOTAL_LIMIT: usize = 8 * 1024 * 1024;
 const COUNT_LIMIT: usize = 1000;
+// Bound directory entries as well as files, including empty directory trees.
+const INVENTORY_LIMIT: usize = 5000;
+fn no_symlink_ancestors(root: &Path, relative: &Path) -> Result<()> {
+    let mut path = root.to_path_buf();
+    if path.symlink_metadata()?.file_type().is_symlink() {
+        bail!("拒绝采集符号链接目录");
+    }
+    for component in relative.components() {
+        if !matches!(component, std::path::Component::Normal(_)) {
+            bail!("路径必须位于项目目录内");
+        }
+        path.push(component);
+        if path.symlink_metadata()?.file_type().is_symlink() {
+            bail!("拒绝采集符号链接路径");
+        }
+    }
+    Ok(())
+}
+async fn inventory(root: &Path) -> Result<(Vec<String>, bool)> {
+    let (inside, truncated) = match files::git(root, &["rev-parse", "--is-inside-work-tree"]).await
+    {
+        Ok(result) => result,
+        Err(error) if error.to_string() == "无法读取 Git 状态，请确认项目是 Git 仓库" => {
+            (String::new(), false)
+        }
+        Err(error) => return Err(error),
+    };
+    if inside.trim() == "true" && !truncated {
+        let (prefix, a) = files::git(root, &["rev-parse", "--show-prefix"]).await?;
+        let (paths, b) = files::git(
+            root,
+            &[
+                "ls-files",
+                "--full-name",
+                "--cached",
+                "--others",
+                "--exclude-standard",
+                "-z",
+                "--",
+                ".",
+            ],
+        )
+        .await?;
+        return Ok((
+            paths
+                .split('\0')
+                .filter(|path| !path.is_empty())
+                .filter_map(|path| path.strip_prefix(prefix.trim_end_matches('\n')))
+                .map(str::to_owned)
+                .collect(),
+            a || b,
+        ));
+    }
+    let mut directories = vec![root.to_path_buf()];
+    let mut paths = Vec::new();
+    let mut visited = 0;
+    let mut truncated = false;
+    while let Some(directory) = directories.pop() {
+        no_symlink_ancestors(root, directory.strip_prefix(root)?)?;
+        let mut entries = tokio::fs::read_dir(&directory).await?;
+        while let Some(entry) = entries.next_entry().await? {
+            visited += 1;
+            if visited > INVENTORY_LIMIT || paths.len() >= COUNT_LIMIT {
+                return Ok((paths, true));
+            }
+            let name = entry.file_name();
+            let Some(name) = name.to_str() else {
+                truncated = true;
+                continue;
+            };
+            if matches!(name, ".git" | "node_modules" | "target" | ".DS_Store") {
+                continue;
+            }
+            let kind = entry.file_type().await?;
+            if kind.is_symlink() {
+                truncated = true;
+                continue;
+            }
+            let path = entry.path();
+            // Recheck ancestors before traversal; never follow a directory link.
+            no_symlink_ancestors(root, path.strip_prefix(root)?)?;
+            files::resolve(
+                root,
+                path.strip_prefix(root)?
+                    .to_str()
+                    .context("文件路径不是 UTF-8")?,
+            )?;
+            if kind.is_dir() {
+                directories.push(path);
+            } else if kind.is_file() {
+                paths.push(
+                    path.strip_prefix(root)?
+                        .to_str()
+                        .context("文件路径不是 UTF-8")?
+                        .to_owned(),
+                );
+            } else {
+                truncated = true;
+            }
+        }
+    }
+    paths.sort();
+    Ok((paths, truncated))
+}
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Snapshot {
     pub at: f64,
@@ -34,36 +138,21 @@ impl Snapshot {
     }
     pub async fn capture(root: &Path) -> Result<Self> {
         tokio::time::timeout(Duration::from_secs(12), async {
-            let (prefix, a) = files::git(root, &["rev-parse", "--show-prefix"]).await?;
-            let prefix = prefix.trim_end_matches('\n');
-            let (paths, b) = files::git(
-                root,
-                &[
-                    "ls-files",
-                    "--full-name",
-                    "--cached",
-                    "--others",
-                    "--exclude-standard",
-                    "-z",
-                    "--",
-                    ".",
-                ],
-            )
-            .await?;
+            // Git keeps its tracked/ignored-file semantics. Ordinary directories
+            // use a bounded, symlink-free inventory with the same byte limits.
+            let (paths, inventory_truncated) = inventory(root).await?;
             let root_metadata = std::fs::metadata(root)?;
             let mut snapshot = Self {
                 at: now(),
                 root_identity: Some((root_metadata.dev(), root_metadata.ino())),
                 files: BTreeMap::new(),
                 modes: BTreeMap::new(),
-                truncated: a || b,
+                truncated: inventory_truncated,
                 unavailable: None,
             };
             let mut total = 0;
-            for path in paths.split('\0').filter(|p| !p.is_empty()) {
-                let Some(path) = path.strip_prefix(prefix) else {
-                    continue;
-                };
+            for path in &paths {
+                let path = path.as_str();
                 if snapshot.files.len() >= COUNT_LIMIT {
                     snapshot.truncated = true;
                     break;
@@ -647,6 +736,72 @@ mod tests {
                 "-qm",
                 "baseline",
             ],
+        );
+    }
+    #[tokio::test]
+    async fn ordinary_directory_freezes_real_edits_additions_and_deletions() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir(root.join("nested")).unwrap();
+        std::fs::write(root.join("nested/edit.txt"), "before\n").unwrap();
+        std::fs::write(root.join("delete.txt"), "remove\n").unwrap();
+        let before = Snapshot::capture(root).await.unwrap();
+        assert!(before.summary(root).await.unwrap().entries.is_empty());
+        std::fs::write(root.join("nested/edit.txt"), "after\nextra\n").unwrap();
+        std::fs::remove_file(root.join("delete.txt")).unwrap();
+        std::fs::write(root.join("new.txt"), "created\n").unwrap();
+        let after = Snapshot::capture(root).await.unwrap();
+        let turn = FrozenTurn::freeze("r1".into(), before, after, false, false)
+            .await
+            .unwrap();
+        assert_eq!(turn.changes.summary.entries.len(), 3);
+        assert_eq!(
+            (turn.changes.summary.added, turn.changes.summary.removed),
+            (3, 2)
+        );
+        assert!(!turn.changes.summary.truncated);
+        assert!(turn.changes.summary.unavailable.is_none());
+        let turn: FrozenTurn =
+            serde_json::from_str(&serde_json::to_string(&turn).unwrap()).unwrap();
+        let (patch, _) = turn.patch("nested/edit.txt").await.unwrap();
+        assert!(patch.contains("-before") && patch.contains("+extra"));
+        std::fs::write(root.join("nested/edit.txt"), "external\n").unwrap();
+        assert_eq!(turn.patch("nested/edit.txt").await.unwrap().0, patch);
+        assert!(turn.validate_undo(root).is_err());
+        std::fs::write(root.join("nested/edit.txt"), "after\nextra\n").unwrap();
+        turn.restore(root).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(root.join("nested/edit.txt")).unwrap(),
+            "before\n"
+        );
+        assert!(root.join("delete.txt").exists());
+        assert!(!root.join("new.txt").exists());
+    }
+    #[tokio::test]
+    async fn ordinary_inventory_is_bounded_and_does_not_follow_symlinks() {
+        let dir = tempfile::tempdir().unwrap();
+        let external = tempfile::tempdir().unwrap();
+        std::fs::write(external.path().join("private.txt"), "private").unwrap();
+        std::os::unix::fs::symlink(external.path(), dir.path().join("outside")).unwrap();
+        std::fs::create_dir(dir.path().join("node_modules")).unwrap();
+        std::fs::write(dir.path().join("node_modules/skip.txt"), "skip").unwrap();
+        std::fs::write(dir.path().join("large.txt"), vec![0; FILE_LIMIT + 1]).unwrap();
+        let before = Snapshot::capture(dir.path()).await.unwrap();
+        assert!(before.truncated);
+        assert!(before.files.is_empty());
+        std::fs::remove_file(dir.path().join("large.txt")).unwrap();
+        assert!(before.summary(dir.path()).await.unwrap().entries.is_empty());
+        for n in 0..=COUNT_LIMIT {
+            std::fs::write(dir.path().join(format!("file-{n}.txt")), "bounded").unwrap();
+        }
+        let snapshot = Snapshot::capture(dir.path()).await.unwrap();
+        assert!(snapshot.truncated);
+        assert!(snapshot.files.len() <= COUNT_LIMIT);
+        assert!(
+            snapshot
+                .files
+                .keys()
+                .all(|p| !p.contains("private") && !p.contains("skip"))
         );
     }
     #[tokio::test]

@@ -3,7 +3,6 @@ import {
   Plus,
   Folder,
   FolderOpen,
-  Globe2,
   CirclePause,
   CircleAlert,
   CircleHelp,
@@ -28,6 +27,7 @@ import { useRecentSessions } from "./useRecentSessions";
 import { useStatusIssues, type StatusIssue } from "./statusNotices";
 import { ProjectActions } from "./ProjectActions";
 import { RemoteProjectIcon } from "./RemoteProjectIcon";
+import { RemoteGlobeIcon } from "./RemoteGlobeIcon";
 import type { HostedProject } from "./projectCatalog";
 import { message, request } from "./api";
 import { statusNames } from "./Conversation";
@@ -393,9 +393,6 @@ export function Sidebar({
               </small>
             )}
           </span>
-          {list === "recent" && s.hostId !== "local" && (
-            <Globe2 size={12} className="recent-remote" aria-label="远程对话" />
-          )}
           <span className="row-status">
             {loadingLabel ? (
               <span
@@ -445,6 +442,8 @@ export function Sidebar({
                 aria-label="未读"
                 title="未读"
               />
+            ) : list === "recent" && s.hostId !== "local" ? (
+              <RemoteGlobeIcon className="recent-remote" />
             ) : null}
           </span>
         </button>

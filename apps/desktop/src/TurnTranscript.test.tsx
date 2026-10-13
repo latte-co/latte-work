@@ -78,6 +78,72 @@ it.each(["running", "waiting", "failed", "unknown"] as Status[])(
     ).toEqual([]);
   },
 );
+it("folds streamed progress when a turn completes", () => {
+  const rows = events(user("q"), text("progress"), tool, result, text("final"));
+  const content = (rows: Event[]) => (
+    <TurnTranscript events={rows}>
+      {(item) => (
+        <p key={item.key}>{item.type === "assistant" ? item.text : "record"}</p>
+      )}
+    </TurnTranscript>
+  );
+  const view = render(content(rows));
+  expect(screen.getByText("progress")).toBeTruthy();
+  view.rerender(
+    content([
+      ...rows,
+      ...events(state("completed")).map((e) => ({ ...e, seq: rows.length })),
+    ]),
+  );
+  expect(screen.queryByText("progress")).toBeNull();
+  expect(screen.getByText("final").closest("details")).toBeNull();
+  expect(screen.getByText("用时 0秒").closest("details")!.open).toBe(false);
+});
+it.each(["completion", "session"])(
+  "resets expansion for a new %s but preserves it for the same result",
+  (change) => {
+    const rows = events(
+      user("q"),
+      text("progress"),
+      tool,
+      result,
+      text("final"),
+      state("completed"),
+    );
+    const content = (rows: Event[]) => (
+      <TurnTranscript events={rows}>
+        {(item) => (
+          <p key={item.key}>
+            {item.type === "assistant" ? item.text : "record"}
+          </p>
+        )}
+      </TurnTranscript>
+    );
+    const view = render(content(rows));
+    const details = screen.getByText("用时 0秒").closest("details")!;
+    details.open = true;
+    fireEvent(details, new window.Event("toggle"));
+    view.rerender(content([...rows]));
+    expect(screen.getByText("progress")).toBeTruthy();
+    expect(details.open).toBe(true);
+    const next =
+      change === "session"
+        ? rows.map((e) => ({ ...e, session_id: "other" }))
+        : [
+            ...rows,
+            {
+              seq: rows.length,
+              session_id: "s",
+              at: rows.length,
+              event: state("completed"),
+            },
+          ];
+    view.rerender(content(next));
+    expect(screen.getByText("用时 0秒").closest("details")!.open).toBe(false);
+    expect(screen.queryByText("progress")).toBeNull();
+    expect(screen.getByText("final").closest("details")).toBeNull();
+  },
+);
 it("does not turn pre-tool commentary or incomplete history into a final answer", () => {
   expect(
     turnTranscript(

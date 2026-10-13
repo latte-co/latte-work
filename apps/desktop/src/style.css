@@ -282,7 +282,7 @@ button svg {
 }
 .recent-remote {
   flex-shrink: 0;
-  color: var(--color-text-muted);
+  color: var(--color-success);
 }
 .recent-notice {
   margin: 0;
@@ -542,6 +542,10 @@ button.recent-notice {
   align-items: center;
   justify-content: center;
   pointer-events: none;
+}
+.session-item .row-status {
+  right: 3px;
+  width: 28px;
 }
 .session-progress {
   display: inline-flex;
@@ -3989,6 +3993,12 @@ button[aria-checked="true"] .model-option-check {
 .subagent-result {
   margin-top: 24px;
   overflow-wrap: anywhere;
+}
+.subagent-transcript {
+  max-width: var(--content-width);
+}
+.subagent-transcript > .markdown {
+  margin: var(--space-4) 0;
 }
 
 .task-overview-popover {
