@@ -92,10 +92,8 @@ export function SubagentTranscript({
         <article className="markdown subagent-result">
           <MessageContent text={task.summary} />
         </article>
-      ) : completed || !items.length ? (
-        <p className="subagent-empty">
-          {completed ? "未收到最终输出" : "尚未收到过程输出"}
-        </p>
+      ) : completed ? (
+        <p className="subagent-empty">未收到最终输出</p>
       ) : null}
       {truncated && (
         <p className="subagent-empty">

@@ -775,7 +775,8 @@ async fn dispatch(s: &Service, request: Request) -> Result<Response> {
                 }
             }
             let (events, truncated) = db(&s.database, |d| {
-                d.subagent_transcript(&session_id, &task_id)
+                let snapshot = d.subagent_transcript(&session_id, &task_id)?;
+                agents::normalize_child_transcript(&d.session(&session_id)?.agent, snapshot)
             })?;
             Response::SubagentTranscript { events, truncated }
         }

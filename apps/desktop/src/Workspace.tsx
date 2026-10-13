@@ -604,6 +604,7 @@ function WorkspacePage({
               taskId={tab.kind === "subagent" ? tab.taskId : undefined}
               hostId={hostId}
               sessionId={sessionId}
+              connected={connected}
               active={
                 active && !conversationActive && current === tab.id && connected
               }

@@ -82,6 +82,17 @@ export default function App() {
     connected,
     events,
     workbench.hostConnectionVersions?.[hostId] ?? 0,
+    workbench.workspace.visible &&
+      !(
+        workbench.workspace.expanded && workbench.workspace.conversationActive
+      ) &&
+      !workbench.modal &&
+      !workbench.passwordPrompt &&
+      workbench.workspace.tabs.some(
+        (tab) =>
+          tab.id === workbench.workspace.current &&
+          (tab.kind === "subagents" || tab.kind === "subagent"),
+      ),
   );
   const lastTurn = latestTurnChanges(events);
   const lastTurnVersion = lastTurn

@@ -1224,6 +1224,7 @@ pub(super) fn parse_child_transcript(
     let (mut events, mut bytes, mut offset, mut truncated) =
         (VecDeque::new(), 0usize, raw.start, raw.truncated);
     let at = crate::store::now();
+    let mut handbacks = HashMap::<String, String>::new();
     for (line_index, line) in raw.bytes.split_inclusive(|b| *b == b'\n').enumerate() {
         let base = offset;
         offset += line.len() as u64;
@@ -1254,6 +1255,25 @@ pub(super) fn parse_child_transcript(
         }
         truncated |= blocks.len() > 128;
         for (index, block) in blocks.iter().take(128).enumerate() {
+            // A handback's prose is the report; the later Agent result is only
+            // a delivery receipt. Promote it only after the matching native
+            // tool result explicitly confirms delivery, before field clipping.
+            if value["type"] == "assistant"
+                && block["type"] == "tool_use"
+                && block["name"] == "SubagentHandback"
+                && let (Some(id), Some(message)) =
+                    (block["id"].as_str(), block["input"]["message"].as_str())
+                && id.len() <= 256
+            {
+                handbacks.insert(id.into(), message.into());
+            }
+            let report = if value["type"] == "user" && block["type"] == "tool_result" {
+                block["tool_use_id"]
+                    .as_str()
+                    .and_then(|id| handbacks.remove(id).filter(|_| handback_delivered(block)))
+            } else {
+                None
+            };
             let event = match (value["type"].as_str(), block["type"].as_str()) {
                 (Some("assistant"), Some("text")) => block["text"]
                     .as_str()
@@ -1294,6 +1314,21 @@ pub(super) fn parse_child_transcript(
                 size,
             ));
             bytes += size;
+            if let Some(report) = report {
+                let EventKind::Text { text } =
+                    config.redact_event(EventKind::Text { text: report })?
+                else {
+                    unreachable!("redaction preserves the event kind")
+                };
+                let (reports, partial) =
+                    report_events(text, (base * 128 + index as u64) as f64, session_id, at);
+                truncated |= partial;
+                for event in reports {
+                    let size = serde_json::to_vec(&event.event)?.len() + 128;
+                    events.push_back((event, size));
+                    bytes += size;
+                }
+            }
             while events.len() > 500 || bytes > 256 * 1024 {
                 bytes -= events.pop_front().expect("bounded nonempty events").1;
                 truncated = true;
@@ -1304,6 +1339,109 @@ pub(super) fn parse_child_transcript(
         events.into_iter().map(|(event, _)| event).collect(),
         truncated,
     ))
+}
+
+fn report_events(mut text: String, seq: f64, session_id: &str, at: f64) -> super::ChildTranscript {
+    let truncated = text.len() > 128 * 1024;
+    if truncated {
+        let mut end = 128 * 1024;
+        while !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        text.truncate(end);
+        text.push_str("\n…（报告已截断）");
+    }
+    let mut events = Vec::new();
+    let mut rest = text.as_str();
+    while !rest.is_empty() {
+        let mut end = rest.len().min(4 * 1024);
+        while !rest.is_char_boundary(end) {
+            end -= 1;
+        }
+        events.push(latte_work_protocol::Event {
+            seq: seq + (events.len() + 1) as f64 / 64.0,
+            session_id: session_id.into(),
+            at,
+            event: EventKind::Text {
+                text: rest[..end].into(),
+            },
+        });
+        rest = &rest[end..];
+    }
+    (events, truncated)
+}
+
+/// Older persisted snapshots already passed the owning launch context's
+/// redaction. Normalize those in memory, without reopening native files or
+/// requiring a process to still be running. New snapshots are idempotent.
+pub(super) fn normalize_child_transcript(
+    snapshot: super::ChildTranscript,
+) -> Result<super::ChildTranscript> {
+    use std::collections::VecDeque;
+    let (source, mut truncated) = snapshot;
+    let mut pending = HashMap::<&str, &str>::new();
+    let (mut events, mut bytes) = (VecDeque::new(), 0usize);
+    for (index, event) in source.iter().enumerate() {
+        let mut report = None;
+        match &event.event {
+            EventKind::Tool { id, name, input } if name == "SubagentHandback" => {
+                if let Some(text) = input["message"].as_str() {
+                    pending.insert(id, text);
+                }
+            }
+            EventKind::ToolResult {
+                id,
+                content,
+                is_error,
+            } => {
+                if let Some(text) = pending.remove(id.as_str())
+                    && handback_delivered(&json!({"content":content,"is_error":is_error}))
+                    && !source
+                        .get(index + 1)
+                        .is_some_and(|e| matches!(e.event, EventKind::Text { .. }))
+                {
+                    report = Some(text);
+                }
+            }
+            _ => {}
+        }
+        let mut additions = vec![event.clone()];
+        if let Some(text) = report {
+            let (reports, partial) =
+                report_events(text.into(), event.seq, &event.session_id, event.at);
+            additions.extend(reports);
+            truncated |= partial;
+        }
+        for event in additions {
+            let size = serde_json::to_vec(&event)?.len();
+            bytes += size;
+            events.push_back((event, size));
+        }
+        while events.len() > 500 || bytes > 256 * 1024 {
+            bytes -= events.pop_front().expect("bounded nonempty events").1;
+            truncated = true;
+        }
+    }
+    Ok((
+        events.into_iter().map(|(event, _)| event).collect(),
+        truncated,
+    ))
+}
+
+fn handback_delivered(block: &Value) -> bool {
+    if block["is_error"].as_bool().unwrap_or(false) {
+        return false;
+    }
+    let success = |text: &str| {
+        serde_json::from_str::<Value>(text).is_ok_and(|value| value["success"] == true)
+    };
+    match &block["content"] {
+        Value::String(text) => success(text),
+        Value::Array(blocks) => blocks
+            .iter()
+            .any(|part| part["type"] == "text" && part["text"].as_str().is_some_and(success)),
+        _ => false,
+    }
 }
 
 fn subagent_action(
@@ -1556,6 +1694,123 @@ mod tests {
         assert!(encoded.contains("[redacted]"));
         assert!(parse_child_transcript(raw(), "other-parent", "a123", "public", &config).is_err());
         assert!(parse_child_transcript(raw(), "parent", "other-child", "public", &config).is_err());
+    }
+
+    #[test]
+    fn native_handback_promotes_only_confirmed_report_before_tool_input_clipping() {
+        use super::*;
+        let config = LaunchConfig {
+            provider: None,
+            settings_dir: PathBuf::from("/tmp"),
+            model: None,
+            effort: None,
+            permission_mode: None,
+        };
+        let report = "报告正文🧪\n".repeat(3000);
+        let record = |kind: &str, blocks: Value| {
+            json!({
+                "type":kind,"sessionId":"parent","agentId":"a123","isSidechain":true,
+                "message":{"content":blocks}
+            })
+        };
+        let tool = record(
+            "assistant",
+            json!([{"type":"tool_use","id":"handback","name":"SubagentHandback","input":{"message":report}}]),
+        );
+        let result = |id: &str, success: bool, is_error: bool| {
+            record(
+                "user",
+                json!([{"type":"tool_result","tool_use_id":id,"is_error":is_error,"content":[{"type":"text","text":json!({"success":success,"message":"Report delivered to your caller."}).to_string()}]}]),
+            )
+        };
+        let parse = |records: Vec<Value>| {
+            parse_child_transcript(
+                super::super::claude_sessions::ChildBytes {
+                    bytes: records
+                        .iter()
+                        .map(|r| format!("{r}\n"))
+                        .collect::<String>()
+                        .into_bytes(),
+                    start: 0,
+                    truncated: false,
+                },
+                "parent",
+                "a123",
+                "public",
+                &config,
+            )
+            .unwrap()
+        };
+        for records in [
+            vec![tool.clone()],
+            vec![tool.clone(), result("other", true, false)],
+            vec![tool.clone(), result("handback", false, false)],
+            vec![tool.clone(), result("handback", true, true)],
+        ] {
+            assert!(
+                !parse(records)
+                    .0
+                    .iter()
+                    .any(|e| matches!(e.event, EventKind::Text { .. }))
+            );
+        }
+        let (events, truncated) = parse(vec![tool.clone(), result("handback", true, false)]);
+        let delivered: String = events
+            .iter()
+            .filter_map(|e| match &e.event {
+                EventKind::Text { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(delivered, report);
+        assert!(truncated); // tool input was clipped, but the report is complete
+        assert!(events.windows(2).all(|pair| pair[0].seq < pair[1].seq));
+        assert!(matches!(events[1].event, EventKind::ToolResult { .. }));
+        let original = serde_json::to_value(&(events.clone(), truncated)).unwrap();
+        let normalized = normalize_child_transcript((events, truncated)).unwrap();
+        assert_eq!(serde_json::to_value(normalized).unwrap(), original);
+        // A pre-fix persisted snapshot has the tool and receipt but no report
+        // text. Its already-redacted input must work after daemon restart.
+        let old_report = "完整历史报告".repeat(1000);
+        let old_tool = record(
+            "assistant",
+            json!([{"type":"tool_use","id":"handback","name":"SubagentHandback","input":{"message":old_report}}]),
+        );
+        let mut cached = parse(vec![old_tool]);
+        cached.0.push(latte_work_protocol::Event {
+            seq: 1000000.0,
+            session_id: "public".into(),
+            at: 0.0,
+            event: EventKind::ToolResult {
+                id: "handback".into(),
+                content: json!([{"type":"text","text":"{\"success\":true}"}]),
+                is_error: false,
+            },
+        });
+        let restored = normalize_child_transcript(cached).unwrap();
+        let restored_text: String = restored
+            .0
+            .iter()
+            .filter_map(|e| match &e.event {
+                EventKind::Text { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(restored_text, old_report);
+        let oversized = record(
+            "assistant",
+            json!([{"type":"tool_use","id":"handback","name":"SubagentHandback","input":{"message":"界".repeat(60000)}}]),
+        );
+        let (events, truncated) = parse(vec![oversized, result("handback", true, false)]);
+        let report: String = events
+            .iter()
+            .filter_map(|e| match &e.event {
+                EventKind::Text { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert!(truncated && report.ends_with("（报告已截断）"));
+        assert!(report.len() < 129 * 1024);
     }
 
     #[test]

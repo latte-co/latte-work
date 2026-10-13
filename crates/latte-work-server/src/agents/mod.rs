@@ -6,6 +6,15 @@ mod claude_sessions;
 pub use adapter::{Action, AgentAdapter, AgentCommand, Input};
 use anyhow::{Result, bail};
 pub type ChildTranscript = (Vec<latte_work_protocol::Event>, bool);
+pub fn normalize_child_transcript(
+    agent: &str,
+    snapshot: ChildTranscript,
+) -> Result<ChildTranscript> {
+    match agent {
+        "claude" => claude::normalize_child_transcript(snapshot),
+        _ => bail!("此 Agent 尚未实现子智能体过程：{agent}"),
+    }
+}
 pub fn child_read_permit() -> Result<tokio::sync::OwnedSemaphorePermit> {
     static READS: std::sync::OnceLock<std::sync::Arc<tokio::sync::Semaphore>> =
         std::sync::OnceLock::new();

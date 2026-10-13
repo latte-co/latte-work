@@ -88,3 +88,34 @@ it("does not claim a missing tool result succeeded after completion and marks pa
   expect(screen.getByText("结果待确认")).toBeTruthy();
   expect(screen.getByText(/部分过程或内容超出显示上限/)).toBeTruthy();
 });
+it("shows the normalized delivered report instead of the task delivery receipt", () => {
+  const receipt =
+    "This agent's report was delivered to you as a message. Read it there.";
+  render(
+    <SubagentTranscript
+      task={{ ...task, status: "completed", summary: receipt }}
+      events={rows(
+        {
+          kind: "tool",
+          id: "handback",
+          name: "SubagentHandback",
+          input: { message: "历史报告正文" },
+        },
+        {
+          kind: "tool_result",
+          id: "handback",
+          content: [{ type: "text", text: '{"success":true}' }],
+          is_error: false,
+        },
+        { kind: "text", text: "历史报告" },
+        { kind: "text", text: "正文" },
+      )}
+      elapsed="3s"
+      truncated
+    />,
+  );
+  expect(screen.getByText("历史报告正文").closest("details")).toBeNull();
+  expect(screen.queryByText(receipt)).toBeNull();
+  expect(screen.getByRole("button", { name: "复制回复" })).toBeTruthy();
+  expect(screen.getByText("用时 3s").closest("details")!.open).toBe(false);
+});

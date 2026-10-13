@@ -3980,15 +3980,14 @@ button[aria-checked="true"] .model-option-check {
   gap: 8px;
   margin-bottom: 20px;
 }
-.subagent-detail-heading {
-  display: flex;
-  align-items: center;
-  gap: 12px;
+.workspace-pane .subagent-conversation {
+  position: relative;
+  height: 100%;
+  margin: 0;
+  border-radius: 0;
 }
-.subagent-detail-heading h2 {
-  font-size: 16px;
-  font-weight: 500;
-  overflow-wrap: anywhere;
+.subagent-conversation > .return-latest {
+  bottom: var(--space-4);
 }
 .subagent-result {
   margin-top: 24px;

@@ -37,6 +37,7 @@ import type {
   Response,
 } from "./protocol";
 import { appendEvents } from "./transcript";
+import { LIVE_POLL_MS } from "./usePollingSnapshot";
 import { HistoryCache } from "./historyCache";
 import {
   agentSessionKey,
@@ -661,7 +662,7 @@ export function useWorkbench() {
           replay = [];
           initialWindow = false;
           replaying = false;
-          timer = setTimeout(() => void poll(), 650);
+          timer = setTimeout(() => void poll(), LIVE_POLL_MS);
           return;
         }
         if (r.kind === "events") {
@@ -710,7 +711,7 @@ export function useWorkbench() {
           setSessions((previous) =>
             previous.map((s) => (s.id === r.session.id ? r.session : s)),
           );
-          timer = setTimeout(() => void poll(), r.has_more ? 0 : 650);
+          timer = setTimeout(() => void poll(), r.has_more ? 0 : LIVE_POLL_MS);
         }
       } catch (e) {
         if (!disposed && !(e instanceof HostConnectionError)) {

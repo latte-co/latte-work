@@ -3844,6 +3844,102 @@ async fn disconnected_app_quit_preserves_remote_execution_and_reattaches_without
 }
 
 #[tokio::test]
+async fn persisted_handback_report_is_read_without_reopening_or_replaying_agent() {
+    let host = Host::start().await;
+    let mut client = host.client().await;
+    let folder = tempfile::tempdir().unwrap();
+    let id = session(&mut client, folder.path()).await;
+    send(&mut client, &id, "child-request", "subagents").await;
+    wait(&mut client, &id, Status::Completed).await;
+    let Response::Subagents { tasks, .. } = ask(
+        &mut client,
+        Request::Subagents {
+            session_id: id.clone(),
+        },
+    )
+    .await
+    else {
+        panic!()
+    };
+    let child = &tasks[0];
+    ask(
+        &mut client,
+        Request::CloseAgentSession {
+            session_id: id.clone(),
+            only_if_idle: Some(false),
+        },
+    )
+    .await;
+    let report = "完整历史报告".repeat(1000);
+    let events = vec![
+        latte_work_protocol::Event {
+            seq: 1.0,
+            session_id: id.clone(),
+            at: 0.0,
+            event: EventKind::Tool {
+                id: "handback".into(),
+                name: "SubagentHandback".into(),
+                input: serde_json::json!({"message":report}),
+            },
+        },
+        latte_work_protocol::Event {
+            seq: 2.0,
+            session_id: id.clone(),
+            at: 0.0,
+            event: EventKind::ToolResult {
+                id: "handback".into(),
+                content: serde_json::json!([{"type":"text","text":"{\"success\":true}"}]),
+                is_error: false,
+            },
+        },
+    ];
+    let db = rusqlite::Connection::open(host.directory.path().join("state.sqlite")).unwrap();
+    db.execute(
+        "INSERT INTO subagent_native_transcripts(session_id,task_id,data) VALUES (?1,?2,?3)",
+        rusqlite::params![
+            id,
+            child.id,
+            serde_json::to_string(&(events, true)).unwrap()
+        ],
+    )
+    .unwrap();
+    let requests: i64 = db
+        .query_row("SELECT count(*) FROM requests", [], |row| row.get(0))
+        .unwrap();
+    drop(client);
+    let mut client = host.client().await;
+    let Response::SubagentTranscript { events, truncated } = ask(
+        &mut client,
+        Request::SubagentTranscript {
+            session_id: id.clone(),
+            task_id: child.id.clone(),
+        },
+    )
+    .await
+    else {
+        panic!()
+    };
+    let output: String = events
+        .iter()
+        .filter_map(|e| match &e.event {
+            EventKind::Text { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(output, report);
+    assert!(truncated && events.iter().all(|e| e.session_id == id));
+    assert_eq!(
+        db.query_row("SELECT count(*) FROM requests", [], |row| row
+            .get::<_, i64>(0))
+            .unwrap(),
+        requests
+    );
+    assert!(
+        matches!(ask(&mut client,Request::Session { session_id:id }).await,Response::Session { session } if session.agent_session_open==Some(false))
+    );
+}
+
+#[tokio::test]
 async fn subagents_native_commands_snapshot_reconnect_and_close_share_one_protocol() {
     use latte_work_protocol::SubagentStatus;
     let host = Host::start().await;

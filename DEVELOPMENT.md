@@ -479,13 +479,26 @@ regular-file checks, reject symlink directories and verify every accepted record
 parent/child/sidechain identity. Hidden thinking blocks are excluded. The original
 launch context redacts provider credentials before truncation and caching. Terminal
 child notifications capture that snapshot before the context can be replaced.
+Successful native `SubagentHandback` delivery promotes its `message` into shared
+text events after the matching result explicitly confirms success. The adapter
+does this before tool-input clipping; reports retain up to 128 KiB with explicit
+report truncation. Already-redacted historical snapshots are normalized in memory
+on read, so a saved complete report can replace a delivery receipt after restart.
+Pending, failed and unmatched handbacks never claim a delivered report. A partial
+process history can still contain a complete final report.
 Native reads have a three-second deadline and a shared two-reader limit; stopped
 runtimes serve only persisted snapshots or already recorded stdout events, without
-opening or replaying an Agent. No untrusted transcript paths are read. The tab polls only while visible and a child is active, fences
-late responses by host/session/child/connection identity, and preserves recorded
-evidence across read failures. Successful completion folds the process by default
+opening or replaying an Agent. No untrusted transcript paths are read. The visible child list refreshes independently of parent
+events, and active child transcripts use the same 650 ms polling gap as the main
+conversation. Reads are serialized; metadata revisions coalesce into one queued
+refresh without invalidating an in-flight read. Completion queues a final read
+and stops periodic polling. Hiding a tab stops its periodic reads; showing it
+refreshes immediately. Host/session/child/connection changes fence late responses,
+and recorded evidence survives read failures and reconnects. Successful completion folds the process by default
 and keeps the final native output visible; failed/unknown children retain their
-process evidence. Tools without a result remain unconfirmed, never successful.
+process evidence. The detail uses the main conversation layout, tool rows and
+reported-phase status row without a composer; scrolling up pauses following and
+offers the shared return-to-latest control. Tools without a result remain unconfirmed, never successful.
 Old histories without captured child events keep their native summary. Both the
 local client and remote host need the additive transcript request to use this view.
 Hiding or closing a child tab never stops execution. Child result envelopes cannot

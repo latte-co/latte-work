@@ -88,3 +88,81 @@ it("keeps recorded output on read failure and explains unsupported old servers",
   expect(hook.result.current.events).toHaveLength(1);
   expect(hook.result.current.error).toContain("请更新 Server");
 });
+
+it("coalesces frequent task revisions without cancelling or overlapping a slow read", async () => {
+  let resolve!: (v: unknown) => void;
+  mocks.request
+    .mockImplementationOnce(
+      () =>
+        new Promise((r) => {
+          resolve = r;
+        }),
+    )
+    .mockResolvedValue(reply("latest"));
+  const hook = renderHook(
+    ({ revision }) =>
+      useSubagentTranscript("local", "s", "a", true, true, revision),
+    { initialProps: { revision: 0 } },
+  );
+  for (let revision = 1; revision <= 5; revision++) hook.rerender({ revision });
+  expect(mocks.request).toHaveBeenCalledTimes(1);
+  await act(async () => resolve(reply("first read")));
+  expect(mocks.request).toHaveBeenCalledTimes(2);
+  expect(hook.result.current.events[0].event).toEqual({
+    kind: "text",
+    text: "latest",
+  });
+});
+it("does a final read when completion arrives during an active read, then stops polling", async () => {
+  vi.useFakeTimers();
+  let resolve!: (v: unknown) => void;
+  mocks.request
+    .mockImplementationOnce(
+      () =>
+        new Promise((r) => {
+          resolve = r;
+        }),
+    )
+    .mockResolvedValue(reply("final"));
+  const hook = renderHook(
+    ({ running }) => useSubagentTranscript("local", "s", "a", true, running),
+    { initialProps: { running: true } },
+  );
+  hook.rerender({ running: false });
+  expect(mocks.request).toHaveBeenCalledTimes(1);
+  await act(async () => resolve(reply("progress")));
+  expect(hook.result.current.events[0].event).toEqual({
+    kind: "text",
+    text: "final",
+  });
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(10000);
+  });
+  expect(mocks.request).toHaveBeenCalledTimes(2);
+});
+it("retains captured output across a failed reconnect and rejects the old connection's response", async () => {
+  mocks.request.mockResolvedValueOnce(reply("saved"));
+  const hook = renderHook(
+    ({ version }) =>
+      useSubagentTranscript("local", "s", "a", true, false, 0, version),
+    { initialProps: { version: 0 } },
+  );
+  await act(async () => {});
+  let resolve!: (v: unknown) => void;
+  mocks.request.mockImplementationOnce(
+    () =>
+      new Promise((r) => {
+        resolve = r;
+      }),
+  );
+  hook.rerender({ version: 1 });
+  mocks.request.mockRejectedValueOnce(new Error("disconnected"));
+  hook.rerender({ version: 2 });
+  await act(async () => {});
+  await act(async () => resolve(reply("stale connection")));
+  expect(hook.result.current.events[0].event).toEqual({
+    kind: "text",
+    text: "saved",
+  });
+  expect(hook.result.current.error).toContain("disconnected");
+});
