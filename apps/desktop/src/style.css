@@ -12,6 +12,15 @@
 * {
   box-sizing: border-box;
 }
+/* The workbench stays in the viewport; only its panels scroll. Stop boundary
+   gestures from rubber-banding the document and exposing the native window. */
+html,
+body,
+#root {
+  height: 100%;
+  overflow: hidden;
+  overscroll-behavior: none;
+}
 body {
   margin: 0;
 }
@@ -728,7 +737,9 @@ button.recent-notice {
 }
 .conversation-scroll {
   flex: 1;
+  min-height: 0;
   overflow: auto;
+  overscroll-behavior: none;
   scrollbar-gutter: stable both-edges;
 }
 .conversation-scroll.empty {
