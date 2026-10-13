@@ -24,7 +24,11 @@ export function RemoteGlobeIcon({ className }: { className?: string }) {
       role="img"
       aria-label="远程对话"
     >
-      <RemoteGlobeMark />
+      {/* Own the stroke below the SVG root: generic button icon styles must
+          not thicken this compact 12-unit globe. At 14px this is a 0.875px line. */}
+      <g strokeWidth="0.75">
+        <RemoteGlobeMark />
+      </g>
     </svg>
   );
 }
