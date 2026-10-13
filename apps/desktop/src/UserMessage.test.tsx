@@ -22,7 +22,8 @@ it("uses the persisted timestamp and copies the exact original message", async (
   const view = render(<UserMessage text={text} at={at} />);
   const time = view.container.querySelector("time")!;
   expect(time.dateTime).toBe("2026-09-30T09:35:00.000Z");
-  expect(time.textContent).toMatch(/^星期三\d{2}:35$/);
+  expect(time.textContent).toMatch(/ \d{2}:35$/);
+  expect(time.textContent).not.toContain("星期");
   expect(time.title).toContain("2026");
   fireEvent.click(screen.getByRole("button", { name: "复制消息" }));
   await waitFor(() =>
