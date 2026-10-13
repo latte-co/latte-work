@@ -779,6 +779,59 @@ it("shows pinned sessions only once and restores them under the project after un
   expect(screen.queryByRole("region", { name: "置顶会话" })).toBeNull();
 });
 
+it.each(["local", "remote"])(
+  "opening a pinned conversation on %s preserves project expansion even when recent is hidden",
+  (targetHost) => {
+    const pinned = {
+      ...session("completed"),
+      id: "pin",
+      title: "Pinned task",
+      project_id: "other",
+      pinned_at: 1,
+      hostId: targetHost,
+    };
+    const base = state([session("completed")]);
+    const props = {
+      ...base,
+      isHostConnected: () => true,
+      hosts: [
+        ...base.hosts,
+        { id: "remote", name: "Remote host", ssh: "remote", server_path: null },
+      ],
+      projects: [
+        ...base.projects,
+        { hostId: targetHost, id: "other", name: "Other", path: "/other" },
+      ],
+      pinned: [pinned],
+    };
+    mocks.request.mockResolvedValue({ kind: "sessions", sessions: [pinned] });
+    const view = render(<Sidebar state={props} />);
+    const origin = screen.getByRole("button", { name: "Project" });
+    const target = screen.getByRole("button", { name: "Other" });
+    expect(origin.getAttribute("aria-expanded")).toBe("true");
+    expect(target.getAttribute("aria-expanded")).toBe("false");
+    fireEvent.click(screen.getByRole("button", { name: "Pinned task" }));
+    expect(props.openSession).toHaveBeenCalledWith(pinned);
+    view.rerender(
+      <Sidebar
+        state={{
+          ...props,
+          hostId: targetHost,
+          projectId: "other",
+          sessionId: pinned.id,
+          sessions: [pinned],
+        }}
+      />,
+    );
+    expect(target.getAttribute("aria-expanded")).toBe("false");
+    expect(origin.getAttribute("aria-expanded")).toBe("true");
+    fireEvent.click(target);
+    expect(target.getAttribute("aria-expanded")).toBe("true");
+    fireEvent.click(screen.getByRole("button", { name: "Pinned task" }));
+    expect(target.getAttribute("aria-expanded")).toBe("true");
+  },
+);
+
 it("shows delayed history feedback only beside the selected conversation", () => {
   vi.useFakeTimers();
   const s = state([

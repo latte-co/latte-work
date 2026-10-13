@@ -157,13 +157,17 @@ export function Sidebar({
       : (state.isHostConnected?.(id) ?? (id === hostId && connected))
         ? "connected"
         : "connecting");
+  const selectedIsPinned = state.pinned.some(
+    (s) =>
+      s.hostId === hostId && s.project_id === projectId && s.id === sessionId,
+  );
   useEffect(() => {
-    if (!projectId || sections.recent) return;
+    if (!projectId || sections.recent || selectedIsPinned) return;
     const key = `${hostId}:${projectId}`;
     setExpandedProjects((old) =>
       old[key] === undefined ? { ...old, [key]: true } : old,
     );
-  }, [hostId, projectId, sections.recent]);
+  }, [hostId, projectId, sections.recent, selectedIsPinned]);
   const recent = useRecentSessions(
     hosts
       .filter((host) => connectionStatus(host.id) === "connected")
@@ -365,7 +369,7 @@ export function Sidebar({
           aria-label={s.title}
           aria-description={`${sourceProject?.name ?? "项目"} · ${sourceHost?.name ?? s.hostId} · ${statusNames[s.status]}${liveState === "closed" ? "" : ` · ${liveLabel}`}`}
           onClick={() => {
-            if (list !== "recent")
+            if (list === "project")
               setExpandedProjects((old) => ({
                 ...old,
                 [`${s.hostId}:${s.project_id}`]: true,
