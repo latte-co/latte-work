@@ -32,7 +32,8 @@ import { PermissionPicker } from "./PermissionPicker";
 import { UsageIndicator } from "./UsageIndicator";
 import { ModelPicker, type ModelPickerHandle } from "./ModelPicker";
 import { TaskProjectPicker } from "./TaskProjectPicker";
-import { TurnTranscript } from "./TurnTranscript";
+import { TurnTranscript, turnTranscript } from "./TurnTranscript";
+import { TurnNavigator, turnNavigationEntries } from "./TurnNavigator";
 import { ToolGroup, ToolRow } from "./ToolActivity";
 export const statusNames = {
   ready: "就绪",
@@ -213,6 +214,11 @@ export function Conversation({
     connected &&
     (liveSessionState === "opening" || liveSessionState === "restoring");
   const [away, setAway] = useState(false);
+  const turns = useMemo(() => turnTranscript(events), [events]);
+  const turnEntries = useMemo(() => turnNavigationEntries(turns), [turns]);
+  const showTurnNavigation =
+    !preparingHistory &&
+    (turnEntries.length > 1 || (hasEarlierHistory && turnEntries.length > 0));
   const [stopping, setStopping] = useState(false);
   const stopGeneration = useRef(0);
   const active = session && ["running", "waiting"].includes(session.status);
@@ -485,7 +491,10 @@ export function Conversation({
       ref={root}
       data-preparing={!connected && (connecting || !connectionError)}
     >
-      <div className="conversation-history">
+      <div
+        className="conversation-history"
+        data-turn-navigation={showTurnNavigation}
+      >
         <div
           className={`conversation-scroll${events.length === 0 ? " empty" : ""}`}
           ref={scroller}
@@ -555,7 +564,7 @@ export function Conversation({
                   </button>
                 </div>
               )}
-              <TurnTranscript events={events}>
+              <TurnTranscript events={events} turns={turns}>
                 {(item) =>
                   item.type === "user" ? (
                     <UserMessage key={item.key} text={item.text} at={item.at} />
@@ -649,6 +658,34 @@ export function Conversation({
             </div>
           )}
         </div>
+        {showTurnNavigation && (
+          <TurnNavigator
+            key={positionScope}
+            entries={turnEntries}
+            scroller={scroller}
+            onNavigate={(top) => {
+              follow.current = false;
+              setAway(true);
+              positions.set(positionScope, { top, follow: false });
+              scroller.current?.scrollTo({ top });
+            }}
+            hasEarlierHistory={hasEarlierHistory}
+            earlierHistoryLoading={earlierHistoryLoading}
+            onLoadEarlier={
+              loadEarlierHistory
+                ? () => {
+                    follow.current = false;
+                    setAway(true);
+                    positions.set(positionScope, {
+                      top: scroller.current?.scrollTop ?? 0,
+                      follow: false,
+                    });
+                    void loadEarlierHistory();
+                  }
+                : undefined
+            }
+          />
+        )}
       </div>
       <div className="composer-wrap">
         <div className="composer-context">

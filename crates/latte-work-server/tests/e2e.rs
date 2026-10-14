@@ -2503,7 +2503,6 @@ async fn native_child_transcript_is_cached_without_reopening_an_agent_or_replayi
     let id = session(&mut client, project.path()).await;
     send(&mut client, &id, "native-child-process", "subagent-process").await;
     wait(&mut client, &id, Status::Completed).await;
-    tokio::time::sleep(Duration::from_millis(300)).await;
     let Response::Subagents { tasks, .. } = ask(
         &mut client,
         Request::Subagents {
@@ -2519,17 +2518,31 @@ async fn native_child_transcript_is_cached_without_reopening_an_agent_or_replayi
         session_id: id.clone(),
         task_id: task.id.clone(),
     };
-    assert!(matches!(
-        ask(
+    // Parent completion precedes the child's notification and the native idle
+    // frame. Wait for the actor's idle guard rather than assuming 300ms is enough
+    // on a loaded CI runner. Never close an active fixture by overriding it.
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        match ask(
             &mut client,
             Request::CloseAgentSession {
                 session_id: id.clone(),
                 only_if_idle: Some(true),
             },
         )
-        .await,
-        Response::Ok
-    ));
+        .await
+        {
+            Response::Ok => break,
+            Response::Error { message, .. } if message.contains("请确认后关闭") => {
+                assert!(
+                    Instant::now() < deadline,
+                    "fixture did not become idle: {message}"
+                );
+                tokio::time::sleep(Duration::from_millis(30)).await;
+            }
+            response => panic!("unexpected idle-close response: {response:?}"),
+        }
+    }
     let Response::SubagentTranscript { events, truncated } = ask(&mut client, read.clone()).await
     else {
         panic!("native child")

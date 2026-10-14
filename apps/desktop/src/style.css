@@ -3872,6 +3872,126 @@ button[aria-checked="true"] .model-option-check {
   flex: 1;
   min-height: 0;
 }
+.conversation-history[data-turn-navigation="true"] > .conversation-scroll {
+  margin-right: var(--space-8);
+}
+.turn-navigator {
+  position: absolute;
+  z-index: 2;
+  top: var(--space-4);
+  bottom: var(--space-4);
+  right: var(--space-1);
+  width: var(--icon-hit-size);
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+}
+.turn-navigator-list {
+  position: relative;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: none;
+  scrollbar-width: none;
+}
+.turn-navigator-list::-webkit-scrollbar {
+  display: none;
+}
+.turn-navigator-list button,
+.turn-navigator-earlier {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  width: var(--icon-hit-size);
+  height: var(--icon-hit-size);
+  min-height: var(--icon-hit-size);
+  border: 0;
+  border-radius: var(--radius-sm);
+  padding: 0;
+  background: transparent;
+  color: var(--color-text-muted);
+}
+.turn-navigator-list button > span {
+  display: block;
+  height: 2px;
+  width: 6px;
+  background: var(--color-text-muted);
+  opacity: 0.4;
+  transition:
+    width var(--duration-fast),
+    opacity var(--duration-fast);
+}
+/* Compact timeline marks retain a full-width target and keyboard navigation. */
+.turn-navigator-list button {
+  height: var(--space-4);
+  min-height: var(--space-4);
+}
+.turn-navigator-list button:hover {
+  background: transparent;
+}
+.turn-navigator-list button:hover > span,
+.turn-navigator-list button:focus-visible > span {
+  width: var(--space-4);
+  opacity: 0.8;
+}
+.turn-navigator-list button[aria-current="location"] > span {
+  width: var(--space-6);
+  background: var(--color-text);
+  opacity: 1;
+}
+.turn-navigator-list button:focus-visible {
+  background: var(--color-focus-background);
+}
+.turn-navigator-earlier {
+  flex: none;
+  justify-content: center;
+}
+.turn-navigator-earlier:disabled {
+  color: var(--color-disabled-text);
+  background: transparent;
+}
+.turn-navigator-preview {
+  position: absolute;
+  right: calc(var(--icon-hit-size) + var(--space-2));
+  width: min(360px, calc(100cqw - 80px));
+  max-height: 100%;
+  overflow: hidden;
+  padding: var(--space-3) var(--space-4);
+  background: var(--color-elevated);
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-panel);
+  box-shadow: var(--shadow-popover);
+  pointer-events: none;
+  font-size: var(--text-lg);
+  line-height: var(--leading-content);
+}
+.turn-navigator-preview p {
+  margin: 0;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+}
+.turn-navigator-prompt {
+  -webkit-line-clamp: 2;
+  color: var(--color-text);
+  font-weight: var(--weight-content-emphasis);
+}
+.turn-navigator-preview .turn-navigator-reply {
+  margin-top: var(--space-2);
+  -webkit-line-clamp: 3;
+  color: var(--color-text-muted);
+}
+.turn-navigator-preview small {
+  display: block;
+  margin-top: var(--space-2);
+  color: var(--color-text-secondary);
+  font-size: var(--text-xs);
+}
+@media (prefers-reduced-motion: reduce) {
+  .turn-navigator-list button > span {
+    transition: none;
+  }
+}
 .conversation-scroll[data-history-loading="true"] > .messages,
 .conversation-scroll[data-history-loading="true"] > .welcome {
   visibility: hidden;

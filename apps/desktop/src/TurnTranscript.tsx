@@ -72,6 +72,7 @@ export function turnTranscript(events: Event[]) {
       key: `${events[0].session_id}:${events[0].seq}`,
       outcomeKey: end?.seq,
       user,
+      status: end?.event.kind === "state" ? end.event.status : undefined,
       finalKey: hasFinal ? lastAssistant?.key : undefined,
       finalAt: hasFinal ? end?.at : undefined,
       stopped,
@@ -90,16 +91,27 @@ export function turnTranscript(events: Event[]) {
   });
 }
 
+export type TranscriptTurn = ReturnType<typeof turnTranscript>[number];
+
 export function TurnTranscript({
   events,
+  turns: suppliedTurns,
   children,
 }: {
   events: Event[];
+  turns?: TranscriptTurn[];
   children: (item: ActivityItem) => ReactNode;
 }) {
-  const turns = useMemo(() => turnTranscript(events), [events]);
+  const turns = useMemo(
+    () => suppliedTurns ?? turnTranscript(events),
+    [events, suppliedTurns],
+  );
   return turns.map((turn) => (
-    <div className="conversation-turn" key={turn.key}>
+    <div
+      className="conversation-turn"
+      key={turn.key}
+      data-turn-key={turn.user ? turn.key : undefined}
+    >
       {turn.user && children(turn.user)}
       {turn.process.length > 0 && (
         <ProcessDisclosure key={turn.outcomeKey}>
