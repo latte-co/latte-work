@@ -456,6 +456,7 @@ button.recent-notice {
 }
 .session-item {
   position: relative;
+  padding-block: 1px;
 }
 .session-row {
   position: relative;
@@ -3637,9 +3638,6 @@ button[aria-checked="true"] .model-option-check {
 }
 .pinned-session-list {
   min-height: 0;
-}
-.pinned-session {
-  margin: 2px 0;
 }
 .session-label {
   white-space: nowrap;
