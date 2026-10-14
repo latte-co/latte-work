@@ -4569,3 +4569,163 @@ button[aria-checked="true"] .model-option-check {
     border-bottom: 1px solid var(--color-border);
   }
 }
+
+/* One review surface for Git ranges and frozen task/turn snapshots. */
+.review-scope-control {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+  flex-wrap: wrap;
+}
+.review-snapshot-scope {
+  padding: 6px var(--space-3);
+  border-radius: var(--radius-pill);
+  background: var(--color-hover);
+  font-size: var(--text-sm);
+  color: var(--color-text-secondary);
+}
+.review-file-section {
+  min-width: 0;
+  border-bottom: 1px solid var(--color-border);
+  scroll-margin-top: 0;
+}
+.review-file-section .git-review-file-heading {
+  padding: var(--space-1) var(--space-2);
+  background: var(--color-canvas);
+  min-height: 40px;
+}
+.review-file-toggle {
+  width: 28px;
+  height: 28px;
+  min-height: 28px;
+  padding: 4px;
+  flex-shrink: 0;
+  color: var(--color-text-muted);
+}
+.review-file-status {
+  color: var(--color-text-muted);
+  font-size: var(--text-xs);
+}
+.review-file-placeholder {
+  color: var(--color-text-muted);
+  font-size: var(--text-sm);
+  margin: 0;
+  padding: var(--space-5) var(--space-3);
+  min-height: 80px;
+}
+.review-file-tree {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+.review-file-tree button {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 30px;
+  width: 100%;
+  padding: 5px var(--space-2);
+  text-align: left;
+  font-size: var(--text-sm);
+  border-radius: var(--radius-sm);
+  color: var(--color-text-secondary);
+}
+.review-file-tree button.selected {
+  background: var(--color-selected);
+  color: var(--color-text);
+}
+.review-file-tree .review-tree-folder {
+  color: var(--color-text-muted);
+}
+.review-file-tree .change-totals {
+  margin-left: auto;
+  font-size: var(--text-xs);
+  flex-shrink: 0;
+}
+.review-unified-row.added,
+.review-diff-cell.added {
+  background: color-mix(in srgb, var(--color-success) 12%, transparent);
+  box-shadow: inset 3px 0
+    color-mix(in srgb, var(--color-success) 65%, transparent);
+}
+.review-unified-row.removed,
+.review-diff-cell.removed {
+  background: color-mix(in srgb, var(--color-danger) 12%, transparent);
+  box-shadow: inset 3px 0
+    color-mix(in srgb, var(--color-danger) 65%, transparent);
+}
+.review-diff code {
+  color: var(--color-text-secondary);
+}
+.review-diff .syntax-keyword {
+  color: var(--color-code-keyword, #cda4d7);
+}
+.review-diff .syntax-string {
+  color: var(--color-code-string, #c4c998);
+}
+.review-diff .syntax-number {
+  color: var(--color-code-number, #a7c6be);
+}
+.review-diff .syntax-type {
+  color: var(--color-code-type, #dfbc85);
+}
+.review-diff .syntax-comment {
+  color: var(--color-text-muted);
+}
+.review-unified-row.hunk {
+  border-top: 1px solid var(--color-border-subtle);
+  border-bottom: 1px solid var(--color-border-subtle);
+  margin: var(--space-2) 0;
+  font-size: var(--text-xs);
+  color: var(--color-text-muted);
+}
+.review-show-more {
+  margin: var(--space-3);
+  font-size: var(--text-sm);
+  color: var(--color-text-secondary);
+}
+.review-unified-row.hunk > span,
+.review-unified-row.meta > span {
+  display: none;
+}
+.review-unified-row.hunk code,
+.review-unified-row.meta code {
+  padding-left: var(--space-3);
+}
+/* Keep directory navigation on the right, including narrow workspace tabs. */
+@container (max-width: 560px) {
+  .git-review-body {
+    flex-direction: row;
+  }
+  .git-review-files {
+    flex: 0 0 clamp(120px, 34cqw, 190px);
+    border-left: 1px solid var(--color-border);
+    border-bottom: 0;
+    padding: var(--space-1);
+  }
+  .review-file-status {
+    display: none;
+  }
+  .review-file-section .git-review-file-heading {
+    display: grid;
+    grid-template-columns: 28px minmax(0, 1fr) auto;
+    gap: 6px;
+  }
+  .review-file-section .git-review-file-heading > svg,
+  .review-directory-prefix {
+    display: none;
+  }
+  .git-review-file-heading .change-totals {
+    margin-left: 0;
+    font-size: var(--text-xs);
+  }
+}
+.git-review-boundary {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.git-review-content {
+  position: relative;
+}

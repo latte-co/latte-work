@@ -80,7 +80,7 @@ async function scope(label: string) {
 }
 it("defaults to the real branch base, filters the right list, routes selected diffs and switches layouts", async () => {
   render(<ChangesView {...props} />);
-  await screen.findByRole("region", { name: "统一文件差异" });
+  await screen.findAllByRole("region", { name: "统一文件差异" });
   expect(mocks.request).toHaveBeenCalledWith("local", {
     method: "git_review",
     project_id: "p",
@@ -105,18 +105,20 @@ it("defaults to the real branch base, filters the right list, routes selected di
       }),
     ),
   );
-  await screen.findByRole("region", { name: "统一文件差异" });
+  await screen.findAllByRole("region", { name: "统一文件差异" });
   fireEvent.click(screen.getByRole("button", { name: "并排差异" }));
-  expect(screen.getByRole("region", { name: "并排文件差异" })).toBeTruthy();
+  expect(
+    screen.getAllByRole("region", { name: "并排文件差异" })[0],
+  ).toBeTruthy();
   expect(
     screen
-      .getByRole("region", { name: "并排文件差异" })
+      .getAllByRole("region", { name: "并排文件差异" })[0]
       .classList.contains("wrap"),
   ).toBe(true);
   fireEvent.click(screen.getByRole("button", { name: "自动换行" }));
   expect(
     screen
-      .getByRole("region", { name: "并排文件差异" })
+      .getAllByRole("region", { name: "并排文件差异" })[0]
       .classList.contains("wrap"),
   ).toBe(false);
   fireEvent.click(screen.getByRole("button", { name: "更多差异选项" }));
@@ -129,7 +131,7 @@ it("defaults to the real branch base, filters the right list, routes selected di
       expect.objectContaining({ full_context: true }),
     ),
   );
-  await screen.findByRole("region", { name: "并排文件差异" });
+  await screen.findAllByRole("region", { name: "并排文件差异" });
   expect(screen.queryByRole("menu")).toBeNull();
   fireEvent.click(screen.getByRole("button", { name: "更多差异选项" }));
   expect(
@@ -147,7 +149,7 @@ it("defaults to the real branch base, filters the right list, routes selected di
 });
 it("changes comparison scopes and base without submitting agent commands", async () => {
   render(<ChangesView {...props} />);
-  await screen.findByRole("region", { name: "统一文件差异" });
+  await screen.findAllByRole("region", { name: "统一文件差异" });
   fireEvent.click(screen.getByRole("combobox", { name: "比较基准" }));
   fireEvent.change(screen.getByRole("combobox", { name: "搜索分支" }), {
     target: { value: "main" },
@@ -168,7 +170,7 @@ it("changes comparison scopes and base without submitting agent commands", async
     ["已暂存", "staged"],
   ]) {
     await scope(label);
-    await screen.findByRole("region", { name: "统一文件差异" });
+    await screen.findAllByRole("region", { name: "统一文件差异" });
     expect(mocks.request).toHaveBeenCalledWith(
       "local",
       expect.objectContaining({
@@ -198,7 +200,7 @@ it("fences stale host reads, performs no reads while hidden and reports unsuppor
   );
   const view = render(<ChangesView {...props} />);
   view.rerender(<ChangesView {...props} hostId="remote" />);
-  await screen.findByRole("region", { name: "统一文件差异" });
+  await screen.findAllByRole("region", { name: "统一文件差异" });
   await act(async () =>
     resolve({ kind: "git_info", info: { ...info, branch: "stale" } }),
   );
@@ -216,7 +218,7 @@ it("fences stale host reads, performs no reads while hidden and reports unsuppor
 });
 it("distinguishes an empty branch from a filter with no matching files", async () => {
   render(<ChangesView {...props} />);
-  await screen.findByRole("region", { name: "统一文件差异" });
+  await screen.findAllByRole("region", { name: "统一文件差异" });
   fireEvent.change(screen.getByRole("textbox", { name: "筛选文件" }), {
     target: { value: "missing" },
   });
@@ -313,7 +315,7 @@ it("reads the saved last turn outside Git, preserves its status and refreshes on
 });
 it("does not invent a last turn when the conversation has no recorded snapshot", async () => {
   render(<ChangesView {...props} />);
-  await screen.findByRole("region", { name: "统一文件差异" });
+  await screen.findAllByRole("region", { name: "统一文件差异" });
   mocks.request.mockClear();
   await scope("上一轮");
   expect(await screen.findByText("当前对话尚无已保存的回合快照")).toBeTruthy();
@@ -327,7 +329,7 @@ it("uses the server's empty snapshot result and reports unsupported responses", 
       : previous(host, req),
   );
   render(<ChangesView {...props} sessionId="s1" />);
-  await screen.findByRole("region", { name: "统一文件差异" });
+  await screen.findAllByRole("region", { name: "统一文件差异" });
   await scope("上一轮");
   await screen.findByText("当前对话尚无已保存的回合快照");
   expect(mocks.request).toHaveBeenCalledWith("local", {
@@ -357,9 +359,11 @@ it("reconciles an undo event for the same last turn without changing its saved d
   const view = render(
     <ChangesView {...props} sessionId="s1" lastTurnVersion="r1-ready" />,
   );
-  await screen.findByRole("region", { name: "统一文件差异" });
+  await screen.findAllByRole("region", { name: "统一文件差异" });
   await scope("上一轮");
-  await screen.findByRole("button", { name: /saved.txt/ });
+  await within(
+    screen.getByRole("complementary", { name: "变更文件" }),
+  ).findByRole("button", { name: /saved.txt/ });
   expect(screen.queryByText(/本轮修改已撤销/)).toBeNull();
   saved = { ...saved, undo: "reverted" };
   view.rerender(
@@ -404,7 +408,7 @@ it.each([false, true])(
     const view = render(
       <ChangesView {...props} sessionId="s1" lastTurnVersion="r1" />,
     );
-    await screen.findByRole("region", { name: "统一文件差异" });
+    await screen.findAllByRole("region", { name: "统一文件差异" });
     await scope("上一轮");
     view.rerender(
       <ChangesView {...props} sessionId="s2" lastTurnVersion="r2" />,
