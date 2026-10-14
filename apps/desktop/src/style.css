@@ -4000,15 +4000,25 @@ button[aria-checked="true"] .model-option-check {
   flex: 1;
   min-height: 0;
 }
-.conversation-history[data-turn-navigation="true"] > .conversation-scroll {
-  margin-right: var(--space-8);
+.conversation-history[data-turn-navigation="true"]
+  > .conversation-scroll
+  > .messages,
+.conversation-history[data-turn-navigation="true"] ~ .composer-wrap {
+  padding-inline: max(
+    var(--content-gutter),
+    calc(var(--icon-hit-size) + var(--space-3))
+  );
+  max-width: calc(
+    var(--content-width) + 2 *
+      max(var(--content-gutter), calc(var(--icon-hit-size) + var(--space-3)))
+  );
 }
 .turn-navigator {
   position: absolute;
   z-index: 2;
   top: var(--space-4);
   bottom: var(--space-4);
-  right: var(--space-1);
+  left: var(--space-1);
   width: var(--icon-hit-size);
   display: flex;
   flex-direction: column;
@@ -4079,7 +4089,7 @@ button[aria-checked="true"] .model-option-check {
 }
 .turn-navigator-preview {
   position: absolute;
-  right: calc(var(--icon-hit-size) + var(--space-2));
+  left: calc(var(--icon-hit-size) + var(--space-2));
   width: min(360px, calc(100cqw - 80px));
   max-height: 100%;
   overflow: hidden;
