@@ -16,6 +16,7 @@ pub fn lane(request: &Request) -> Lane {
         | Request::CloseAgentSession { .. }
         | Request::Send { .. }
         | Request::Approve { .. }
+        | Request::AnswerQuestion { .. }
         | Request::Cancel { .. } => Lane::Control,
         Request::AgentCommands { .. }
         | Request::AgentPermissions { .. }

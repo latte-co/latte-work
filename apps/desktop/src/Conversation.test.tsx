@@ -845,3 +845,78 @@ it("keeps a pending send disabled when polling reports running, then sends the n
   );
   expect(input().value).toBe("");
 });
+it("renders a question directly, submits once for its session and preserves panel navigation without a child summary card", async () => {
+  const p = props();
+  const answerQuestion = vi.fn();
+  let finish!: () => void;
+  answerQuestion.mockImplementation(
+    () =>
+      new Promise<void>((done) => {
+        finish = done;
+      }),
+  );
+  const question: Event = {
+    seq: 2,
+    at: 1,
+    session_id: "s",
+    event: {
+      kind: "question",
+      request_id: "question",
+      tool_use_id: null,
+      questions: [
+        {
+          id: "q0",
+          text: "选择输出格式",
+          header: "格式",
+          multi_select: false,
+          options: [
+            { label: "摘要", description: "简短" },
+            { label: "全文", description: "完整" },
+          ],
+        },
+      ],
+    },
+  };
+  const events: Event[] = [
+    {
+      seq: 1,
+      at: 0,
+      session_id: "s",
+      event: { kind: "user", text: "评估项目", request_id: "send" },
+    },
+    question,
+  ];
+  const openSubagents = vi.fn();
+  const view = render(
+    <Conversation
+      {...p}
+      session={{ ...session("s"), status: "waiting" }}
+      events={events}
+      answerQuestion={answerQuestion}
+      openSubagents={openSubagents}
+    />,
+  );
+  expect(screen.getByText("等待你的回答")).toBeTruthy();
+  expect(screen.queryByText(/是否允许/)).toBeNull();
+  expect(screen.queryByRole("button", { name: "查看子智能体" })).toBeNull();
+  fireEvent.click(await screen.findByRole("radio", { name: /全文/ }));
+  fireEvent.click(screen.getByRole("button", { name: "提交回答" }));
+  fireEvent.click(screen.getByRole("button", { name: "正在提交…" }));
+  expect(answerQuestion).toHaveBeenCalledOnce();
+  expect(answerQuestion).toHaveBeenCalledWith("question", [
+    { question_id: "q0", option_indices: [1], text: null },
+  ]);
+  expect(p.approve).not.toHaveBeenCalled();
+  expect(p.send).not.toHaveBeenCalled();
+  view.rerender(
+    <Conversation
+      {...p}
+      session={{ ...session("other"), status: "running" }}
+      events={events}
+      answerQuestion={answerQuestion}
+      openSubagents={openSubagents}
+    />,
+  );
+  await act(async () => finish());
+  expect(screen.queryByRole("form", { name: "待回答问题" })).toBeNull();
+});

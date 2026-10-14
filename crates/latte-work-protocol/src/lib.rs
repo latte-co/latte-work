@@ -197,6 +197,15 @@ pub enum EventKind {
         content: Value,
         is_error: bool,
     },
+    Question {
+        request_id: String,
+        tool_use_id: Option<String>,
+        questions: Vec<UserQuestion>,
+    },
+    QuestionResolved {
+        request_id: String,
+        answers: Option<Vec<QuestionAnswer>>,
+    },
     Approval {
         request_id: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -533,6 +542,11 @@ pub enum Request {
         after: Option<f64>,
         source: Option<String>,
     },
+    AnswerQuestion {
+        session_id: String,
+        request_id: String,
+        answers: Option<Vec<QuestionAnswer>>,
+    },
     Approve {
         session_id: String,
         request_id: String,
@@ -643,6 +657,25 @@ pub enum ChangeSection {
     Unstaged,
     Staged,
     Untracked,
+}
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+pub struct QuestionOption {
+    pub label: String,
+    pub description: String,
+}
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+pub struct UserQuestion {
+    pub id: String,
+    pub header: String,
+    pub text: String,
+    pub options: Vec<QuestionOption>,
+    pub multi_select: bool,
+}
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+pub struct QuestionAnswer {
+    pub question_id: String,
+    pub option_indices: Vec<u32>,
+    pub text: Option<String>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 pub struct GitChange {

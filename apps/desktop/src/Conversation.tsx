@@ -1,6 +1,4 @@
 import { TurnChangesCard } from "./TurnChangesCard";
-import { SubagentSummary } from "./SubagentsPanel";
-import type { SubagentsState } from "./useSubagents";
 import { UserMessage } from "./UserMessage";
 import { WorkingStatus } from "./WorkingStatus";
 import {
@@ -10,6 +8,7 @@ import {
 import { modelSelectionScope } from "./modelSelectionScope";
 import { executionStatus } from "./executionStatus";
 import { hasRepeatedOutput } from "./repeatedOutput";
+import { QuestionCard } from "./QuestionCard";
 import { ApprovalCard } from "./ApprovalCard";
 import { activityTranscript } from "./activity";
 import { ComposerAction } from "./ComposerAction";
@@ -45,7 +44,6 @@ export const statusNames = {
   unknown: "状态待确认",
 };
 interface Props {
-  subagents?: SubagentsState;
   openSubagents?: () => void;
   openTurnChanges?: (changes: TurnChanges, path?: string) => void;
   drafts: DraftStore;
@@ -86,9 +84,12 @@ interface Props {
   ) => Promise<boolean>;
   cancel: () => void | Promise<boolean>;
   approve: (id: string, allow: boolean) => Promise<void>;
+  answerQuestion?: (
+    id: string,
+    answers: import("./protocol").QuestionAnswer[] | null,
+  ) => Promise<void>;
 }
 export function Conversation({
-  subagents,
   openSubagents,
   openTurnChanges,
   drafts,
@@ -123,6 +124,7 @@ export function Conversation({
   send,
   cancel,
   approve,
+  answerQuestion,
 }: Props) {
   const draftKey = session ? JSON.stringify([hostId, session.id]) : "new-task";
   const draft = useDraft(drafts, draftKey);
@@ -214,6 +216,21 @@ export function Conversation({
   const [stopping, setStopping] = useState(false);
   const stopGeneration = useRef(0);
   const active = session && ["running", "waiting"].includes(session.status);
+  const pendingQuestions = useMemo(
+    () =>
+      session && active && !session.archived && !preparingHistory
+        ? activityTranscript(
+            events.filter((event) => event.session_id === session.id),
+          ).flatMap((item) =>
+            item.type === "event" &&
+            item.value.kind === "question" &&
+            !item.resolved
+              ? [item.value]
+              : [],
+          )
+        : [],
+    [events, session, active, preparingHistory],
+  );
   const pendingApprovals = useMemo(
     () =>
       session && active && !session.archived && !preparingHistory
@@ -399,6 +416,30 @@ export function Conversation({
       setApproving((current) => (current === submission ? null : current));
     }
   }
+  async function answer(
+    id: string,
+    answers: import("./protocol").QuestionAnswer[] | null,
+  ) {
+    const key = JSON.stringify([draftKey, id]);
+    if (
+      !answerQuestion ||
+      !connected ||
+      stopping ||
+      submittingApproval ||
+      approvalSubmissions.current.has(key) ||
+      !pendingQuestions.some((question) => question.request_id === id)
+    )
+      return;
+    const submission = { scope: draftKey, id };
+    approvalSubmissions.current.add(key);
+    setApproving(submission);
+    try {
+      await answerQuestion(id, answers);
+    } finally {
+      approvalSubmissions.current.delete(key);
+      setApproving((current) => (current === submission ? null : current));
+    }
+  }
   const hostName = hosts.find((host) => host.id === hostId)?.name ?? "主机";
   useStatusIssues([
     {
@@ -514,9 +555,6 @@ export function Conversation({
                   </button>
                 </div>
               )}
-              {subagents && openSubagents && (
-                <SubagentSummary state={subagents} open={openSubagents} />
-              )}
               <TurnTranscript events={events}>
                 {(item) =>
                   item.type === "user" ? (
@@ -551,6 +589,19 @@ export function Conversation({
                             }
                             changes={v.changes}
                             open={(path) => openTurnChanges(v.changes, path)}
+                          />
+                        );
+                      if (v.kind === "question")
+                        return (
+                          <QuestionCard
+                            key={item.key}
+                            request={v}
+                            resolved={item.resolved}
+                            answers={
+                              item.type === "event" ? item.answers : undefined
+                            }
+                            record
+                            onAnswer={() => {}}
                           />
                         );
                       if (v.kind === "approval")
@@ -651,6 +702,29 @@ export function Conversation({
             <span>{agentName}</span>
           </span>
         </div>
+        {pendingQuestions.length > 0 && (
+          <section
+            className="approval-dock question-dock"
+            aria-label="待回答问题"
+          >
+            {pendingQuestions.map((question) => (
+              <QuestionCard
+                key={JSON.stringify([draftKey, question.request_id])}
+                request={question}
+                disabled={
+                  !connected ||
+                  stopping ||
+                  !!submittingApproval ||
+                  !answerQuestion
+                }
+                busy={submittingApproval === question.request_id}
+                onAnswer={(answers) =>
+                  void answer(question.request_id, answers)
+                }
+              />
+            ))}
+          </section>
+        )}
         {pendingApprovals.length > 0 && (
           <section className="approval-dock" aria-label="待审批操作">
             {pendingApprovals.length > 1 && (

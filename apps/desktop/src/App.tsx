@@ -280,7 +280,6 @@ export default function App() {
             </div>
           </header>
           <Conversation
-            subagents={subagents}
             openSubagents={showSubagents}
             openTurnChanges={(changes, path) => {
               if (session)
@@ -351,6 +350,19 @@ export default function App() {
               } catch (e) {
                 setError(message(e));
                 return false;
+              }
+            }}
+            answerQuestion={async (id, answers) => {
+              if (!session) return;
+              try {
+                await request(hostId, {
+                  method: "answer_question",
+                  session_id: session.id,
+                  request_id: id,
+                  answers,
+                });
+              } catch (e) {
+                setError(message(e));
               }
             }}
             approve={async (id, allow) => {

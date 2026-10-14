@@ -692,3 +692,20 @@ external-diff/textconv restrictions as branch review. Local and SSH use the same
 handler; older remote servers report unsupported history and need an update.
 Focused checks: `git_review::tests` and the final-binary
 `git_review_wire_preserves_scope_and_branch_snapshot_after_reconnect` test.
+
+## Agent questions
+
+`AskUserQuestion` is translated inside the Claude adapter into generic `question`
+events, independently of tool approvals. It requires user input even in
+`bypassPermissions`: [native SDK user input](https://code.claude.com/docs/en/agent-sdk/user-input).
+The additive `answer_question` request submits selected option indices and optional
+free text, or null for an explicit skip. Answers are checked against the active
+session's single-use question ID before consumption; invalid or cross-session
+responses do not stop execution or consume the question. Original native questions
+are retained only in the actor; the adapter returns them with the answers mapping
+through `updatedInput`. Persisted question/resolution events are redacted, do not
+create a user turn and are not automatically replayed after a transport failure.
+Questions and approvals share the existing 32-interaction and process time bounds.
+Old servers cannot accept structured answers; the client offers an explicit update
+message and optional skip, never an empty approval. Focused final-binary check:
+`user_questions_are_not_permissions_and_answers_are_bound_single_use_and_persisted`.

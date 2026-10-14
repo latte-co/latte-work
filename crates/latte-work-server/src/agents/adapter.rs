@@ -35,6 +35,12 @@ pub enum Input<'a> {
         input: Value,
         allow: bool,
     },
+    QuestionAnswer {
+        id: &'a str,
+        input: Value,
+        questions: Vec<latte_work_protocol::UserQuestion>,
+        answers: Option<Vec<latte_work_protocol::QuestionAnswer>>,
+    },
 }
 
 pub enum Action {
@@ -64,6 +70,12 @@ pub enum Action {
         tool_use_id: Option<String>,
         tool: String,
         input: Value,
+    },
+    Question {
+        id: String,
+        tool_use_id: Option<String>,
+        input: Value,
+        questions: Vec<latte_work_protocol::UserQuestion>,
     },
     /// Must follow explicit native completion evidence, never EOF or a successful exit.
     Finished {

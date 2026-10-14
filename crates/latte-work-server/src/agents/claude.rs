@@ -543,6 +543,51 @@ impl AgentAdapter for Claude {
                 }
                 self.decode(serde_json::from_str(line).context("Claude 返回无效 JSON")?)
             }
+            Input::QuestionAnswer {
+                id,
+                mut input,
+                questions,
+                answers,
+            } => {
+                if !matches!(self.phase, Phase::Running | Phase::BetweenTurns) {
+                    bail!("Claude 当前不可处理回答");
+                }
+                let allow = answers.is_some();
+                if let Some(answers) = answers {
+                    crate::questions::validate(&questions, &answers)?;
+                    let mut values = serde_json::Map::new();
+                    for (question, native) in questions
+                        .iter()
+                        .zip(input["questions"].as_array().context("问题参数不完整")?)
+                    {
+                        let answer = answers
+                            .iter()
+                            .find(|a| a.question_id == question.id)
+                            .context("问题没有回答")?;
+                        let mut selections: Vec<_> = answer
+                            .option_indices
+                            .iter()
+                            .map(|i| question.options[*i as usize].label.clone())
+                            .collect();
+                        if let Some(text) = &answer.text
+                            && !text.trim().is_empty()
+                        {
+                            selections.push(text.trim().into());
+                        }
+                        values.insert(
+                            native["question"].as_str().context("问题文本缺失")?.into(),
+                            json!(selections.join(", ")),
+                        );
+                    }
+                    input["answers"] = Value::Object(values);
+                }
+                let response = if allow {
+                    self.approval(id, input, true)
+                } else {
+                    json!({"type":"control_response","response":{"subtype":"success","request_id":id,"response":{"behavior":"deny","message":"用户跳过了本次问题，请勿假定用户已回答"}}})
+                };
+                Ok(vec![write_action(response)?])
+            }
             Input::Approval { id, input, allow } => {
                 if !matches!(self.phase, Phase::Running | Phase::BetweenTurns) {
                     bail!("Claude 当前不可处理审批");
@@ -551,6 +596,58 @@ impl AgentAdapter for Claude {
             }
         }
     }
+}
+fn parse_questions(input: &Value) -> Result<Vec<latte_work_protocol::UserQuestion>> {
+    use latte_work_protocol::{QuestionOption, UserQuestion};
+    let rows = input["questions"].as_array().context("问题参数缺失")?;
+    if rows.is_empty() || rows.len() > 4 {
+        bail!("问题数量无效");
+    }
+    let mut seen = std::collections::HashSet::new();
+    rows.iter()
+        .enumerate()
+        .map(|(index, row)| {
+            let text = row["question"]
+                .as_str()
+                .filter(|s| !s.trim().is_empty() && s.len() <= 32 * 1024)
+                .context("问题文本无效")?;
+            if !seen.insert(text) {
+                bail!("问题文本重复");
+            }
+            let header = row["header"].as_str().unwrap_or("");
+            if header.len() > 256 {
+                bail!("问题标题过长");
+            }
+            let options = row["options"]
+                .as_array()
+                .filter(|a| !a.is_empty() && a.len() <= 8)
+                .context("问题选项无效")?;
+            let options = options
+                .iter()
+                .map(|option| {
+                    let label = option["label"]
+                        .as_str()
+                        .filter(|s| !s.trim().is_empty() && s.len() <= 1024)
+                        .context("选项标签无效")?;
+                    let description = option["description"].as_str().unwrap_or("");
+                    if description.len() > 16 * 1024 {
+                        bail!("选项说明过长");
+                    }
+                    Ok(QuestionOption {
+                        label: label.into(),
+                        description: description.into(),
+                    })
+                })
+                .collect::<Result<Vec<_>>>()?;
+            Ok(UserQuestion {
+                id: format!("q{index}"),
+                header: header.into(),
+                text: text.into(),
+                options,
+                multi_select: row["multiSelect"].as_bool().unwrap_or(false),
+            })
+        })
+        .collect()
 }
 impl Claude {
     fn reset_turn(&mut self) {
@@ -888,12 +985,19 @@ impl Claude {
                     if id.is_empty() || !request["input"].is_object() {
                         bail!("无效的 Claude 审批请求");
                     }
-                    output.push(Action::Approval {
-                        id,
-                        tool_use_id: request["tool_use_id"].as_str().map(str::to_owned),
-                        tool: request["tool_name"].as_str().unwrap_or("Tool").into(),
-                        input: request["input"].clone(),
-                    });
+                    if request["tool_name"] == "AskUserQuestion" {
+                        match parse_questions(&request["input"]) {
+                            Ok(questions) => output.push(Action::Question { id, tool_use_id: request["tool_use_id"].as_str().map(str::to_owned), input: request["input"].clone(), questions }),
+                            Err(_) => output.push(write_action(json!({"type":"control_response","response":{"subtype":"success","request_id":id,"response":{"behavior":"deny","message":"Latte Work 无法读取问题参数；请重新提出有效的问题"}}}))?),
+                        }
+                    } else {
+                        output.push(Action::Approval {
+                            id,
+                            tool_use_id: request["tool_use_id"].as_str().map(str::to_owned),
+                            tool: request["tool_name"].as_str().unwrap_or("Tool").into(),
+                            input: request["input"].clone(),
+                        });
+                    }
                 } else {
                     output.push(write_action(json!({"type":"control_response","response":{"subtype":"error","request_id":id,"error":"Unsupported control request in Latte Work v0.1"}}))?);
                 }
@@ -2555,6 +2659,56 @@ mod tests {
         assert!(message(&mut adapter, json!({"type":"control_response","response":{"request_id":"latte-init","subtype":"error","error":"denied"}})).is_err());
         assert!(adapter.advance(Input::Message("invalid JSON")).is_err());
         assert!(message(&mut adapter, json!({"type":"result","is_error":false})).is_err());
+    }
+    #[test]
+    fn native_user_question_is_not_approval_and_answers_preserve_original_input() {
+        let mut adapter = Claude::default();
+        adapter
+            .advance(Input::Start { prompt: "question" })
+            .unwrap();
+        message(&mut adapter, initialized()).unwrap();
+        let input = json!({"questions":[{"header":"Format","question":"Which format?","multiSelect":false,"options":[{"label":"Short","description":"Brief"},{"label":"Long","description":"Full"}]}],"metadata":{"original":true}});
+        let actions = message(&mut adapter, json!({"type":"control_request","request_id":"native-question","request":{"subtype":"can_use_tool","tool_use_id":"tool","tool_name":"AskUserQuestion","input":input}})).unwrap();
+        let Action::Question { questions, .. } = &actions[0] else {
+            panic!()
+        };
+        assert!(encoded(&actions).is_empty());
+        let wire = encoded(
+            &adapter
+                .advance(Input::QuestionAnswer {
+                    id: "native-question",
+                    input: input.clone(),
+                    questions: questions.clone(),
+                    answers: Some(vec![latte_work_protocol::QuestionAnswer {
+                        question_id: "q0".into(),
+                        option_indices: vec![1],
+                        text: None,
+                    }]),
+                })
+                .unwrap(),
+        );
+        assert_eq!(
+            wire[0]["response"]["response"]["updatedInput"]["questions"],
+            input["questions"]
+        );
+        assert_eq!(
+            wire[0]["response"]["response"]["updatedInput"]["metadata"],
+            input["metadata"]
+        );
+        assert_eq!(
+            wire[0]["response"]["response"]["updatedInput"]["answers"]["Which format?"],
+            "Long"
+        );
+        let malformed = message(&mut adapter, json!({"type":"control_request","request_id":"bad","request":{"subtype":"can_use_tool","tool_name":"AskUserQuestion","input":{"questions":[]}}})).unwrap();
+        assert_eq!(
+            encoded(&malformed)[0]["response"]["response"]["behavior"],
+            "deny"
+        );
+        assert!(
+            !malformed
+                .iter()
+                .any(|a| matches!(a, Action::Question { .. } | Action::Approval { .. }))
+        );
     }
     #[test]
     fn adapter_encodes_approval_and_finishes_only_on_native_result() {

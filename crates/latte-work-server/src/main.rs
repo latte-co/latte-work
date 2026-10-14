@@ -5,6 +5,7 @@ mod attachments;
 mod files;
 mod git_review;
 mod providers;
+mod questions;
 mod runtime;
 mod sources;
 mod store;
@@ -305,6 +306,7 @@ async fn dispatch(s: &Service, request: Request) -> Result<Response> {
             | Request::CreateTerminal { .. }
             | Request::WriteTerminal { .. }
             | Request::Approve { .. }
+            | Request::AnswerQuestion { .. }
     ) {
         Some(s.file_admission.read().await)
     } else {
@@ -876,6 +878,31 @@ async fn dispatch(s: &Service, request: Request) -> Result<Response> {
                 has_more,
             })
         })?,
+        Request::AnswerQuestion {
+            session_id,
+            request_id,
+            answers,
+        } => {
+            let control = s
+                .runs
+                .lock()
+                .map_err(|_| anyhow::anyhow!("run lock poisoned"))?
+                .get(&session_id)
+                .map(|run| run.control.clone())
+                .context("此会话没有运行中的任务")?;
+            let (reply, receive) = oneshot::channel();
+            control
+                .send(Control::AnswerQuestion {
+                    id: request_id,
+                    answers,
+                    reply,
+                })
+                .await?;
+            tokio::time::timeout(Duration::from_secs(10), receive)
+                .await??
+                .map_err(anyhow::Error::msg)?;
+            Response::Ok
+        }
         Request::Approve {
             session_id,
             request_id,

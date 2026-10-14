@@ -4763,3 +4763,163 @@ async fn complete_child_history_recovers_every_native_page_and_long_report_witho
         matches!(ask(&mut reconnected,Request::Poll{session_id:id,after:0.0}).await,Response::Events{session,events,..} if session.agent_session_open==Some(false) && events.iter().filter(|e|matches!(e.event,EventKind::User{..})).count()==1)
     );
 }
+
+#[tokio::test]
+async fn user_questions_are_not_permissions_and_answers_are_bound_single_use_and_persisted() {
+    use latte_work_protocol::QuestionAnswer;
+    let host = Host::start().await;
+    let mut client = host.client().await;
+    let root = tempfile::tempdir().unwrap();
+    let sid = session(&mut client, root.path()).await;
+    let send_question = |request_id: String| Request::Send {
+        permission_mode: Some("bypassPermissions".into()),
+        provider: None,
+        session_id: sid.clone(),
+        request_id,
+        text: "ask-user".into(),
+        model: None,
+        effort: None,
+    };
+    assert!(matches!(
+        ask(&mut client, send_question(uuid::Uuid::new_v4().to_string())).await,
+        Response::Accepted { .. }
+    ));
+    let waiting = wait(&mut client, &sid, Status::Waiting).await;
+    assert!(
+        !waiting
+            .iter()
+            .any(|e| matches!(e.event, EventKind::Approval { .. }))
+    );
+    let public = waiting
+        .iter()
+        .find_map(|e| {
+            if let EventKind::Question {
+                request_id,
+                questions,
+                tool_use_id,
+            } = &e.event
+            {
+                assert_eq!(questions.len(), 2);
+                assert_eq!(tool_use_id.as_deref(), Some("question-tool"));
+                Some(request_id.clone())
+            } else {
+                None
+            }
+        })
+        .unwrap();
+    assert!(matches!(
+        ask(
+            &mut client,
+            Request::Approve {
+                session_id: sid.clone(),
+                request_id: public.clone(),
+                allow: true
+            }
+        )
+        .await,
+        Response::Error { .. }
+    ));
+    let answer = |answers| Request::AnswerQuestion {
+        session_id: sid.clone(),
+        request_id: public.clone(),
+        answers,
+    };
+    assert!(matches!(
+        ask(&mut client, answer(Some(vec![]))).await,
+        Response::Error { .. }
+    ));
+    let answers = vec![
+        QuestionAnswer {
+            question_id: "q0".into(),
+            option_indices: vec![1],
+            text: None,
+        },
+        QuestionAnswer {
+            question_id: "q1".into(),
+            option_indices: vec![0, 1],
+            text: Some("Extra".into()),
+        },
+    ];
+    let mut invalid = answers.clone();
+    invalid[0].option_indices = vec![0, 1];
+    assert!(matches!(
+        ask(&mut client, answer(Some(invalid))).await,
+        Response::Error { .. }
+    ));
+    let other = session(&mut client, root.path()).await;
+    assert!(matches!(
+        ask(
+            &mut client,
+            Request::AnswerQuestion {
+                session_id: other,
+                request_id: public.clone(),
+                answers: Some(answers.clone())
+            }
+        )
+        .await,
+        Response::Error { .. }
+    ));
+    wait(&mut client, &sid, Status::Waiting).await;
+    let mut reconnect = host.client().await;
+    assert!(matches!(
+        ask(&mut reconnect, answer(Some(answers))).await,
+        Response::Ok
+    ));
+    let events = wait(&mut reconnect, &sid, Status::Completed).await;
+    assert!(events.iter().any(|e| matches!(&e.event, EventKind::QuestionResolved { request_id, answers: Some(answers) } if request_id==&public && answers.len()==2)));
+    let values: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(root.path().join("question-answers.json")).unwrap())
+            .unwrap();
+    assert_eq!(values["How much detail?"], "Detailed");
+    assert_eq!(values["Which sections?"], "Intro, Conclusion, Extra");
+    assert!(matches!(
+        ask(&mut reconnect, answer(None)).await,
+        Response::Error { .. }
+    ));
+    assert!(matches!(
+        ask(
+            &mut reconnect,
+            send_question(uuid::Uuid::new_v4().to_string())
+        )
+        .await,
+        Response::Accepted { .. }
+    ));
+    let next = wait(&mut reconnect, &sid, Status::Waiting).await;
+    let second = next
+        .iter()
+        .rev()
+        .find_map(|e| {
+            if let EventKind::Question { request_id, .. } = &e.event {
+                Some(request_id.clone())
+            } else {
+                None
+            }
+        })
+        .unwrap();
+    assert_ne!(public, second);
+    assert!(matches!(
+        ask(
+            &mut reconnect,
+            Request::AnswerQuestion {
+                session_id: sid.clone(),
+                request_id: second,
+                answers: None
+            }
+        )
+        .await,
+        Response::Ok
+    ));
+    let events = wait(&mut reconnect, &sid, Status::Completed).await;
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(&e.event, EventKind::Text { text } if text=="QUESTION_SKIPPED"))
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|e| matches!(e.event, EventKind::User { .. }))
+            .count(),
+        2
+    );
+}

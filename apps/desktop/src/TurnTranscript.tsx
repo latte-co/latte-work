@@ -65,7 +65,7 @@ export function turnTranscript(events: Event[]) {
       !items.some(
         (item) =>
           item.type === "event" &&
-          item.value.kind === "approval" &&
+          (item.value.kind === "approval" || item.value.kind === "question") &&
           !item.resolved,
       );
     return {

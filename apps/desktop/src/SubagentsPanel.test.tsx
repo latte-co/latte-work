@@ -7,9 +7,8 @@ import {
   screen,
 } from "@testing-library/react";
 import { afterEach, expect, it, vi } from "vitest";
-import { SubagentSummary, SubagentsPanel } from "./SubagentsPanel";
+import { SubagentsPanel } from "./SubagentsPanel";
 import type { Subagent } from "./protocol";
-import { openSubagents, readWorkspace } from "./workspaceState";
 afterEach(cleanup);
 vi.mock("./api", () => ({
   request: vi.fn(async () => ({
@@ -34,7 +33,7 @@ const task = (id: string, status: Subagent["status"]): Subagent => ({
   started_at: 1,
   updated_at: 2000,
 });
-it("opens the workspace, separates running/completed/unknown and shows a selected native result", () => {
+it("separates running/completed/unknown and shows a selected native result", () => {
   const state = {
     tasks: [
       task("running child", "running"),
@@ -45,21 +44,8 @@ it("opens the workspace, separates running/completed/unknown and shows a selecte
     error: "",
     truncated: false,
   };
-  const id = crypto.randomUUID();
-  const open = vi.fn(() => openSubagents(id));
   const select = vi.fn();
-  const view = render(
-    <>
-      <SubagentSummary state={state} open={open} />
-      <SubagentsPanel state={state} onOpen={select} />
-    </>,
-  );
-  fireEvent.click(screen.getByRole("button", { name: "查看子智能体" }));
-  expect(readWorkspace(id)).toMatchObject({
-    visible: true,
-    current: "subagents",
-    conversationActive: false,
-  });
+  const view = render(<SubagentsPanel state={state} onOpen={select} />);
   expect(screen.getByRole("region", { name: "已开启" }).textContent).toContain(
     "running child",
   );

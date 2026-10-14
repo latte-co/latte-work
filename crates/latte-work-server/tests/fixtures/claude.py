@@ -200,6 +200,11 @@ for line in sys.stdin:
             assert env['ANTHROPIC_MODEL']==model
             emit({'type':'assistant','message':{'content':[{'type':'text','text':('resumed:' if resumed else 'fresh:')+model+':api_key'}]}})
             emit({'type':'result','subtype':'success','is_error':False})
+        elif text=='ask-user':
+            assert '--permission-mode=bypassPermissions' in sys.argv
+            question_input={'questions':[{'question':'How much detail?', 'header':'Detail', 'multiSelect':False, 'options':[{'label':'Short','description':'Brief'},{'label':'Detailed','description':'Full'}]},{'question':'Which sections?', 'header':'Sections', 'multiSelect':True, 'options':[{'label':'Intro','description':'Start'},{'label':'Conclusion','description':'End'}]}],'metadata':{'keep':'original'}}
+            emit({'type':'assistant','message':{'content':[{'type':'tool_use','id':'question-tool','name':'AskUserQuestion','input':question_input}]}})
+            emit({'type':'control_request','request_id':'question-1','request':{'subtype':'can_use_tool','tool_use_id':'question-tool','tool_name':'AskUserQuestion','input':question_input}})
         elif text=='approve':
             emit({'type':'assistant','message':{'content':[{'type':'tool_use','id':'tool-1','name':'Write','input':{'file_path':'approved.txt','content':'approved'}}]}})
             emit({'type':'control_request','request_id':'permission-1','request':{'subtype':'can_use_tool','tool_use_id':'tool-1','tool_name':'Write','input':{'file_path':'approved.txt','content':'approved'}}})
@@ -210,6 +215,15 @@ for line in sys.stdin:
             emit({'type':'result','subtype':'success','is_error':False})
     elif value['type']=='control_response':
         response=value['response']['response'];allowed=response['behavior']=='allow'
+        if value['response']['request_id']=='question-1':
+            if allowed:
+                updated=response['updatedInput'];assert updated['questions']==question_input['questions'] and updated['metadata']==question_input['metadata']
+                assert updated['answers'] and all(updated['answers'].values())
+                with open('question-answers.json','w') as f:json.dump(updated['answers'],f)
+            emit({'type':'user','message':{'content':[{'type':'tool_result','tool_use_id':'question-tool','content':'answered' if allowed else 'skipped','is_error':not allowed}]}})
+            emit({'type':'assistant','message':{'content':[{'type':'text','text':'QUESTION_ANSWERED' if allowed else 'QUESTION_SKIPPED'}]}})
+            emit({'type':'result','subtype':'success','is_error':False})
+            continue
         if allowed:
             assert response['updatedInput']['file_path']=='approved.txt'
             with open('approved.txt','w') as f:f.write('approved')

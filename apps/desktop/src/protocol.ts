@@ -96,6 +96,17 @@ export type EventKind =
   | { kind: "tool"; id: string; name: string; input: JsonValue }
   | { kind: "tool_result"; id: string; content: JsonValue; is_error: boolean }
   | {
+      kind: "question";
+      request_id: string;
+      tool_use_id: string | null;
+      questions: Array<UserQuestion>;
+    }
+  | {
+      kind: "question_resolved";
+      request_id: string;
+      answers: Array<QuestionAnswer> | null;
+    }
+  | {
       kind: "approval";
       request_id: string;
       tool_use_id?: string;
@@ -105,6 +116,19 @@ export type EventKind =
   | { kind: "approval_resolved"; request_id: string; allow: boolean }
   | { kind: "state"; status: Status; message: string | null }
   | { kind: "notice"; text: string };
+export type QuestionOption = { label: string; description: string };
+export type UserQuestion = {
+  id: string;
+  header: string;
+  text: string;
+  options: Array<QuestionOption>;
+  multi_select: boolean;
+};
+export type QuestionAnswer = {
+  question_id: string;
+  option_indices: Array<number>;
+  text: string | null;
+};
 export type Event = {
   seq: number;
   session_id: string;
@@ -349,6 +373,12 @@ export type Request =
       task_id: string;
       after: number | null;
       source: string | null;
+    }
+  | {
+      method: "answer_question";
+      session_id: string;
+      request_id: string;
+      answers: Array<QuestionAnswer> | null;
     }
   | {
       method: "approve";

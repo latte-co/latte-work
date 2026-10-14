@@ -73,6 +73,11 @@ pub enum Control {
         reply: Option<oneshot::Sender<Result<(), String>>>,
         only_if_idle: bool,
     },
+    AnswerQuestion {
+        id: String,
+        answers: Option<Vec<latte_work_protocol::QuestionAnswer>>,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
     Approval {
         id: String,
         allow: bool,
@@ -334,7 +339,14 @@ type Outcome = (Status, Option<String>);
 #[derive(Default)]
 struct TurnState {
     ready: bool,
-    pending: HashMap<String, (String, Value)>,
+    pending: HashMap<
+        String,
+        (
+            String,
+            Value,
+            Option<Vec<latte_work_protocol::UserQuestion>>,
+        ),
+    >,
 }
 impl TurnState {
     async fn apply(
@@ -468,6 +480,30 @@ impl TurnState {
                 Action::SubagentEvent { tool_use_id, event } => db(database, |s| {
                     s.subagent_event(session_id, &tool_use_id, config.redact_event(event)?)
                 })?,
+                Action::Question {
+                    id,
+                    tool_use_id,
+                    input,
+                    questions,
+                } => {
+                    if self.pending.len() >= 32 {
+                        bail!("待处理交互数量超出限制");
+                    }
+                    let public_id = uuid::Uuid::new_v4().to_string();
+                    self.pending
+                        .insert(public_id.clone(), (id, input, Some(questions.clone())));
+                    db(database, |s| {
+                        s.event(
+                            session_id,
+                            config.redact_event(EventKind::Question {
+                                request_id: public_id,
+                                tool_use_id,
+                                questions,
+                            })?,
+                        )?;
+                        s.state(session_id, Status::Waiting, None)
+                    })?;
+                }
                 Action::Approval {
                     id,
                     tool_use_id,
@@ -479,7 +515,7 @@ impl TurnState {
                     }
                     let public_id = uuid::Uuid::new_v4().to_string();
                     self.pending
-                        .insert(public_id.clone(), (id, original.clone()));
+                        .insert(public_id.clone(), (id, original.clone(), None));
                     db(database, |s| {
                         s.event(
                             session_id,
@@ -1029,17 +1065,37 @@ async fn actor(
                     }
                     break;
                 }
+                Some(Control::AnswerQuestion { id, answers, reply }) => {
+                    let validation = process.as_ref().and_then(|p| p.state.pending.get(&id)).and_then(|(_, _, questions)| questions.as_ref()).context("问题已过期或不属于当前执行").and_then(|questions| match &answers { Some(answers) => crate::questions::validate(questions, answers), None => Ok(()) });
+                    if let Err(error) = validation {
+                        let _ = reply.send(Err(error.to_string()));
+                        Ok(())
+                    } else {
+                        let result = async {
+                            let p = process.as_mut().context("此会话没有运行中的任务")?;
+                            let (native_id, original, questions) = p.state.pending.remove(&id).context("问题已过期")?;
+                            let actions = p.adapter.advance(Input::QuestionAnswer { id: &native_id, input: original, questions: questions.context("此交互不是问题")?, answers: answers.clone() })?;
+                            p.apply(actions, &database, &session.id).await?;
+                            db(&database, |s| {
+                                s.event(&session.id, p.config.redact_event(EventKind::QuestionResolved { request_id: id, answers })?)?;
+                                s.state(&session.id, if !p.state.pending.is_empty() { Status::Waiting } else if p.turn_active { Status::Running } else { Status::Completed }, None)
+                            })
+                        }.await;
+                        let _ = reply.send(result.as_ref().map(|_| ()).map_err(|e| e.to_string()));
+                        result
+                    }
+                }
                 Some(Control::Approval { id, allow, reply }) => {
                     let valid = process
                         .as_ref()
-                        .is_some_and(|p| p.state.pending.contains_key(&id));
+                        .is_some_and(|p| p.state.pending.get(&id).is_some_and(|(_, _, questions)| questions.is_none()));
                     if !valid {
                         let _ = reply.send(Err("审批已过期或不属于当前执行".into()));
                         Ok(())
                     } else {
                         let result = async {
                             let p = process.as_mut().context("此会话没有运行中的任务")?;
-                            let (native_id, original) = p
+                            let (native_id, original, _) = p
                                 .state
                                 .pending
                                 .remove(&id)

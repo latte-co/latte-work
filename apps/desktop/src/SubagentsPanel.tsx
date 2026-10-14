@@ -28,33 +28,6 @@ export function subagentCounts(tasks: Subagent[]) {
     ).length,
   };
 }
-export function SubagentSummary({
-  state,
-  open,
-}: {
-  state: SubagentsState;
-  open: () => void;
-}) {
-  if (!state.tasks.length) return null;
-  const counts = subagentCounts(state.tasks);
-  return (
-    <button
-      className="subagent-summary"
-      onClick={open}
-      aria-label="查看子智能体"
-    >
-      <Bot size={16} />
-      <span>子智能体</span>
-      <span>{counts.active} 个运行中</span>
-      <span>
-        {counts.completed} 完成
-        {counts.other ? ` · ${counts.other} 项需查看` : ""}
-        {state.truncated ? " · 部分记录" : ""}
-      </span>
-      <ChevronRight size={14} />
-    </button>
-  );
-}
 export function SubagentsPanel({
   state,
   onOpen,
