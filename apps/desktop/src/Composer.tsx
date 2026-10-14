@@ -10,7 +10,6 @@ import {
   ArrowLeft,
   ChevronRight,
   FileText,
-  Image,
   FileVideo,
   Folder,
   Plus,
@@ -41,6 +40,8 @@ import {
   storePastedFile,
   type ComposerReference,
 } from "./pasteAttachments";
+import { AttachmentImage } from "./AttachmentImage";
+import { referenceKind } from "./referenceMessage";
 
 interface Props {
   referenceState?: { scope: string; entries: ComposerReference[] };
@@ -850,20 +851,33 @@ export function Composer(props: Props) {
         <div className="composer-references" aria-label="已添加项目引用">
           {attached.map((entry) => (
             <span key={entry.path} title={entry.path}>
-              {entry.directory ? (
-                <Folder size={14} />
-              ) : entry.attachmentKind === "image" ? (
-                <Image size={14} />
-              ) : entry.attachmentKind === "video" ? (
-                <FileVideo size={14} />
+              {!entry.directory && referenceKind(entry) === "image" ? (
+                <AttachmentImage
+                  reference={entry}
+                  variant="chip"
+                  hostId={hostId}
+                  projectId={projectId}
+                  sessionId={sessionId}
+                  connected={connected}
+                  active={!hidden}
+                  onOpen={close}
+                />
               ) : (
-                <FileText size={14} />
+                <>
+                  {entry.directory ? (
+                    <Folder size={14} />
+                  ) : entry.attachmentKind === "video" ? (
+                    <FileVideo size={14} />
+                  ) : (
+                    <FileText size={14} />
+                  )}
+                  <span>
+                    {entry.attachmentKind && !entry.directory
+                      ? `${attachmentLabels[entry.attachmentKind]} · ${entry.name}`
+                      : entry.path}
+                  </span>
+                </>
               )}
-              <span>
-                {entry.attachmentKind && !entry.directory
-                  ? `${attachmentLabels[entry.attachmentKind]} · ${entry.name}`
-                  : entry.path}
-              </span>
               <button
                 disabled={sending || pasting}
                 aria-label={`移除引用 ${entry.path}`}

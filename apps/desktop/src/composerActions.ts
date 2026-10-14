@@ -1,6 +1,6 @@
 import type { AgentSlashCommand } from "./protocol";
 
-import type { ComposerReference } from "./pasteAttachments";
+export { referencePrompt } from "./referenceMessage";
 
 export interface ComposerTrigger {
   kind: "files" | "commands";
@@ -24,21 +24,6 @@ export function composerTrigger(
     query: match[1],
   };
 }
-export function referencePrompt(text: string, references: ComposerReference[]) {
-  if (!references.length) return text.trim();
-  return `${text.trim() || "请查看这些文件引用。"}\n\n文件引用（相对路径基于当前项目根目录；绝对路径位于当前执行主机。仅引用路径，按当前权限读取）：\n${JSON.stringify(
-    references.map(({ path, name, directory, attachmentKind, mimeType }) => ({
-      name,
-      path,
-      type: directory ? "directory" : "file",
-      ...(attachmentKind ? { kind: attachmentKind } : {}),
-      ...(mimeType ? { mime_type: mimeType } : {}),
-    })),
-    null,
-    2,
-  )}`;
-}
-
 export const subagentPanelAliases = [
   "agents",
   "list-agents",

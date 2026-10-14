@@ -4936,3 +4936,67 @@ async fn user_questions_are_not_permissions_and_answers_are_bound_single_use_and
         2
     );
 }
+
+#[tokio::test]
+async fn compact_and_legacy_reference_prompts_persist_and_preview_on_the_owning_host() {
+    let host = Host::start().await;
+    let mut client = host.client().await;
+    let project = tempfile::tempdir().unwrap();
+    let id = session(&mut client, project.path()).await;
+    let Response::Events { session: task, .. } = ask(
+        &mut client,
+        Request::Poll {
+            session_id: id.clone(),
+            after: 0.0,
+        },
+    )
+    .await
+    else {
+        panic!("session");
+    };
+    let outside = tempfile::tempdir().unwrap();
+    let png = b"\x89PNG\r\n\x1a\n";
+    let paths = [
+        outside
+            .path()
+            .canonicalize()
+            .unwrap()
+            .join("图 \"compact\".png"),
+        outside.path().canonicalize().unwrap().join("legacy.png"),
+    ];
+    let markers = [
+        "\n\n引用（相对项目；绝对路径在当前主机，按现有权限读取）：\n",
+        "\n\n文件引用（相对路径基于当前项目根目录；绝对路径位于当前执行主机。仅引用路径，按当前权限读取）：\n",
+    ];
+    for (index, path) in paths.iter().enumerate() {
+        std::fs::write(path, png).unwrap();
+        let preview = || Request::PreviewSource {
+            project_id: task.project_id.clone(),
+            session_id: Some(id.clone()),
+            path: path.to_string_lossy().into_owned(),
+            offset: 0,
+        };
+        assert!(matches!(
+            ask(&mut client, preview()).await,
+            Response::Error { .. }
+        ));
+        let text = format!(
+            "查看图片{}{}",
+            markers[index],
+            serde_json::json!([{"path":path,"type":"file","name":"original.png","kind":"image"}])
+        );
+        send(&mut client, &id, &format!("image-ref-{index}"), &text).await;
+        wait(&mut client, &id, Status::Completed).await;
+        let mut reconnect = host.client().await;
+        assert!(
+            matches!(ask(&mut reconnect, Request::History { session_id:id.clone(), before:None }).await,
+            Response::History { events, .. } if events.iter().any(|event| matches!(&event.event, EventKind::User { text: saved, .. } if saved == &text)))
+        );
+        assert!(
+            matches!(ask(&mut reconnect, Request::Sources { session_id:id.clone() }).await,
+            Response::Sources { entries, .. } if entries.iter().any(|source| source.path.as_deref() == path.to_str() && source.name == "original.png"))
+        );
+        assert!(matches!(ask(&mut reconnect, preview()).await,
+            Response::SourcePreview { data, mime_type, has_more, .. } if data == png && mime_type == "image/png" && !has_more));
+    }
+}

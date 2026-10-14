@@ -577,6 +577,16 @@ This is temporal attribution: other writers in a shared directory can appear in
 these net changes. The UI provides separate task and workspace views.
 
 Explicit user reference manifests and actual native tool calls are indexed durably.
+The compact Composer manifest and legacy expanded manifest are both recognized;
+the compact form preserves paths/types and necessary attachment names/kinds while
+omitting repeated MIME and formatting metadata. Saved requests still contain the
+exact prompt dispatched to the Agent. The transcript extracts only valid complete
+App manifests for attachment presentation; arbitrary/malformed prose stays visible.
+Composer image chips and transcript thumbnails share an in-App image dialog and
+the existing host-scoped preview reader. No new preview protocol or filesystem
+permission is added. Visible image reads share a two-reader/64-waiter bound;
+hidden/off-screen readers stop starting chunks and release object URLs. The image
+dialog traps/restores focus, closes on scope changes and uses sniffed raster MIME.
 Tool-use IDs deduplicate calls, including child calls. MCP tool names identify
 connector groups; installed-but-unused connectors are never fabricated. Source
 inventories return at most 128 entries with a truncation flag.

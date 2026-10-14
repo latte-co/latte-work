@@ -1123,6 +1123,134 @@ button.recent-notice {
 .composer-references button {
   padding: 2px;
 }
+.composer-references .attachment-image-chip {
+  display: flex;
+  align-items: center;
+  flex-shrink: 1;
+  min-width: 0;
+  gap: var(--space-1);
+  padding: 0;
+  color: inherit;
+  font-size: inherit;
+  background: transparent;
+  border-radius: var(--radius-sm);
+}
+.attachment-image-chip > span {
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.composer-references .attachment-image-chip:focus-visible {
+  background: var(--color-focus-background);
+}
+.user-message-attachments {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: var(--space-2);
+  margin-bottom: var(--space-2);
+}
+.attachment-image-thumbnail {
+  width: clamp(80px, 25cqw, 112px);
+  height: clamp(80px, 25cqw, 112px);
+  max-width: 100%;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: var(--space-2);
+  overflow: hidden;
+  padding: 0;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-panel);
+  background: var(--color-input);
+  color: var(--color-text-muted);
+  cursor: zoom-in;
+}
+.attachment-image-thumbnail > img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+.attachment-image-thumbnail > span {
+  font-size: var(--text-sm);
+  padding: 0 var(--space-2);
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.user-file-reference {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+  max-width: 100%;
+  padding: var(--space-2) var(--space-3);
+  font-size: var(--text-sm);
+  border-radius: var(--radius-control);
+  background: var(--color-surface);
+  color: var(--color-text-secondary);
+}
+.user-file-reference > svg {
+  flex: none;
+}
+.user-file-reference > span {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.modal.attachment-image-dialog {
+  width: min(1080px, calc(100vw - 48px));
+  height: min(820px, calc(100dvh - 48px));
+  padding: var(--space-4);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.attachment-image-dialog > header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  flex: none;
+  padding-bottom: var(--space-3);
+}
+.attachment-image-dialog > header > span {
+  min-width: 0;
+  font-weight: var(--weight-content-emphasis);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.attachment-image-stage {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  overflow: hidden;
+}
+.attachment-image-stage > img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+.attachment-image-error,
+.attachment-image-loading {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-direction: column;
+  gap: var(--space-3);
+  max-width: 100%;
+  color: var(--color-text-secondary);
+  text-align: center;
+  overflow-wrap: anywhere;
+}
+.attachment-image-error p {
+  margin: 0;
+}
 .composer-notice {
   color: var(--color-text-muted);
   font-size: var(--text-xs);
@@ -1381,7 +1509,7 @@ button.recent-notice {
 }
 .user-message {
   overflow-wrap: anywhere;
-  margin: 0;
+  margin: 0 0 0 auto;
   padding: var(--space-3) var(--space-4);
   background: var(--color-surface);
   border-radius: var(--radius-dialog);

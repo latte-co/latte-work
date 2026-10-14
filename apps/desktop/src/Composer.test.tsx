@@ -11,6 +11,7 @@ import {
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { Composer } from "./Composer";
 import { composerTrigger } from "./composerActions";
+import { referenceMessage } from "./referenceMessage";
 const pasteMocks = vi.hoisted(() => ({
   paths: vi.fn(),
   importFile: vi.fn(),
@@ -164,7 +165,11 @@ it("adds a file with spaces at the caret, preserves surrounding text and retries
   );
   fireEvent.click(screen.getByText("发送"));
   await waitFor(() => expect(mocks.send).toHaveBeenCalledOnce());
-  expect(mocks.send.mock.calls[0][0]).toContain('"path": "src/中文 file.ts"');
+  expect(referenceMessage(mocks.send.mock.calls[0][0]).references).toEqual(
+    expect.arrayContaining([
+      expect.objectContaining({ path: "src/中文 file.ts" }),
+    ]),
+  );
   expect(screen.getByRole("button", { name: /移除引用/ })).toBeTruthy();
   mocks.send.mockResolvedValue(true);
   fireEvent.click(screen.getByText("发送"));
@@ -304,10 +309,12 @@ it("references a local file or folder chosen outside the project without sending
   expect(mocks.send).not.toHaveBeenCalled();
   fireEvent.click(screen.getByText("发送"));
   await waitFor(() => expect(mocks.send).toHaveBeenCalledOnce());
-  expect(mocks.send.mock.calls[0][0]).toContain(
-    '"path": "/outside/中文 file.txt"',
+  expect(referenceMessage(mocks.send.mock.calls[0][0]).references).toEqual(
+    expect.arrayContaining([
+      expect.objectContaining({ path: "/outside/中文 file.txt" }),
+    ]),
   );
-  expect(mocks.send.mock.calls[0][0]).toContain("绝对路径位于当前执行主机");
+  expect(mocks.send.mock.calls[0][0]).toContain("绝对路径在当前主机");
 });
 it("resolves remote paths on the selected host and never opens a local chooser", async () => {
   mocks.request.mockResolvedValue({
@@ -803,5 +810,67 @@ it("opens App settings when command discovery fails and preserves references", a
   expect(mocks.request).not.toHaveBeenCalled();
   expect(
     screen.getByRole("button", { name: "移除引用 README.md" }),
+  ).toBeTruthy();
+});
+
+it("opens an attached image without sending or removing the draft and restores its trigger on close", async () => {
+  URL.createObjectURL = vi.fn(() => "blob:composer");
+  URL.revokeObjectURL = vi.fn();
+  mocks.request.mockResolvedValue({
+    kind: "source_preview",
+    mime_type: "image/png",
+    data: [137, 80, 78, 71],
+    size: 4,
+    next: 4,
+    has_more: false,
+  });
+  render(
+    <Composer
+      agent="claude"
+      hostId="remote"
+      projectId="p"
+      connected
+      disabled={false}
+      sending={false}
+      hidden={false}
+      value="这张图呢"
+      onChange={vi.fn()}
+      onSubmit={mocks.send}
+      placeholder="任务"
+      toolbar={() => null}
+      referenceState={{
+        scope: "remote:p:claude",
+        entries: [
+          {
+            name: "image.png",
+            path: "/remote/image.png",
+            directory: false,
+            attachmentKind: "image",
+          },
+        ],
+      }}
+      onReferencesChange={vi.fn()}
+    />,
+  );
+  const trigger = screen.getByRole("button", { name: "预览图片 image.png" });
+  fireEvent.click(trigger);
+  await screen.findByRole("img", { name: "image.png" });
+  expect(mocks.request).toHaveBeenCalledWith(
+    "remote",
+    expect.objectContaining({
+      method: "preview_source",
+      project_id: "p",
+      path: "/remote/image.png",
+    }),
+  );
+  expect(mocks.send).not.toHaveBeenCalled();
+  fireEvent.keyDown(screen.getByRole("dialog"), { key: "Escape" });
+  expect(document.activeElement).toBe(trigger);
+  expect(
+    (screen.getByRole("textbox", { name: "任务输入" }) as HTMLTextAreaElement)
+      .value,
+  ).toBe("这张图呢");
+  expect(
+    screen.getByRole("button", { name: "移除引用 /remote/image.png" }),
   ).toBeTruthy();
 });

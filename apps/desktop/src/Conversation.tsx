@@ -567,7 +567,16 @@ export function Conversation({
               <TurnTranscript events={events} turns={turns}>
                 {(item) =>
                   item.type === "user" ? (
-                    <UserMessage key={item.key} text={item.text} at={item.at} />
+                    <UserMessage
+                      key={item.key}
+                      text={item.text}
+                      at={item.at}
+                      hostId={hostId}
+                      projectId={projectId}
+                      sessionId={session?.id}
+                      connected={connected}
+                      active={!settingsOpen && !preparingHistory}
+                    />
                   ) : item.type === "assistant" ? (
                     <article
                       className="assistant-message markdown"
