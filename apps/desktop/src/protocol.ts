@@ -119,8 +119,10 @@ export type GitChange = {
   section: ChangeSection;
   status: string;
 };
-export type GitReviewScope = "branch" | "worktree" | "unstaged" | "staged";
+export type GitReviewScope =
+  "branch" | "commit" | "worktree" | "unstaged" | "staged";
 export type GitRef = { name: string; full_name: string };
+export type GitCommit = { oid: string; subject: string };
 export type GitInfo = {
   branch: string | null;
   head: string | null;
@@ -371,6 +373,12 @@ export type Request =
   | { method: "changes"; project_id: string }
   | { method: "git_info"; project_id: string }
   | {
+      method: "git_commits";
+      project_id: string;
+      head: string | null;
+      offset: number;
+    }
+  | {
       method: "git_review";
       project_id: string;
       scope: GitReviewScope;
@@ -442,6 +450,12 @@ export type Response =
     }
   | { kind: "changes"; entries: Array<GitChange>; truncated: boolean }
   | { kind: "git_info"; info: GitInfo }
+  | {
+      kind: "git_commits";
+      head: string | null;
+      commits: Array<GitCommit>;
+      has_more: boolean;
+    }
   | { kind: "git_review"; review: GitReview }
   | { kind: "agent_permissions"; modes: Array<AgentPermissionMode> }
   | { kind: "agent_commands"; commands: Array<AgentSlashCommand> }

@@ -302,6 +302,7 @@ function ReviewFileSection({
 
 export function ReviewWorkspace({
   scopeControl,
+  comparisonControl,
   files,
   added,
   removed,
@@ -318,6 +319,7 @@ export function ReviewWorkspace({
   loadDiff,
 }: {
   scopeControl: ReactNode;
+  comparisonControl?: ReactNode;
   files: GitReviewFile[];
   added: number;
   removed: number;
@@ -341,7 +343,7 @@ export function ReviewWorkspace({
   const [closed, setClosed] = useState(new Set<string>());
   const sections = useRef(new Map<string, HTMLElement>());
   const [navigation, navigate] = useState({ path: "", revision: 0 });
-  const initialJump = useRef(false);
+  const initialJump = useRef("");
   const navigationLock = useRef("");
   const selectedFile = files.some((file) => file.path === selected)
     ? selected
@@ -370,10 +372,10 @@ export function ReviewWorkspace({
   useEffect(() => {
     if (
       initialPath &&
-      !initialJump.current &&
+      initialJump.current !== initialPath &&
       sections.current.has(initialPath)
     ) {
-      initialJump.current = true;
+      initialJump.current = initialPath;
       jump(initialPath);
     }
   }, [initialPath, files]);
@@ -442,13 +444,16 @@ export function ReviewWorkspace({
     <div className="git-review">
       <div className="git-review-toolbar">
         <div className="review-scope-control">
-          {scopeControl}
-          {!loading && files.length > 0 && (
-            <span className="change-totals">
-              <b>+{added}</b>
-              <em>-{removed}</em>
-            </span>
-          )}
+          <div className="review-scope-summary">
+            {scopeControl}
+            {!loading && files.length > 0 && (
+              <span className="change-totals">
+                <b>+{added}</b>
+                <em>-{removed}</em>
+              </span>
+            )}
+          </div>
+          {comparisonControl}
         </div>
         <div className="git-review-actions">
           {additionalActions}

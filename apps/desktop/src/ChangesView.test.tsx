@@ -446,3 +446,75 @@ it.each([false, true])(
     ]);
   },
 );
+it("uses one page for a historical snapshot and Git scopes, preserving layout and returning to the exact request", async () => {
+  const previous = mocks.request.getMockImplementation()!;
+  mocks.request.mockImplementation(async (host, req) =>
+    req.method === "turn_change_summary"
+      ? {
+          kind: "turn_changes",
+          changes: { ...turn, request_id: req.request_id },
+        }
+      : previous(host, req),
+  );
+  render(<ChangesView {...props} sessionId="s1" requestId="historical" />);
+  await screen.findAllByRole("region", { name: "统一文件差异" });
+  expect(mocks.request).not.toHaveBeenCalledWith(
+    "local",
+    expect.objectContaining({ method: "git_info" }),
+  );
+  expect(screen.queryByRole("button", { name: "工作区" })).toBeNull();
+  fireEvent.click(screen.getByRole("button", { name: "并排差异" }));
+  await scope("未暂存");
+  await screen.findAllByRole("region", { name: "并排文件差异" });
+  await scope("本轮");
+  await screen.findAllByRole("region", { name: "并排文件差异" });
+  expect(mocks.request).toHaveBeenCalledWith("local", {
+    method: "turn_change_diff",
+    session_id: "s1",
+    request_id: "historical",
+    path: "saved.txt",
+  });
+  expect(
+    mocks.request.mock.calls.every(
+      ([, req]) => !["send", "open_agent_session"].includes(req.method),
+    ),
+  ).toBe(true);
+});
+it("selects a real commit through the submenu and pins its diff IDs", async () => {
+  const previous = mocks.request.getMockImplementation()!;
+  const commit = { oid: "c".repeat(40), subject: "Fix review" };
+  mocks.request.mockImplementation(async (host, req) =>
+    req.method === "git_commits"
+      ? {
+          kind: "git_commits",
+          head: commit.oid,
+          commits: [commit],
+          has_more: false,
+        }
+      : previous(host, req),
+  );
+  render(<ChangesView {...props} />);
+  await screen.findAllByRole("region", { name: "统一文件差异" });
+  fireEvent.click(screen.getByRole("combobox", { name: "变更范围" }));
+  fireEvent.click(screen.getByRole("option", { name: "已提交" }));
+  fireEvent.click(await screen.findByRole("option", { name: /Fix review/ }));
+  await screen.findAllByRole("region", { name: "统一文件差异" });
+  expect(
+    screen.getByRole("combobox", { name: "变更范围" }).textContent,
+  ).toContain("已提交 · cccccccc");
+  expect(mocks.request).toHaveBeenCalledWith("local", {
+    method: "git_review",
+    project_id: "p",
+    scope: "commit",
+    base: commit.oid,
+  });
+  expect(mocks.request).toHaveBeenCalledWith(
+    "local",
+    expect.objectContaining({
+      method: "git_review_diff",
+      scope: "commit",
+      base: review.base,
+      head: review.head,
+    }),
+  );
+});

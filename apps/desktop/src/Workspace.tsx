@@ -591,7 +591,11 @@ function WorkspacePage({
             />
           ) : tab.kind === "diff" ? (
             <ChangesView
-              sessionId={sessionId}
+              key={tab.requestId ?? "git"}
+              requestId={tab.requestId}
+              snapshotAt={tab.snapshotAt}
+              initialPath={tab.file}
+              sessionId={tab.snapshotSessionId ?? sessionId}
               lastTurnVersion={lastTurnVersion}
               hostId={tab.hostId ?? hostId}
               project={tab.project ?? project!}

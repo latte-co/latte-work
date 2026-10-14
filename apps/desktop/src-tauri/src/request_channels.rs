@@ -27,6 +27,7 @@ pub fn lane(request: &Request) -> Lane {
         | Request::ChangeDiff { .. }
         | Request::LastTurnChanges { .. }
         | Request::GitInfo { .. }
+        | Request::GitCommits { .. }
         | Request::GitReview { .. }
         | Request::GitReviewDiff { .. } => Lane::Metadata,
         _ => Lane::Read,

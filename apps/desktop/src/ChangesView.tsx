@@ -1,30 +1,26 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useRef, useState } from "react";
 import { ArrowRight, MoreHorizontal } from "lucide-react";
 import type {
+  ChangeSummary,
+  GitCommit,
   GitInfo,
   GitReview,
-  GitReviewScope,
   Project,
   TurnChanges,
 } from "./protocol";
 import { request, message } from "./api";
+import { ChangeScopePicker, type ReviewScope } from "./ChangeScopePicker";
 import { ReviewOptions } from "./ReviewOptions";
 import { ReviewWorkspace } from "./ReviewWorkspace";
+import { formatMessageTimestamp } from "./MessageTimestamp";
 import { Select } from "./Select";
 import { useStatusIssues } from "./statusNotices";
-const scopes = [
-  { value: "lastTurn", label: "上一轮" },
-  { value: "branch", label: "分支" },
-  { value: "worktree", label: "未提交" },
-  { value: "unstaged", label: "未暂存" },
-  { value: "staged", label: "已暂存" },
-];
-type ReviewScope = GitReviewScope | "lastTurn";
 type Snapshot = {
   scope: ReviewScope;
   context: string;
   review: GitReview;
   turn?: TurnChanges;
+  summary?: ChangeSummary;
   sessionId?: string;
 };
 export function ChangesView({
@@ -33,31 +29,52 @@ export function ChangesView({
   active,
   sessionId,
   lastTurnVersion,
+  requestId,
+  snapshotAt,
+  initialPath,
+  initialScope = requestId ? "turn" : "branch",
 }: {
   hostId: string;
   project: Project;
   active: boolean;
   sessionId?: string;
   lastTurnVersion?: string;
+  requestId?: string;
+  snapshotAt?: number | null;
+  initialPath?: string;
+  initialScope?: ReviewScope;
 }) {
   const [info, setInfo] = useState<GitInfo>();
-  const [scope, setScope] = useState<ReviewScope>("branch");
+  const [scope, setScope] = useState<ReviewScope>(initialScope);
   const [base, setBase] = useState("");
+  const [commit, setCommit] = useState<GitCommit>();
+  const gitMode = [
+    "branch",
+    "commit",
+    "worktree",
+    "unstaged",
+    "staged",
+  ].includes(scope);
+  const context = JSON.stringify([
+    hostId,
+    project.id,
+    scope,
+    gitMode ? null : sessionId,
+    scope === "turn" ? requestId : null,
+    scope === "branch" ? base : scope === "commit" ? commit?.oid : null,
+  ]);
   const [snapshot, setSnapshot] = useState<Snapshot>();
-  const review =
-    snapshot?.scope === scope &&
-    snapshot.context === JSON.stringify([hostId, project.id]) &&
-    (scope !== "lastTurn" || snapshot.sessionId === sessionId)
-      ? snapshot.review
-      : undefined;
-  const turn = scope === "lastTurn" && review ? snapshot?.turn : undefined;
-  const [selected, select] = useState("");
+  const review = snapshot?.context === context ? snapshot.review : undefined;
+  const turn = review ? snapshot?.turn : undefined;
+  const summary = review ? snapshot?.summary : undefined;
+  const [selected, select] = useState(initialPath ?? "");
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
   const [revision, refresh] = useState(0);
+  const issueId = useId();
   useStatusIssues([
     {
-      id: `changes:${hostId}:${project.id}:${scope}`,
+      id: `changes:${issueId}`,
       title: `${project.name} 的变更未能读取`,
       error: active ? error : "",
       pending: active && loading,
@@ -71,17 +88,19 @@ export function ChangesView({
     setMore(false);
     if (restoreFocus) moreTrigger.current?.focus();
   }, []);
-  const gitMode = scope !== "lastTurn";
   const turnRevision = gitMode ? 0 : revision;
   const infoContext = useRef("");
   const selection = useRef(selected);
   selection.current = selected;
   useEffect(() => {
+    select(initialPath ?? "");
+  }, [initialPath]);
+  useEffect(() => {
     infoContext.current = "";
     setInfo(undefined);
     setBase("");
     setSnapshot(undefined);
-    select("");
+    select(initialPath ?? "");
     setError("");
   }, [hostId, project.id]);
   useEffect(() => {
@@ -114,7 +133,7 @@ export function ChangesView({
   useEffect(() => {
     if (
       !active ||
-      (scope !== "lastTurn" &&
+      (gitMode &&
         (!info ||
           infoContext.current !== JSON.stringify([hostId, project.id]) ||
           (scope === "branch" && !base)))
@@ -125,7 +144,7 @@ export function ChangesView({
     setError("");
     setSnapshot(undefined);
     setMore(false);
-    if (scope === "lastTurn" && !sessionId) {
+    if (!gitMode && !sessionId) {
       setLoading(false);
       select("");
       return;
@@ -137,12 +156,32 @@ export function ChangesView({
             method: "last_turn_changes",
             session_id: sessionId!,
           }
-        : {
-            method: "git_review",
-            project_id: project.id,
-            scope,
-            base: scope === "branch" ? base : null,
-          },
+        : scope === "turn"
+          ? {
+              method: "turn_change_summary",
+              session_id: sessionId!,
+              request_id: requestId!,
+            }
+          : scope === "task"
+            ? {
+                method: "change_summary",
+                project_id: project.id,
+                session_id: sessionId!,
+              }
+            : {
+                method: "git_review",
+                project_id: project.id,
+                scope: scope as Exclude<
+                  ReviewScope,
+                  "lastTurn" | "turn" | "task"
+                >,
+                base:
+                  scope === "branch"
+                    ? base
+                    : scope === "commit"
+                      ? commit!.oid
+                      : null,
+              },
     )
       .then((response) => {
         if (disposed) return;
@@ -157,40 +196,45 @@ export function ChangesView({
         const changes =
           response.kind === "last_turn_changes"
             ? (response.changes ?? undefined)
-            : undefined;
-        const result: GitReview | undefined =
-          scope === "lastTurn"
-            ? changes && {
-                base: null,
-                head: null,
-                entries: changes.summary.entries.map((entry) => ({
-                  ...entry,
-                  previous_path: null,
-                  binary: false,
-                  untracked: false,
-                })),
-                added: changes.summary.added,
-                removed: changes.summary.removed,
-                truncated: changes.summary.truncated,
-              }
-            : response.kind === "git_review"
-              ? response.review
+            : response.kind === "turn_changes"
+              ? response.changes
               : undefined;
+        const summary =
+          changes?.summary ??
+          (response.kind === "change_summary" ? response.summary : undefined);
+        const result: GitReview | undefined = !gitMode
+          ? summary && {
+              base: null,
+              head: null,
+              entries: summary.entries.map((entry) => ({
+                ...entry,
+                previous_path: null,
+                binary: false,
+                untracked: false,
+              })),
+              added: summary.added,
+              removed: summary.removed,
+              truncated: summary.truncated,
+            }
+          : response.kind === "git_review"
+            ? response.review
+            : undefined;
         if (!result)
           throw new Error(
-            scope === "lastTurn"
+            !gitMode
               ? "Server 不支持回合快照，请更新后重试"
               : "Server 不支持 Git 审阅，请更新后重试",
           );
         if (!disposed) {
           setSnapshot({
             scope,
-            context: JSON.stringify([hostId, project.id]),
+            context,
             review: result,
             turn: changes,
+            summary,
             sessionId,
           });
-          setError(changes?.summary.unavailable ?? "");
+          setError(summary?.unavailable ?? "");
           select(
             result.entries.some((file) => file.path === selection.current)
               ? selection.current
@@ -215,29 +259,42 @@ export function ChangesView({
     base,
     info,
     sessionId,
-    lastTurnVersion,
+    scope === "lastTurn" ? lastTurnVersion : null,
     turnRevision,
+    requestId,
+    commit,
+    context,
+    gitMode,
   ]);
   const loadDiff = useCallback(
     async (path: string) => {
       const response = await request(
         hostId,
-        scope === "lastTurn"
+        scope === "lastTurn" || scope === "turn"
           ? {
               method: "turn_change_diff",
               session_id: snapshot!.sessionId!,
               request_id: turn!.request_id,
               path,
             }
-          : {
-              method: "git_review_diff",
-              project_id: project.id,
-              scope,
-              base: review!.base,
-              head: review!.head,
-              path,
-              full_context: fullContext,
-            },
+          : scope === "task"
+            ? {
+                method: "task_change_diff",
+                session_id: snapshot!.sessionId!,
+                path,
+              }
+            : {
+                method: "git_review_diff",
+                project_id: project.id,
+                scope: scope as Exclude<
+                  ReviewScope,
+                  "lastTurn" | "turn" | "task"
+                >,
+                base: review!.base,
+                head: review!.head,
+                path,
+                full_context: fullContext,
+              },
       );
       if (response.kind !== "content") throw new Error("无法读取文件差异");
       return response;
@@ -250,50 +307,49 @@ export function ChangesView({
         { value: "HEAD", label: "当前提交" },
       ]
     : [];
-  const onScope = (value: string) => {
-    setScope(value as ReviewScope);
-    select("");
-  };
   const scopeControl = (
     <>
-      <Select
-        label="变更范围"
-        compact
-        value={scope}
-        options={scopes}
-        onChange={onScope}
+      <ChangeScopePicker
+        hostId={hostId}
+        projectId={project.id}
+        sessionId={sessionId}
+        requestId={requestId}
+        scope={scope}
+        commit={commit}
         disabled={!active}
+        choose={(value, commit) => {
+          setScope(value);
+          if (commit) setCommit(commit);
+          select(value === "turn" ? (initialPath ?? "") : "");
+        }}
       />
-      {scope === "branch" ? (
-        <div className="git-review-comparison">
-          <span title={info?.head ?? ""}>
-            {info?.branch ?? (info?.head ? "分离 HEAD" : "分支")}
-          </span>
-          <ArrowRight size={14} />
-          <Select
-            label="比较基准"
-            compact
-            value={base}
-            options={options}
-            onChange={setBase}
-            disabled={!active || !info}
-            minMenuWidth={200}
-            searchable
-            searchPlaceholder="搜索分支"
-          />
-        </div>
-      ) : null}
     </>
   );
   return (
     <ReviewWorkspace
-      key={JSON.stringify([
-        hostId,
-        project.id,
-        scope,
-        scope === "lastTurn" ? sessionId : null,
-      ])}
+      key={JSON.stringify([hostId, project.id, sessionId, requestId])}
       scopeControl={scopeControl}
+      comparisonControl={
+        scope === "branch" ? (
+          <div className="git-review-comparison">
+            <span title={info?.head ?? ""}>
+              {info?.branch ?? (info?.head ? "分离 HEAD" : "分支")}
+            </span>
+            <ArrowRight size={14} />
+            <Select
+              label="比较基准"
+              compact
+              value={base}
+              options={options}
+              onChange={setBase}
+              disabled={!active || !info}
+              minMenuWidth={200}
+              searchable
+              searchPlaceholder="搜索分支"
+            />
+          </div>
+        ) : null
+      }
       files={review?.entries ?? []}
       added={review?.added ?? 0}
       removed={review?.removed ?? 0}
@@ -304,7 +360,11 @@ export function ChangesView({
       emptyLabel={
         scope === "lastTurn" && !turn
           ? "当前对话尚无已保存的回合快照"
-          : "此范围没有变更"
+          : !gitMode
+            ? summary?.truncated
+              ? "采集范围内没有已记录的文件变更"
+              : `${scope === "task" ? "本任务" : "本轮"}没有文件变更`
+            : "此范围没有变更"
       }
       loadDiff={loadDiff}
       refresh={() => refresh((v) => v + 1)}
@@ -327,7 +387,7 @@ export function ChangesView({
           <ReviewOptions
             trigger={moreTrigger.current}
             fullContext={fullContext}
-            frozen={scope === "lastTurn"}
+            frozen={!gitMode}
             choose={() => setFullContext((v) => !v)}
             close={closeMore}
           />
@@ -365,15 +425,21 @@ export function ChangesView({
         </>
       }
       boundary={
-        scope === "lastTurn"
-          ? "对比上一轮开始与结束时保存的内容；后续修改不会改变快照。共享目录中的同期写入也可能包含在内。"
-          : scope === "branch"
-            ? "对比当前提交与基准分支的共同祖先；未提交的修改在未提交范围查看。"
-            : scope === "worktree"
-              ? "当前工作区相对 HEAD 的净变更，包含暂存及未跟踪文件。"
-              : scope === "staged"
-                ? "暂存区相对 HEAD 的变更。"
-                : "工作区相对暂存区的变更，包含未跟踪文件。"
+        scope === "task"
+          ? "任务开始后的净变更；共享目录内可能包含其他写入。"
+          : scope === "turn"
+            ? `${snapshotAt ? (formatMessageTimestamp(snapshotAt) ?? "") + " · " : ""}对比本轮开始与结束时保存的内容；后续修改不会改变快照。共享目录中的同期写入也可能包含在内。`
+            : scope === "commit"
+              ? "所选提交相对第一父级的变更；首次提交对比空目录，不包含未提交修改。"
+              : scope === "lastTurn"
+                ? "对比上一轮开始与结束时保存的内容；后续修改不会改变快照。共享目录中的同期写入也可能包含在内。"
+                : scope === "branch"
+                  ? "对比当前提交与基准分支的共同祖先；未提交的修改在未提交范围查看。"
+                  : scope === "worktree"
+                    ? "当前工作区相对 HEAD 的净变更，包含暂存及未跟踪文件。"
+                    : scope === "staged"
+                      ? "暂存区相对 HEAD 的变更。"
+                      : "工作区相对暂存区的变更，包含未跟踪文件。"
       }
     />
   );

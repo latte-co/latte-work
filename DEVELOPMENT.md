@@ -682,3 +682,13 @@ Metadata reads of closed sessions refresh sidebar/history titles; live sessions
 follow native events so stale transcript flushes cannot overwrite a rename.
 These semantics are shared by local and SSH hosts. Unsupported native live rename
 returns an error instead of silently renaming only the Latte record.
+
+The unified change page uses an additive `git_commits` metadata read (50 first-parent
+commits per page). The returned head SHA pins subsequent offset pages; no fetch or
+Git mutation occurs. `GitReviewScope::Commit` compares a selected full commit SHA
+with its first parent, or the empty tree for a root commit. File reads use the
+resolved base/head from the summary, the same literal project path boundary and
+external-diff/textconv restrictions as branch review. Local and SSH use the same
+handler; older remote servers report unsupported history and need an update.
+Focused checks: `git_review::tests` and the final-binary
+`git_review_wire_preserves_scope_and_branch_snapshot_after_reconnect` test.

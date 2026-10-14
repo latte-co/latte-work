@@ -25,6 +25,7 @@ fn main() {
         GitChange::decl(),
         GitReviewScope::decl(),
         GitRef::decl(),
+        GitCommit::decl(),
         GitInfo::decl(),
         GitReviewFile::decl(),
         GitReview::decl(),

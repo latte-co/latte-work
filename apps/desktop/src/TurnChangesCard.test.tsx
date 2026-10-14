@@ -45,8 +45,8 @@ it("shows per-turn counts and opens exact-file diffs without launching an agent"
   openTurnChanges("turn-tabs", "s1", "r1", 1000, "a.txt");
   openTurnChanges("turn-tabs", "s1", "r2", 2000);
   openTurnChanges("turn-tabs", "s1", "r1", 1000);
-  expect(readWorkspace("turn-tabs").tabs).toHaveLength(2);
-  expect(readWorkspace("turn-tabs").current).toBe("turnChanges:r1");
+  expect(readWorkspace("turn-tabs").tabs).toHaveLength(1);
+  expect(readWorkspace("turn-tabs").current).toBe("diff");
 });
 it("sends undo once, records its result, and never retries a conflict", async () => {
   let finish!: (value: unknown) => void;

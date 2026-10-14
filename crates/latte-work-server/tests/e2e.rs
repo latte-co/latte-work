@@ -4498,6 +4498,56 @@ async fn git_review_wire_preserves_scope_and_branch_snapshot_after_reconnect() {
         panic!()
     };
     assert_eq!((review.added, review.removed), (1, 1));
+    let Response::GitCommits {
+        head,
+        commits,
+        has_more: false,
+    } = ask(
+        &mut client,
+        Request::GitCommits {
+            project_id: project.id.clone(),
+            head: None,
+            offset: 0,
+        },
+    )
+    .await
+    else {
+        panic!()
+    };
+    assert_eq!(commits.len(), 2);
+    assert_eq!(commits[0].subject, "feature");
+    assert_eq!(head.as_deref(), Some(commits[0].oid.as_str()));
+    let Response::GitReview { review: committed } = ask(
+        &mut client,
+        Request::GitReview {
+            project_id: project.id.clone(),
+            scope: GitReviewScope::Commit,
+            base: Some(commits[0].oid.clone()),
+        },
+    )
+    .await
+    else {
+        panic!()
+    };
+    assert_eq!((committed.added, committed.removed), (1, 1));
+    let Response::GitReview {
+        review: root_commit,
+    } = ask(
+        &mut client,
+        Request::GitReview {
+            project_id: project.id.clone(),
+            scope: GitReviewScope::Commit,
+            base: Some(commits[1].oid.clone()),
+        },
+    )
+    .await
+    else {
+        panic!()
+    };
+    assert!(root_commit.base.is_none());
+    assert!(
+        matches!(ask(&mut client, Request::GitReviewDiff { project_id: project.id.clone(), scope: GitReviewScope::Commit, base: None, head: root_commit.head, path: "file.txt".into(), full_context: false }).await, Response::Content { text, .. } if text.contains("+original"))
+    );
     let mut reconnect = host.client().await;
     run(&["update-ref", "refs/remotes/origin/main", "HEAD"]);
     let request = |path: &str| Request::GitReviewDiff {

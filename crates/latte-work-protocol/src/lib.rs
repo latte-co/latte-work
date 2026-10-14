@@ -579,6 +579,11 @@ pub enum Request {
     GitInfo {
         project_id: String,
     },
+    GitCommits {
+        project_id: String,
+        head: Option<String>,
+        offset: u32,
+    },
     GitReview {
         project_id: String,
         scope: GitReviewScope,
@@ -651,6 +656,7 @@ pub struct GitChange {
 #[serde(rename_all = "snake_case")]
 pub enum GitReviewScope {
     Branch,
+    Commit,
     Worktree,
     Unstaged,
     Staged,
@@ -659,6 +665,11 @@ pub enum GitReviewScope {
 pub struct GitRef {
     pub name: String,
     pub full_name: String,
+}
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+pub struct GitCommit {
+    pub oid: String,
+    pub subject: String,
 }
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 pub struct GitInfo {
@@ -796,6 +807,11 @@ pub enum Response {
     },
     GitInfo {
         info: GitInfo,
+    },
+    GitCommits {
+        head: Option<String>,
+        commits: Vec<GitCommit>,
+        has_more: bool,
     },
     GitReview {
         review: GitReview,

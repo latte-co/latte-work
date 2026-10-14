@@ -1145,6 +1145,20 @@ async fn dispatch(s: &Service, request: Request) -> Result<Response> {
                 info: git_review::info(Path::new(&p.path)).await?,
             }
         }
+        Request::GitCommits {
+            project_id,
+            head,
+            offset,
+        } => {
+            let p = db(&s.database, |d| d.project(&project_id))?;
+            let (head, commits, has_more) =
+                git_review::commits(Path::new(&p.path), head.as_deref(), offset).await?;
+            Response::GitCommits {
+                head,
+                commits,
+                has_more,
+            }
+        }
         Request::GitReview {
             project_id,
             scope,
