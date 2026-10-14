@@ -4517,6 +4517,7 @@ button[aria-checked="true"] .model-option-check {
   min-height: 32px;
   height: 32px;
   width: auto;
+  margin-top: 0;
   border-radius: var(--radius-control);
   padding: 0 var(--space-3);
 }
@@ -4963,7 +4964,6 @@ button[aria-checked="true"] .model-option-check {
 /* One scope menu for saved snapshots and every Git comparison. */
 .change-scope-trigger {
   background: var(--color-hover);
-  border-radius: var(--radius-pill) !important;
   max-width: 240px;
 }
 .change-scope-menu {
@@ -5042,18 +5042,31 @@ button[aria-checked="true"] .model-option-check {
 .review-scope-summary {
   display: flex;
   align-items: center;
-  gap: var(--space-2);
+  gap: var(--space-1);
   background: var(--color-hover);
   border: 1px solid var(--color-border);
   border-radius: var(--radius-pill);
-  padding-right: var(--space-3);
+  padding-right: var(--space-2);
+  font-size: var(--text-lg);
+  line-height: var(--leading-ui);
 }
 .review-scope-summary .change-scope-trigger {
   border: 0;
+  border-radius: inherit;
   background: transparent;
+  font-size: inherit;
+  font-weight: 400;
 }
 .review-scope-summary .change-scope-trigger:hover {
   background: var(--color-selected);
+}
+.review-scope-summary .change-totals {
+  margin-left: 0;
+  gap: var(--space-1);
+}
+.review-scope-summary .change-totals b,
+.review-scope-summary .change-totals em {
+  font-weight: 400;
 }
 .change-commit-submenu {
   min-height: 0;
