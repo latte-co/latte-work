@@ -664,9 +664,9 @@ export function Sidebar({
               !loadingProjects[key] &&
               !projectErrors[key] &&
               noSessions;
-            const running = allSessions.some((s) => s.status === "running");
-            const waiting = allSessions.some((s) => s.status === "waiting");
-            const unreadCompleted = allSessions.some(
+            const running = listedSessions.some((s) => s.status === "running");
+            const waiting = listedSessions.some((s) => s.status === "waiting");
+            const unreadCompleted = listedSessions.some(
               (s) => s.status === "completed" && s.unread,
             );
             const toggle = () => {

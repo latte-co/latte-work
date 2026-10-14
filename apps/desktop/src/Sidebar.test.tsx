@@ -683,7 +683,72 @@ it("aggregates unread completions under collapsed projects with running and wait
   expect(within(project).queryByRole("img", { name: /项目中有/ })).toBeNull();
 });
 
-it("includes pinned completions without mixing projects from different hosts", () => {
+it.each([
+  ["running", "执行中"],
+  ["waiting", "等待确认"],
+  ["completed", "未读"],
+] as const)(
+  "keeps pinned %s activity only in the pinned row despite stale project metadata",
+  (status, label) => {
+    const pinned = { ...session(status, true), pinned_at: 1, hostId: "local" };
+    const base = state([{ ...pinned, pinned_at: null }]);
+    render(<Sidebar state={{ ...base, sessionId: "", pinned: [pinned] }} />);
+    const project = screen.getByRole("button", { name: "Project" });
+    fireEvent.click(project);
+    expect(project.getAttribute("aria-expanded")).toBe("false");
+    expect(within(project).queryByRole("img", { name: /项目中有/ })).toBeNull();
+    expect(
+      within(screen.getByRole("button", { name: "Task" })).getByRole("img", {
+        name: label,
+      }),
+    ).toBeTruthy();
+  },
+);
+
+it("updates collapsed project activity when conversations are pinned and unpinned", () => {
+  const running = { ...session("running"), id: "running", title: "Running" };
+  const waiting = { ...session("waiting"), id: "waiting", title: "Waiting" };
+  const completed = session("completed", true);
+  const base = { ...state([running, waiting, completed]), sessionId: "" };
+  const view = render(<Sidebar state={base} />);
+  const project = screen.getByRole("button", { name: "Project" });
+  fireEvent.click(project);
+  expect(
+    within(project).getByRole("img", { name: "项目中有对话执行中" }),
+  ).toBeTruthy();
+  const pins = [{ ...running, pinned_at: 1, hostId: "local" }];
+  view.rerender(<Sidebar state={{ ...base, pinned: pins }} />);
+  expect(
+    within(project).queryByRole("img", { name: "项目中有对话执行中" }),
+  ).toBeNull();
+  expect(
+    within(project).getByRole("img", { name: "项目中有对话等待确认" }),
+  ).toBeTruthy();
+  pins.push({ ...waiting, pinned_at: 1, hostId: "local" });
+  view.rerender(<Sidebar state={{ ...base, pinned: [...pins] }} />);
+  expect(
+    within(project).getByRole("img", { name: "项目中有未读完成回复" }),
+  ).toBeTruthy();
+  view.rerender(
+    <Sidebar
+      state={{
+        ...base,
+        pinned: [...pins, { ...completed, pinned_at: 1, hostId: "local" }],
+      }}
+    />,
+  );
+  expect(within(project).queryByRole("img", { name: /项目中有/ })).toBeNull();
+  view.rerender(<Sidebar state={{ ...base, pinned: [...pins] }} />);
+  expect(
+    within(project).getByRole("img", { name: "项目中有未读完成回复" }),
+  ).toBeTruthy();
+  view.rerender(<Sidebar state={base} />);
+  expect(
+    within(project).getByRole("img", { name: "项目中有对话执行中" }),
+  ).toBeTruthy();
+});
+
+it("excludes pinned activity without suppressing same-id conversations on other hosts", async () => {
   const completed = {
     ...session("completed", true),
     pinned_at: 1,
@@ -694,6 +759,7 @@ it("includes pinned completions without mixing projects from different hosts", (
     ...base,
     sessionId: "",
     pinned: [completed],
+    isHostConnected: () => true,
     hosts: [
       ...base.hosts,
       { id: "remote", name: "Remote", ssh: "remote", server_path: null },
@@ -703,19 +769,22 @@ it("includes pinned completions without mixing projects from different hosts", (
       { id: "p", hostId: "remote", name: "Remote project", path: "/remote" },
     ],
   };
-  mocks.request.mockResolvedValue({ kind: "sessions", sessions: [] });
+  mocks.request.mockResolvedValue({
+    kind: "sessions",
+    sessions: [session("running")],
+  });
   render(<Sidebar state={props} />);
   const project = screen.getByRole("button", { name: "Project" });
   fireEvent.click(project);
-  expect(
-    within(project).getByRole("img", { name: "项目中有未读完成回复" }),
-  ).toBeTruthy();
-  expect(
-    within(screen.getByRole("button", { name: "Remote project" })).queryByRole(
-      "img",
-      { name: "项目中有未读完成回复" },
-    ),
-  ).toBeNull();
+  expect(within(project).queryByRole("img", { name: /项目中有/ })).toBeNull();
+  await waitFor(() =>
+    expect(
+      within(screen.getByRole("button", { name: "Remote project" })).getByRole(
+        "img",
+        { name: "项目中有对话执行中" },
+      ),
+    ).toBeTruthy(),
+  );
 });
 it("opens row menus without selecting a conversation and keeps the trigger marked open", () => {
   const s = state([session("running")]);
