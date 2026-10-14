@@ -37,7 +37,7 @@ import { ToolGroup, ToolRow } from "./ToolActivity";
 export const statusNames = {
   ready: "就绪",
   running: "执行中",
-  waiting: "等待审批",
+  waiting: "等待你的回应",
   completed: "已完成",
   failed: "执行失败",
   stopped: "已停止",
