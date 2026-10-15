@@ -64,6 +64,14 @@ finish and terminals close. Restarting only the desktop leaves them running.
 Wire protocol changes: edit latte-work-protocol then run `make types` and
 `make fmt`. Desktop presentation must not import or reproduce Claude wire types.
 
+Archiving an idle task first closes any retained native session, reaps its owned
+process group, pauses pending messages and ends background subagents. Only a
+confirmed close allows the archive flag to be saved; failures keep it unarchived.
+Archive shares the exclusive execution-admission gate with undo, so another client
+cannot reopen or send between close and persistence. Archived tasks cannot create
+actors through queue actions either. Unarchive changes metadata only and does not
+open an Agent; running/waiting tasks must still be stopped before archiving.
+
 `recent_sessions` reads unarchived history across visible projects on the target host,
 100 rows per page with an activity-time/session-ID cursor. Activity comes from saved
 conversation events; opening/reading, lifecycle state and pin metadata do not reorder

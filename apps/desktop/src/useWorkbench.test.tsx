@@ -1225,3 +1225,62 @@ it("keeps the known lifecycle when reconciling a previously accepted request", a
   expect(hook.result.current.session?.status).toBe(before);
   expect(hook.result.current.admissionNotice).toContain("没有重复发送");
 });
+
+it.each([false, true])(
+  "cleans archived session state only after confirmed close (failure=%s)",
+  async (fails) => {
+    const base = mocks.request.getMockImplementation()!;
+    let finish!: (value: unknown) => void;
+    mocks.request.mockImplementation(async (host, r) => {
+      if (r.method === "open_agent_session")
+        return new Promise((resolve) => {
+          finish = resolve;
+        });
+      if (r.method === "archive_session") {
+        if (fails) throw new Error("native close failed");
+        return {
+          kind: "session",
+          session: { ...session(), archived: true, agent_session_open: false },
+        };
+      }
+      return base(host, r);
+    });
+    const hook = renderHook(useWorkbench);
+    await act(async () => {});
+    await act(async () =>
+      hook.result.current.openSession({ ...session(), hostId: "local" }),
+    );
+    expect(finish).toBeTypeOf("function");
+    await act(async () => {
+      const archive = hook.result.current.sessionAction("local", {
+        method: "archive_session",
+        session_id: "s",
+        archived: true,
+      });
+      if (fails) await expect(archive).rejects.toThrow("native close failed");
+      else await archive;
+    });
+    expect(hook.result.current.sessionId).toBe(fails ? "s" : "");
+    await act(async () => finish({ kind: "ok" }));
+    expect(
+      hook.result.current.sessions.find((s) => s.id === "s")?.archived,
+    ).toBe(!fails);
+    if (!fails) {
+      expect(
+        hook.result.current.agentSessionTransitions[
+          JSON.stringify(["local", "s"])
+        ],
+      ).toBeUndefined();
+      expect(
+        mocks.request.mock.calls.some(
+          ([, r]) => r.method === "poll" && r.after === Number.MAX_SAFE_INTEGER,
+        ),
+      ).toBe(false);
+      expect(
+        mocks.request.mock.calls.some(
+          ([, r]) => r.method === "close_agent_session",
+        ),
+      ).toBe(false);
+    }
+  },
+);

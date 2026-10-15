@@ -831,7 +831,14 @@ export function useWorkbench() {
   }
   async function sessionAction(targetHostId: string, action: Request) {
     const result = await request(targetHostId, action);
-    if (action.method === "close_agent_session" && result.kind === "ok") {
+    if (
+      (action.method === "close_agent_session" && result.kind === "ok") ||
+      (action.method === "archive_session" &&
+        action.archived &&
+        result.kind === "session" &&
+        result.session.archived &&
+        result.session.agent_session_open === false)
+    ) {
       const key = JSON.stringify([targetHostId, action.session_id]);
       openedEvidence.current.delete(key);
       setAgentSessionTransitions((old) => {

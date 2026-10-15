@@ -315,10 +315,14 @@ async fn dispatch(s: &Service, request: Request) -> Result<Response> {
         },
         other => other,
     };
-    // Undo holds exclusive admission until file restoration and its durable result.
+    // Undo and archive hold exclusive admission through their durable result.
+    // Archive must not race a new open/send between closing and saving metadata.
     // Ordinary turns retain concurrent admission; no request is replayed.
-    let undo = matches!(&request, Request::UndoTurnChanges { .. });
-    let _undo_guard = if undo {
+    let exclusive = matches!(
+        &request,
+        Request::UndoTurnChanges { .. } | Request::ArchiveSession { archived: true, .. }
+    );
+    let _exclusive_guard = if exclusive {
         Some(s.file_admission.write().await)
     } else {
         None
@@ -339,9 +343,11 @@ async fn dispatch(s: &Service, request: Request) -> Result<Response> {
         None
     };
     let closed_resource = match &request {
-        Request::CloseAgentSession { session_id, .. } => {
-            Some(upgrade::Resource::AgentSession(session_id.clone()))
-        }
+        Request::CloseAgentSession { session_id, .. }
+        | Request::ArchiveSession {
+            session_id,
+            archived: true,
+        } => Some(upgrade::Resource::AgentSession(session_id.clone())),
         Request::CloseTerminal { terminal_id } => {
             Some(upgrade::Resource::Terminal(terminal_id.clone()))
         }
@@ -614,7 +620,7 @@ async fn dispatch(s: &Service, request: Request) -> Result<Response> {
             session_id,
             archived,
         } => Response::Session {
-            session: db(&s.database, |d| d.archive_session(&session_id, archived))?,
+            session: runtime::archive(&s.database, &s.runs, &session_id, archived).await?,
         },
         Request::CreateSession { project_id, agent } => {
             if agent != s.agent.id {
@@ -1401,9 +1407,7 @@ async fn dispatch(s: &Service, request: Request) -> Result<Response> {
             Response::Content { text, truncated }
         }
     };
-    if matches!(response, Response::Ok)
-        && let Some(resource) = closed_resource
-    {
+    if let Some(resource) = closed_resource {
         s.lifecycle.forget(&resource)?;
     }
     runtime::refresh_titles(&s.database, &s.runs, &s.title_refresh, &mut response).await?;

@@ -383,6 +383,9 @@ fn control_for(
     session: Session,
     path: String,
 ) -> Result<mpsc::Sender<Control>> {
+    if db(&database, |s| Ok(s.session(&session.id)?.archived))? {
+        bail!("请先取消归档再打开 Agent 会话或发送消息");
+    }
     let mut map = runs.lock().map_err(|_| anyhow::anyhow!("执行状态锁异常"))?;
     if let Some(run) = map.get(&session.id) {
         Ok(run.control.clone())
@@ -432,6 +435,23 @@ pub async fn open(
         .context("打开 Agent 会话超时，请重试")??
         .map_err(anyhow::Error::msg)
 }
+/// The caller holds exclusive admission until close and archive both complete.
+/// Never hide a session whose native close has failed or is still unconfirmed.
+pub async fn archive(
+    database: &Database,
+    runs: &Runs,
+    id: &str,
+    archived: bool,
+) -> Result<Session> {
+    if archived {
+        if db(database, |s| Ok(s.session(id)?.status.active()))? {
+            bail!("请先停止任务，再归档会话");
+        }
+        close(database, runs, id, false).await?;
+    }
+    db(database, |s| s.archive_session(id, archived))
+}
+
 pub async fn close(database: &Database, runs: &Runs, id: &str, only_if_idle: bool) -> Result<()> {
     db(database, |s| s.session(id))?;
     let control = runs
@@ -1384,10 +1404,8 @@ async fn actor(
                     if let Ok(mut map) = runs.lock() {
                         map.remove(&session.id);
                     }
-                    if result.is_ok()
-                        && let Some(reply) = reply
-                    {
-                        let _ = reply.send(Ok(()));
+                    if let Some(reply) = reply {
+                        let _ = reply.send(result.map_err(|error| error.to_string()));
                     }
                     break;
                 }
@@ -1758,6 +1776,76 @@ pub async fn commands(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn archive_waits_for_close_confirmation_and_preserves_metadata_on_failure() {
+        for succeeds in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let mut store = Store::open(&dir.path().join("state.sqlite")).unwrap();
+            let project = store.add_project(dir.path()).unwrap();
+            let session = store.create_session(project.id, "claude".into()).unwrap();
+            store.state(&session.id, Status::Completed, None).unwrap();
+            store.pin_session(&session.id, true).unwrap();
+            let database = Arc::new(Mutex::new(store));
+            let (control, mut controls) = mpsc::channel(1);
+            let runs = Arc::new(Mutex::new(HashMap::from([(
+                session.id.clone(),
+                Run {
+                    control,
+                    safe_to_close: Arc::new(AtomicBool::new(true)),
+                    session_open: Arc::new(AtomicBool::new(true)),
+                },
+            )])));
+            let id = session.id.clone();
+            let db_clone = database.clone();
+            let runs_clone = runs.clone();
+            let operation =
+                tokio::spawn(async move { archive(&db_clone, &runs_clone, &id, true).await });
+            let Some(Control::Cancel {
+                reply: Some(reply),
+                only_if_idle: false,
+            }) = controls.recv().await
+            else {
+                panic!("archive must close native session first");
+            };
+            let before = db(&database, |s| s.session(&session.id)).unwrap();
+            assert!(!before.archived && before.pinned_at.is_some());
+            assert!(!operation.is_finished());
+            if succeeds {
+                runs.lock().unwrap().remove(&session.id);
+                reply.send(Ok(())).unwrap();
+            } else {
+                reply.send(Err("fixture close failed".into())).unwrap();
+            }
+            let result = operation.await.unwrap();
+            assert_eq!(result.is_ok(), succeeds);
+            let after = db(&database, |s| s.session(&session.id)).unwrap();
+            assert_eq!(after.archived, succeeds);
+            assert_eq!(after.pinned_at.is_none(), succeeds);
+            assert_eq!(after.status, Status::Completed);
+        }
+    }
+    #[tokio::test]
+    async fn archived_sessions_cannot_allocate_an_actor_through_any_admission() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(&dir.path().join("state.sqlite")).unwrap();
+        let project = store.add_project(dir.path()).unwrap();
+        let session = store.create_session(project.id, "claude".into()).unwrap();
+        store.archive_session(&session.id, true).unwrap();
+        // Also reject a caller holding a stale, unarchived metadata snapshot.
+        let database = Arc::new(Mutex::new(store));
+        let runs = Arc::new(Mutex::new(HashMap::new()));
+        assert!(
+            control_for(
+                database,
+                runs.clone(),
+                "must-not-launch".into(),
+                session,
+                dir.path().to_string_lossy().into_owned()
+            )
+            .is_err()
+        );
+        assert!(runs.lock().unwrap().is_empty());
+    }
     #[test]
     fn closed_title_refresh_is_debounced_per_native_identity_and_memory_bounded() {
         let dir = tempfile::tempdir().unwrap();

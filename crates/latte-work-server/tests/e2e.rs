@@ -1222,6 +1222,190 @@ async fn native_session_titles_sync_both_ways_without_sending_or_stopping_turns(
 }
 
 #[tokio::test]
+async fn archive_closes_native_sessions_and_background_processes_before_hiding_the_task() {
+    let host = Host::start().await;
+    let mut client = host.client().await;
+    let project = tempfile::tempdir().unwrap();
+    let id = session(&mut client, project.path()).await;
+    send(&mut client, &id, "background", "background").await;
+    let saved = wait(&mut client, &id, Status::Completed).await;
+    let pid = agent_pid(project.path());
+    let child = saved
+        .iter()
+        .find_map(|entry| match &entry.event {
+            EventKind::Text { text } => text
+                .strip_prefix("background:")
+                .and_then(|s| s.parse::<i32>().ok()),
+            _ => None,
+        })
+        .unwrap();
+    assert!(kill(Pid::from_raw(pid), None).is_ok());
+    assert!(kill(Pid::from_raw(child), None).is_ok());
+    let resource = latte_work_protocol::lifecycle::Resource::AgentSession(id.clone());
+    let server_id = client.server_id().to_owned();
+    client
+        .claim_resources("before-archive".into(), vec![resource.clone()])
+        .await
+        .unwrap();
+    assert!(
+        matches!(ask(&mut client, Request::ArchiveSession {session_id:id.clone(),archived:true}).await,
+        Response::Session {session} if session.archived && session.status==Status::Completed && session.agent_session_open==Some(false) && session.agent_session_busy==Some(false))
+    );
+    assert_gone(pid).await;
+    assert_gone(child).await;
+    let Response::Events { events, .. } = ask(
+        &mut client,
+        Request::Poll {
+            session_id: id.clone(),
+            after: 0.0,
+        },
+    )
+    .await
+    else {
+        panic!("poll")
+    };
+    for previous in &saved {
+        assert!(events.iter().any(|entry| entry.seq == previous.seq
+            && serde_json::to_value(&entry.event).unwrap()
+                == serde_json::to_value(&previous.event).unwrap()));
+    }
+    assert!(matches!(
+        ask(
+            &mut client,
+            Request::OpenAgentSession {
+                session_id: id.clone(),
+                provider: None
+            }
+        )
+        .await,
+        Response::Error { .. }
+    ));
+    assert!(matches!(
+        ask(
+            &mut client,
+            Request::ResumeMessageQueue {
+                session_id: id.clone(),
+                provider: None
+            }
+        )
+        .await,
+        Response::Error { .. }
+    ));
+    assert!(
+        matches!(ask(&mut client, Request::ArchiveSession {session_id:id.clone(),archived:false}).await,
+        Response::Session {session} if !session.archived && session.agent_session_open==Some(false))
+    );
+    assert_eq!(
+        agent_pid(project.path()),
+        pid,
+        "unarchive must not start another CLI"
+    );
+    assert!(matches!(
+        ask(
+            &mut client,
+            Request::OpenAgentSession {
+                session_id: id.clone(),
+                provider: None
+            }
+        )
+        .await,
+        Response::Ok
+    ));
+    let reopened_pid = agent_pid(project.path());
+    assert!(
+        client
+            .adopt_resources(
+                server_id,
+                "before-archive".into(),
+                "new-window".into(),
+                vec![resource]
+            )
+            .await
+            .unwrap()
+            .is_empty(),
+        "archive must also release the former owner's resource record"
+    );
+    assert!(
+        matches!(ask(&mut client, Request::ArchiveSession {session_id:id,archived:true}).await,
+        Response::Session {session} if session.archived && session.agent_session_open==Some(false))
+    );
+    assert_gone(reopened_pid).await;
+}
+#[tokio::test]
+async fn archive_serializes_with_concurrent_open_and_refuses_running_tasks() {
+    let host = Host::start().await;
+    let project = tempfile::tempdir().unwrap();
+    let mut client = host.client().await;
+    let mut other = host.client().await;
+    let id = session(&mut client, project.path()).await;
+    ask(
+        &mut client,
+        Request::OpenAgentSession {
+            session_id: id.clone(),
+            provider: None,
+        },
+    )
+    .await;
+    let pid = agent_pid(project.path());
+    let (archived, opened) = tokio::join!(
+        ask(
+            &mut client,
+            Request::ArchiveSession {
+                session_id: id.clone(),
+                archived: true
+            }
+        ),
+        ask(
+            &mut other,
+            Request::OpenAgentSession {
+                session_id: id.clone(),
+                provider: None
+            }
+        ),
+    );
+    assert!(
+        matches!(archived, Response::Session {session} if session.archived && session.agent_session_open==Some(false))
+    );
+    assert!(matches!(opened, Response::Ok | Response::Error { .. }));
+    assert_gone(pid).await;
+    assert!(
+        matches!(ask(&mut other, Request::Session {session_id:id.clone()}).await,
+        Response::Session {session} if session.archived && session.agent_session_open==Some(false))
+    );
+    ask(
+        &mut client,
+        Request::ArchiveSession {
+            session_id: id.clone(),
+            archived: false,
+        },
+    )
+    .await;
+    assert!(matches!(
+        ask(
+            &mut client,
+            Request::OpenAgentSession {
+                session_id: id.clone(),
+                provider: None
+            }
+        )
+        .await,
+        Response::Ok
+    ));
+    send(&mut client, &id, "running", "hang").await;
+    wait(&mut client, &id, Status::Running).await;
+    let pid = agent_pid(project.path());
+    assert!(
+        matches!(ask(&mut other, Request::ArchiveSession {session_id:id.clone(),archived:true}).await,
+        Response::Error {message,..} if message.contains("先停止"))
+    );
+    assert!(kill(Pid::from_raw(pid), None).is_ok());
+    assert!(
+        matches!(ask(&mut client, Request::Session {session_id:id}).await,
+        Response::Session {session} if !session.archived && session.status==Status::Running)
+    );
+}
+
+#[tokio::test]
 async fn session_menu_metadata_is_durable_and_host_scoped() {
     let host = Host::start().await;
     let mut client = host.client().await;
