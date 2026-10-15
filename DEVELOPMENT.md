@@ -713,7 +713,9 @@ routing, preference write failure, unsafe URL restoration and surface lifecycle.
 ## Native session titles
 
 Agent-generated titles are host metadata, not UI-generated summaries. Claude's
-`session_title_changed` updates the saved Session without creating a turn.
+`session_title_changed` reports an explicit native session name (not an AI title).
+It updates the saved custom name without creating a turn, including a native-side
+rename after an earlier Latte rename.
 Manual Rename uses the running session's native `rename_session` control request
 and commits the displayed title only after acknowledgement. Rejection preserves
 the old title; timeout stays unconfirmed and does not replay the request. Closed
@@ -723,14 +725,20 @@ native session exists, the requested title is passed with `--name` at creation.
 
 Native metadata reads use the same host shell environment as execution, validate
 the exact native UUID, reject escaping/symlink session files, and read bounded
-64 KiB head/tail windows. Custom native titles take priority over generated titles.
-Metadata reads of closed sessions refresh sidebar/history titles; live sessions
-follow native events so stale transcript flushes cannot overwrite a rename.
-Closed-file reads are debounced per session/native identity for two seconds across
+incremental pages of at most 4 MiB per file. The 256-entry metadata index keeps
+only titles, offsets and a partial record of at most 64 KiB, not transcript text;
+it resets on file replacement or truncation. Reads continue until the current end
+before applying a title, so metadata in the middle is not lost or replaced with
+an older name during catch-up. Offline renames verify a bounded 64 KiB tail.
+Each refresh processes at most 16 files. Custom names take priority over AI titles.
+Metadata reads refresh closed sessions and unnamed live sessions, allowing
+AI titles to appear without closing an Agent. Named live sessions follow native
+events so stale transcript flushes cannot overwrite a rename.
+File reads are debounced per session/native identity for two seconds across
 all clients, with at most 2,048 entries. Repeated polls reuse the current database
 projection. External native renames appear at the next eligible metadata read;
 read results apply only if the native identity, title and custom-title state still
-match the original snapshot and no actor has opened in the meantime.
+match the original snapshot; named live actors remain protected from file reads.
 These semantics are shared by local and SSH hosts. Unsupported native live rename
 returns an error instead of silently renaming only the Latte record.
 

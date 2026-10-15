@@ -50,7 +50,8 @@ pub enum Input<'a> {
 }
 
 pub enum Action {
-    Title(String),
+    /// Authoritative native session name, including external manual renames.
+    NativeName(String),
     TitleRenamed(Result<String, String>),
     SourceUsed {
         id: String,

@@ -1059,6 +1059,41 @@ async fn models_select_per_turn_validate_and_persist_without_changing_provider()
 }
 
 #[tokio::test]
+async fn generated_native_titles_refresh_without_closing_the_agent() {
+    let host = Host::start().await;
+    let mut client = host.client().await;
+    let project = tempfile::tempdir().unwrap();
+    let id = session(&mut client, project.path()).await;
+    send(
+        &mut client,
+        &id,
+        "title-generated",
+        "native-generated-title",
+    )
+    .await;
+    wait(&mut client, &id, Status::Completed).await;
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let response = ask(
+            &mut client,
+            Request::Session {
+                session_id: id.clone(),
+            },
+        )
+        .await;
+        if matches!(response, Response::Session { session } if session.title=="Generated native title" && !session.custom_title && session.agent_session_open==Some(true))
+        {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "AI native title did not refresh while open"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+#[tokio::test]
 async fn native_session_titles_sync_both_ways_without_sending_or_stopping_turns() {
     let host = Host::start().await;
     let mut client = host.client().await;
@@ -1071,7 +1106,7 @@ async fn native_session_titles_sync_both_ways_without_sending_or_stopping_turns(
         .filter(|e| matches!(e.event, EventKind::User { .. }))
         .count();
     assert!(
-        matches!(ask(&mut client,Request::Session{session_id:id.clone()}).await,Response::Session{session} if session.title=="Agent generated title" && !session.custom_title)
+        matches!(ask(&mut client,Request::Session{session_id:id.clone()}).await,Response::Session{session} if session.title=="Native session name" && session.custom_title)
     );
     let rename = |title: &str| Request::RenameSession {
         session_id: id.clone(),
@@ -1090,7 +1125,7 @@ async fn native_session_titles_sync_both_ways_without_sending_or_stopping_turns(
     send(&mut client, &id, "title-r2", "native-title-update").await;
     wait(&mut client, &id, Status::Completed).await;
     assert!(
-        matches!(ask(&mut client,Request::Session{session_id:id.clone()}).await,Response::Session{session} if session.title=="Manual title")
+        matches!(ask(&mut client,Request::Session{session_id:id.clone()}).await,Response::Session{session} if session.title=="Native renamed session" && session.custom_title)
     );
     // Live rename while work is running must not end the turn or create a prompt.
     send(&mut client, &id, "title-hang", "hang").await;
@@ -1133,6 +1168,7 @@ async fn native_session_titles_sync_both_ways_without_sending_or_stopping_turns(
         .join("11111111-1111-4111-8111-111111111111.jsonl");
     let saved = std::fs::read_to_string(&native).unwrap();
     assert!(saved.contains("Closed title"));
+    assert!(saved.contains("Manual title") && saved.contains("While running"));
     // An external native rename is reflected on read, including across reconnect.
     use std::io::Write;
     let mut file = std::fs::OpenOptions::new()
@@ -1140,6 +1176,14 @@ async fn native_session_titles_sync_both_ways_without_sending_or_stopping_turns(
         .open(&native)
         .unwrap();
     writeln!(file,"{}",serde_json::json!({"type":"custom-title","customTitle":"External title","sessionId":"11111111-1111-4111-8111-111111111111"})).unwrap();
+    for _ in 0..200 {
+        writeln!(
+            file,
+            "{}",
+            serde_json::json!({"type":"assistant","message":{"content":"padding".repeat(100)}})
+        )
+        .unwrap();
+    }
     let mut reconnect = host.client().await;
     // Native file reads are debounced across clients; external renames appear
     // on a later metadata read, without launching an Agent or sending a prompt.

@@ -342,7 +342,9 @@ impl Store {
             .collect()
     }
     pub fn sync_live_native_title(&self, id: &str, title: &str) -> Result<Session> {
-        self.sync_native_title(id, title, false)
+        // Explicit native names remain authoritative after a previous manual
+        // rename. AI-generated titles use sync_native_title(..., false).
+        self.sync_native_title(id, title, true)
     }
     pub fn sync_native_title(&self, id: &str, title: &str, custom: bool) -> Result<Session> {
         let mut session = self.session(id)?;
@@ -1338,7 +1340,7 @@ fn index_source(
 #[cfg(test)]
 mod tests {
     #[test]
-    fn live_generated_titles_preserve_manual_names() {
+    fn native_names_follow_external_renames_while_generated_titles_preserve_manual_names() {
         use super::*;
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open(&dir.path().join("titles.db")).unwrap();
@@ -1346,20 +1348,20 @@ mod tests {
         let session = store.create_session(project.id, "claude".into()).unwrap();
         assert_eq!(
             store
-                .sync_live_native_title(&session.id, "Generated")
+                .sync_native_title(&session.id, "Generated", false)
                 .unwrap()
                 .title,
             "Generated"
         );
         store.rename_session(&session.id, "Manual").unwrap();
         let current = store
-            .sync_live_native_title(&session.id, "Later generated")
+            .sync_native_title(&session.id, "Later generated", false)
             .unwrap();
         assert_eq!(current.title, "Manual");
         assert!(current.custom_title);
         assert_eq!(
             store
-                .sync_native_title(&session.id, "New manual", true)
+                .sync_live_native_title(&session.id, "New manual")
                 .unwrap()
                 .title,
             "New manual"

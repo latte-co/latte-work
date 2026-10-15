@@ -845,11 +845,13 @@ impl Claude {
             && m["subtype"] == "session_title_changed"
             && m["parent_tool_use_id"].is_null()
         {
+            // This event carries the explicit session name, not aiTitle. An
+            // external native rename must supersede an earlier host rename.
             if let Some(title) = bounded_field(&m, "title", 800) {
                 if self.renaming.is_some() {
                     self.rename_result_title = Some(title);
                 } else {
-                    output.push(Action::Title(title));
+                    output.push(Action::NativeName(title));
                 }
             }
             return Ok(output);
@@ -1772,10 +1774,12 @@ mod tests {
             phase: Phase::BetweenTurns,
             ..Default::default()
         };
-        let automatic = adapter
-            .decode(json!({"type":"system","subtype":"session_title_changed","title":"Generated"}))
+        let named = adapter
+            .decode(
+                json!({"type":"system","subtype":"session_title_changed","title":"Native name"}),
+            )
             .unwrap();
-        assert!(matches!(&automatic[..],[Action::Title(title)] if title=="Generated"));
+        assert!(matches!(&named[..],[Action::NativeName(title)] if title=="Native name"));
         let actions = adapter
             .advance(Input::RenameTitle {
                 id: "rename-1",

@@ -37,6 +37,21 @@ pub struct TitleRefreshCache {
 impl TitleRefreshCache {
     const INTERVAL: Duration = Duration::from_secs(2);
     const LIMIT: usize = 2048;
+    fn select(&mut self, mut sessions: Vec<Session>, now: Instant) -> Vec<Session> {
+        // Refresh the least recently read identities first so a slow-polling list
+        // with more than one batch cannot starve the rows after the first 16.
+        sessions.sort_by_key(|session| {
+            self.reads
+                .get(&session.id)
+                .filter(|(native, _)| Some(native) == session.native_id.as_ref())
+                .map(|(_, at)| *at)
+        });
+        sessions
+            .into_iter()
+            .filter(|session| self.claim(session, now))
+            .take(16)
+            .collect()
+    }
     fn claim(&mut self, session: &Session, now: Instant) -> bool {
         let Some(native_id) = &session.native_id else {
             return false;
@@ -282,10 +297,13 @@ pub async fn refresh_titles(
             .lock()
             .map_err(|_| anyhow::anyhow!("标题刷新锁异常"))?;
         let now = Instant::now();
-        sessions
-            .into_iter()
-            .filter(|session| !open_ids.contains(&session.id) && cache.claim(session, now))
-            .collect()
+        cache.select(
+            sessions
+                .into_iter()
+                .filter(|session| !open_ids.contains(&session.id) || !session.custom_title)
+                .collect(),
+            now,
+        )
     };
     if due.is_empty() {
         return Ok(());
@@ -319,9 +337,10 @@ pub async fn refresh_titles(
         let mut fresh = HashMap::new();
         for (observed, title) in titles {
             let mut session = s.session(&observed.id)?;
-            // Native reads must not overwrite a rename or a newly opened actor
-            // that raced the blocking file read.
-            if !current.contains_key(&session.id)
+            // Live native names are authoritative; an on-disk flush can lag a
+            // rename acknowledgement. Only unnamed live sessions may adopt file
+            // metadata (AI titles are not emitted as native name events).
+            if (!current.contains_key(&session.id) || !observed.custom_title)
                 && session.native_id == observed.native_id
                 && session.title == observed.title
                 && session.custom_title == observed.custom_title
@@ -466,7 +485,7 @@ impl TurnState {
     ) -> Result<Option<Outcome>> {
         for action in actions {
             match action {
-                Action::Title(title) => {
+                Action::NativeName(title) => {
                     db(database, |s| s.sync_live_native_title(session_id, &title))?;
                 }
                 Action::TitleRenamed(_) => bail!("未处理的原生标题确认"),
@@ -1739,6 +1758,30 @@ mod tests {
         }
         assert_eq!(cache.reads.len(), TitleRefreshCache::LIMIT);
         assert!(cache.claim(&session, now + TitleRefreshCache::INTERVAL * 2));
+    }
+    #[test]
+    fn bounded_title_refresh_reaches_later_rows_even_when_polls_are_slow() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(&dir.path().join("titles.db")).unwrap();
+        let project = store.add_project(dir.path()).unwrap();
+        let mut session = store.create_session(project.id, "claude".into()).unwrap();
+        session.native_id = Some("native".into());
+        let sessions: Vec<_> = (0..40)
+            .map(|i| {
+                let mut s = session.clone();
+                s.id = i.to_string();
+                s
+            })
+            .collect();
+        let mut cache = TitleRefreshCache::default();
+        let now = Instant::now();
+        let mut seen = std::collections::HashSet::new();
+        for i in 0..3 {
+            let batch = cache.select(sessions.clone(), now + TitleRefreshCache::INTERVAL * i);
+            assert!(batch.len() <= 16);
+            seen.extend(batch.into_iter().map(|s| s.id));
+        }
+        assert_eq!(seen.len(), 40);
     }
     #[tokio::test]
     async fn actions_preserve_wire_bytes_and_ready_never_sends_an_implicit_prompt() {

@@ -67,10 +67,16 @@ for line in sys.stdin:
         metadata({'type':'user','message':{'content':text},'sessionId':native_id})
         if name: metadata({'type':'custom-title','customTitle':name,'sessionId':native_id})
         emit({'type':'system','subtype':'init','session_id':native_id})
+        if text=='native-generated-title':
+            metadata({'type':'ai-title','aiTitle':'Generated native title','sessionId':native_id})
+            emit({'type':'assistant','message':{'content':[{'type':'text','text':'TITLE_OK'}]}})
+            emit({'type':'result','subtype':'success','is_error':False})
+            continue
         if text in ('native-title', 'native-title-update'):
             if not name or text=='native-title-update':
-                metadata({'type':'ai-title','aiTitle':'Agent generated title','sessionId':native_id})
-                emit({'type':'system','subtype':'session_title_changed','title':'Agent generated title','session_id':native_id})
+                name='Native session name' if text=='native-title' else 'Native renamed session'
+                metadata({'type':'custom-title','customTitle':name,'sessionId':native_id})
+                emit({'type':'system','subtype':'session_title_changed','title':name,'session_id':native_id})
             emit({'type':'assistant','message':{'content':[{'type':'text','text':'TITLE_OK'}]}})
             emit({'type':'result','subtype':'success','is_error':False})
             continue
