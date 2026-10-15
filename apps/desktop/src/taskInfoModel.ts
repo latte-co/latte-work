@@ -44,21 +44,29 @@ export function artifactPath(value: string): string | null {
   return path;
 }
 
-/** Presentation from recorded tool calls/results; never execute or infer success. */
-export function taskInfo(
-  events: Event[],
-  sessionId?: string,
-  projectPath?: string,
-) {
-  const links = new Map<string, { url: string; title: string }>();
-  const files = new Map<string, InfoFile>();
-  const products = new Map<string, InfoResource>();
-  const resources = new Map<string, InfoResource>();
-  const skills = new Map<string, number>();
-  const tools = new Map<string, number>();
-  const calls = new Map<string, Extract<Event["event"], { kind: "tool" }>>();
-  const results = new Set<string>();
-  let todos = new Map<string, InfoTodo>();
+const newState = () => ({
+  links: new Map<string, { url: string; title: string }>(),
+  files: new Map<string, InfoFile>(),
+  products: new Map<string, InfoResource>(),
+  resources: new Map<string, InfoResource>(),
+  skills: new Map<string, number>(),
+  tools: new Map<string, number>(),
+  calls: new Map<string, Extract<Event["event"], { kind: "tool" }>>(),
+  results: new Set<string>(),
+  todos: new Map<string, InfoTodo>(),
+});
+function collector(projectPath?: string, state = newState()) {
+  const {
+    links,
+    files,
+    products,
+    resources,
+    skills,
+    tools,
+    calls,
+    results,
+    todos,
+  } = state;
   const file = (
     value: string,
     title?: string,
@@ -103,10 +111,28 @@ export function taskInfo(
       body = parsed.text;
     }
     // Ignore fenced examples; inline code can contain actual linked file paths.
-    const prose = body.replace(
-      /^(`{3,}|~{3,})[^\n]*\n[\s\S]*?^\1[^\n]*$/gm,
-      "",
-    );
+    let fence: string | undefined;
+    const prose = body
+      .split("\n")
+      .filter((line) => {
+        const marker = line.match(/^ {0,3}(`{3,}|~{3,})/);
+        if (fence) {
+          if (
+            marker &&
+            marker[1][0] === fence[0] &&
+            marker[1].length >= fence.length &&
+            line.slice(marker[0].length).trim() === ""
+          )
+            fence = undefined;
+          return false;
+        }
+        if (marker) {
+          fence = marker[1];
+          return false;
+        }
+        return true;
+      })
+      .join("\n");
     const rest = prose.replace(
       /!?\[([^\]]*)\]\(\s*(<[^>]+>|[^\s)]+)(?:\s+["'][^\n]*?["'])?\s*\)/g,
       (_match, title: string, target: string) => {
@@ -137,18 +163,16 @@ export function taskInfo(
     if (body) scan(body, bodyKind === "user");
     body = "";
   };
-  for (const { event } of events
-    .filter((entry) => entry.session_id === sessionId)
-    .sort((a, b) => a.seq - b.seq)) {
+  const append = (event: Event["event"]) => {
     if (event.kind === "text" || event.kind === "user") {
       if (event.kind !== bodyKind || event.kind === "user") flush();
       bodyKind = event.kind;
       body += event.text;
-      continue;
+      return;
     }
     flush();
     if (event.kind === "tool") {
-      if (calls.has(event.id)) continue;
+      if (calls.has(event.id)) return;
       calls.set(event.id, event);
       tools.set(event.name, (tools.get(event.name) ?? 0) + 1);
       if (event.name === "Skill") {
@@ -159,10 +183,11 @@ export function taskInfo(
     if (event.kind === "tool_result" && !results.has(event.id)) {
       results.add(event.id);
       const call = calls.get(event.id);
-      if (!call || event.is_error) continue;
+      if (!call || event.is_error) return;
       const input = record(call.input);
       if (call.name === "TodoWrite" && Array.isArray(input.todos)) {
-        todos = new Map();
+        for (const id of todos.keys())
+          if (id.startsWith("todo:")) todos.delete(id);
         input.todos.forEach((value, i) => {
           const todo = record(value);
           const title = text(todo.content);
@@ -215,10 +240,9 @@ export function taskInfo(
       for (const entry of event.changes.summary.entries)
         if (entry.status !== "D" && entry.status !== "deleted")
           file(entry.path, undefined, true);
-  }
-  flush();
+  };
   const limited = <T>(values: Iterable<T>) => [...values].slice(0, 128);
-  return {
+  const snapshot = () => ({
     products: limited(products.values()),
     resources: limited(resources.values()),
     todos: limited(todos.values()),
@@ -229,5 +253,64 @@ export function taskInfo(
     truncated: [todos, skills, tools, links, files, products, resources].some(
       (items) => items.size > 128,
     ),
+  });
+  return {
+    append,
+    snapshot(includePending = true): ReturnType<typeof snapshot> {
+      if (!body || !includePending) return snapshot();
+      // Project the unfinished message into temporary maps: partial URLs must
+      // not remain as phantom resources when the next fragment extends them.
+      const visible = collector(projectPath, {
+        ...state,
+        links: new Map(links),
+        files: new Map(files),
+        products: new Map(products),
+        resources: new Map(resources),
+      });
+      visible.scanPending(body, bodyKind === "user");
+      return visible.snapshot(false);
+    },
+    scanPending: scan,
   };
+}
+
+/** Reuse parsed records for an append-only stream; a prepended history page or
+ * replaced record resets the projection. Only completed text blocks are committed. */
+export function createTaskInfoReader() {
+  let previous: Event[] = [];
+  let context = "";
+  let model = collector();
+  return (
+    events: Event[],
+    sessionId?: string,
+    projectPath?: string,
+    includePending = true,
+  ) => {
+    const scope = JSON.stringify([sessionId, projectPath]);
+    let ordered = events.filter((entry) => entry.session_id === sessionId);
+    if (ordered.some((entry, i) => i > 0 && entry.seq < ordered[i - 1].seq))
+      ordered = ordered.sort((a, b) => a.seq - b.seq);
+    if (
+      scope !== context ||
+      previous.length > ordered.length ||
+      !previous.every((entry, i) => entry === ordered[i])
+    ) {
+      model = collector(projectPath);
+      previous = [];
+      context = scope;
+    }
+    for (let i = previous.length; i < ordered.length; i++)
+      model.append(ordered[i].event);
+    previous = ordered;
+    return model.snapshot(includePending);
+  };
+}
+
+/** A standalone projection for callers without an incremental event stream. */
+export function taskInfo(
+  events: Event[],
+  sessionId?: string,
+  projectPath?: string,
+) {
+  return createTaskInfoReader()(events, sessionId, projectPath);
 }

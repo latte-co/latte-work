@@ -482,3 +482,58 @@ it("restores a confirmed late take to its captured session after the queue unmou
   await act(async () => finish({ kind: "queued_message_taken", entry }));
   expect(onEdit).toHaveBeenCalledWith(entry);
 });
+
+it("rebases a drag onto the latest queue when the original head starts executing", async () => {
+  let entries = multiple();
+  mocks.request.mockImplementation(async () => ({
+    kind: "message_queue",
+    entries,
+    paused: false,
+    reason: null,
+  }));
+  const view = render(<MessageQueue {...props} />);
+  const grip = await screen.findByRole("button", {
+    name: "排序排队消息：Third",
+  });
+  const rows = screen.getAllByRole("listitem");
+  vi.spyOn(screen.getByRole("list"), "getBoundingClientRect").mockReturnValue({
+    left: 0,
+    right: 300,
+    top: 0,
+    bottom: 120,
+  } as DOMRect);
+  rows.forEach((row, index) =>
+    vi.spyOn(row, "getBoundingClientRect").mockReturnValue({
+      top: index * 40,
+      bottom: (index + 1) * 40,
+      height: 40,
+    } as DOMRect),
+  );
+  fireEvent.pointerDown(grip, { button: 0, clientX: 10, clientY: 100 });
+  fireEvent.pointerMove(grip, { clientX: 10, clientY: 45 });
+  entries = entries.slice(1);
+  view.rerender(<MessageQueue {...props} revision="head-dispatched" />);
+  await waitFor(() => expect(screen.getAllByRole("listitem")).toHaveLength(2));
+  fireEvent.pointerUp(grip);
+  await waitFor(() =>
+    expect(mocks.request).toHaveBeenCalledWith("ssh", {
+      method: "reorder_message_queue",
+      session_id: "s",
+      expected: ["b", "c"],
+      order: ["c", "b"],
+    }),
+  );
+});
+it("closes the portal on Tab without leaving focus on a removed menu item", async () => {
+  render(<MessageQueue {...props} onEdit={vi.fn()} />);
+  const trigger = await screen.findByRole("button", {
+    name: "排队消息更多操作：Original message",
+  });
+  fireEvent.click(trigger);
+  expect(document.activeElement).toBe(
+    screen.getByRole("menuitem", { name: "编辑消息" }),
+  );
+  fireEvent.keyDown(document, { key: "Tab" });
+  expect(screen.queryByRole("menu")).toBeNull();
+  expect(document.activeElement).toBe(trigger);
+});

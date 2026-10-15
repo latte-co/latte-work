@@ -1468,7 +1468,15 @@ async fn actor(
                     p.apply(actions, &database, &session.id).await
                 }.await
             },
-            _ = deadline(immediate_deadline) => Err(anyhow::anyhow!("发送确认超时，消息保留在队列，请核对后重试")),
+            _ = deadline(immediate_deadline) => {
+                // Timing out a delivery confirmation is not evidence that the
+                // native process failed. Keep its interrupt acknowledgement and
+                // current turn under normal supervision, without replaying input.
+                if let Some(pending) = immediate.take() {
+                    let _ = pending.reply.send(Err("发送确认超时，消息保留在队列，请核对后重试".into()));
+                    db(&database, |d| d.pause_queue(&session.id, pending.restore_reason.as_deref().or(Some("发送确认超时，队列已暂停，请核对后继续"))))
+                } else { Ok(()) }
+            },
             _ = deadline(init_deadline) => Err(anyhow::anyhow!("Agent 初始化超时（18 秒）")),
             _ = deadline(turn_deadline) => Err(anyhow::anyhow!("任务超过 24 小时上限")),
         };
@@ -1563,7 +1571,13 @@ async fn actor(
                     true,
                 )
                 .await?;
+                if db(&database, |d| {
+                    Ok(d.session(&session.id)?.status == Status::Failed)
+                })? {
+                    bail!("已发送消息未能开始执行，请核对后继续");
+                }
             }
+            let status = db(&database, |d| Ok(d.session(&session.id)?.status))?;
             if immediate.is_some()
                 && !status.active()
                 && process
@@ -1608,11 +1622,18 @@ async fn actor(
                 .await;
                 let _ = pending.reply.send(result.map_err(|e| e.to_string()));
             }
-            let (paused, _) = db(&database, |d| d.queue_state(&session.id))?;
+            let (status, paused) = db(&database, |d| {
+                Ok((
+                    d.session(&session.id)?.status,
+                    d.queue_state(&session.id)?.0,
+                ))
+            })?;
             if !paused
                 && !status.active()
                 && process.as_ref().is_none_or(|p| {
                     p.state.ready
+                        && !p.stopping
+                        && !p.interrupt_ack_pending
                         && !p.turn_active
                         && p.state.pending.is_empty()
                         && p.adapter.can_reconfigure()

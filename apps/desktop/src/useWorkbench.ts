@@ -291,6 +291,11 @@ export function useWorkbench() {
     null,
   );
   const [error, setError] = useState("");
+  const [admissionNotice, setAdmissionNotice] = useState<{
+    host: string;
+    session: string;
+    text: string;
+  }>();
   const [agentSessionTransitions, setAgentSessionTransitions] = useState<
     Record<string, AgentSessionTransition>
   >({});
@@ -1098,13 +1103,22 @@ export function useWorkbench() {
       });
       if (admission.kind !== "accepted" && admission.kind !== "message_queued")
         throw new Error("消息未确认接收，请更新 Server 并核对状态");
+      setAdmissionNotice(
+        admission.duplicate
+          ? {
+              host: hostId,
+              session: target.id,
+              text: "已核对原请求，此消息此前已被接收，没有重复发送。",
+            }
+          : undefined,
+      );
       if (pendingSend.current?.id === id) pendingSend.current = undefined;
       if (
         selection.current.hostId !== hostId ||
         selection.current.projectId !== projectId
       )
         return true;
-      if (admission.kind === "accepted")
+      if (admission.kind === "accepted" && !admission.duplicate)
         setSessions((previous) =>
           previous.map((s) =>
             s.id === target.id
@@ -1325,6 +1339,11 @@ export function useWorkbench() {
   return {
     hosts,
     passwordPrompt,
+    admissionNotice:
+      admissionNotice?.host === hostId && admissionNotice.session === sessionId
+        ? admissionNotice.text
+        : undefined,
+    dismissAdmissionNotice: () => setAdmissionNotice(undefined),
     submitPassword,
     cancelPasswordPrompt,
     hostId,

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { useCallback, useMemo, useState, type ReactNode } from "react";
 import {
   Bot,
   Check,
@@ -13,15 +13,16 @@ import {
   Sparkles,
   Wrench,
 } from "lucide-react";
-import { request, message } from "./api";
-import type { Event, GitReview, Project, TaskSource } from "./protocol";
+import { request } from "./api";
+import type { Event, GitReview, Project } from "./protocol";
 import { WebLink } from "./LinkHandling";
 import { TaskFileRow } from "./TaskFileRow";
 import { SkillRow } from "./SkillRow";
-import { taskInfo } from "./taskInfoModel";
+import { createTaskInfoReader } from "./taskInfoModel";
 import { SubagentsPanel } from "./SubagentsPanel";
 import type { SubagentsState } from "./useSubagents";
 import { openSubagent, openWorkspaceResource } from "./workspaceState";
+import { usePollingSnapshot } from "./usePollingSnapshot";
 import { useStatusIssues } from "./statusNotices";
 
 function Section({
@@ -65,6 +66,7 @@ export function TaskInfo({
   connected,
   events,
   subagents,
+  running = false,
   historyLoading = false,
   hasEarlierHistory = false,
   earlierHistoryLoading = false,
@@ -78,6 +80,7 @@ export function TaskInfo({
   connected: boolean;
   events: Event[];
   subagents: SubagentsState;
+  running?: boolean;
   historyLoading?: boolean;
   hasEarlierHistory?: boolean;
   earlierHistoryLoading?: boolean;
@@ -85,19 +88,8 @@ export function TaskInfo({
 }) {
   const scope = JSON.stringify([hostId, project?.id, sessionId]);
   const [revision, refresh] = useState(0);
-  const [snapshot, setSnapshot] = useState<{
-    scope: string;
-    review?: GitReview;
-    sources?: TaskSource[];
-    truncated?: boolean;
-    changesError?: string;
-    sourcesError?: string;
-    loading: boolean;
-  }>({ scope, loading: true });
-  const data = useMemo(
-    () => taskInfo(events, sessionId, project?.path),
-    [events, sessionId, project?.path],
-  );
+  const readInfo = useMemo(() => createTaskInfoReader(), [scope]);
+  const data = readInfo(events, sessionId, project?.path, !running);
   const version = events
     .filter(
       (entry) =>
@@ -107,66 +99,56 @@ export function TaskInfo({
         ),
     )
     .at(-1)?.seq;
-  useEffect(() => {
-    if (!active || !connected || !project) return;
-    let disposed = false;
-    setSnapshot((old) => ({
-      ...(old.scope === scope ? old : { scope }),
-      loading: true,
-    }));
-    const timer = setTimeout(() => {
-      void Promise.allSettled([
-        request(hostId, {
-          method: "git_review",
-          project_id: project.id,
-          scope: "branch",
-          base: null,
-        }).then((response) => {
-          if (response.kind !== "git_review")
-            throw new Error("无法读取变更，请检查 Server 版本");
-          return response.review;
-        }),
-        sessionId
-          ? request(hostId, { method: "sources", session_id: sessionId }).then(
-              (response) => {
-                if (response.kind !== "sources")
-                  throw new Error("无法读取工具列表，请更新 Server");
-                return response;
-              },
-            )
-          : Promise.resolve(undefined),
-      ]).then(([changes, sources]) => {
-        if (disposed) return;
-        setSnapshot({
-          scope,
-          loading: false,
-          review: changes.status === "fulfilled" ? changes.value : undefined,
-          changesError:
-            changes.status === "rejected" ? message(changes.reason) : "",
-          sources:
-            sources.status === "fulfilled" ? sources.value?.entries : undefined,
-          truncated: sources.status === "fulfilled" && sources.value?.truncated,
-          sourcesError:
-            sources.status === "rejected" ? message(sources.reason) : "",
-        });
-      });
-    }, 100);
-    return () => {
-      disposed = true;
-      clearTimeout(timer);
-    };
-  }, [
-    active,
-    connected,
+  const readChanges = useCallback(async () => {
+    const response = await request(hostId, {
+      method: "git_review",
+      project_id: project!.id,
+      scope: "branch",
+      base: null,
+    });
+    if (response.kind !== "git_review")
+      throw new Error("无法读取变更，请检查 Server 版本");
+    return response.review;
+  }, [hostId, project?.id]);
+  const readSources = useCallback(async () => {
+    if (!sessionId) return undefined;
+    const response = await request(hostId, {
+      method: "sources",
+      session_id: sessionId,
+    });
+    if (response.kind !== "sources")
+      throw new Error("无法读取工具列表，请更新 Server");
+    return response;
+  }, [hostId, sessionId]);
+  const enabled = active && connected && !!project;
+  // Branch diffs are read on opening, explicit refresh and settlement. Tool
+  // activity during a turn never spawns a Git status/diff per streamed update.
+  const changes = usePollingSnapshot<GitReview | undefined>(
     scope,
-    hostId,
-    project?.id,
-    sessionId,
-    version,
-    revision,
-  ]);
-  const current: typeof snapshot =
-    snapshot.scope === scope ? snapshot : { scope, loading: true };
+    enabled,
+    readChanges,
+    undefined,
+    `${revision}:${running ? "running" : version}`,
+    0,
+    0,
+  );
+  const sources = usePollingSnapshot(
+    scope,
+    enabled,
+    readSources,
+    undefined,
+    `${revision}:${running ? "running" : version}`,
+    running ? 2000 : 0,
+    0,
+  );
+  const current = {
+    review: changes.data,
+    sources: sources.data?.entries,
+    truncated: sources.data?.truncated,
+    changesError: changes.error,
+    sourcesError: sources.error,
+    loading: changes.loading || sources.loading,
+  };
   useStatusIssues([
     {
       id: `task-info-changes:${scope}`,

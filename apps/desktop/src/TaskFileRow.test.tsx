@@ -33,6 +33,10 @@ it("resolves only an explicitly clicked external file and opens the shared file 
   });
   render(<TaskFileRow {...props} />);
   expect(mocks.request).not.toHaveBeenCalled();
+  expect(screen.getByText(/项目外/)).toBeTruthy();
+  expect(screen.getByRole("button", { name: /Report/ }).title).toContain(
+    "此文件的只读预览权限",
+  );
   fireEvent.click(screen.getByRole("button", { name: /Report/ }));
   await waitFor(() =>
     expect(readWorkspace(props.workspaceId).current).toBe("files"),

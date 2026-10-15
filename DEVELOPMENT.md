@@ -539,6 +539,13 @@ finish the parent turn. Trailing empty/duplicate success results while idle are
 ignored; result-only autonomous replies and actual failures remain visible.
 
 The Task Summary tab shows compact, read-only sections with uniform empty states.
+Its append-only event projection reuses parsed records; prepended history and
+replaced records reset it. Unfinished streamed text is parsed on settlement, not
+on each token, and Markdown fences are stripped in a linear line scan. TodoWrite
+replaces its own snapshot while retaining TaskCreate records. Branch reviews are
+read on opening, settlement and explicit refresh, independent of streamed tool
+activity; the lightweight source inventory refreshes at most once every two seconds
+while running, with one read in flight. Authentication prompts suspend these reads.
 The single hover/focus background on each workspace tab includes its close control.
 Project names and history-scope paragraphs are not repeated in the inspector;
 the footer offers explicit earlier-history reads, with scope in its tooltip.
@@ -556,7 +563,9 @@ an available Skill selects its canonical directory through `resolve_reference`,
 then opens `SKILL.md` directly in the shared Files tab, with the directory tree.
 Task files use the same Files tab. An external file click resolves exactly that file;
 its preview does not browse or grant access to its parent. Explicit directory
-selections retain their canonical preview scope, separate from project browsing. Hover never grants that directory access;
+selections retain their canonical preview scope, separate from project browsing.
+External paths are labelled before selection (including normalized parent segments),
+and file/Skill controls explain the retained file or directory preview scope. Hover never grants that directory access;
 preview still enforces canonical containment, including escaping nested symlinks.
 Local and SSH hosts share this additive request; older Servers must update for
 metadata. Failures do not fabricate descriptions or paths. Focused checks include
@@ -839,3 +848,14 @@ cancel the gesture. Option+Up/Down provides keyboard ordering. Only held primary
 mouse movement beyond the threshold starts a drag; accessibility clicks and
 ordinary hover must not become a drag or suppress project expansion. No Server
 mutation or Agent request is used to save this display order.
+
+Queue dispatch failures are checked after each activation, before considering the
+next item; auto-drain reads the current session status. A delayed immediate-send
+confirmation pauses the queue without classifying the native process as failed or
+killing it. Later interrupt acknowledgements cannot release the selected pending
+message without an explicit resume. A drag uses the latest visible queue order;
+removed source/target rows cancel the drop, and the Server still checks full CAS.
+Previously acknowledged requests produce an informational receipt on explicit
+reconciliation. Taken-for-edit and cancelled requests retain distinct explanations.
+The edit/clear queue protocol requests remain for existing clients and host tests;
+the desktop exposes take-to-edit and per-item deletion only.

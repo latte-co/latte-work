@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 import {
+  act,
   cleanup,
   fireEvent,
   screen,
@@ -212,4 +213,36 @@ it("keeps scope information out of the header and uses one empty-state phrase", 
       "暂无记录",
     ),
   ).toBeTruthy();
+});
+
+it("keeps Git reads independent of streamed events and refreshes tools at a bounded cadence", async () => {
+  vi.useFakeTimers();
+  try {
+    const view = render(<TaskInfo {...props} running />);
+    await act(async () => {});
+    const count = (method: string) =>
+      mocks.request.mock.calls.filter(([, r]) => r.method === method).length;
+    expect(count("git_review")).toBe(1);
+    const entries = [...props.events];
+    for (let i = 0; i < 40; i++) {
+      entries.push({
+        seq: i + 2,
+        at: i + 2,
+        session_id: "s",
+        event: { kind: "text", text: "fragment" },
+      });
+      view.rerender(<TaskInfo {...props} running events={[...entries]} />);
+    }
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(2100);
+    });
+    expect(count("git_review")).toBe(1);
+    expect(count("sources")).toBe(2);
+    view.rerender(<TaskInfo {...props} events={entries} />);
+    await act(async () => {});
+    expect(count("git_review")).toBe(2);
+  } finally {
+    cleanup();
+    vi.useRealTimers();
+  }
 });

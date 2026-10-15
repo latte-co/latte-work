@@ -4,6 +4,7 @@ import { request, message } from "./api";
 import type { Project } from "./protocol";
 import type { InfoFile } from "./taskInfoModel";
 import { openArtifact } from "./workspaceState";
+import { projectReference } from "./projectReference";
 import { useStatusIssues } from "./statusNotices";
 
 export function TaskFileRow({
@@ -86,18 +87,23 @@ export function TaskFileRow({
       action: { label: "重试", run: () => void open() },
     },
   ]);
+  const outside = project && projectReference(project.path, file.path).outside;
+  const scopeNote = file.directory ? "此目录及其文件" : "此文件";
   const Icon = file.directory ? Folder : FileText;
   return (
     <button
       className="task-info-file"
-      title={file.path}
+      title={`${file.path}\n${outside ? "项目外 · " : ""}点击打开并保留${scopeNote}的只读预览权限`}
       disabled={!connected || !project || busy}
       onClick={() => void open()}
     >
       <Icon size={16} />
       <span>
         {file.name}
-        <small>{file.path}</small>
+        <small>
+          {outside ? "项目外 · " : ""}
+          {file.path}
+        </small>
       </span>
     </button>
   );

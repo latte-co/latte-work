@@ -39,6 +39,20 @@ export function orderProjects(projects: HostedProject[], order: string[]) {
   return [...result, ...remaining.values()];
 }
 
+/** Shared insertion rule for drag previews, keyboard moves and saved ordering. */
+export function moveProjectKeys(
+  keys: string[],
+  source: string,
+  target: string,
+  after: boolean,
+) {
+  if (source === target || !keys.includes(source) || !keys.includes(target))
+    return keys;
+  const next = keys.filter((key) => key !== source);
+  next.splice(next.indexOf(target) + (after ? 1 : 0), 0, source);
+  return next.every((key, i) => key === keys[i]) ? keys : next;
+}
+
 /** Replace visible slots, retaining preferences for hosts not currently loaded. */
 export function moveProjectOrder(
   previous: string[],
@@ -48,11 +62,8 @@ export function moveProjectOrder(
   after: boolean,
 ): string[] {
   const keys = orderProjects(projects, previous).map(projectOrderKey);
-  if (source === target || !keys.includes(source) || !keys.includes(target))
-    return previous;
-  const next = keys.filter((key) => key !== source);
-  next.splice(next.indexOf(target) + (after ? 1 : 0), 0, source);
-  if (next.every((key, index) => key === keys[index])) return previous;
+  const next = moveProjectKeys(keys, source, target, after);
+  if (next === keys) return previous;
   const visible = new Set(keys);
   const result = previous.map((key) =>
     visible.has(key) ? next.shift()! : key,

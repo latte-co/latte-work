@@ -6,7 +6,7 @@ import {
   type PointerEvent,
 } from "react";
 import type { HostedProject } from "./projectCatalog";
-import { projectOrderKey } from "./projectOrder";
+import { projectOrderKey, moveProjectKeys } from "./projectOrder";
 
 type Target = {
   key: string;
@@ -65,11 +65,8 @@ export function useProjectReorder({
   function move(key: string, target: Target) {
     const projects = current.current.projects;
     const keys = projects.map(projectOrderKey);
-    if (!keys.includes(key) || !keys.includes(target.key) || key === target.key)
-      return;
-    const next = keys.filter((k) => k !== key);
-    next.splice(next.indexOf(target.key) + (target.after ? 1 : 0), 0, key);
-    if (next.every((k, i) => k === keys[i])) return;
+    const next = moveProjectKeys(keys, key, target.key, target.after);
+    if (next === keys) return;
     current.current.onMove(key, target.key, target.after);
     const name = projects.find((p) => projectOrderKey(p) === key)?.name;
     setAnnouncement(`${name} 已移至第 ${next.indexOf(key) + 1} 个位置`);
@@ -83,6 +80,7 @@ export function useProjectReorder({
       !current.current.enabled ||
       current.current.projects.length < 2 ||
       event.button !== 0 ||
+      (event.pointerType && event.pointerType !== "mouse") ||
       event.isPrimary === false
     )
       return;

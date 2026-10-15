@@ -3,6 +3,7 @@ import { HoverCard } from "./SidebarHoverCard";
 import { message, request } from "./api";
 import type { Project, SkillInfo } from "./protocol";
 import { openArtifact } from "./workspaceState";
+import { projectReference } from "./projectReference";
 import { useStatusIssues } from "./statusNotices";
 
 export function SkillRow({
@@ -147,7 +148,7 @@ export function SkillRow({
             <div className="skill-hover-path">
               {info.directory}
               <br />
-              点击查看 SKILL.md
+              点击查看 SKILL.md，并保留此 Skill 目录及其文件的只读预览权限
             </div>
           )}
         </>
@@ -156,13 +157,21 @@ export function SkillRow({
       <button
         className="task-info-row task-info-skill"
         aria-label={`查看 Skill ${name}`}
+        title="打开 SKILL.md，并允许预览此 Skill 目录及其文件"
         aria-disabled={!connected || busy || info === null}
         onMouseEnter={() => inspect()}
         onFocus={() => inspect()}
         onClick={() => void open()}
       >
         <span>{name}</span>
-        <small>{uses} 次</small>
+        <small>
+          {info &&
+          project &&
+          projectReference(project.path, info.directory).outside
+            ? "项目外目录 · "
+            : ""}
+          {uses} 次
+        </small>
       </button>
     </HoverCard>
   );

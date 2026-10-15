@@ -221,3 +221,21 @@ it("ignores unpressed mouse motion during an accessibility click instead of star
   expect(document.querySelector(".project-drag-preview")).toBeNull();
   expect(move).not.toHaveBeenCalled();
 });
+
+it("leaves touch gestures available for scrolling instead of starting a project drag", () => {
+  render(<Harness />);
+  bounds();
+  const row = screen.getByRole("button", { name: "Gamma" });
+  const event = new MouseEvent("pointerdown", {
+    bubbles: true,
+    button: 0,
+    clientX: 80,
+    clientY: 200,
+  });
+  Object.defineProperty(event, "pointerType", { value: "touch" });
+  fireEvent(row, event);
+  fireEvent.pointerMove(window, { buttons: 1, clientX: 80, clientY: 105 });
+  fireEvent.pointerUp(window, { clientX: 80, clientY: 105 });
+  expect(move).not.toHaveBeenCalled();
+  expect(screen.queryByTestId("project-drag-preview")).toBeNull();
+});

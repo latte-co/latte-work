@@ -70,7 +70,6 @@ export function MessageQueue({
   const drag = useRef<
     | {
         id: string;
-        expected: string[];
         x: number;
         y: number;
         moved: boolean;
@@ -202,6 +201,10 @@ export function MessageQueue({
     after: boolean,
     keyboard = false,
   ) {
+    if (!expected.includes(id) || !expected.includes(target)) {
+      setAnnouncement("队列已更新，已取消本次拖动");
+      return;
+    }
     const order = expected.filter((key) => key !== id);
     const index = order.indexOf(target);
     if (index < 0 || id === target) return;
@@ -284,7 +287,6 @@ export function MessageQueue({
                       event.currentTarget.setPointerCapture?.(event.pointerId);
                       drag.current = {
                         id: entry.request_id,
-                        expected: entries.map((item) => item.request_id),
                         x: event.clientX,
                         y: event.clientY,
                         moved: false,
@@ -340,7 +342,7 @@ export function MessageQueue({
                       const moving = drag.current;
                       if (canReorder && moving?.moved && moving.target)
                         reorder(
-                          moving.expected,
+                          entries.map((item) => item.request_id),
                           moving.id,
                           moving.target.id,
                           moving.target.after,
@@ -488,6 +490,9 @@ function QueueMessageMenu({
     };
     const key = (event: KeyboardEvent) => {
       if (event.key === "Tab") {
+        // Put focus on the persistent trigger before the portal is removed;
+        // normal Tab/Shift+Tab then continues from the row instead of body.
+        trigger.current?.focus();
         setPoint(undefined);
         return;
       }

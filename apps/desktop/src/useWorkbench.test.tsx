@@ -471,7 +471,7 @@ it("retains history and an ambiguous send request ID without automatically repla
       );
       throw failure;
     }
-    return { kind: "accepted", duplicate: false };
+    return { kind: "message_queued", duplicate: true };
   });
   const hook = renderHook(useWorkbench);
   await act(async () => {});
@@ -501,6 +501,9 @@ it("retains history and an ambiguous send request ID without automatically repla
   });
   expect(sends()).toHaveLength(2);
   expect(sends()[1][1].request_id).toBe(sends()[0][1].request_id);
+  expect(hook.result.current.admissionNotice).toContain("此前已被接收");
+  act(() => hook.result.current.dismissAdmissionNotice());
+  expect(hook.result.current.admissionNotice).toBeUndefined();
 });
 
 it("opens selected Agent sessions and closes explicitly without reopening on refresh", async () => {
@@ -1199,4 +1202,26 @@ it("retains project ordering after host refresh and a new workbench mount", asyn
     "second",
     "p",
   ]);
+});
+
+it("keeps the known lifecycle when reconciling a previously accepted request", async () => {
+  const base = mocks.request.getMockImplementation()!;
+  mocks.request.mockImplementation(async (host, r) =>
+    r.method === "send_queued"
+      ? { kind: "accepted", duplicate: true }
+      : base(host, r),
+  );
+  const hook = renderHook(useWorkbench);
+  await act(async () => {});
+  await act(async () =>
+    hook.result.current.openSession({ ...session(), hostId: "local" }),
+  );
+  const before = hook.result.current.session?.status;
+  await act(async () => {
+    expect(await hook.result.current.send("reconcile", null, null, null)).toBe(
+      true,
+    );
+  });
+  expect(hook.result.current.session?.status).toBe(before);
+  expect(hook.result.current.admissionNotice).toContain("没有重复发送");
 });

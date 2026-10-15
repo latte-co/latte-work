@@ -1,6 +1,6 @@
 import { expect, it } from "vitest";
 import type { Event, EventKind } from "./protocol";
-import { artifactPath, taskInfo } from "./taskInfoModel";
+import { artifactPath, taskInfo, createTaskInfoReader } from "./taskInfoModel";
 const events = (...items: EventKind[]): Event[] =>
   items.map((event, i) => ({ seq: i + 1, session_id: "s", at: i, event }));
 it("uses successful todo results, replaces snapshots, and ignores rejected or duplicated calls", () => {
@@ -202,5 +202,118 @@ it("groups generated files as products and inputs, read files and web links as r
     "https://example.com/",
     "source.ts",
     "https://example.com/docs",
+  ]);
+});
+
+it("keeps TaskCreate records when TodoWrite replaces only its own snapshot", () => {
+  const history = events(
+    {
+      kind: "tool",
+      id: "task",
+      name: "TaskCreate",
+      input: { subject: "Native task" },
+    },
+    {
+      kind: "tool_result",
+      id: "task",
+      content: { taskId: "7" },
+      is_error: false,
+    },
+    {
+      kind: "tool",
+      id: "todos-a",
+      name: "TodoWrite",
+      input: { todos: [{ content: "Old todo", status: "pending" }] },
+    },
+    { kind: "tool_result", id: "todos-a", content: "ok", is_error: false },
+    {
+      kind: "tool",
+      id: "todos-b",
+      name: "TodoWrite",
+      input: { todos: [{ content: "Current todo", status: "completed" }] },
+    },
+    { kind: "tool_result", id: "todos-b", content: "ok", is_error: false },
+  );
+  expect(taskInfo(history, "s").todos).toEqual([
+    { id: "7", title: "Native task", status: "pending" },
+    { id: "todo:0", title: "Current todo", status: "completed" },
+  ]);
+});
+
+it("parses each new stream fragment once and rebuilds after history or record replacement", () => {
+  const read = createTaskInfoReader();
+  const history: Event[] = [];
+  let reads = 0;
+  for (let i = 0; i < 200; i++) {
+    history.push({
+      seq: i + 1,
+      at: i,
+      session_id: "s",
+      event: {
+        kind: "text",
+        get text() {
+          reads++;
+          return `[Doc](https://example.com/${i})\n`;
+        },
+      },
+    });
+    expect(read(history, "s", undefined, false).links).toEqual([]);
+  }
+  expect(reads).toBe(200);
+  history.push({
+    seq: 201,
+    at: 201,
+    session_id: "s",
+    event: { kind: "state", status: "completed", message: null },
+  });
+  expect(read(history, "s").links).toHaveLength(128);
+  expect(reads).toBe(200);
+  const older = {
+    seq: 0,
+    at: 0,
+    session_id: "s",
+    event: {
+      kind: "user" as const,
+      request_id: "older",
+      text: "[Earlier](/tmp/earlier.md)",
+    },
+  };
+  expect(read([older, ...history], "s").resources[0]).toMatchObject({
+    path: "/tmp/earlier.md",
+  });
+  const replacement = events({ kind: "text", text: "[New](/tmp/new.md)" });
+  expect(read(replacement, "s").files).toEqual([
+    { path: "/tmp/new.md", name: "New", directory: false },
+  ]);
+  expect(read(replacement, "other").files).toEqual([]);
+});
+
+it("does not keep a temporary partial URL after a later stream fragment extends it", () => {
+  const read = createTaskInfoReader();
+  const history = events({ kind: "text", text: "https://example.com/part" });
+  expect(read(history, "s").links[0].url).toBe("https://example.com/part");
+  history.push({
+    seq: 2,
+    at: 2,
+    session_id: "s",
+    event: { kind: "text", text: "-two" },
+  });
+  expect(read(history, "s").links).toEqual([
+    {
+      url: "https://example.com/part-two",
+      title: "https://example.com/part-two",
+    },
+  ]);
+});
+
+it("treats unclosed and repeated fence markers as code instead of rescanning the remaining message", () => {
+  const body =
+    "[Visible](https://example.com/visible)\n~~~\n" +
+    Array.from(
+      { length: 2000 },
+      (_, i) => `\`\`\`lang-${i}\nhttps://example.com/code-${i}`,
+    ).join("\n");
+  expect(taskInfo(events({ kind: "text", text: body }), "s").links).toEqual([
+    { url: "https://example.com/visible", title: "Visible" },
   ]);
 });

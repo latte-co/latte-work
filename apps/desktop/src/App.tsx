@@ -167,6 +167,14 @@ export default function App() {
         ? { label: "重试", run: subagents.reload }
         : undefined,
     });
+  if (workbench.admissionNotice)
+    statusNotices.push({
+      id: `admission:${hostId}:${session?.id}`,
+      level: "info",
+      title: "消息此前已接收",
+      detail: workbench.admissionNotice,
+      action: { label: "知道了", run: workbench.dismissAdmissionNotice },
+    });
   useStatusNotices(statusNotices);
   const sidebarVisible = sidebarOpen || sidebarPreview.visible;
   const statusCenter =
@@ -407,7 +415,11 @@ export default function App() {
                   workbench.workspace.expanded &&
                   workbench.workspace.conversationActive
                 ) &&
-                workbench.modal !== "settings"
+                workbench.modal !== "settings" &&
+                !workbench.passwordPrompt
+              }
+              running={
+                session?.status === "running" || session?.status === "waiting"
               }
               hostId={hostId}
               project={project}

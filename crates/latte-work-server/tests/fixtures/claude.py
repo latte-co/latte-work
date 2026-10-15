@@ -45,6 +45,9 @@ for line in sys.stdin:
                 emit({'type':'control_response','response':{'subtype':'success','request_id':value['request_id']}})
             continue
         if value['request']['subtype']=='interrupt':
+            result_first=os.environ.get('LATTE_FIXTURE_INTERRUPT_RESULT_FIRST')=='1'
+            if result_first: emit({'type':'result','subtype':'success','is_error':False})
+            time.sleep(min(15,float(os.environ.get('LATTE_FIXTURE_INTERRUPT_DELAY','0'))))
             with native_lock:
                 native_generation+=1
                 native_head=False
@@ -54,7 +57,7 @@ for line in sys.stdin:
             if child is not None:
                 child.terminate();child.wait();child=None
             # Result and control acknowledgement may arrive in either order.
-            emit({'type':'result','subtype':'success','is_error':False})
+            if not result_first: emit({'type':'result','subtype':'success','is_error':False})
             emit({'type':'control_response','response':{'subtype':'success','request_id':value['request_id']}})
             continue
         if '--no-session-persistence' not in sys.argv:

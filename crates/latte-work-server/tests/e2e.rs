@@ -5913,7 +5913,7 @@ async fn message_queue_take_restores_exact_content_and_resends_at_tail_with_new_
     }
     assert!(matches!(
         queue_send(&mut c, &id, "take-a", "original input with refs").await,
-        Response::Error { .. }
+        Response::Error { message, .. } if message.contains("已取出编辑")
     ));
     assert!(matches!(
         queue_send(&mut c, &id, "take-edited", "edited input with refs").await,
@@ -5997,6 +5997,90 @@ async fn dispatch_queue(c: &mut Client, id: &str, request_id: &str, interrupt: b
     )
     .await
 }
+#[tokio::test]
+async fn message_queue_forwarded_activation_failure_pauses_before_the_next_message() {
+    let host = Host::start().await;
+    let root = tempfile::tempdir().unwrap();
+    let mut c = host.client().await;
+    let id = session(&mut c, root.path()).await;
+    queue_send(&mut c, &id, "head", "native-queue-head").await;
+    native_queue_ready(&mut c, &id).await;
+    queue_send(&mut c, &id, "fail-forwarded", "native-message-first").await;
+    queue_send(&mut c, &id, "held-next", "native-message-next").await;
+    queue_send(&mut c, &id, "uncertain-tail", "native-message-tail").await;
+    dispatch_queue(&mut c, &id, "fail-forwarded", false).await;
+    dispatch_queue(&mut c, &id, "uncertain-tail", false).await;
+    // Reproduce a real admission-success / baseline-persistence-failure split,
+    // without a production failpoint or a disk-wide failure affecting other tests.
+    let db = rusqlite::Connection::open(host.directory.path().join("state.sqlite")).unwrap();
+    db.execute_batch("CREATE TRIGGER fail_forwarded_baseline BEFORE INSERT ON turn_changes WHEN NEW.request_id='fail-forwarded' BEGIN SELECT RAISE(ABORT, 'baseline fixture failure'); END;").unwrap();
+    std::fs::write(root.path().join("native-release"), "go").unwrap();
+    let events = wait(&mut c, &id, Status::Failed).await;
+    assert!(
+        matches!(ask(&mut c, Request::MessageQueue { session_id: id.clone() }).await,
+        Response::MessageQueue { entries, paused: true, .. } if entries.len()==1 && entries[0].request_id=="held-next")
+    );
+    assert!(!events.iter().any(
+        |e| matches!(&e.event, EventKind::User { request_id, .. } if request_id=="held-next")
+    ));
+    assert!(
+        events.iter().any(
+            |e| matches!(&e.event, EventKind::Notice { text } if text.contains("不会自动重发"))
+        )
+    );
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    assert_eq!(
+        db.query_row(
+            "SELECT COUNT(*) FROM requests WHERE id='held-next'",
+            [],
+            |r| r.get::<_, u32>(0)
+        )
+        .unwrap(),
+        0
+    );
+    assert_eq!(
+        std::fs::read_to_string(root.path().join("native-inputs")).unwrap(),
+        "native-message-first\nnative-message-tail\n"
+    );
+}
+#[tokio::test]
+async fn message_queue_confirmation_timeout_preserves_the_native_process_and_pending_message() {
+    let host = Host::start_with_environment(&[
+        ("LATTE_FIXTURE_INTERRUPT_DELAY", std::ffi::OsStr::new("9")),
+        (
+            "LATTE_FIXTURE_INTERRUPT_RESULT_FIRST",
+            std::ffi::OsStr::new("1"),
+        ),
+    ])
+    .await;
+    let root = tempfile::tempdir().unwrap();
+    let mut c = host.client().await;
+    let id = session(&mut c, root.path()).await;
+    queue_send(&mut c, &id, "head", "native-queue-head").await;
+    native_queue_ready(&mut c, &id).await;
+    queue_send(&mut c, &id, "held", "native-message-held").await;
+    assert!(
+        matches!(dispatch_queue(&mut c, &id, "held", true).await, Response::Error { message, .. } if message.contains("超时"))
+    );
+    let pid: i32 = std::fs::read_to_string(root.path().join("fixture-agent-pid"))
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert!(
+        kill(Pid::from_raw(pid), None).is_ok(),
+        "confirmation timeout killed the native process"
+    );
+    assert!(
+        matches!(ask(&mut c, Request::Poll { session_id:id.clone(),after:0.0 }).await,
+        Response::Events {session,events,..} if session.status!=Status::Failed && !events.iter().any(|e|matches!(&e.event,EventKind::User { request_id,.. } if request_id=="held")))
+    );
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    assert!(
+        matches!(ask(&mut c, Request::MessageQueue { session_id:id }).await,
+        Response::MessageQueue {entries,paused:true,..} if entries.len()==1 && entries[0].request_id=="held")
+    );
+}
+
 #[tokio::test]
 async fn message_queue_default_send_hands_off_now_without_interrupt_and_never_writes_twice() {
     let host = Host::start().await;

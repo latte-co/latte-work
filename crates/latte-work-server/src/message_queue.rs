@@ -80,7 +80,10 @@ impl Store {
         {
             bail!("排队请求 ID 已被其他内容或配置使用，请核对原消息");
         }
-        if status == "cancelled" || status == "taken" {
+        if status == "taken" {
+            bail!("此排队消息已取出编辑，不会重新入队");
+        }
+        if status == "cancelled" {
             bail!("此排队消息已取消，不会重新入队");
         }
         Ok(Some(
