@@ -525,6 +525,21 @@ impl AgentAdapter for Claude {
                 Ok(vec![write_action(self.initialize())?])
             }
 
+            Input::Queue { prompt } => {
+                if !matches!(self.phase, Phase::Running) {
+                    bail!("Agent 当前不能接收运行中消息");
+                }
+                self.check_command(prompt)?;
+                Ok(vec![write_action(self.prompt(prompt))?])
+            }
+            Input::ActivateQueued => {
+                if !matches!(self.phase, Phase::BetweenTurns) {
+                    bail!("Agent 上一轮尚未确认完成");
+                }
+                self.reset_turn();
+                self.phase = Phase::Running;
+                Ok(vec![])
+            }
             Input::Start { prompt } => {
                 if matches!(self.phase, Phase::BetweenTurns) {
                     self.check_command(prompt)?;

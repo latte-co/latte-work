@@ -340,7 +340,24 @@ impl std::fmt::Debug for ProviderDraft {
             .finish_non_exhaustive()
     }
 }
+/// Current installed skill metadata, read on the execution host without invoking it.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+pub struct SkillInfo {
+    pub name: String,
+    pub description: String,
+    pub directory: String,
+}
 /// A command reported by the selected native Agent in the project context.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+pub struct QueuedMessage {
+    pub request_id: String,
+    pub text: String,
+    pub model: Option<String>,
+    pub effort: Option<Effort>,
+    pub permission_mode: Option<String>,
+    pub revision: u32,
+    pub created_at: f64,
+}
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 pub struct AgentSlashCommand {
     pub name: String,
@@ -503,6 +520,60 @@ pub enum Request {
         #[ts(optional)]
         only_if_idle: Option<bool>,
     },
+    SendQueued {
+        #[serde(default)]
+        #[ts(optional)]
+        provider: Option<TurnProvider>,
+        session_id: String,
+        request_id: String,
+        text: String,
+        #[serde(default)]
+        model: Option<String>,
+        #[serde(default)]
+        effort: Option<Effort>,
+        #[serde(default)]
+        permission_mode: Option<String>,
+    },
+    MessageQueue {
+        session_id: String,
+    },
+    /// Compare the complete pending order before replacing it atomically.
+    ReorderMessageQueue {
+        session_id: String,
+        expected: Vec<String>,
+        order: Vec<String>,
+    },
+    TakeQueuedMessage {
+        session_id: String,
+        request_id: String,
+        revision: u32,
+    },
+    DispatchQueuedMessage {
+        #[serde(default)]
+        interrupt: bool,
+        session_id: String,
+        request_id: String,
+        revision: u32,
+        provider: Option<TurnProvider>,
+    },
+    EditQueuedMessage {
+        session_id: String,
+        request_id: String,
+        revision: u32,
+        text: String,
+    },
+    CancelQueuedMessage {
+        session_id: String,
+        request_id: String,
+        revision: u32,
+    },
+    ClearMessageQueue {
+        session_id: String,
+    },
+    ResumeMessageQueue {
+        session_id: String,
+        provider: Option<TurnProvider>,
+    },
     Send {
         #[serde(default)]
         #[ts(optional)]
@@ -634,6 +705,10 @@ pub enum Request {
     TaskChangeDiff {
         session_id: String,
         path: String,
+    },
+    SkillInfo {
+        session_id: String,
+        name: String,
     },
     Sources {
         session_id: String,
@@ -801,6 +876,9 @@ pub enum Response {
     ChangeSummary {
         summary: ChangeSummary,
     },
+    SkillInfo {
+        skill: Option<SkillInfo>,
+    },
     Sources {
         entries: Vec<TaskSource>,
         truncated: bool,
@@ -827,6 +905,9 @@ pub enum Response {
         truncated: bool,
     },
     SubagentHistory {
+        #[serde(default)]
+        #[ts(optional)]
+        prompt: Option<String>,
         events: Vec<Event>,
         has_more: bool,
         after: Option<f64>,
@@ -907,6 +988,17 @@ pub enum Response {
     },
     Session {
         session: Session,
+    },
+    QueuedMessageTaken {
+        entry: QueuedMessage,
+    },
+    MessageQueued {
+        duplicate: bool,
+    },
+    MessageQueue {
+        entries: Vec<QueuedMessage>,
+        paused: bool,
+        reason: Option<String>,
     },
     Accepted {
         duplicate: bool,

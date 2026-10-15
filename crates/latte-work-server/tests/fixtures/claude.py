@@ -25,6 +25,11 @@ def metadata(value):
 turns=0
 child=None
 background=None
+native_lock=threading.Lock()
+native_pending=[]
+native_head=False
+native_generation=0
+native_mode=False
 resumed=any(arg.startswith('--resume=') for arg in sys.argv)
 for line in sys.stdin:
     value=json.loads(line)
@@ -40,6 +45,12 @@ for line in sys.stdin:
                 emit({'type':'control_response','response':{'subtype':'success','request_id':value['request_id']}})
             continue
         if value['request']['subtype']=='interrupt':
+            with native_lock:
+                native_generation+=1
+                native_head=False
+                native_pending.clear()
+            if native_mode:
+                with pathlib.Path('native-interrupts').open('a') as record: record.write('interrupt\n')
             if child is not None:
                 child.terminate();child.wait();child=None
             # Result and control acknowledgement may arrive in either order.
@@ -93,6 +104,48 @@ for line in sys.stdin:
             continue
         if text=='malformed': print('this is not json',flush=True);sys.exit(0)
         if text=='exit': sys.exit(2)
+        if text=='native-queue-head':
+            native_mode=True
+            with native_lock:
+                native_head=True
+                native_generation+=1
+                generation=native_generation
+            def finish_native_head(generation=generation):
+                global native_head
+                deadline=time.monotonic()+min(600,float(os.environ.get('LATTE_FIXTURE_QUEUE_TIMEOUT','20')))
+                while not pathlib.Path('native-release').exists() and time.monotonic()<deadline: time.sleep(.02)
+                with native_lock:
+                    if native_generation!=generation: return
+                    emit({'type':'assistant','message':{'content':[{'type':'text','text':'NATIVE_HEAD_COMPLETE'}]}})
+                    emit({'type':'result','subtype':'success','is_error':False})
+                    for queued in native_pending:
+                        emit({'type':'assistant','message':{'content':[{'type':'text','text':'NATIVE_PROCESSED:'+queued}]}})
+                        emit({'type':'result','subtype':'success','is_error':False})
+                    native_pending.clear()
+                    native_head=False
+            threading.Thread(target=finish_native_head,daemon=True).start()
+            emit({'type':'assistant','message':{'content':[{'type':'text','text':'NATIVE_HEAD_WAITING'}]}})
+            continue
+        if text.startswith('native-message-'):
+            native_mode=True
+            with pathlib.Path('native-inputs').open('a') as record: record.write(text+'\n')
+            with native_lock:
+                if native_head:
+                    native_pending.append(text)
+                    continue
+            emit({'type':'assistant','message':{'content':[{'type':'text','text':'NATIVE_PROCESSED:'+text}]}})
+            emit({'type':'result','subtype':'success','is_error':False})
+            continue
+        if text=='queue-slow':
+            def finish_queue_head():
+                deadline=time.monotonic()+min(600,float(os.environ.get('LATTE_FIXTURE_QUEUE_TIMEOUT','20')))
+                while not pathlib.Path('queue-release').exists() and time.monotonic()<deadline:
+                    time.sleep(.02)
+                emit({'type':'assistant','message':{'content':[{'type':'text','text':'QUEUE_HEAD_COMPLETE'}]}})
+                emit({'type':'result','subtype':'success','is_error':False})
+            threading.Thread(target=finish_queue_head,daemon=True).start()
+            emit({'type':'assistant','message':{'content':[{'type':'text','text':'QUEUE_HEAD_WAITING'}]}})
+            continue
         if text=='hang':
             child=subprocess.Popen(['sleep','120'])
             emit({'type':'assistant','message':{'content':[{'type':'text','text':f'child:{child.pid}'}]}})
@@ -127,7 +180,7 @@ for line in sys.stdin:
                         for i in range(700):
                             f.write(json.dumps(child_record('assistant',[{'type':'tool_use','id':f'long-read-{i}','name':'Read','input':{'step':i,'text':'process evidence '+('x'*1024)}}]))+'\n')
 
-            emit({'type':'assistant','message':{'content':[{'type':'tool_use','id':'process-agent','name':'Agent','input':{'description':'Inspect with process'}}]}})
+            emit({'type':'assistant','message':{'content':[{'type':'tool_use','id':'process-agent','name':'Agent','input':{'description':'Inspect with process','prompt':'Inspect the exact project changes with evidence.'}}]}})
             emit({'type':'system','subtype':'task_started','task_id':'process-native','task_type':'local_agent','tool_use_id':'process-agent','description':'Inspect with process'})
             for part in ['child ', 'progress']:
                 emit({'type':'stream_event','parent_tool_use_id':'process-agent','event':{'type':'content_block_delta','delta':{'type':'text_delta','text':part}}})

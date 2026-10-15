@@ -150,7 +150,8 @@ it("creates a new conversation on the first startup submission instead of sendin
   mocks.request.mockImplementation(async (host: string, r: Request) => {
     if (r.method === "create_session")
       return { kind: "session", session: created };
-    if (r.method === "send") return { kind: "ok" };
+    if (r.method === "send_queued")
+      return { kind: "accepted", duplicate: false };
     if (r.method === "poll" && r.session_id === created.id)
       return {
         kind: "events",
@@ -170,7 +171,9 @@ it("creates a new conversation on the first startup submission instead of sendin
   expect(
     mocks.request.mock.calls.filter(([, r]) => r.method === "create_session"),
   ).toHaveLength(1);
-  const sends = mocks.request.mock.calls.filter(([, r]) => r.method === "send");
+  const sends = mocks.request.mock.calls.filter(
+    ([, r]) => r.method === "send_queued",
+  );
   expect(sends).toHaveLength(1);
   expect(sends[0][1]).toMatchObject({
     session_id: created.id,
@@ -231,9 +234,9 @@ it("waits for the handshake before reading cached pinned history and reporting c
   expect(
     mocks.request.mock.calls.some(([, r]) => r.method === "pinned_sessions"),
   ).toBe(true);
-  expect(mocks.request.mock.calls.some(([, r]) => r.method === "send")).toBe(
-    false,
-  );
+  expect(
+    mocks.request.mock.calls.some(([, r]) => r.method === "send_queued"),
+  ).toBe(false);
 });
 it("adding a host initializes it once and preserves other hosts' live connections", async () => {
   const hook = renderHook(useWorkbench);
@@ -377,7 +380,7 @@ it("marks a new unsaved task disconnected after metadata transport failure and r
   expect(hook.result.current.connected).toBe(true);
   expect(hook.result.current.sessionId).toBe("");
   expect(
-    mocks.request.mock.calls.filter(([, r]) => r.method === "send"),
+    mocks.request.mock.calls.filter(([, r]) => r.method === "send_queued"),
   ).toHaveLength(0);
 });
 it("a background host's failure does not disconnect the selected host", async () => {
@@ -421,9 +424,9 @@ it("automatically recovers a background host without reconnecting the selected h
   expect(
     mocks.connect.mock.calls.filter(([h]) => h.id === "local"),
   ).toHaveLength(1);
-  expect(mocks.request.mock.calls.some(([, r]) => r.method === "send")).toBe(
-    false,
-  );
+  expect(
+    mocks.request.mock.calls.some(([, r]) => r.method === "send_queued"),
+  ).toBe(false);
 });
 it("does not reuse a failed replacement and restores the connection indicator without replaying a prompt", async () => {
   const hook = renderHook(useWorkbench);
@@ -440,9 +443,9 @@ it("does not reuse a failed replacement and restores the connection indicator wi
   expect(hook.result.current.connected).toBe(true);
   expect(hook.result.current.hostConnectionVersions.local).toBe(2);
   expect(mocks.connect).toHaveBeenCalledTimes(3);
-  expect(mocks.request.mock.calls.some(([, r]) => r.method === "send")).toBe(
-    false,
-  );
+  expect(
+    mocks.request.mock.calls.some(([, r]) => r.method === "send_queued"),
+  ).toBe(false);
 });
 it("retains history and an ambiguous send request ID without automatically replaying the message", async () => {
   const base = mocks.request.getMockImplementation()!;
@@ -460,7 +463,7 @@ it("retains history and an ambiguous send request ID without automatically repla
           },
         ],
       };
-    if (r.method !== "send") return base(host, r);
+    if (r.method !== "send_queued") return base(host, r);
     if (failSend) {
       const failure = new HostConnectionError(host, "发送响应丢失");
       window.dispatchEvent(
@@ -468,7 +471,7 @@ it("retains history and an ambiguous send request ID without automatically repla
       );
       throw failure;
     }
-    return { kind: "ok" };
+    return { kind: "accepted", duplicate: false };
   });
   const hook = renderHook(useWorkbench);
   await act(async () => {});
@@ -488,7 +491,7 @@ it("retains history and an ambiguous send request ID without automatically repla
     await vi.advanceTimersByTimeAsync(5000);
   });
   const sends = () =>
-    mocks.request.mock.calls.filter(([, r]) => r.method === "send");
+    mocks.request.mock.calls.filter(([, r]) => r.method === "send_queued");
   expect(sends()).toHaveLength(1);
   failSend = false;
   await act(async () => {
@@ -614,9 +617,9 @@ it("distinguishes first open, recovery, and switching to a live session", async 
       ([, r]) => r.method === "open_agent_session" && r.session_id === "s",
     ),
   ).toHaveLength(2);
-  expect(mocks.request.mock.calls.some(([, r]) => r.method === "send")).toBe(
-    false,
-  );
+  expect(
+    mocks.request.mock.calls.some(([, r]) => r.method === "send_queued"),
+  ).toBe(false);
 });
 
 it.each(["local", "remote"])(
@@ -721,9 +724,9 @@ it.each(["local", "remote"])(
     );
     await act(async () => result.current.setRetry((value) => value + 1));
     expect(mocks.connect.mock.calls.length).toBeGreaterThan(connections);
-    expect(mocks.request.mock.calls.some(([, r]) => r.method === "send")).toBe(
-      false,
-    );
+    expect(
+      mocks.request.mock.calls.some(([, r]) => r.method === "send_queued"),
+    ).toBe(false);
   },
 );
 
@@ -1159,3 +1162,41 @@ it.each(["/model", "/effort high"])(
     expect(mocks.request).not.toHaveBeenCalled();
   },
 );
+
+it("retains project ordering after host refresh and a new workbench mount", async () => {
+  const projects = [
+    { id: "p", name: "P", path: "/p" },
+    { id: "second", name: "Second", path: "/second" },
+  ];
+  const original = mocks.request.getMockImplementation()!;
+  mocks.request.mockImplementation((host, r) =>
+    r.method === "projects"
+      ? Promise.resolve({ kind: "projects", projects })
+      : original(host, r),
+  );
+  const first = renderHook(useWorkbench);
+  await act(async () => {});
+  const ids = () => first.result.current.projects.map((p) => p.id);
+  expect(ids()).toEqual(["p", "second"]);
+  const selectedProject = first.result.current.projectId;
+  act(() =>
+    first.result.current.moveProject(
+      JSON.stringify(["local", "second"]),
+      JSON.stringify(["local", "p"]),
+      false,
+    ),
+  );
+  expect(ids()).toEqual(["second", "p"]);
+  expect(first.result.current.projectId).toBe(selectedProject);
+  await act(async () =>
+    first.result.current.refreshHost(first.result.current.host),
+  );
+  expect(ids()).toEqual(["second", "p"]);
+  first.unmount();
+  const next = renderHook(useWorkbench);
+  await act(async () => {});
+  expect(next.result.current.projects.map((p) => p.id)).toEqual([
+    "second",
+    "p",
+  ]);
+});

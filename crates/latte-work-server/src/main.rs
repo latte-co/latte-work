@@ -4,6 +4,7 @@ mod agents;
 mod attachments;
 mod files;
 mod git_review;
+mod message_queue;
 mod providers;
 mod questions;
 mod runtime;
@@ -293,6 +294,27 @@ async fn connection(stream: UnixStream, service: Service) -> Result<()> {
     Ok(())
 }
 async fn dispatch(s: &Service, request: Request) -> Result<Response> {
+    let allow_queue = matches!(&request, Request::SendQueued { .. });
+    let request = match request {
+        Request::SendQueued {
+            provider,
+            session_id,
+            request_id,
+            text,
+            model,
+            effort,
+            permission_mode,
+        } => Request::Send {
+            provider,
+            session_id,
+            request_id,
+            text,
+            model,
+            effort,
+            permission_mode,
+        },
+        other => other,
+    };
     // Undo holds exclusive admission until file restoration and its durable result.
     // Ordinary turns retain concurrent admission; no request is replayed.
     let undo = matches!(&request, Request::UndoTurnChanges { .. });
@@ -309,6 +331,8 @@ async fn dispatch(s: &Service, request: Request) -> Result<Response> {
             | Request::WriteTerminal { .. }
             | Request::Approve { .. }
             | Request::AnswerQuestion { .. }
+            | Request::ResumeMessageQueue { .. }
+            | Request::DispatchQueuedMessage { .. }
     ) {
         Some(s.file_admission.read().await)
     } else {
@@ -648,6 +672,7 @@ async fn dispatch(s: &Service, request: Request) -> Result<Response> {
             .await?;
             Response::Ok
         }
+        Request::SendQueued { .. } => unreachable!(),
         Request::Send {
             provider,
             session_id,
@@ -657,18 +682,23 @@ async fn dispatch(s: &Service, request: Request) -> Result<Response> {
             effort,
             permission_mode,
         } => {
+            if allow_queue && provider.is_none() {
+                bail!("消息排队需要明确的执行配置，请更新客户端");
+            }
             let fingerprint = providers::turn_fingerprint(provider.as_ref())?;
-            if db(&s.database, |d| {
-                d.already_accepted(
-                    &session_id,
-                    &request_id,
-                    &text,
-                    model.as_deref(),
-                    effort,
-                    fingerprint.as_deref(),
-                    permission_mode.as_deref(),
-                )
-            })? {
+            if !allow_queue
+                && db(&s.database, |d| {
+                    d.already_accepted(
+                        &session_id,
+                        &request_id,
+                        &text,
+                        model.as_deref(),
+                        effort,
+                        fingerprint.as_deref(),
+                        permission_mode.as_deref(),
+                    )
+                })?
+            {
                 return Ok(Response::Accepted { duplicate: true });
             }
             if !s.agent.available {
@@ -717,7 +747,7 @@ async fn dispatch(s: &Service, request: Request) -> Result<Response> {
                 let path = d.project(&session.project_id)?.path;
                 Ok((session, path))
             })?;
-            let new = runtime::submit(
+            runtime::submit(
                 s.database.clone(),
                 s.runs.clone(),
                 s.agent_binary.clone(),
@@ -730,9 +760,140 @@ async fn dispatch(s: &Service, request: Request) -> Result<Response> {
                     fingerprint,
                     config: launch_config,
                 },
+                allow_queue,
             )
-            .await?;
-            Response::Accepted { duplicate: !new }
+            .await?
+        }
+        Request::MessageQueue { session_id } => db(&s.database, |d| d.queue_snapshot(&session_id))?,
+        request @ (Request::TakeQueuedMessage { .. }
+        | Request::DispatchQueuedMessage { .. }
+        | Request::ReorderMessageQueue { .. }
+        | Request::EditQueuedMessage { .. }
+        | Request::CancelQueuedMessage { .. }
+        | Request::ClearMessageQueue { .. }
+        | Request::ResumeMessageQueue { .. }) => {
+            let id = match &request {
+                Request::TakeQueuedMessage { session_id, .. }
+                | Request::DispatchQueuedMessage { session_id, .. }
+                | Request::ReorderMessageQueue { session_id, .. }
+                | Request::EditQueuedMessage { session_id, .. }
+                | Request::CancelQueuedMessage { session_id, .. }
+                | Request::ClearMessageQueue { session_id }
+                | Request::ResumeMessageQueue { session_id, .. } => session_id.clone(),
+                _ => unreachable!(),
+            };
+            let (session, path) = db(&s.database, |d| {
+                let session = d.session(&id)?;
+                let path = d.project(&session.project_id)?.path;
+                Ok((session, path))
+            })?;
+            let action = match request {
+                Request::TakeQueuedMessage {
+                    request_id,
+                    revision,
+                    ..
+                } => runtime::QueueAction::Take {
+                    request_id,
+                    revision,
+                },
+                Request::DispatchQueuedMessage {
+                    interrupt,
+                    request_id,
+                    revision,
+                    provider,
+                    ..
+                } => {
+                    if provider.is_none() || !s.agent.available || session.archived {
+                        bail!("Agent 不可用、会话已归档或执行配置未确认");
+                    }
+                    let fingerprint = providers::turn_fingerprint(provider.as_ref())?;
+                    let (entry, original) = db(&s.database, |d| d.queued(&id))?
+                        .into_iter()
+                        .find(|(e, _)| e.request_id == request_id && e.revision == revision)
+                        .context("消息已开始执行、移除或更新，请刷新队列")?;
+                    if fingerprint != original {
+                        bail!("排队时的 Provider 配置已改变，请取消后重新发送");
+                    }
+                    let mut config = s
+                        .providers
+                        .lock()
+                        .map_err(|_| anyhow::anyhow!("Provider 配置锁异常"))?
+                        .turn_config(&session.agent, entry.model.as_deref(), provider)?;
+                    config.effort = entry.effort;
+                    config.permission_mode = entry.permission_mode;
+                    runtime::QueueAction::Dispatch {
+                        interrupt,
+                        request_id,
+                        revision,
+                        config: Box::new(config),
+                    }
+                }
+                Request::ReorderMessageQueue {
+                    expected, order, ..
+                } => runtime::QueueAction::Reorder { expected, order },
+                Request::EditQueuedMessage {
+                    request_id,
+                    revision,
+                    text,
+                    ..
+                } => runtime::QueueAction::Edit {
+                    request_id,
+                    revision,
+                    text: Some(text),
+                },
+                Request::CancelQueuedMessage {
+                    request_id,
+                    revision,
+                    ..
+                } => runtime::QueueAction::Edit {
+                    request_id,
+                    revision,
+                    text: None,
+                },
+                Request::ClearMessageQueue { .. } => runtime::QueueAction::Clear,
+                Request::ResumeMessageQueue { provider, .. } => {
+                    if provider.is_none() {
+                        bail!("继续排队需要重新确认执行配置，请更新客户端");
+                    }
+                    if !s.agent.available {
+                        bail!("Agent CLI 不可用，请检查主机");
+                    }
+                    if session.archived {
+                        bail!("请先取消归档再继续排队");
+                    }
+                    let fingerprint = providers::turn_fingerprint(provider.as_ref())?;
+                    let entries = db(&s.database, |d| d.queued(&id))?;
+                    let mut configs = HashMap::new();
+                    let providers = s
+                        .providers
+                        .lock()
+                        .map_err(|_| anyhow::anyhow!("Provider 配置锁异常"))?;
+                    for (entry, original) in entries {
+                        if fingerprint != original {
+                            bail!("排队时的 Provider 配置已改变，请核对后取消并重新发送消息");
+                        }
+                        let mut config = providers.turn_config(
+                            &session.agent,
+                            entry.model.as_deref(),
+                            provider.clone(),
+                        )?;
+                        config.effort = entry.effort;
+                        config.permission_mode = entry.permission_mode;
+                        configs.insert(entry.request_id, config);
+                    }
+                    runtime::QueueAction::Resume { configs }
+                }
+                _ => unreachable!(),
+            };
+            runtime::queue_action(
+                s.database.clone(),
+                s.runs.clone(),
+                s.agent_binary.clone(),
+                session,
+                path,
+                action,
+            )
+            .await?
         }
         Request::History { session_id, before } => db(&s.database, |d| {
             let session = d.session(&session_id)?;
@@ -988,6 +1149,13 @@ async fn dispatch(s: &Service, request: Request) -> Result<Response> {
                 })?;
             }
             Response::FileReference { entry }
+        }
+        Request::SkillInfo { session_id, name } => {
+            let session = db(&s.database, |d| d.session(&session_id))?;
+            let project = db(&s.database, |d| d.project(&session.project_id))?;
+            Response::SkillInfo {
+                skill: agents::skill_info(&session.agent, project.path.into(), name).await?,
+            }
         }
         Request::Sources { session_id } => {
             let (entries, truncated) = db(&s.database, |d| d.sources(&session_id))?;

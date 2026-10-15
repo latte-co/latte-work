@@ -138,6 +138,7 @@ export function SubagentsPanel({
                 <SubagentTranscript
                   task={selected}
                   events={transcript.events}
+                  prompt={transcript.prompt}
                   elapsed={age(selected)}
                   incomplete={transcript.incomplete}
                   readingMore={transcript.readingMore}

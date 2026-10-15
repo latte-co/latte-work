@@ -207,6 +207,20 @@ export type TaskSource = {
   tools: Array<string>;
   uses: number;
 };
+export type SkillInfo = {
+  name: string;
+  description: string;
+  directory: string;
+};
+export type QueuedMessage = {
+  request_id: string;
+  text: string;
+  model: string | null;
+  effort: Effort | null;
+  permission_mode: string | null;
+  revision: number;
+  created_at: number;
+};
 export type AgentInfo = {
   id: string;
   name: string;
@@ -353,6 +367,56 @@ export type Request =
       only_if_idle?: boolean;
     }
   | {
+      method: "send_queued";
+      provider?: TurnProvider;
+      session_id: string;
+      request_id: string;
+      text: string;
+      model: string | null;
+      effort: Effort | null;
+      permission_mode: string | null;
+    }
+  | { method: "message_queue"; session_id: string }
+  | {
+      method: "reorder_message_queue";
+      session_id: string;
+      expected: Array<string>;
+      order: Array<string>;
+    }
+  | {
+      method: "take_queued_message";
+      session_id: string;
+      request_id: string;
+      revision: number;
+    }
+  | {
+      method: "dispatch_queued_message";
+      interrupt: boolean;
+      session_id: string;
+      request_id: string;
+      revision: number;
+      provider: TurnProvider | null;
+    }
+  | {
+      method: "edit_queued_message";
+      session_id: string;
+      request_id: string;
+      revision: number;
+      text: string;
+    }
+  | {
+      method: "cancel_queued_message";
+      session_id: string;
+      request_id: string;
+      revision: number;
+    }
+  | { method: "clear_message_queue"; session_id: string }
+  | {
+      method: "resume_message_queue";
+      session_id: string;
+      provider: TurnProvider | null;
+    }
+  | {
       method: "send";
       provider?: TurnProvider;
       session_id: string;
@@ -434,6 +498,7 @@ export type Request =
       path: string;
     }
   | { method: "task_change_diff"; session_id: string; path: string }
+  | { method: "skill_info"; session_id: string; name: string }
   | { method: "sources"; session_id: string }
   | {
       method: "preview_source";
@@ -457,6 +522,7 @@ export type Response =
   | { kind: "last_turn_changes"; changes: TurnChanges | null }
   | { kind: "turn_changes"; changes: TurnChanges }
   | { kind: "change_summary"; summary: ChangeSummary }
+  | { kind: "skill_info"; skill: SkillInfo | null }
   | { kind: "sources"; entries: Array<TaskSource>; truncated: boolean }
   | {
       kind: "source_preview";
@@ -471,6 +537,7 @@ export type Response =
   | { kind: "subagent_transcript"; events: Array<Event>; truncated: boolean }
   | {
       kind: "subagent_history";
+      prompt?: string;
       events: Array<Event>;
       has_more: boolean;
       after: number | null;
@@ -532,6 +599,14 @@ export type Response =
   | { kind: "project"; project: Project }
   | { kind: "sessions"; sessions: Array<Session> }
   | { kind: "session"; session: Session }
+  | { kind: "queued_message_taken"; entry: QueuedMessage }
+  | { kind: "message_queued"; duplicate: boolean }
+  | {
+      kind: "message_queue";
+      entries: Array<QueuedMessage>;
+      paused: boolean;
+      reason: string | null;
+    }
   | { kind: "accepted"; duplicate: boolean }
   | {
       kind: "history";

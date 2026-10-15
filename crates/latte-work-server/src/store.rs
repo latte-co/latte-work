@@ -12,7 +12,7 @@ use std::{
 use uuid::Uuid;
 
 pub struct Store {
-    db: Connection,
+    pub(crate) db: Connection,
 }
 pub fn now() -> f64 {
     SystemTime::now()
@@ -64,7 +64,17 @@ impl Store {
         if !columns.iter().any(|name| name == "permission_mode") {
             db.execute("ALTER TABLE requests ADD COLUMN permission_mode TEXT", [])?;
         }
+        crate::message_queue::initialize(&db)?;
         let store = Self { db };
+        let forwarded = store
+            .db
+            .prepare("SELECT DISTINCT session_id FROM message_queue WHERE status='forwarded'")?
+            .query_map([], |r| r.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        for id in forwarded {
+            store.uncertain_forwarded(&id)?;
+            store.pause_queue(&id, Some("后台已重启，请核对已发送的消息"))?;
+        }
         // Native child processes cannot survive a daemon restart, even if the main
         // turn had already completed while background work continued.
         let child_sessions = store
@@ -556,7 +566,22 @@ impl Store {
         requested_source: Option<&str>,
         source_has_more: bool,
     ) -> Result<latte_work_protocol::Response> {
-        self.subagent(session_id, task_id)?;
+        let task = self.subagent(session_id, task_id)?;
+        // Read the original, already-redacted parent tool input independently of UI history pages.
+        let prompt: Option<String> = if let Some(tool) = task.tool_use_id {
+            self.db.query_row(
+                "SELECT json_extract(data,'$.input.prompt') FROM events WHERE session_id=?1 AND json_extract(data,'$.kind')='tool' AND json_extract(data,'$.name') IN ('Agent','Task') AND json_extract(data,'$.id')=?2 AND json_type(data,'$.input.prompt')='text' ORDER BY seq DESC LIMIT 1",
+                params![session_id, tool], |row| row.get(0),
+            ).optional()?.flatten()
+        } else {
+            None
+        };
+        if prompt
+            .as_ref()
+            .is_some_and(|text| text.len() > latte_work_protocol::MAX_FRAME / 2)
+        {
+            bail!("子智能体任务指令超出传输范围，内容未截断");
+        }
         if after.is_some_and(|v| !v.is_finite() || v < 0.0) {
             bail!("子智能体事件游标无效");
         }
@@ -584,6 +609,7 @@ impl Store {
             page.truncate(128);
             let after = page.last().map(|e| e.seq).or(after);
             return Ok(latte_work_protocol::Response::SubagentHistory {
+                prompt,
                 events: page,
                 has_more,
                 after,
@@ -609,7 +635,8 @@ impl Store {
                 has_more = true;
                 break;
             }
-            if size > latte_work_protocol::MAX_FRAME - 4096 {
+            if size + prompt.as_ref().map_or(0, String::len) > latte_work_protocol::MAX_FRAME - 8192
+            {
                 bail!("单条子智能体事件超出传输范围，内容未截断");
             }
             bytes += size;
@@ -626,6 +653,7 @@ impl Store {
             && ((cursor.has_more && !source_has_more)
                 || (cursor.pending_tail && !self.subagent(session_id, task_id)?.status.active()));
         Ok(latte_work_protocol::Response::SubagentHistory {
+            prompt,
             events,
             has_more,
             after,
@@ -1068,6 +1096,7 @@ impl Store {
             )?;
             index_event(&tx, id, &event)?;
         }
+        tx.execute("UPDATE message_queue SET status='dispatched' WHERE request_id=?1 AND session_id=?2 AND status IN ('pending','forwarded')", params![request_id,id])?;
         tx.commit()?;
         Ok(true)
     }
@@ -1688,6 +1717,17 @@ mod tests {
         let other = store
             .create_session(project.id.clone(), "claude".into())
             .unwrap();
+        store.event(&session.id, EventKind::Tool { id: "tool".into(), name: "Agent".into(), input: serde_json::json!({"prompt":"Inspect the exact changes. Original input."}) }).unwrap();
+        store
+            .event(
+                &other.id,
+                EventKind::Tool {
+                    id: "tool".into(),
+                    name: "Agent".into(),
+                    input: serde_json::json!({"prompt":"Wrong session"}),
+                },
+            )
+            .unwrap();
         let update = |id: &str, status| EventKind::Subagent {
             update: SubagentUpdate {
                 id: id.into(),
@@ -1725,6 +1765,9 @@ mod tests {
         assert_eq!(
             store.subagents(&session.id).unwrap().0[0].status,
             SubagentStatus::Unknown
+        );
+        assert!(
+            matches!(store.subagent_history(&session.id, "tool:tool", None, None, false).unwrap(), latte_work_protocol::Response::SubagentHistory { prompt: Some(prompt), .. } if prompt == "Inspect the exact changes. Original input.")
         );
         store
             .end_subagents(&session.id, SubagentStatus::Stopped)

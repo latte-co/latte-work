@@ -485,6 +485,10 @@ The child tab reads dedicated `subagent_history` forward pages. Full redacted
 stdout events and native child records persist separately from parent events,
 joined by the task's stable ID. The legacy `subagent_transcript` bounded snapshot
 remains available for old clients, but its limits do not govern the child UI.
+The additive optional `prompt` field reads the original, already-redacted parent
+Agent/Task tool input by session and tool-use ID, independently of loaded chat
+pages, and survives restart. Missing input stays absent; the UI exposes saved
+input in a separate “任务指令” disclosure above process and final output.
 History pages contain at most 128 events / roughly 256 KiB; a larger individual
 event remains intact within the protocol frame limit. The client reads successive
 pages while visible, including after completion, and joins the complete final
@@ -534,9 +538,34 @@ Hiding or closing a child tab never stops execution. Child result envelopes cann
 finish the parent turn. Trailing empty/duplicate success results while idle are
 ignored; result-only autonomous replies and actual failures remain visible.
 
+The Task Summary tab shows compact, read-only sections with uniform empty states.
+The single hover/focus background on each workspace tab includes its close control.
+Project names and history-scope paragraphs are not repeated in the inspector;
+the footer offers explicit earlier-history reads, with scope in its tooltip.
+
+`skill_info` resolves current installed Skill metadata on the execution host without
+starting an Agent, changing access or evaluating Skill body/template commands.
+The Claude implementation reads known personal/project folders (including linked
+skill folders) and namespaced installed-plugin records; unsupported, missing and
+ambiguous metadata are explicit. This is current-file metadata, not proof of the
+exact Skill version used in an earlier turn. Location reference:
+[Claude skills](https://code.claude.com/docs/en/skills#choose-where-skills-load).
+Metadata reads use two concurrent blocking workers, a three-second deadline,
+64 KiB Skill files, a 256 KiB plugin index, and bounded candidate counts. Clicking
+an available Skill selects its canonical directory through `resolve_reference`,
+then opens `SKILL.md` directly in the shared Files tab, with the directory tree.
+Task files use the same Files tab. An external file click resolves exactly that file;
+its preview does not browse or grant access to its parent. Explicit directory
+selections retain their canonical preview scope, separate from project browsing. Hover never grants that directory access;
+preview still enforces canonical containment, including escaping nested symlinks.
+Local and SSH hosts share this additive request; older Servers must update for
+metadata. Failures do not fabricate descriptions or paths. Focused checks include
+`claude_skills` unit tests, `SkillRow`/`TaskInfo` frontend tests and the final-binary
+`skill_metadata_is_host_local_read_only_and_preview_requires_explicit_reference` test.
+
 The topbar Task Overview popover links to changes and subagents. The Sources
 section and source tabs are currently removed from the workspace UI. The source
-inventory and scoped preview APIs described below remain available on the host;
+inventory and scoped preview APIs described below also back the summary and Files tab;
 Composer references continue to use their existing add and send flow.
 The desktop owns a single `/agents` (子智能体) navigation entry for every Agent.
 Native commands carrying the `subagents` presentation hint, and the reserved
@@ -731,3 +760,74 @@ Questions and approvals share the existing 32-interaction and process time bound
 Old servers cannot accept structured answers; the client offers an explicit update
 message and optional skip, never an empty approval. Focused final-binary check:
 `user_questions_are_not_permissions_and_answers_are_bound_single_use_and_persisted`.
+
+## Persistent message queue
+
+`send_queued` is an explicit additive alternative to `send`; an idle session starts
+immediately, a busy session saves the prompt in the host's SQLite FIFO. The desktop
+uses this API and the same native provider injection for local and SSH hosts.
+`message_queued` acknowledges durable admission, not execution; the user event and
+request record are written only when the actor starts that turn. Starting a queued
+turn and retiring its pending row share a transaction. Original admission identities
+and cancellation tombstones prevent lost responses from re-enqueuing messages,
+including after editing. Transport reconnect never re-sends a prompt.
+
+Queue listing, revision-checked editing, removal, clearing and explicit resumption
+share the host protocol. Drag/keyboard reordering compares the complete pending
+request ID order and atomically persists its replacement. Stale, missing or duplicate
+IDs fail without mutation; a repeated identical order is idempotent. Dispatch always
+uses this saved order. The session actor serializes reorder/edits/cancellation against
+execution. Capacity is 16 pending messages / 512 KiB serialized content per session,
+with the existing 128 KiB per-prompt limit. Queue records contain prompts and launch
+option metadata, never Provider snapshots or credentials. A pending queue has one
+Provider identity; each item retains its model, effort and permission choices.
+Native launch configurations stay in bounded actor memory. Resumption must supply
+that original Provider identity again; changed credentials/settings fail explicitly.
+
+Normal completion drains the saved order even after the initiating client disconnects. Stop,
+close, failure and daemon restart retain the remaining queue in a paused state.
+Restart never replays the interrupted active request. After checking the current
+conversation, the user can resume the pending messages with fresh native configuration,
+or edit/remove them. Pending active queues veto idle shutdown; paused queues remain
+safe to close. Closing/clearing the queue does not stop the current turn.
+
+Focused validation: final-binary `message_queue_` tests cover FIFO, multi-client
+reconnect, reordering/restart persistence, edits/removal, request identity, stop/restart, bounded admission, session
+isolation, and credential-free persistence/configuration fencing. Native fixture
+smoke evidence is separate from real-model behavior.
+
+The queued-row send arrow uses `dispatch_queued_message` with `interrupt: false`.
+While a native turn is running, the server writes the selected prompt to that same
+Claude stream immediately; it never sends an interrupt or waits for the host queue
+head. A persisted handoff receipt is distinct from a user/execution turn. Native
+completion boundaries activate delivered inputs in their delivery order without
+writing them again, before draining host-held messages. Outstanding native inputs
+share the 16-message/512-KiB admission budget. Streamed handoffs cannot provide a
+safe independent filesystem boundary, so overlapping turn snapshots cannot be undone.
+
+The extra menu's “停止当前并发送” explicitly requests `interrupt: true`. With no
+native backlog, it waits for both the native result and interrupt acknowledgement
+before starting the selected message. If native inputs were already handed off,
+stopping closes that process and marks their processing state uncertain; they are
+never replayed automatically. The selected host-held item then starts in the saved
+session. Stop, close, failure and restart also quarantine unconfirmed native inputs
+and preserve their original prompt receipts. Remaining host-held messages retain
+their order and the queue's original paused/running choice.
+
+Editing uses revision-bound `take_queued_message`: atomically retire the pending
+item and return its exact content. A repeated take reconciles a lost response.
+The client merges it into the session draft, preserving existing text and attached
+references, and focuses the composer. Submitting uses a new request ID and appends
+to the host queue. No in-place edit or automatic resend occurs.
+
+Sidebar project ordering is an App-only preference (`latte-work.project-order.v1`),
+keyed by the host/project pair rather than names or paths. Mixed-host ordering
+survives project catalog refresh and restart; new projects append, and temporarily
+absent hosts retain their saved slots. Pointer-based dragging shows a floating
+project and insertion line, scrolls at the navigation edges, and moves the entire
+project group without changing its expanded state or selected conversation.
+Escape, pointer cancellation, window blur and dropping outside the project list
+cancel the gesture. Option+Up/Down provides keyboard ordering. Only held primary
+mouse movement beyond the threshold starts a drag; accessibility clicks and
+ordinary hover must not become a drag or suppress project expansion. No Server
+mutation or Agent request is used to save this display order.

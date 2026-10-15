@@ -27,6 +27,12 @@ pub enum Input<'a> {
     Start {
         prompt: &'a str,
     },
+    /// Hand an input to the native agent while retaining the active turn.
+    Queue {
+        prompt: &'a str,
+    },
+    /// Begin accounting for a previously delivered native input; never write it twice.
+    ActivateQueued,
     /// One complete line without its delimiter. Only the adapter interprets its payload.
     Message(&'a str),
     /// Delivered only after Runtime validates and consumes a pending public approval ID.

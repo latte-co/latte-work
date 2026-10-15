@@ -4807,11 +4807,16 @@ async fn complete_child_history_recovers_every_native_page_and_long_report_witho
             source_has_more,
             incomplete,
             source: new_source,
+            prompt,
         } = response
         else {
             panic!("history");
         };
         assert!(!incomplete);
+        assert_eq!(
+            prompt.as_deref(),
+            Some("Inspect the exact project changes with evidence.")
+        );
         found.extend(events);
         after = next;
         source = Some(new_source);
@@ -5097,4 +5102,1131 @@ async fn compact_and_legacy_reference_prompts_persist_and_preview_on_the_owning_
         assert!(matches!(ask(&mut reconnect, preview()).await,
             Response::SourcePreview { data, mime_type, has_more, .. } if data == png && mime_type == "image/png" && !has_more));
     }
+}
+
+#[tokio::test]
+async fn skill_metadata_is_host_local_read_only_and_preview_requires_explicit_reference() {
+    let host = Host::start().await;
+    let mut client = host.client().await;
+    let root = tempfile::tempdir().unwrap();
+    let external = tempfile::tempdir().unwrap();
+    std::fs::write(external.path().join("SKILL.md"), "---\nname: Review\ndescription: Inspect changes with evidence.\n---\n!`touch SHOULD_NOT_RUN`\n").unwrap();
+    let skills = root.path().join(".claude/skills");
+    std::fs::create_dir_all(&skills).unwrap();
+    std::os::unix::fs::symlink(external.path(), skills.join("fixture-review")).unwrap();
+    let Response::Project { project } = ask(
+        &mut client,
+        Request::AddProject {
+            path: root.path().to_string_lossy().into_owned(),
+            name: None,
+        },
+    )
+    .await
+    else {
+        panic!("project")
+    };
+    let Response::Session { session } = ask(
+        &mut client,
+        Request::CreateSession {
+            project_id: project.id.clone(),
+            agent: "claude".into(),
+        },
+    )
+    .await
+    else {
+        panic!("session")
+    };
+    let Response::SkillInfo { skill: Some(info) } = ask(
+        &mut client,
+        Request::SkillInfo {
+            session_id: session.id.clone(),
+            name: "fixture-review".into(),
+        },
+    )
+    .await
+    else {
+        panic!("metadata")
+    };
+    assert_eq!(info.name, "Review");
+    assert_eq!(info.description, "Inspect changes with evidence.");
+    let file = Path::new(&info.directory)
+        .join("SKILL.md")
+        .to_string_lossy()
+        .into_owned();
+    assert!(matches!(
+        ask(
+            &mut client,
+            Request::PreviewSource {
+                project_id: project.id.clone(),
+                session_id: Some(session.id.clone()),
+                path: file.clone(),
+                offset: 0
+            }
+        )
+        .await,
+        Response::Error { .. }
+    ));
+    assert!(matches!(
+        ask(
+            &mut client,
+            Request::ResolveReference {
+                project_id: project.id.clone(),
+                path: info.directory.clone()
+            }
+        )
+        .await,
+        Response::FileReference { .. }
+    ));
+    assert!(matches!(
+        ask(
+            &mut client,
+            Request::PreviewSource {
+                project_id: project.id.clone(),
+                session_id: Some(session.id.clone()),
+                path: info.directory,
+                offset: 0
+            }
+        )
+        .await,
+        Response::SourceDirectory { .. }
+    ));
+    assert!(matches!(
+        ask(
+            &mut client,
+            Request::PreviewSource {
+                project_id: project.id.clone(),
+                session_id: Some(session.id.clone()),
+                path: file,
+                offset: 0
+            }
+        )
+        .await,
+        Response::SourcePreview { .. }
+    ));
+    let outside = tempfile::NamedTempFile::new().unwrap();
+    std::os::unix::fs::symlink(outside.path(), external.path().join("escape")).unwrap();
+    assert!(matches!(
+        ask(
+            &mut client,
+            Request::PreviewSource {
+                project_id: project.id,
+                session_id: Some(session.id.clone()),
+                path: external
+                    .path()
+                    .join("escape")
+                    .to_string_lossy()
+                    .into_owned(),
+                offset: 0
+            }
+        )
+        .await,
+        Response::Error { .. }
+    ));
+    assert!(matches!(
+        ask(
+            &mut client,
+            Request::SkillInfo {
+                session_id: session.id.clone(),
+                name: "../../secret".into()
+            }
+        )
+        .await,
+        Response::Error { .. }
+    ));
+    let Response::History {
+        events, session, ..
+    } = ask(
+        &mut client,
+        Request::History {
+            session_id: session.id,
+            before: None,
+        },
+    )
+    .await
+    else {
+        panic!("history")
+    };
+    assert!(events.is_empty());
+    assert_eq!(session.agent_session_open, Some(false));
+    assert!(!root.path().join("SHOULD_NOT_RUN").exists());
+}
+
+async fn queue_send(c: &mut Client, id: &str, request: &str, text: &str) -> Response {
+    ask(
+        c,
+        Request::SendQueued {
+            session_id: id.into(),
+            request_id: request.into(),
+            text: text.into(),
+            model: None,
+            effort: None,
+            permission_mode: None,
+            provider: Some(latte_work_protocol::TurnProvider::Cli),
+        },
+    )
+    .await
+}
+async fn queue_until(c: &mut Client, id: &str, count: usize) -> Vec<latte_work_protocol::Event> {
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        let Response::Events {
+            events, session, ..
+        } = ask(
+            c,
+            Request::Poll {
+                session_id: id.into(),
+                after: 0.0,
+            },
+        )
+        .await
+        else {
+            panic!("poll");
+        };
+        if events
+            .iter()
+            .filter(|e| matches!(e.event, EventKind::User { .. }))
+            .count()
+            == count
+            && session.status == Status::Completed
+        {
+            return events;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "queued execution deadline: {:?}",
+            session.status
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+#[tokio::test]
+async fn message_queue_is_durable_fifo_editable_and_not_client_driven() {
+    let host = Host::start().await;
+    let project = tempfile::tempdir().unwrap();
+    let mut a = host.client().await;
+    let id = session(&mut a, project.path()).await;
+    assert!(matches!(
+        queue_send(&mut a, &id, "queue-head", "queue-slow").await,
+        Response::Accepted { duplicate: false }
+    ));
+    assert!(matches!(
+        queue_send(&mut a, &id, "queue-a", "hello-a").await,
+        Response::MessageQueued { duplicate: false }
+    ));
+    let mut b = host.client().await;
+    assert!(matches!(
+        queue_send(&mut b, &id, "queue-b", "hello-b").await,
+        Response::MessageQueued { duplicate: false }
+    ));
+    assert!(matches!(
+        queue_send(&mut b, &id, "queue-c", "hello-c").await,
+        Response::MessageQueued { duplicate: false }
+    ));
+    assert!(matches!(
+        queue_send(&mut b, &id, "queue-a", "hello-a").await,
+        Response::MessageQueued { duplicate: true }
+    ));
+    assert!(matches!(
+        queue_send(&mut b, &id, "queue-a", "changed").await,
+        Response::Error { .. }
+    ));
+    assert!(matches!(
+        ask(
+            &mut b,
+            Request::EditQueuedMessage {
+                session_id: id.clone(),
+                request_id: "queue-b".into(),
+                revision: 0,
+                text: "hello-b-edited".into()
+            }
+        )
+        .await,
+        Response::MessageQueue { .. }
+    ));
+    assert!(matches!(
+        ask(
+            &mut a,
+            Request::EditQueuedMessage {
+                session_id: id.clone(),
+                request_id: "queue-b".into(),
+                revision: 0,
+                text: "stale edit".into()
+            }
+        )
+        .await,
+        Response::Error { .. }
+    ));
+    assert!(matches!(
+        ask(
+            &mut b,
+            Request::CancelQueuedMessage {
+                session_id: id.clone(),
+                request_id: "queue-c".into(),
+                revision: 0
+            }
+        )
+        .await,
+        Response::MessageQueue { .. }
+    ));
+    assert!(matches!(
+        queue_send(&mut b, &id, "queue-c", "hello-c").await,
+        Response::Error { .. }
+    ));
+    let Response::MessageQueue {
+        entries,
+        paused: false,
+        ..
+    } = ask(
+        &mut b,
+        Request::MessageQueue {
+            session_id: id.clone(),
+        },
+    )
+    .await
+    else {
+        panic!("queue snapshot");
+    };
+    assert_eq!(
+        entries.iter().map(|m| m.text.as_str()).collect::<Vec<_>>(),
+        ["hello-a", "hello-b-edited"]
+    );
+    let Response::Events { events, .. } = ask(
+        &mut b,
+        Request::Poll {
+            session_id: id.clone(),
+            after: 0.0,
+        },
+    )
+    .await
+    else {
+        panic!("poll");
+    };
+    assert_eq!(
+        events
+            .iter()
+            .filter(|e| matches!(e.event, EventKind::User { .. }))
+            .count(),
+        1,
+        "pending messages are not executed conversation turns"
+    );
+    drop(a);
+    drop(b);
+    std::fs::write(project.path().join("queue-release"), "continue").unwrap();
+    let mut observer = host.client().await;
+    let events = queue_until(&mut observer, &id, 3).await;
+    let turns = events
+        .iter()
+        .filter_map(|e| match &e.event {
+            EventKind::User { request_id, text } => Some((request_id.as_str(), text.as_str())),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        turns,
+        [
+            ("queue-head", "queue-slow"),
+            ("queue-a", "hello-a"),
+            ("queue-b", "hello-b-edited")
+        ]
+    );
+    assert!(matches!(
+        queue_send(&mut observer, &id, "queue-b", "hello-b").await,
+        Response::Accepted { duplicate: true }
+    ));
+    assert!(matches!(
+        ask(
+            &mut observer,
+            Request::EditQueuedMessage {
+                session_id: id.clone(),
+                request_id: "queue-b".into(),
+                revision: 1,
+                text: "too late".into()
+            }
+        )
+        .await,
+        Response::Error { .. }
+    ));
+    assert!(
+        matches!(ask(&mut observer,Request::MessageQueue{session_id:id}).await,Response::MessageQueue{entries,..} if entries.is_empty())
+    );
+}
+#[tokio::test]
+async fn message_queue_stop_pauses_and_restart_requires_explicit_resume_without_replay() {
+    let mut host = Host::start().await;
+    let project = tempfile::tempdir().unwrap();
+    let mut c = host.client().await;
+    let id = session(&mut c, project.path()).await;
+    queue_send(&mut c, &id, "restart-head", "queue-slow").await;
+    assert!(matches!(
+        queue_send(&mut c, &id, "restart-next", "hello").await,
+        Response::MessageQueued { .. }
+    ));
+    drop(c);
+    host.process.kill().unwrap();
+    host.process.wait().unwrap();
+    host.process = Command::new(env!("CARGO_BIN_EXE_latte-work-server"))
+        .arg("serve")
+        .arg("--state-dir")
+        .arg(host.directory.path())
+        .env("LATTE_WORK_AGENT_ENV", "inherit")
+        .env(
+            "LATTE_WORK_CLAUDE",
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/claude.py"),
+        )
+        .env(
+            "CLAUDE_CONFIG_DIR",
+            host.directory.path().join("claude-config"),
+        )
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let mut c = host.client().await;
+    assert!(
+        matches!(ask(&mut c,Request::MessageQueue{session_id:id.clone()}).await,Response::MessageQueue{entries,paused:true,..} if entries.len()==1)
+    );
+    let Response::Events { events, .. } = ask(
+        &mut c,
+        Request::Poll {
+            session_id: id.clone(),
+            after: 0.0,
+        },
+    )
+    .await
+    else {
+        panic!("poll");
+    };
+    assert_eq!(
+        events
+            .iter()
+            .filter(|e| matches!(e.event, EventKind::User { .. }))
+            .count(),
+        1
+    );
+    assert!(matches!(
+        ask(
+            &mut c,
+            Request::ResumeMessageQueue {
+                session_id: id.clone(),
+                provider: Some(latte_work_protocol::TurnProvider::Cli)
+            }
+        )
+        .await,
+        Response::MessageQueue { .. }
+    ));
+    let events = queue_until(&mut c, &id, 2).await;
+    assert_eq!(
+        events
+            .iter()
+            .filter(
+                |e| matches!(&e.event,EventKind::User{request_id,..} if request_id=="restart-head")
+            )
+            .count(),
+        1
+    );
+    queue_send(&mut c, &id, "stop-head", "hang").await;
+    queue_send(&mut c, &id, "stop-next", "hello").await;
+    assert!(matches!(
+        ask(
+            &mut c,
+            Request::Cancel {
+                session_id: id.clone()
+            }
+        )
+        .await,
+        Response::Ok
+    ));
+    assert!(
+        matches!(ask(&mut c,Request::MessageQueue{session_id:id.clone()}).await,Response::MessageQueue{entries,paused:true,..} if entries.len()==1)
+    );
+    assert!(matches!(
+        ask(
+            &mut c,
+            Request::ResumeMessageQueue {
+                session_id: id.clone(),
+                provider: Some(latte_work_protocol::TurnProvider::Cli)
+            }
+        )
+        .await,
+        Response::MessageQueue { .. }
+    ));
+    queue_until(&mut c, &id, 4).await;
+}
+#[tokio::test]
+async fn message_queue_bounds_contents_and_keeps_sessions_isolated() {
+    let host = Host::start().await;
+    let project = tempfile::tempdir().unwrap();
+    let mut c = host.client().await;
+    let id = session(&mut c, project.path()).await;
+    let other = session(&mut c, project.path()).await;
+    queue_send(&mut c, &id, "limit-head", "queue-slow").await;
+    for i in 0..16 {
+        assert!(matches!(
+            queue_send(&mut c, &id, &format!("limit-{i}"), "hello").await,
+            Response::MessageQueued { duplicate: false }
+        ));
+    }
+    assert!(matches!(
+        queue_send(&mut c, &id, "overflow", "hello").await,
+        Response::Error { .. }
+    ));
+    assert!(
+        matches!(ask(&mut c,Request::MessageQueue{session_id:other.clone()}).await,Response::MessageQueue{entries,..} if entries.is_empty())
+    );
+    assert!(matches!(
+        ask(
+            &mut c,
+            Request::CancelQueuedMessage {
+                session_id: other,
+                request_id: "limit-0".into(),
+                revision: 0
+            }
+        )
+        .await,
+        Response::Error { .. }
+    ));
+    assert!(
+        matches!(ask(&mut c,Request::ClearMessageQueue{session_id:id.clone()}).await,Response::MessageQueue{entries,..} if entries.is_empty())
+    );
+    assert!(matches!(
+        queue_send(&mut c, &id, "limit-0", "hello").await,
+        Response::Error { .. }
+    ));
+    for i in 0..3 {
+        assert!(matches!(
+            queue_send(&mut c, &id, &format!("large-{i}"), &"x".repeat(128 * 1024)).await,
+            Response::MessageQueued { .. }
+        ));
+    }
+    assert!(matches!(
+        queue_send(&mut c, &id, "large-overflow", &"x".repeat(128 * 1024)).await,
+        Response::Error { .. }
+    ));
+}
+
+#[tokio::test]
+async fn message_queue_credentials_stay_volatile_and_resume_checks_configuration() {
+    use latte_work_protocol::{
+        Provider, ProviderAuth, ProviderProtocol, ProviderSnapshot, TurnProvider,
+    };
+    let host = Host::start().await;
+    let project = tempfile::tempdir().unwrap();
+    let mut c = host.client().await;
+    let id = session(&mut c, project.path()).await;
+    queue_send(&mut c, &id, "secret-head", "queue-slow").await;
+    let snapshot = ProviderSnapshot {
+        provider: Provider {
+            id: "queue-api".into(),
+            name: "Queue API".into(),
+            protocol: ProviderProtocol::AnthropicMessages,
+            base_url: "https://example.test".into(),
+            model: "fixture-model".into(),
+            models: vec![],
+            model_labels: Default::default(),
+            auth: ProviderAuth::ApiKey,
+            has_credential: true,
+            revision: "r1".into(),
+        },
+        credential: "fixture-private-key".into(),
+    };
+    let queued = Request::SendQueued {
+        session_id: id.clone(),
+        request_id: "secret-next".into(),
+        text: "provider".into(),
+        provider: Some(TurnProvider::Snapshot(snapshot.clone())),
+        model: None,
+        effort: None,
+        permission_mode: None,
+    };
+    let shared = tokio::sync::Mutex::new(host.client().await);
+    assert!(matches!(
+        latte_work_client::request_with_app_provider(&shared, queued, |_| async {
+            Ok(Some(snapshot.clone()))
+        })
+        .await
+        .unwrap(),
+        Response::MessageQueued { duplicate: false }
+    ));
+    let database = rusqlite::Connection::open(host.directory.path().join("state.sqlite")).unwrap();
+    let serialized: String = database
+        .query_row(
+            "SELECT admission || data FROM message_queue WHERE request_id='secret-next'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert!(!serialized.contains("fixture-private-key"));
+    drop(database);
+    assert!(matches!(
+        queue_send(&mut c, &id, "different-provider", "hello").await,
+        Response::Error { .. }
+    ));
+    assert!(matches!(
+        ask(
+            &mut c,
+            Request::Cancel {
+                session_id: id.clone()
+            }
+        )
+        .await,
+        Response::Ok
+    ));
+    assert!(matches!(
+        ask(
+            &mut c,
+            Request::ResumeMessageQueue {
+                session_id: id.clone(),
+                provider: Some(TurnProvider::Cli)
+            }
+        )
+        .await,
+        Response::Error { .. }
+    ));
+    let mut rotated = snapshot.clone();
+    rotated.credential = "rotated-key".into();
+    assert!(matches!(
+        ask(
+            &mut c,
+            Request::ResumeMessageQueue {
+                session_id: id.clone(),
+                provider: Some(TurnProvider::Snapshot(rotated))
+            }
+        )
+        .await,
+        Response::Error { .. }
+    ));
+    assert!(
+        matches!(ask(&mut c,Request::MessageQueue{session_id:id.clone()}).await,Response::MessageQueue{entries,paused:true,..} if entries.len()==1)
+    );
+    let resume = Request::ResumeMessageQueue {
+        session_id: id.clone(),
+        provider: None,
+    };
+    assert!(matches!(
+        latte_work_client::request_with_app_provider(&shared, resume, |_| async {
+            Ok(Some(snapshot.clone()))
+        })
+        .await
+        .unwrap(),
+        Response::MessageQueue { .. }
+    ));
+    queue_until(&mut c, &id, 2).await;
+}
+
+#[tokio::test]
+async fn message_queue_reorder_is_atomic_durable_and_controls_actual_execution() {
+    let mut host = Host::start().await;
+    let project = tempfile::tempdir().unwrap();
+    let mut c = host.client().await;
+    let id = session(&mut c, project.path()).await;
+    queue_send(&mut c, &id, "sort-head", "queue-slow").await;
+    for key in ["sort-a", "sort-b", "sort-c"] {
+        assert!(matches!(
+            queue_send(&mut c, &id, key, key).await,
+            Response::MessageQueued { .. }
+        ));
+    }
+    let reorder = |expected: &[&str], order: &[&str]| Request::ReorderMessageQueue {
+        session_id: id.clone(),
+        expected: expected.iter().map(|s| (*s).into()).collect(),
+        order: order.iter().map(|s| (*s).into()).collect(),
+    };
+    let original = ["sort-a", "sort-b", "sort-c"];
+    let desired = ["sort-c", "sort-a", "sort-b"];
+    assert!(matches!(
+        ask(&mut c, reorder(&original, &desired)).await,
+        Response::MessageQueue { .. }
+    ));
+    // Reconcile a lost response without applying the move again.
+    assert!(matches!(
+        ask(&mut c, reorder(&original, &desired)).await,
+        Response::MessageQueue { .. }
+    ));
+    for request in [
+        reorder(&original, &["sort-b", "sort-a", "sort-c"]), // stale order
+        reorder(&desired, &["sort-c", "sort-a", "sort-a"]),  // duplicate
+        reorder(&["sort-c", "sort-a"], &["sort-a", "sort-c"]), // omitted row
+        reorder(&desired, &["sort-c", "sort-a", "sort-head"]), // active row
+        reorder(&["foreign"], &["foreign"]),
+    ] {
+        assert!(matches!(ask(&mut c, request).await, Response::Error { .. }));
+    }
+    drop(c);
+    // A fresh socket observes persisted ordering, independent of the drag client.
+    let mut c = host.client().await;
+    let Response::MessageQueue { entries, .. } = ask(
+        &mut c,
+        Request::MessageQueue {
+            session_id: id.clone(),
+        },
+    )
+    .await
+    else {
+        panic!("queue")
+    };
+    assert_eq!(
+        entries
+            .iter()
+            .map(|e| e.request_id.as_str())
+            .collect::<Vec<_>>(),
+        desired
+    );
+    assert!(entries.iter().all(|e| e.revision == 0));
+    drop(c);
+    host.process.kill().unwrap();
+    host.process.wait().unwrap();
+    host.process = Command::new(env!("CARGO_BIN_EXE_latte-work-server"))
+        .arg("serve")
+        .arg("--state-dir")
+        .arg(host.directory.path())
+        .env("LATTE_WORK_AGENT_ENV", "inherit")
+        .env(
+            "LATTE_WORK_CLAUDE",
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/claude.py"),
+        )
+        .env(
+            "CLAUDE_CONFIG_DIR",
+            host.directory.path().join("claude-config"),
+        )
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let mut c = host.client().await;
+    let Response::MessageQueue {
+        entries,
+        paused: true,
+        ..
+    } = ask(
+        &mut c,
+        Request::MessageQueue {
+            session_id: id.clone(),
+        },
+    )
+    .await
+    else {
+        panic!("paused queue")
+    };
+    assert_eq!(
+        entries
+            .iter()
+            .map(|e| e.request_id.as_str())
+            .collect::<Vec<_>>(),
+        desired
+    );
+    // New admissions append after the saved order, not the original insertion order.
+    assert!(matches!(
+        queue_send(&mut c, &id, "sort-d", "sort-d").await,
+        Response::MessageQueued { .. }
+    ));
+    ask(
+        &mut c,
+        Request::ResumeMessageQueue {
+            session_id: id.clone(),
+            provider: Some(latte_work_protocol::TurnProvider::Cli),
+        },
+    )
+    .await;
+    let events = queue_until(&mut c, &id, 5).await;
+    let actual = events
+        .iter()
+        .filter_map(|e| match &e.event {
+            EventKind::User { request_id, .. } => Some(request_id.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        actual,
+        ["sort-head", "sort-c", "sort-a", "sort-b", "sort-d"]
+    );
+    assert!(matches!(
+        ask(&mut c, reorder(&original, &desired)).await,
+        Response::Error { .. }
+    ));
+}
+
+#[tokio::test]
+async fn message_queue_take_restores_exact_content_and_resends_at_tail_with_new_identity() {
+    let host = Host::start().await;
+    let root = tempfile::tempdir().unwrap();
+    let mut c = host.client().await;
+    let id = session(&mut c, root.path()).await;
+    queue_send(&mut c, &id, "take-head", "queue-slow").await;
+    queue_send(&mut c, &id, "take-a", "original input with refs").await;
+    queue_send(&mut c, &id, "take-b", "second").await;
+    let take = || Request::TakeQueuedMessage {
+        session_id: id.clone(),
+        request_id: "take-a".into(),
+        revision: 0,
+    };
+    for _ in 0..2 {
+        let Response::QueuedMessageTaken { entry } = ask(&mut c, take()).await else {
+            panic!("take")
+        };
+        assert_eq!(entry.text, "original input with refs");
+    }
+    assert!(matches!(
+        queue_send(&mut c, &id, "take-a", "original input with refs").await,
+        Response::Error { .. }
+    ));
+    assert!(matches!(
+        queue_send(&mut c, &id, "take-edited", "edited input with refs").await,
+        Response::MessageQueued { .. }
+    ));
+    let Response::MessageQueue { entries, .. } = ask(
+        &mut c,
+        Request::MessageQueue {
+            session_id: id.clone(),
+        },
+    )
+    .await
+    else {
+        panic!("queue")
+    };
+    assert_eq!(
+        entries
+            .iter()
+            .map(|e| e.request_id.as_str())
+            .collect::<Vec<_>>(),
+        ["take-b", "take-edited"]
+    );
+    std::fs::write(root.path().join("queue-release"), "go").unwrap();
+    let events = queue_until(&mut c, &id, 3).await;
+    let ids = events
+        .iter()
+        .filter_map(|e| match &e.event {
+            EventKind::User { request_id, .. } => Some(request_id.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(ids, ["take-head", "take-b", "take-edited"]);
+    assert!(matches!(
+        ask(
+            &mut c,
+            Request::TakeQueuedMessage {
+                session_id: id.clone(),
+                request_id: "take-b".into(),
+                revision: 0
+            }
+        )
+        .await,
+        Response::Error { .. }
+    ));
+}
+
+async fn native_queue_ready(c: &mut Client, id: &str) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let Response::Events { events, .. } = ask(
+            c,
+            Request::Poll {
+                session_id: id.into(),
+                after: 0.0,
+            },
+        )
+        .await
+        else {
+            panic!("poll")
+        };
+        if events
+            .iter()
+            .any(|e| matches!(&e.event,EventKind::Text{text} if text=="NATIVE_HEAD_WAITING"))
+        {
+            return;
+        }
+        assert!(Instant::now() < deadline, "native queue ready");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+async fn dispatch_queue(c: &mut Client, id: &str, request_id: &str, interrupt: bool) -> Response {
+    ask(
+        c,
+        Request::DispatchQueuedMessage {
+            session_id: id.into(),
+            request_id: request_id.into(),
+            revision: 0,
+            interrupt,
+            provider: Some(latte_work_protocol::TurnProvider::Cli),
+        },
+    )
+    .await
+}
+#[tokio::test]
+async fn message_queue_default_send_hands_off_now_without_interrupt_and_never_writes_twice() {
+    let host = Host::start().await;
+    let root = tempfile::tempdir().unwrap();
+    let mut c = host.client().await;
+    let id = session(&mut c, root.path()).await;
+    queue_send(&mut c, &id, "native-head", "native-queue-head").await;
+    native_queue_ready(&mut c, &id).await;
+    queue_send(&mut c, &id, "native-a", "native-message-a").await;
+    queue_send(&mut c, &id, "native-b", "native-message-b").await;
+    queue_send(&mut c, &id, "host-c", "native-message-c").await;
+    for key in ["native-b", "native-a"] {
+        assert!(matches!(
+            dispatch_queue(&mut c, &id, key, false).await,
+            Response::MessageQueue { .. }
+        ));
+    }
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let input = std::fs::read_to_string(root.path().join("native-inputs")).unwrap_or_default();
+        if input.lines().count() == 2 {
+            assert_eq!(input, "native-message-b\nnative-message-a\n");
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "native inputs received while head still running"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(!root.path().join("native-interrupts").exists());
+    let Response::Events {
+        events, session, ..
+    } = ask(
+        &mut c,
+        Request::Poll {
+            session_id: id.clone(),
+            after: 0.0,
+        },
+    )
+    .await
+    else {
+        panic!("poll")
+    };
+    assert_eq!(session.status, Status::Running);
+    assert_eq!(
+        events
+            .iter()
+            .filter(|e| matches!(e.event, EventKind::User { .. }))
+            .count(),
+        1,
+        "handoff is not execution"
+    );
+    assert!(matches!(
+        dispatch_queue(&mut c, &id, "native-b", false).await,
+        Response::Error { .. }
+    ));
+    assert!(matches!(
+        queue_send(&mut c, &id, "native-b", "native-message-b").await,
+        Response::Accepted { duplicate: true }
+    ));
+    drop(c);
+    std::fs::write(root.path().join("native-release"), "go").unwrap();
+    let mut observer = host.client().await;
+    let events = queue_until(&mut observer, &id, 4).await;
+    let ids = events
+        .iter()
+        .filter_map(|e| match &e.event {
+            EventKind::User { request_id, .. } => Some(request_id.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(ids, ["native-head", "native-b", "native-a", "host-c"]);
+    assert_eq!(
+        std::fs::read_to_string(root.path().join("native-inputs")).unwrap(),
+        "native-message-b\nnative-message-a\nnative-message-c\n"
+    );
+}
+#[tokio::test]
+async fn message_queue_stop_and_send_is_explicit_and_prioritizes_only_the_selected_item() {
+    let host = Host::start().await;
+    let root = tempfile::tempdir().unwrap();
+    let mut c = host.client().await;
+    let id = session(&mut c, root.path()).await;
+    queue_send(&mut c, &id, "stop-send-head", "native-queue-head").await;
+    native_queue_ready(&mut c, &id).await;
+    queue_send(&mut c, &id, "after-a", "native-message-a").await;
+    queue_send(&mut c, &id, "priority-b", "native-message-b").await;
+    assert!(matches!(
+        dispatch_queue(&mut c, &id, "priority-b", true).await,
+        Response::MessageQueue { .. }
+    ));
+    let events = queue_until(&mut c, &id, 3).await;
+    let ids = events
+        .iter()
+        .filter_map(|e| match &e.event {
+            EventKind::User { request_id, .. } => Some(request_id.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(ids, ["stop-send-head", "priority-b", "after-a"]);
+    assert_eq!(
+        std::fs::read_to_string(root.path().join("native-interrupts")).unwrap(),
+        "interrupt\n"
+    );
+    assert!(events.iter().any(|e| matches!(
+        e.event,
+        EventKind::State {
+            status: Status::Stopped,
+            ..
+        }
+    )));
+}
+#[tokio::test]
+async fn message_queue_stop_quarantines_handed_off_messages_without_automatic_replay() {
+    let host = Host::start().await;
+    let root = tempfile::tempdir().unwrap();
+    let mut c = host.client().await;
+    let id = session(&mut c, root.path()).await;
+    queue_send(&mut c, &id, "unknown-head", "native-queue-head").await;
+    native_queue_ready(&mut c, &id).await;
+    queue_send(&mut c, &id, "unknown-sent", "native-message-sent").await;
+    queue_send(&mut c, &id, "held", "native-message-held").await;
+    assert!(matches!(
+        dispatch_queue(&mut c, &id, "unknown-sent", false).await,
+        Response::MessageQueue { .. }
+    ));
+    ask(
+        &mut c,
+        Request::Cancel {
+            session_id: id.clone(),
+        },
+    )
+    .await;
+    let events = wait(&mut c, &id, Status::Stopped).await;
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(&e.event,EventKind::Notice{text} if text.contains("不会自动重发")))
+    );
+    assert!(matches!(
+        queue_send(&mut c, &id, "unknown-sent", "native-message-sent").await,
+        Response::Accepted { duplicate: true }
+    ));
+    let Response::MessageQueue {
+        entries,
+        paused: true,
+        ..
+    } = ask(
+        &mut c,
+        Request::MessageQueue {
+            session_id: id.clone(),
+        },
+    )
+    .await
+    else {
+        panic!("paused queue")
+    };
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].request_id, "held");
+    ask(
+        &mut c,
+        Request::ResumeMessageQueue {
+            session_id: id.clone(),
+            provider: Some(latte_work_protocol::TurnProvider::Cli),
+        },
+    )
+    .await;
+    let events = queue_until(&mut c, &id, 2).await;
+    assert!(
+        !events.iter().any(
+            |e| matches!(&e.event,EventKind::User{request_id,..} if request_id=="unknown-sent")
+        )
+    );
+}
+
+#[tokio::test]
+async fn message_queue_stop_and_send_after_native_handoff_never_replays_uncertain_inputs() {
+    let host = Host::start().await;
+    let root = tempfile::tempdir().unwrap();
+    let mut c = host.client().await;
+    let id = session(&mut c, root.path()).await;
+    queue_send(&mut c, &id, "mixed-head", "native-queue-head").await;
+    native_queue_ready(&mut c, &id).await;
+    for (key, text) in [
+        ("mixed-sent", "native-message-sent"),
+        ("mixed-priority", "native-message-priority"),
+        ("mixed-held", "native-message-held"),
+    ] {
+        queue_send(&mut c, &id, key, text).await;
+    }
+    assert!(matches!(
+        dispatch_queue(&mut c, &id, "mixed-sent", false).await,
+        Response::MessageQueue { .. }
+    ));
+    let received_deadline = Instant::now() + Duration::from_secs(5);
+    while !std::fs::read_to_string(root.path().join("native-inputs"))
+        .unwrap_or_default()
+        .contains("native-message-sent")
+    {
+        assert!(
+            Instant::now() < received_deadline,
+            "fixture must read the handed-off input before explicit stop"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(matches!(
+        dispatch_queue(&mut c, &id, "mixed-priority", true).await,
+        Response::MessageQueue { .. }
+    ));
+    let events = queue_until(&mut c, &id, 3).await;
+    let ids = events
+        .iter()
+        .filter_map(|e| match &e.event {
+            EventKind::User { request_id, .. } => Some(request_id.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(ids, ["mixed-head", "mixed-priority", "mixed-held"]);
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(&e.event,EventKind::Notice{text} if text.contains("不会自动重发")))
+    );
+    let input = std::fs::read_to_string(root.path().join("native-inputs")).unwrap();
+    assert_eq!(
+        input
+            .lines()
+            .filter(|s| *s == "native-message-sent")
+            .count(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn message_queue_desktop_provider_bridge_accepts_both_dispatch_responses() {
+    let host = Host::start().await;
+    let root = tempfile::tempdir().unwrap();
+    let mut c = host.client().await;
+    let id = session(&mut c, root.path()).await;
+    queue_send(&mut c, &id, "bridge-head", "native-queue-head").await;
+    native_queue_ready(&mut c, &id).await;
+    queue_send(&mut c, &id, "bridge-a", "native-message-a").await;
+    queue_send(&mut c, &id, "bridge-b", "native-message-b").await;
+    let target = tokio::sync::Mutex::new(c);
+    for (key, interrupt) in [("bridge-a", false), ("bridge-b", true)] {
+        let response = latte_work_client::request_with_app_provider(
+            &target,
+            Request::DispatchQueuedMessage {
+                session_id: id.clone(),
+                request_id: key.into(),
+                revision: 0,
+                interrupt,
+                provider: None,
+            },
+            |agent| async move {
+                assert_eq!(agent, "claude");
+                Ok(None)
+            },
+        )
+        .await
+        .unwrap();
+        assert!(
+            matches!(response, Response::MessageQueue { .. }),
+            "native bridge must accept queue acknowledgement"
+        );
+    }
+    let events = queue_until(&mut *target.lock().await, &id, 2).await;
+    let ids = events
+        .iter()
+        .filter_map(|e| match &e.event {
+            EventKind::User { request_id, .. } => Some(request_id.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(ids, ["bridge-head", "bridge-b"]);
 }
