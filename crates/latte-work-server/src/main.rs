@@ -39,6 +39,7 @@ struct Service {
     terminals: terminal::SharedTerminals,
     database: Database,
     runs: Runs,
+    title_refresh: Arc<Mutex<runtime::TitleRefreshCache>>,
     command_probes: Arc<tokio::sync::Semaphore>,
     file_admission: Arc<tokio::sync::RwLock<()>>,
     agent_binary: String,
@@ -171,6 +172,7 @@ async fn serve(dir: &Path) -> Result<()> {
         providers: Arc::new(Mutex::new(providers::ProviderStore::open(dir)?)),
         database,
         runs: Arc::new(Mutex::new(HashMap::new())),
+        title_refresh: Arc::new(Mutex::new(runtime::TitleRefreshCache::default())),
         command_probes: Arc::new(tokio::sync::Semaphore::new(2)),
         file_admission: Arc::new(tokio::sync::RwLock::new(())),
         agent_binary,
@@ -1236,7 +1238,7 @@ async fn dispatch(s: &Service, request: Request) -> Result<Response> {
     {
         s.lifecycle.forget(&resource)?;
     }
-    runtime::refresh_titles(&s.database, &s.runs, &mut response).await?;
+    runtime::refresh_titles(&s.database, &s.runs, &s.title_refresh, &mut response).await?;
     runtime::project_session_state(&s.runs, &mut response)?;
     Ok(response)
 }

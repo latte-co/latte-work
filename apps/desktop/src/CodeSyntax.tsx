@@ -12,7 +12,7 @@ export function CodeSyntax({ text, path }: { text: string; path?: string }) {
     return <>{text}</>;
   const hashComments = /\.(py|sh|bash|zsh|ya?ml|toml)$/.test(path);
   const tokens = text.split(
-    /(\/\/.*$|#[^\n]*$|\/\*.*?\*\/|"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|`(?:\\.|[^`\\])*`|\b\d+(?:\.\d+)?\b|\b[A-Za-z_][A-Za-z_0-9]*\b)/g,
+    /(\/\/[^\n]*|#[^\n]*|\/\*[\s\S]*?\*\/|"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|`(?:\\.|[^`\\])*`|\b\d+(?:\.\d+)?\b|\b[A-Za-z_][A-Za-z_0-9]*\b)/g,
   );
   return (
     <>

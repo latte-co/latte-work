@@ -56,8 +56,8 @@ for line in sys.stdin:
         metadata({'type':'user','message':{'content':text},'sessionId':native_id})
         if name: metadata({'type':'custom-title','customTitle':name,'sessionId':native_id})
         emit({'type':'system','subtype':'init','session_id':native_id})
-        if text=='native-title':
-            if not name:
+        if text in ('native-title', 'native-title-update'):
+            if not name or text=='native-title-update':
                 metadata({'type':'ai-title','aiTitle':'Agent generated title','sessionId':native_id})
                 emit({'type':'system','subtype':'session_title_changed','title':'Agent generated title','session_id':native_id})
             emit({'type':'assistant','message':{'content':[{'type':'text','text':'TITLE_OK'}]}})
@@ -96,6 +96,23 @@ for line in sys.stdin:
         if text=='hang':
             child=subprocess.Popen(['sleep','120'])
             emit({'type':'assistant','message':{'content':[{'type':'text','text':f'child:{child.pid}'}]}})
+            continue
+        if text=='child-stream-overflow':
+            for i in range(513):
+                emit({'type':'system','subtype':'task_started','task_id':f'overflow-{i}','task_type':'local_agent','tool_use_id':f'overflow-tool-{i}','description':'Bounded streaming fixture'})
+                emit({'type':'stream_event','parent_tool_use_id':f'overflow-tool-{i}','event':{'type':'content_block_delta','delta':{'type':'text_delta','text':'prefix'}}})
+                if i<512:
+                    # Terminal notifications can precede the full assistant
+                    # envelope. Stay within the native active-task quota while
+                    # accumulating pending stream de-duplication entries.
+                    emit({'type':'system','subtype':'task_notification','task_id':f'overflow-{i}','status':'completed','summary':'Complete'})
+            emit({'type':'assistant','parent_tool_use_id':'overflow-tool-0','message':{'content':[{'type':'text','text':'prefix'}]}})
+            emit({'type':'stream_event','parent_tool_use_id':'overflow-tool-512','event':{'type':'content_block_delta','delta':{'type':'text_delta','text':'tail'}}})
+            emit({'type':'assistant','parent_tool_use_id':'overflow-tool-512','message':{'content':[{'type':'text','text':'prefixtail'}]}})
+            emit({'type':'system','subtype':'task_notification','task_id':'overflow-512','status':'completed','summary':'Complete'})
+            emit({'type':'assistant','message':{'content':[{'type':'text','text':'OVERFLOW_PARENT_OK'}]}})
+            emit({'type':'result','subtype':'success','is_error':False})
+            emit({'type':'system','subtype':'session_state_changed','state':'idle'})
             continue
         if text=='subagent-process':
             child_native_file=None

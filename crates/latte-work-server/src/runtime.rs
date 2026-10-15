@@ -19,7 +19,7 @@ use std::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
 use tokio::{
     io::{AsyncReadExt, AsyncWrite, AsyncWriteExt},
@@ -30,6 +30,35 @@ use tokio_util::codec::{FramedRead, LinesCodec};
 
 pub type Database = Arc<Mutex<Store>>;
 pub type Runs = Arc<Mutex<HashMap<String, Run>>>;
+#[derive(Default)]
+pub struct TitleRefreshCache {
+    reads: HashMap<String, (String, Instant)>,
+}
+impl TitleRefreshCache {
+    const INTERVAL: Duration = Duration::from_secs(2);
+    const LIMIT: usize = 2048;
+    fn claim(&mut self, session: &Session, now: Instant) -> bool {
+        let Some(native_id) = &session.native_id else {
+            return false;
+        };
+        if self.reads.get(&session.id).is_some_and(|(native, read)| {
+            native == native_id && now.duration_since(*read) < Self::INTERVAL
+        }) {
+            return false;
+        }
+        if self.reads.len() >= Self::LIMIT {
+            self.reads
+                .retain(|_, (_, read)| now.duration_since(*read) < Self::INTERVAL);
+            if self.reads.len() >= Self::LIMIT {
+                return false;
+            }
+        }
+        // Reserve before spawning I/O so concurrent clients share the debounce.
+        self.reads
+            .insert(session.id.clone(), (native_id.clone(), now));
+        true
+    }
+}
 #[derive(Clone)]
 pub struct Run {
     pub control: mpsc::Sender<Control>,
@@ -176,6 +205,7 @@ pub async fn rename_title(
 pub async fn refresh_titles(
     database: &Database,
     runs: &Runs,
+    cache: &Mutex<TitleRefreshCache>,
     response: &mut Response,
 ) -> Result<()> {
     let sessions: Vec<Session> = match response {
@@ -194,10 +224,21 @@ pub async fn refresh_titles(
         .keys()
         .cloned()
         .collect();
-    let candidates = db(database, |s| {
+    let due: Vec<_> = {
+        let mut cache = cache
+            .lock()
+            .map_err(|_| anyhow::anyhow!("标题刷新锁异常"))?;
+        let now = Instant::now();
         sessions
             .into_iter()
-            .filter(|session| session.native_id.is_some() && !open_ids.contains(&session.id))
+            .filter(|session| !open_ids.contains(&session.id) && cache.claim(session, now))
+            .collect()
+    };
+    if due.is_empty() {
+        return Ok(());
+    }
+    let candidates = db(database, |s| {
+        due.into_iter()
             .map(|session| {
                 s.project(&session.project_id)
                     .map(|project| (session, project.path))
@@ -215,34 +256,47 @@ pub async fn refresh_titles(
                 )
                 .ok()
                 .flatten()
-                .map(|title| (session.id, title))
+                .map(|title| (session, title))
             })
             .collect::<Vec<_>>()
     })
     .await?;
-    for (id, title) in titles {
-        db(database, |s| {
-            s.sync_native_title(&id, &title.text, title.custom)
-        })?;
-    }
-    let update = |session: &mut Session| -> Result<()> {
-        let fresh = db(database, |s| s.session(&session.id))?;
-        session.title = fresh.title;
-        session.custom_title = fresh.custom_title;
-        Ok(())
+    let current = runs.lock().map_err(|_| anyhow::anyhow!("执行状态锁异常"))?;
+    let fresh = db(database, |s| {
+        let mut fresh = HashMap::new();
+        for (observed, title) in titles {
+            let mut session = s.session(&observed.id)?;
+            // Native reads must not overwrite a rename or a newly opened actor
+            // that raced the blocking file read.
+            if !current.contains_key(&session.id)
+                && session.native_id == observed.native_id
+                && session.title == observed.title
+                && session.custom_title == observed.custom_title
+            {
+                session = s.sync_native_title(&session.id, &title.text, title.custom)?;
+            }
+            fresh.insert(session.id.clone(), session);
+        }
+        Ok(fresh)
+    })?;
+    let update = |session: &mut Session| {
+        if let Some(fresh) = fresh.get(&session.id) {
+            session.title.clone_from(&fresh.title);
+            session.custom_title = fresh.custom_title;
+        }
     };
     match response {
         Response::Session { session }
         | Response::Events { session, .. }
-        | Response::History { session, .. } => update(session)?,
+        | Response::History { session, .. } => update(session),
         Response::Sessions { sessions } => {
             for session in sessions {
-                update(session)?;
+                update(session);
             }
         }
         Response::RecentSessions { sessions, .. } => {
             for entry in sessions {
-                update(&mut entry.session)?;
+                update(&mut entry.session);
             }
         }
         _ => {}
@@ -1270,6 +1324,28 @@ pub async fn commands(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn closed_title_refresh_is_debounced_per_native_identity_and_memory_bounded() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(&dir.path().join("titles.db")).unwrap();
+        let project = store.add_project(dir.path()).unwrap();
+        let mut session = store.create_session(project.id, "claude".into()).unwrap();
+        let mut cache = TitleRefreshCache::default();
+        let now = Instant::now();
+        assert!(!cache.claim(&session, now));
+        session.native_id = Some("native-1".into());
+        assert!(cache.claim(&session, now));
+        assert!(!cache.claim(&session, now + Duration::from_millis(650)));
+        assert!(cache.claim(&session, now + TitleRefreshCache::INTERVAL));
+        session.native_id = Some("native-2".into());
+        assert!(cache.claim(&session, now + TitleRefreshCache::INTERVAL));
+        for i in 0..TitleRefreshCache::LIMIT + 5 {
+            session.id = format!("session-{i}");
+            cache.claim(&session, now + TitleRefreshCache::INTERVAL);
+        }
+        assert_eq!(cache.reads.len(), TitleRefreshCache::LIMIT);
+        assert!(cache.claim(&session, now + TitleRefreshCache::INTERVAL * 2));
+    }
     #[tokio::test]
     async fn actions_preserve_wire_bytes_and_ready_never_sends_an_implicit_prompt() {
         let dir = tempfile::tempdir().unwrap();

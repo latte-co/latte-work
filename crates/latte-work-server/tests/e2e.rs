@@ -1087,7 +1087,7 @@ async fn native_session_titles_sync_both_ways_without_sending_or_stopping_turns(
     assert!(
         matches!(ask(&mut client,Request::Poll{session_id:id.clone(),after:0.0}).await,Response::Events{session,events,..} if session.title=="Manual title" && session.status==Status::Completed && events.iter().filter(|e|matches!(e.event,EventKind::User{..})).count()==before)
     );
-    send(&mut client, &id, "title-r2", "native-title").await;
+    send(&mut client, &id, "title-r2", "native-title-update").await;
     wait(&mut client, &id, Status::Completed).await;
     assert!(
         matches!(ask(&mut client,Request::Session{session_id:id.clone()}).await,Response::Session{session} if session.title=="Manual title")
@@ -1141,9 +1141,27 @@ async fn native_session_titles_sync_both_ways_without_sending_or_stopping_turns(
         .unwrap();
     writeln!(file,"{}",serde_json::json!({"type":"custom-title","customTitle":"External title","sessionId":"11111111-1111-4111-8111-111111111111"})).unwrap();
     let mut reconnect = host.client().await;
-    assert!(
-        matches!(ask(&mut reconnect,Request::Session{session_id:id.clone()}).await,Response::Session{session} if session.title=="External title" && session.custom_title)
-    );
+    // Native file reads are debounced across clients; external renames appear
+    // on a later metadata read, without launching an Agent or sending a prompt.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let response = ask(
+            &mut reconnect,
+            Request::Session {
+                session_id: id.clone(),
+            },
+        )
+        .await;
+        if matches!(response, Response::Session { session } if session.title=="External title" && session.custom_title)
+        {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "external title was not refreshed"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
     ask(
         &mut reconnect,
         Request::OpenAgentSession {
@@ -2566,6 +2584,86 @@ async fn native_child_transcript_is_cached_without_reopening_an_agent_or_replayi
     assert_eq!(events.len(), restored.len());
     assert!(
         matches!(ask(&mut reconnected, Request::Poll { session_id: id, after: 0.0 }).await, Response::Events { session, events, .. } if session.agent_session_open == Some(false) && events.iter().filter(|e| matches!(e.event, EventKind::User { .. })).count() == 1)
+    );
+}
+
+#[tokio::test]
+async fn excess_child_streams_keep_parent_alive_and_preserve_complete_child_text() {
+    async fn completed_history(client: &mut Client, id: &str) -> Vec<latte_work_protocol::Event> {
+        let deadline = Instant::now() + Duration::from_secs(15);
+        loop {
+            let Response::History {
+                session, events, ..
+            } = ask(
+                client,
+                Request::History {
+                    session_id: id.into(),
+                    before: None,
+                },
+            )
+            .await
+            else {
+                panic!("history response");
+            };
+            assert_ne!(
+                session.status,
+                Status::Failed,
+                "fixture failed: {:?}",
+                events
+                    .iter()
+                    .filter_map(|e| match &e.event {
+                        EventKind::Notice { text } => Some(text),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+            );
+            if session.status == Status::Completed {
+                return events;
+            }
+            assert!(Instant::now() < deadline, "fixture did not complete");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+    let host = Host::start().await;
+    let mut client = host.client().await;
+    let project = tempfile::tempdir().unwrap();
+    let id = session(&mut client, project.path()).await;
+    send(&mut client, &id, "child-overflow", "child-stream-overflow").await;
+    let events = completed_history(&mut client, &id).await;
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(&e.event, EventKind::Text { text } if text == "OVERFLOW_PARENT_OK"))
+    );
+    let Response::SubagentHistory { events, .. } = ask(
+        &mut client,
+        Request::SubagentHistory {
+            session_id: id.clone(),
+            task_id: "overflow-512".into(),
+            after: None,
+            source: None,
+            provider: None,
+        },
+    )
+    .await
+    else {
+        panic!("child history");
+    };
+    let text: String = events
+        .iter()
+        .filter_map(|e| match &e.event {
+            EventKind::Text { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(text, "prefixtail");
+    // The same persistent native actor can accept a subsequent turn.
+    send(&mut client, &id, "after-overflow", "identity").await;
+    let events = completed_history(&mut client, &id).await;
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(&e.event, EventKind::Text { text } if text.contains("\"turns\": 2")))
     );
 }
 

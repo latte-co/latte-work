@@ -134,6 +134,9 @@ Latte's explicit model/effort selections continue to apply on each launched turn
 App-owned `/agents` (and listing aliases), `/model` and `/effort` are resolved before
 native command discovery or turn admission. The latter two open the existing model
 selector or effort submenu; they never change native configuration via a CLI command.
+These names are reserved across all Agents to keep one App navigation contract;
+unsupported selections report their capability error rather than forwarding the
+reserved name to a different native CLI.
 Arguments are retained in the draft with a menu-selection notice. A disabled/unready
 selector reports its reason without clearing the draft or stopping a running turn.
 Namespaced project commands remain native. The workbench send boundary also rejects
@@ -469,6 +472,10 @@ Child tools update child activity rather than the main-agent transcript/status.
 A main result does not finish its background children. Explicit process close
 marks children stopped only after process-group cleanup; process failure or daemon
 restart marks unfinished children unknown, including after a completed main turn.
+Live text streaming tracks at most 512 child IDs. On overflow, existing streams
+continue and new child streams wait for complete assistant messages/native history
+instead of failing the parent. Skipped streams never restart midway through their
+text; admission resets only at a new turn with no unfinished children or streams.
 Transport reconnect neither starts children nor replays their prompts.
 
 The conversation summary opens a closeable Subagents workspace tab, grouped by
@@ -690,6 +697,11 @@ the exact native UUID, reject escaping/symlink session files, and read bounded
 64 KiB head/tail windows. Custom native titles take priority over generated titles.
 Metadata reads of closed sessions refresh sidebar/history titles; live sessions
 follow native events so stale transcript flushes cannot overwrite a rename.
+Closed-file reads are debounced per session/native identity for two seconds across
+all clients, with at most 2,048 entries. Repeated polls reuse the current database
+projection. External native renames appear at the next eligible metadata read;
+read results apply only if the native identity, title and custom-title state still
+match the original snapshot and no actor has opened in the meantime.
 These semantics are shared by local and SSH hosts. Unsupported native live rename
 returns an error instead of silently renaming only the Latte record.
 

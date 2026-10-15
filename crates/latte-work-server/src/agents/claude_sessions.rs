@@ -256,7 +256,7 @@ fn read_child_page_path(
         if line.is_empty() {
             break;
         }
-        if line.len() > latte_work_protocol::MAX_FRAME - 4096 {
+        if line.strip_suffix(b"\n").unwrap_or(&line).len() > latte_work_protocol::MAX_FRAME - 4096 {
             bail!("子会话单条原始记录超出安全读取范围，内容未截断");
         }
         if !line.ends_with(b"\n") {
@@ -383,6 +383,31 @@ mod tests {
         let mut invalid = page.cursor;
         invalid.identity = "replaced".into();
         assert!(super::read_child_page_path(&parent, "a123", invalid).is_err());
+    }
+    #[test]
+    fn child_record_limit_excludes_newline_and_retries_an_exact_boundary_tail() {
+        let dir = tempfile::tempdir().unwrap();
+        let parent = dir.path().canonicalize().unwrap().join("parent.jsonl");
+        std::fs::write(&parent, "").unwrap();
+        let children = parent.with_extension("").join("subagents");
+        std::fs::create_dir_all(&children).unwrap();
+        let path = children.join("agent-a123.jsonl");
+        let limit = latte_work_protocol::MAX_FRAME - 4096;
+        let record = format!("{{\"text\":\"{}\"}}", "x".repeat(limit - 11));
+        assert_eq!(record.len(), limit);
+        std::fs::write(&path, &record).unwrap();
+        let cursor = super::super::ChildHistoryCursor::default();
+        let partial = super::read_child_page_path(&parent, "a123", Default::default())
+            .unwrap()
+            .unwrap();
+        assert!(partial.bytes.is_empty() && partial.cursor.pending_tail);
+        std::fs::write(&path, format!("{record}\n")).unwrap();
+        let page = super::read_child_page_path(&parent, "a123", partial.cursor)
+            .unwrap()
+            .unwrap();
+        assert_eq!(page.bytes, format!("{record}\n").as_bytes());
+        std::fs::write(&path, format!("{record} \n")).unwrap();
+        assert!(super::read_child_page_path(&parent, "a123", cursor).is_err());
     }
     use super::*;
     #[test]

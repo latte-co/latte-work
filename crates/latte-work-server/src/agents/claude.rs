@@ -224,6 +224,7 @@ pub struct Claude {
     rename_result_title: Option<String>,
     streamed: bool,
     streamed_children: HashSet<String>,
+    child_stream_overflow: bool,
     emitted_text: bool,
     context: Option<ContextUsage>,
     accounting_model: Option<String>,
@@ -651,6 +652,9 @@ fn parse_questions(input: &Value) -> Result<Vec<latte_work_protocol::UserQuestio
 }
 impl Claude {
     fn reset_turn(&mut self) {
+        if !self.has_background_work() && self.streamed_children.is_empty() {
+            self.child_stream_overflow = false;
+        }
         self.streamed = false;
         self.emitted_text = false;
         self.progress = None;
@@ -703,10 +707,16 @@ impl Claude {
                     && event["delta"]["type"] == "text_delta"
                     && let Some(text) = event["delta"]["text"].as_str()
                 {
-                    if self.streamed_children.len() >= 512
-                        && !self.streamed_children.contains(parent)
-                    {
-                        bail!("子智能体输出数量超出限制");
+                    if !self.streamed_children.contains(parent) {
+                        if self.streamed_children.len() >= 512 {
+                            self.child_stream_overflow = true;
+                        }
+                        if self.child_stream_overflow {
+                            // Keep the parent alive and wait for the complete
+                            // assistant message/native history. Do not resume
+                            // halfway through a skipped stream after a slot frees.
+                            return Ok(output);
+                        }
                     }
                     self.streamed_children.insert(parent.into());
                     output.push(capture(EventKind::Text { text: text.into() }));
@@ -1432,12 +1442,9 @@ pub(super) fn parse_child_transcript(
         (VecDeque::new(), 0usize, raw.start, raw.truncated);
     let at = crate::store::now();
     let mut handbacks = HashMap::<String, String>::new();
-    for (line_index, line) in raw.bytes.split_inclusive(|b| *b == b'\n').enumerate() {
+    for line in raw.bytes.split_inclusive(|b| *b == b'\n') {
         let base = offset;
         offset += line.len() as u64;
-        if line_index == 0 && raw.start != 0 {
-            continue;
-        }
         let value: Value = match serde_json::from_slice(line) {
             Ok(value) => value,
             Err(_) => {
@@ -1603,9 +1610,6 @@ pub(super) fn normalize_child_transcript(
             } => {
                 if let Some(text) = pending.remove(id.as_str())
                     && handback_delivered(&json!({"content":content,"is_error":is_error}))
-                    && !source
-                        .get(index + 1)
-                        .is_some_and(|e| matches!(e.event, EventKind::Text { .. }))
                 {
                     report = Some(text);
                 }
@@ -1616,7 +1620,15 @@ pub(super) fn normalize_child_transcript(
         if let Some(text) = report {
             let (reports, partial) =
                 report_events(text.into(), event.seq, &event.session_id, event.at);
-            additions.extend(reports);
+            // Any following prose may be a delivery receipt, not the report.
+            // Only an exact existing report sequence makes promotion redundant.
+            let already_present = source.get(index + 1..index + 1 + reports.len())
+                .is_some_and(|following| following.iter().zip(&reports).all(|(actual, expected)|
+                    matches!((&actual.event, &expected.event), (EventKind::Text { text: a }, EventKind::Text { text: b }) if a == b)
+                ));
+            if !already_present {
+                additions.extend(reports);
+            }
             truncated |= partial;
         }
         for event in additions {
@@ -1896,6 +1908,71 @@ mod tests {
         );
     }
     #[test]
+    fn excess_child_streams_wait_for_full_messages_without_failing_parent_or_losing_prefixes() {
+        use super::*;
+        let mut adapter = Claude {
+            phase: Phase::Running,
+            ..Default::default()
+        };
+        for i in 0..513 {
+            let parent = format!("child-{i}");
+            adapter.foreground_agents.insert(parent.clone());
+            let actions = adapter.decode(json!({"type":"stream_event","parent_tool_use_id":parent,"event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"prefix"}}})).unwrap();
+            assert_eq!(actions.len(), usize::from(i < 512));
+        }
+        assert_eq!(adapter.streamed_children.len(), 512);
+        // Freeing a slot must not start capturing the skipped child's tail,
+        // which would suppress its complete message and lose its prefix.
+        adapter.decode(json!({"type":"assistant","parent_tool_use_id":"child-0","message":{"content":[{"type":"text","text":"prefix"}]}})).unwrap();
+        assert!(adapter.decode(json!({"type":"stream_event","parent_tool_use_id":"child-512","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"tail"}}})).unwrap().is_empty());
+        let full = adapter.decode(json!({"type":"assistant","parent_tool_use_id":"child-512","message":{"content":[{"type":"text","text":"prefixtail"}]}})).unwrap();
+        assert!(
+            matches!(&full[..], [Action::SubagentEvent { event: EventKind::Text { text }, .. }] if text == "prefixtail")
+        );
+        assert!(matches!(adapter.phase, Phase::Running));
+        let finish = adapter
+            .decode(json!({"type":"result","is_error":false,"result":"parent complete"}))
+            .unwrap();
+        assert!(
+            finish
+                .iter()
+                .any(|a| matches!(a, Action::Finished { failed: false, .. }))
+        );
+    }
+    #[test]
+    fn bounded_child_window_keeps_a_complete_first_record_at_a_nonzero_offset() {
+        use super::*;
+        let config = LaunchConfig {
+            provider: None,
+            settings_dir: PathBuf::from("/tmp"),
+            model: None,
+            effort: None,
+            permission_mode: None,
+        };
+        let line = json!({"type":"assistant","sessionId":"parent","agentId":"child","isSidechain":true,"message":{"content":[{"type":"text","text":"first complete record"}]}});
+        for prefix in ["", "partial JSON fragment\n"] {
+            let raw = super::super::claude_sessions::ChildBytes {
+                bytes: format!("{prefix}{line}\n").into_bytes(),
+                start: 1024,
+                truncated: true,
+            };
+            let (events, truncated) =
+                parse_child_transcript(raw, "parent", "child", "public", &config).unwrap();
+            assert!(truncated);
+            assert!(
+                matches!(&events[..], [event] if matches!(&event.event, EventKind::Text { text } if text == "first complete record"))
+            );
+        }
+        let raw = super::super::claude_sessions::ChildBytes {
+            bytes: format!("{line}\n").into_bytes(),
+            start: 1024,
+            truncated: true,
+        };
+        assert!(
+            parse_child_transcript(raw, "different-parent", "child", "public", &config).is_err()
+        );
+    }
+    #[test]
     fn complete_child_history_preserves_long_reports_and_cross_page_confirmation() {
         use super::*;
         let config = LaunchConfig {
@@ -2073,6 +2150,31 @@ mod tests {
                 is_error: false,
             },
         });
+        // A receipt or empty streaming fragment must not hide the report.
+        for text in ["", "Report delivered. Read it in the parent session."] {
+            let mut source = cached.clone();
+            source.0.push(latte_work_protocol::Event {
+                seq: 1000001.0,
+                session_id: "public".into(),
+                at: 0.0,
+                event: EventKind::Text { text: text.into() },
+            });
+            let restored = normalize_child_transcript(source).unwrap();
+            let actual: String = restored
+                .0
+                .iter()
+                .filter_map(|e| match &e.event {
+                    EventKind::Text { text } => Some(text.as_str()),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(actual, format!("{old_report}{text}"));
+            assert_eq!(
+                serde_json::to_value(normalize_child_transcript(restored.clone()).unwrap())
+                    .unwrap(),
+                serde_json::to_value(restored).unwrap()
+            );
+        }
         let restored = normalize_child_transcript(cached).unwrap();
         let restored_text: String = restored
             .0

@@ -28,6 +28,50 @@ fn no_symlink_ancestors(root: &Path, relative: &Path) -> Result<()> {
     }
     Ok(())
 }
+fn if_present<T>(result: Result<T>) -> Result<Option<T>> {
+    match result {
+        Ok(value) => Ok(Some(value)),
+        Err(error)
+            if error
+                .downcast_ref::<std::io::Error>()
+                .is_some_and(|e| e.kind() == std::io::ErrorKind::NotFound) =>
+        {
+            Ok(None)
+        }
+        Err(error) => Err(error),
+    }
+}
+async fn inventory_directory(root: &Path, path: &Path) -> Result<Option<tokio::fs::ReadDir>> {
+    if_present(
+        async {
+            no_symlink_ancestors(root, path.strip_prefix(root)?)?;
+            Ok(tokio::fs::read_dir(path).await?)
+        }
+        .await,
+    )
+}
+async fn inventory_entry_type(
+    root: &Path,
+    entry: &tokio::fs::DirEntry,
+) -> Result<Option<std::fs::FileType>> {
+    if_present(
+        async {
+            let kind = entry.file_type().await?;
+            if !kind.is_symlink() {
+                let path = entry.path();
+                no_symlink_ancestors(root, path.strip_prefix(root)?)?;
+                files::resolve(
+                    root,
+                    path.strip_prefix(root)?
+                        .to_str()
+                        .context("文件路径不是 UTF-8")?,
+                )?;
+            }
+            Ok(kind)
+        }
+        .await,
+    )
+}
 async fn inventory(root: &Path) -> Result<(Vec<String>, bool)> {
     let (inside, truncated) = match files::git(root, &["rev-parse", "--is-inside-work-tree"]).await
     {
@@ -67,13 +111,17 @@ async fn inventory(root: &Path) -> Result<(Vec<String>, bool)> {
     let mut paths = Vec::new();
     let mut visited = 0;
     let mut truncated = false;
-    while let Some(directory) = directories.pop() {
-        no_symlink_ancestors(root, directory.strip_prefix(root)?)?;
-        let mut entries = tokio::fs::read_dir(&directory).await?;
-        while let Some(entry) = entries.next_entry().await? {
+    'walk: while let Some(directory) = directories.pop() {
+        let Some(mut entries) = inventory_directory(root, &directory).await? else {
+            continue;
+        };
+        while let Some(entry) =
+            if_present(entries.next_entry().await.map_err(Into::into))?.flatten()
+        {
             visited += 1;
             if visited > INVENTORY_LIMIT || paths.len() >= COUNT_LIMIT {
-                return Ok((paths, true));
+                truncated = true;
+                break 'walk;
             }
             let name = entry.file_name();
             let Some(name) = name.to_str() else {
@@ -83,20 +131,14 @@ async fn inventory(root: &Path) -> Result<(Vec<String>, bool)> {
             if matches!(name, ".git" | "node_modules" | "target" | ".DS_Store") {
                 continue;
             }
-            let kind = entry.file_type().await?;
+            let Some(kind) = inventory_entry_type(root, &entry).await? else {
+                continue;
+            };
             if kind.is_symlink() {
                 truncated = true;
                 continue;
             }
             let path = entry.path();
-            // Recheck ancestors before traversal; never follow a directory link.
-            no_symlink_ancestors(root, path.strip_prefix(root)?)?;
-            files::resolve(
-                root,
-                path.strip_prefix(root)?
-                    .to_str()
-                    .context("文件路径不是 UTF-8")?,
-            )?;
             if kind.is_dir() {
                 directories.push(path);
             } else if kind.is_file() {
@@ -173,15 +215,22 @@ impl Snapshot {
                     snapshot.truncated = true;
                     continue;
                 }
-                let target = files::resolve(root, path)?;
+                let Some(target) = if_present(files::resolve(root, path))? else {
+                    snapshot.files.insert(path.into(), None);
+                    continue;
+                };
                 if !target.is_file() {
                     snapshot.truncated = true;
                     continue;
                 }
                 let mut bytes = Vec::new();
-                tokio::fs::File::open(target)
-                    .await?
-                    .take((FILE_LIMIT + 1) as u64)
+                let Some(file) =
+                    if_present(tokio::fs::File::open(target).await.map_err(Into::into))?
+                else {
+                    snapshot.files.insert(path.into(), None);
+                    continue;
+                };
+                file.take((FILE_LIMIT + 1) as u64)
                     .read_to_end(&mut bytes)
                     .await?;
                 total += bytes.len();
@@ -794,6 +843,9 @@ mod tests {
         for n in 0..=COUNT_LIMIT {
             std::fs::write(dir.path().join(format!("file-{n}.txt")), "bounded").unwrap();
         }
+        let (paths, truncated) = inventory(dir.path()).await.unwrap();
+        assert!(truncated && paths.len() == COUNT_LIMIT);
+        assert!(paths.windows(2).all(|pair| pair[0] < pair[1]));
         let snapshot = Snapshot::capture(dir.path()).await.unwrap();
         assert!(snapshot.truncated);
         assert!(snapshot.files.len() <= COUNT_LIMIT);
@@ -802,6 +854,43 @@ mod tests {
                 .files
                 .keys()
                 .all(|p| !p.contains("private") && !p.contains("skip"))
+        );
+    }
+    #[tokio::test]
+    async fn ordinary_inventory_skips_entries_and_queued_directories_deleted_after_enumeration() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("gone.txt"), "gone").unwrap();
+        let mut entries = tokio::fs::read_dir(dir.path()).await.unwrap();
+        let entry = entries.next_entry().await.unwrap().unwrap();
+        std::fs::remove_file(entry.path()).unwrap();
+        assert!(
+            inventory_entry_type(dir.path(), &entry)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        let queued = dir.path().join("queued");
+        std::fs::create_dir(&queued).unwrap();
+        std::fs::remove_dir(&queued).unwrap();
+        assert!(
+            inventory_directory(dir.path(), &queued)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        std::fs::write(dir.path().join("kept.txt"), "kept").unwrap();
+        assert_eq!(
+            inventory(dir.path()).await.unwrap(),
+            (vec!["kept.txt".into()], false)
+        );
+        // Disappearance is the only ignored error; permission and path-boundary
+        // failures must never be turned into a complete, empty inventory.
+        assert!(
+            if_present::<()>(Err(std::io::Error::from(
+                std::io::ErrorKind::PermissionDenied
+            )
+            .into()))
+            .is_err()
         );
     }
     #[tokio::test]

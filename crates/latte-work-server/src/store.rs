@@ -332,16 +332,7 @@ impl Store {
             .collect()
     }
     pub fn sync_live_native_title(&self, id: &str, title: &str) -> Result<Session> {
-        let mut session = self.session(id)?;
-        if !title.trim().is_empty()
-            && title.chars().count() <= 200
-            && !title.chars().any(char::is_control)
-            && session.title != title
-        {
-            session.title = title.into();
-            self.save(&session)?;
-        }
-        Ok(session)
+        self.sync_native_title(id, title, false)
     }
     pub fn sync_native_title(&self, id: &str, title: &str, custom: bool) -> Result<Session> {
         let mut session = self.session(id)?;
@@ -1317,6 +1308,34 @@ fn index_source(
 }
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn live_generated_titles_preserve_manual_names() {
+        use super::*;
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(&dir.path().join("titles.db")).unwrap();
+        let project = store.add_project(dir.path()).unwrap();
+        let session = store.create_session(project.id, "claude".into()).unwrap();
+        assert_eq!(
+            store
+                .sync_live_native_title(&session.id, "Generated")
+                .unwrap()
+                .title,
+            "Generated"
+        );
+        store.rename_session(&session.id, "Manual").unwrap();
+        let current = store
+            .sync_live_native_title(&session.id, "Later generated")
+            .unwrap();
+        assert_eq!(current.title, "Manual");
+        assert!(current.custom_title);
+        assert_eq!(
+            store
+                .sync_native_title(&session.id, "New manual", true)
+                .unwrap()
+                .title,
+            "New manual"
+        );
+    }
     #[test]
     fn subagent_transcripts_coalesce_streams_keep_aliases_and_survive_restart() {
         use super::*;
