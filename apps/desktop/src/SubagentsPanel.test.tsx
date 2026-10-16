@@ -71,6 +71,44 @@ it("separates running/completed/unknown and shows a selected native result", () 
   expect(screen.getByRole("button", { name: /other child/ })).toBeTruthy();
 });
 
+it("shows native roles below names and current tools only while running", () => {
+  const select = vi.fn();
+  const role = "review:code-reviewer";
+  const state = {
+    tasks: [
+      { ...task("Review service", "running"), agent_type: role },
+      { ...task("Review frontend", "completed"), agent_type: role },
+      { ...task("Paused", "paused"), agent_type: "Explore" },
+      task("Legacy", "unknown"),
+      { ...task("No role", "failed"), agent_type: "  " },
+    ],
+    loading: false,
+    error: "",
+    truncated: false,
+  };
+  render(<SubagentsPanel state={state} onOpen={select} />);
+  const running = screen.getByRole("button", { name: /Review service/ });
+  expect(running.querySelector(".subagent-metadata")?.textContent).toBe(
+    `${role} · 处理中 · Read`,
+  );
+  expect(running.querySelector(".subagent-type")?.getAttribute("title")).toBe(
+    role,
+  );
+  for (const [name, metadata] of [
+    ["Review frontend", `${role} · 已完成`],
+    ["Paused", "Explore · 已暂停"],
+    ["Legacy", "状态待确认"],
+    ["No role", "执行失败"],
+  ]) {
+    const row = screen.getByRole("button", { name: new RegExp(name) });
+    expect(row.querySelector(".subagent-metadata")?.textContent).toBe(metadata);
+  }
+  running.focus();
+  expect(document.activeElement).toBe(running);
+  fireEvent.click(running);
+  expect(select).toHaveBeenCalledWith(state.tasks[0]);
+});
+
 it("uses the conversation waiting row without a composer or duplicate metadata header", async () => {
   const state = {
     tasks: [{ ...task("child", "running"), last_tool: null }],

@@ -4300,7 +4300,7 @@ async fn subagents_native_commands_snapshot_reconnect_and_close_share_one_protoc
     )
     .await;
     assert!(
-        matches!(snapshot, Response::Subagents {tasks, truncated:false} if tasks.len()==1 && tasks[0].status == SubagentStatus::Running && tasks[0].native_id == "native-child" && tasks[0].last_tool.as_deref()==Some("Read"))
+        matches!(snapshot, Response::Subagents {tasks, truncated:false} if tasks.len()==1 && tasks[0].status == SubagentStatus::Running && tasks[0].native_id == "native-child" && tasks[0].last_tool.as_deref()==Some("Read") && tasks[0].agent_type.as_deref()==Some("Explore"))
     );
     drop(client);
     let mut client = host.client().await;
@@ -4312,7 +4312,7 @@ async fn subagents_native_commands_snapshot_reconnect_and_close_share_one_protoc
             .any(|event| matches!(&event.event, EventKind::User {text,..} if text=="/agents"))
     );
     assert!(
-        matches!(ask(&mut client, Request::Subagents {session_id:id.clone()}).await, Response::Subagents {tasks,..} if tasks.len()==1 && tasks[0].status==SubagentStatus::Stopped && tasks[0].summary.as_deref()==Some("Stopped by native command"))
+        matches!(ask(&mut client, Request::Subagents {session_id:id.clone()}).await, Response::Subagents {tasks,..} if tasks.len()==1 && tasks[0].status==SubagentStatus::Stopped && tasks[0].summary.as_deref()==Some("Stopped by native command") && tasks[0].agent_type.as_deref()==Some("Explore"))
     );
     let another = session(&mut client, folder.path()).await;
     assert!(

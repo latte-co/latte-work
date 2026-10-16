@@ -1713,6 +1713,9 @@ fn subagent_action(
             tool_use_id,
             title: bounded_field(fields, "description", 512)
                 .or_else(|| bounded_field(fields, "title", 512)),
+            agent_type: bounded_field(fields, "subagent_type", 256)
+                .map(|name| name.trim().to_owned())
+                .filter(|name| !name.is_empty()),
             status,
             summary: bounded_field(fields, "summary", 2048),
             last_tool: bounded_field(fields, "last_tool_name", 256),
@@ -2218,6 +2221,63 @@ mod tests {
             .collect();
         assert!(truncated && report.ends_with("（报告已截断）"));
         assert!(report.len() < 129 * 1024);
+    }
+
+    #[test]
+    fn subagent_roles_come_from_explicit_native_fields_and_are_bounded() {
+        for tool in ["Agent", "Task"] {
+            let mut agent = Claude::default();
+            let actions = agent
+                .decode(json!({"type":"assistant","message":{"content":[
+                    {"type":"tool_use","id":"child","name":tool,"input":{
+                        "description":"Review changes", "subagent_type":"review:code-reviewer"
+                    }}
+                ]}}))
+                .unwrap();
+            assert!(actions.iter().any(|action| matches!(action,
+                Action::Event(EventKind::Subagent { update })
+                    if update.agent_type.as_deref() == Some("review:code-reviewer")
+                    && update.title.as_deref() == Some("Review changes")
+            )));
+        }
+        let role = |fields| match subagent_action("child", None, &fields, None) {
+            Action::Event(EventKind::Subagent { update }) => update.agent_type,
+            _ => unreachable!(),
+        };
+        assert_eq!(
+            role(json!({"subagent_type":" Explore "})).as_deref(),
+            Some("Explore")
+        );
+        assert_eq!(
+            role(json!({"description":"code-reviewer", "task_type":"local_agent"})),
+            None
+        );
+        assert_eq!(role(json!({"subagent_type":"  "})), None);
+        assert_eq!(role(json!({"subagent_type":123})), None);
+        assert_eq!(
+            role(json!({"subagent_type":"界".repeat(300)}))
+                .unwrap()
+                .chars()
+                .count(),
+            256
+        );
+        let mut agent = Claude::default();
+        let start = agent
+            .decode(json!({"type":"system","subtype":"task_started",
+                "task_id":"native", "task_type":"local_agent", "subagent_type":"Explore"
+            }))
+            .unwrap();
+        assert!(start.iter().any(|action| matches!(action,
+            Action::Event(EventKind::Subagent { update }) if update.agent_type.as_deref() == Some("Explore")
+        )));
+        let progress = agent
+            .decode(json!({"type":"system","subtype":"task_progress",
+                "task_id":"native", "last_tool_name":"Read"
+            }))
+            .unwrap();
+        assert!(progress.iter().any(|action| matches!(action,
+            Action::Event(EventKind::Subagent { update }) if update.agent_type.is_none()
+        )));
     }
 
     #[test]

@@ -148,6 +148,10 @@ pub struct SubagentUpdate {
     pub id: String,
     pub tool_use_id: Option<String>,
     pub title: Option<String>,
+    /// Native agent role, when explicitly reported by the adapter.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub agent_type: Option<String>,
     pub status: Option<SubagentStatus>,
     pub summary: Option<String>,
     pub last_tool: Option<String>,
@@ -158,6 +162,9 @@ pub struct Subagent {
     pub native_id: String,
     pub tool_use_id: Option<String>,
     pub title: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub agent_type: Option<String>,
     pub status: SubagentStatus,
     pub summary: Option<String>,
     pub last_tool: Option<String>,
@@ -1047,6 +1054,27 @@ pub enum Response {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn subagent_roles_are_optional_for_old_history_and_preserved_on_the_wire() {
+        let old = serde_json::json!({
+            "id":"child", "native_id":"native", "tool_use_id":null,
+            "title":"Review changes", "status":"completed", "summary":null,
+            "last_tool":"Read", "started_at":1, "updated_at":2
+        });
+        let mut task: Subagent = serde_json::from_value(old).unwrap();
+        assert_eq!(task.agent_type, None);
+        task.agent_type = Some("review:code-reviewer".into());
+        let encoded = serde_json::to_value(&task).unwrap();
+        assert_eq!(encoded["agent_type"], "review:code-reviewer");
+        let restored: Subagent = serde_json::from_value(encoded).unwrap();
+        assert_eq!(restored.agent_type, task.agent_type);
+        let update: SubagentUpdate = serde_json::from_value(serde_json::json!({
+            "id":"child", "tool_use_id":null, "title":null,
+            "status":"completed", "summary":null, "last_tool":null
+        }))
+        .unwrap();
+        assert_eq!(update.agent_type, None);
+    }
     #[test]
     fn contract_uses_explicit_tag_and_rejects_unknown_method() {
         let request: Request = serde_json::from_str(r#"{"method":"hello","version":1}"#).unwrap();

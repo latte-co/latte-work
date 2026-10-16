@@ -438,6 +438,7 @@ impl Store {
                 id,
                 EventKind::Subagent {
                     update: SubagentUpdate {
+                        agent_type: None,
                         id: task.native_id,
                         tool_use_id: task.tool_use_id,
                         title: None,
@@ -741,6 +742,7 @@ impl Store {
                     native_id: update.id.clone(),
                     tool_use_id: update.tool_use_id.clone(),
                     title: "子智能体".into(),
+                    agent_type: None,
                     status: SubagentStatus::Unknown,
                     summary: None,
                     last_tool: None,
@@ -754,6 +756,9 @@ impl Store {
             }
             if let Some(title) = &update.title {
                 task.title = title.clone();
+            }
+            if let Some(agent_type) = &update.agent_type {
+                task.agent_type = Some(agent_type.clone());
             }
             if let Some(status) = update.status {
                 // Out-of-order progress cannot resurrect a confirmed terminal task.
@@ -1385,6 +1390,7 @@ mod tests {
                     &session.id,
                     EventKind::Subagent {
                         update: SubagentUpdate {
+                            agent_type: None,
                             id: native.into(),
                             tool_use_id: Some(tool.into()),
                             title: None,
@@ -1460,6 +1466,7 @@ mod tests {
                 &session.id,
                 EventKind::Subagent {
                     update: SubagentUpdate {
+                        agent_type: None,
                         id: "child".into(),
                         tool_use_id: Some("p".into()),
                         title: None,
@@ -1563,6 +1570,7 @@ mod tests {
                 &session.id,
                 EventKind::Subagent {
                     update: SubagentUpdate {
+                        agent_type: None,
                         id: "child".into(),
                         tool_use_id: Some("p".into()),
                         title: None,
@@ -1732,6 +1740,7 @@ mod tests {
             .unwrap();
         let update = |id: &str, status| EventKind::Subagent {
             update: SubagentUpdate {
+                agent_type: (id == "tool:tool").then(|| "review:code-reviewer".into()),
                 id: id.into(),
                 tool_use_id: Some("tool".into()),
                 title: Some("检查代码".into()),
@@ -1760,10 +1769,17 @@ mod tests {
         assert_eq!(tasks.len(), 1);
         assert_eq!(tasks[0].id, "tool:tool");
         assert_eq!(tasks[0].native_id, "native");
+        assert_eq!(tasks[0].agent_type.as_deref(), Some("review:code-reviewer"));
         assert!(store.subagents(&other.id).unwrap().0.is_empty());
         store.state(&session.id, Status::Completed, None).unwrap();
         drop(store);
         let store = Store::open(&path).unwrap();
+        assert_eq!(
+            store.subagents(&session.id).unwrap().0[0]
+                .agent_type
+                .as_deref(),
+            Some("review:code-reviewer")
+        );
         assert_eq!(
             store.subagents(&session.id).unwrap().0[0].status,
             SubagentStatus::Unknown
@@ -1784,12 +1800,19 @@ mod tests {
             store.subagents(&session.id).unwrap().0[0].status,
             SubagentStatus::Completed
         );
+        assert_eq!(
+            store.subagents(&session.id).unwrap().0[0]
+                .agent_type
+                .as_deref(),
+            Some("review:code-reviewer")
+        );
         for n in 0..130 {
             store
                 .event(
                     &session.id,
                     EventKind::Subagent {
                         update: SubagentUpdate {
+                            agent_type: None,
                             id: format!("child-{n}"),
                             tool_use_id: None,
                             title: None,

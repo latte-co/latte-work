@@ -70,6 +70,10 @@ export type SubagentUpdate = {
   id: string;
   tool_use_id: string | null;
   title: string | null;
+  /**
+   * Native agent role, when explicitly reported by the adapter.
+   */
+  agent_type?: string;
   status: SubagentStatus | null;
   summary: string | null;
   last_tool: string | null;
@@ -79,6 +83,7 @@ export type Subagent = {
   native_id: string;
   tool_use_id: string | null;
   title: string;
+  agent_type?: string;
   status: SubagentStatus;
   summary: string | null;
   last_tool: string | null;

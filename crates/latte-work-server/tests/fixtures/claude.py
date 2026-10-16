@@ -213,7 +213,7 @@ for line in sys.stdin:
                 emit({'type':'system','subtype':'session_state_changed','state':'idle'})
             threading.Thread(target=finish_process_child,daemon=True).start()
         elif text=='subagents':
-            emit({'type':'assistant','message':{'content':[{'type':'tool_use','id':'agent-tool','name':'Agent','input':{'description':'Inspect project'}}]}})
+            emit({'type':'assistant','message':{'content':[{'type':'tool_use','id':'agent-tool','name':'Agent','input':{'description':'Inspect project','subagent_type':'Explore'}}]}})
             emit({'type':'system','subtype':'task_started','task_id':'native-child','task_type':'local_agent','tool_use_id':'agent-tool','description':'Inspect project'})
             emit({'type':'system','subtype':'task_progress','task_id':'native-child','description':'Inspect project','last_tool_name':'Read'})
             emit({'type':'user','message':{'content':[{'type':'tool_result','tool_use_id':'agent-tool','content':'Launched in background'}]}})

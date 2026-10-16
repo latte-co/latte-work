@@ -120,6 +120,12 @@ results finish turns without closing stdin. Task lifecycle and session-state
 messages stay in the Claude adapter. Configuration changes are rejected before
 admission when background work cannot safely be released. `Ready` must never implicitly send a prompt.
 
+Subagent roles are optional `agent_type` metadata in both updates and snapshots.
+The Claude adapter reads the explicit native `subagent_type` field from Agent/Task
+inputs or lifecycle updates; descriptions, tool names and `task_type` are not roles.
+Store merges preserve the role across native identity changes, progress, close and
+restart. Older records and Servers may omit it; the UI leaves it absent.
+
 Focused checks: `cargo test -p latte-work-server --bin latte-work-server --locked`
 for contract/adapter/runtime UT, followed by `make test-e2e` for real server/bridge
 behavior with the deterministic CLI fixture. These do not measure coverage or

@@ -240,9 +240,24 @@ export function SubagentsPanel({
                     <span className="subagent-title" title={task.title}>
                       {task.title}
                     </span>
-                    <span className={`subagent-state ${task.status}`}>
-                      {subagentLabels[task.status]}
-                      {task.last_tool && ` · ${task.last_tool}`}
+                    <span className="subagent-metadata">
+                      {task.agent_type?.trim() && (
+                        <>
+                          <span
+                            className="subagent-type"
+                            title={task.agent_type}
+                          >
+                            {task.agent_type}
+                          </span>
+                          <span aria-hidden="true"> · </span>
+                        </>
+                      )}
+                      <span className={`subagent-state ${task.status}`}>
+                        {subagentLabels[task.status]}
+                        {task.status === "running" &&
+                          task.last_tool &&
+                          ` · ${task.last_tool}`}
+                      </span>
                     </span>
                   </span>
                   <span className="subagent-age">{age(task)}</span>

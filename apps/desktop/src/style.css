@@ -4235,11 +4235,34 @@ button[aria-checked="true"] .model-option-check {
   white-space: nowrap;
 }
 .subagent-state,
+.subagent-metadata,
 .subagent-age,
 .subagent-empty,
 .subagent-last-tool {
   font-size: 12px;
   color: var(--color-text-muted);
+}
+.subagent-metadata {
+  display: flex;
+  align-items: baseline;
+  white-space: pre;
+  overflow: hidden;
+}
+.subagent-type {
+  max-width: 60%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.subagent-metadata > .subagent-state {
+  flex-shrink: 0;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.subagent-age,
+.subagent-row > svg {
+  flex-shrink: 0;
 }
 .subagent-state.failed {
   color: var(--color-danger);
