@@ -197,11 +197,101 @@ it("groups generated files as products and inputs, read files and web links as r
   ]);
   expect(
     data.resources.map((item) => (item.kind === "file" ? item.path : item.url)),
-  ).toEqual([
-    "input.pdf",
-    "https://example.com/",
-    "source.ts",
-    "https://example.com/docs",
+  ).toEqual(["input.pdf", "https://example.com/", "https://example.com/docs"]);
+});
+
+it("keeps documents and attachments across all sources without code consuming the inventory bound", () => {
+  const writes: EventKind[] = Array.from({ length: 140 }, (_, i) => [
+    {
+      kind: "tool" as const,
+      id: `w${i}`,
+      name: "Write",
+      input: { file_path: `/project/src/file${i}.py` },
+    },
+    {
+      kind: "tool_result" as const,
+      id: `w${i}`,
+      content: "ok",
+      is_error: false,
+    },
+  ]).flat();
+  const data = taskInfo(
+    events(
+      ...writes,
+      {
+        kind: "user",
+        request_id: "r",
+        text: "[Code](src/main.rs:12) [Config](config.json) [Notebook](demo.ipynb) [Folder](src/) [Input](docs/INPUT.PDF) [Photo](image.png)",
+      },
+      {
+        kind: "tool",
+        id: "read",
+        name: "Read",
+        input: { file_path: "/project/src/main.ts" },
+      },
+      { kind: "tool_result", id: "read", content: "ok", is_error: false },
+      {
+        kind: "tool",
+        id: "doc",
+        name: "Write",
+        input: { file_path: "/project/report.html" },
+      },
+      { kind: "tool_result", id: "doc", content: "ok", is_error: false },
+      {
+        kind: "turn_changes",
+        changes: {
+          request_id: "r",
+          interrupted: false,
+          background_pending: false,
+          undo: "ready",
+          summary: {
+            entries: [
+              "src/main.ts",
+              "settings.yaml",
+              "README",
+              "docs/summary.md",
+              "results.csv",
+            ].map((path) => ({ path, status: "M", added: 1, removed: 0 })),
+            added: 5,
+            removed: 0,
+            binary_files: 0,
+            truncated: false,
+            baseline_at: 1,
+            unavailable: null,
+          },
+        },
+      },
+    ),
+    "s",
+    "/project",
+  );
+  expect(
+    data.products.map((item) => item.kind === "file" && item.path),
+  ).toEqual(["report.html", "README", "docs/summary.md", "results.csv"]);
+  expect(
+    data.resources.map((item) => item.kind === "file" && item.path),
+  ).toEqual(["docs/INPUT.PDF", "image.png"]);
+  expect(data.files).toHaveLength(6);
+  expect(data.truncated).toBe(false);
+});
+
+it("retains an attachment's original document name when storage uses an extensionless ID", () => {
+  const marker = "\n\n引用（相对项目；绝对路径在当前主机，按现有权限读取）：\n";
+  const data = taskInfo(
+    events({
+      kind: "user",
+      request_id: "r",
+      text: `Attachments${marker}${JSON.stringify([
+        { path: "/tmp/attachment-id", name: "Project brief.pdf", type: "file" },
+        { path: "/project/code.py", name: "Disguised.md", type: "file" },
+        { path: "/project/reports", name: "Reports.pdf", type: "directory" },
+      ])}`,
+    }),
+    "s",
+    "/project",
+  );
+  expect(data.files).toEqual([
+    { path: "/tmp/attachment-id", name: "Project brief.pdf", directory: false },
   ]);
 });
 

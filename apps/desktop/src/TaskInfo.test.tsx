@@ -12,6 +12,11 @@ import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { TaskInfo } from "./TaskInfo";
 import { readWorkspace } from "./workspaceState";
 import { LinkHandling } from "./LinkHandling";
+import {
+  clearBrowserHistory,
+  recordBrowserVisit,
+  updateBrowserVisitTitle,
+} from "./browserHistory";
 import type { Request } from "./protocol";
 const mocks = vi.hoisted(() => ({ request: vi.fn() }));
 vi.mock("./api", () => ({ request: mocks.request, message: String }));
@@ -36,6 +41,7 @@ const props = {
   subagents: { tasks: [], loading: false, error: "", truncated: false },
 };
 beforeEach(() => {
+  localStorage.clear();
   props.workspaceId = crypto.randomUUID();
   mocks.request
     .mockReset()
@@ -70,7 +76,67 @@ beforeEach(() => {
             },
     );
 });
+
+it("uses real page titles when available and keeps link rows aligned with files", async () => {
+  render(
+    <LinkHandling workspaceId={props.workspaceId}>
+      <TaskInfo {...props} />
+    </LinkHandling>,
+  );
+  const url = "https://example.com/docs";
+  let link = screen.getByRole("link", { name: "Docs" });
+  expect(link.classList.contains("task-info-file")).toBe(true);
+  expect(link.querySelector('svg[aria-hidden="true"]')).toBeTruthy();
+  expect(within(link).getByText(url).tagName).toBe("SMALL");
+  act(() => recordBrowserVisit(url));
+  expect(screen.getByRole("link", { name: "Docs" })).toBeTruthy();
+  act(() => updateBrowserVisitTitle(url, "Queue reference — Example Docs"));
+  link = await screen.findByRole("link", {
+    name: "Queue reference — Example Docs",
+  });
+  expect(within(link).getByText("Queue reference — Example Docs").title).toBe(
+    "Queue reference — Example Docs",
+  );
+  fireEvent.click(link);
+  expect(readWorkspace(props.workspaceId).tabs).toContainEqual(
+    expect.objectContaining({ kind: "browser", url }),
+  );
+  fireEvent.keyDown(link, { key: "F10", shiftKey: true });
+  expect(screen.getByRole("menu", { name: "链接操作" })).toBeTruthy();
+  fireEvent.keyDown(window, { key: "Escape" });
+  expect(document.activeElement).toBe(link);
+  expect(
+    mocks.request.mock.calls.every(([, request]) =>
+      ["git_review", "sources"].includes(request.method),
+    ),
+  ).toBe(true);
+});
 afterEach(cleanup);
+it("matches visited page titles across anchors and resumes title updates after returning to the pane", async () => {
+  const url = "https://example.com/docs";
+  recordBrowserVisit(url, "Real document title");
+  const events = [
+    {
+      ...props.events[0],
+      event: {
+        kind: "text" as const,
+        text: `[Reference](${url}#details) https://unvisited.example/path`,
+      },
+    },
+  ];
+  const view = render(<TaskInfo {...props} events={events} />);
+  await screen.findByRole("link", { name: "Real document title" });
+  expect(screen.getByRole("link", { name: "unvisited.example" })).toBeTruthy();
+  view.rerender(<TaskInfo {...props} events={events} active={false} />);
+  act(() => updateBrowserVisitTitle(url, "Updated document title"));
+  expect(
+    screen.queryByRole("link", { name: "Updated document title" }),
+  ).toBeNull();
+  view.rerender(<TaskInfo {...props} events={events} />);
+  await screen.findByRole("link", { name: "Updated document title" });
+  act(() => clearBrowserHistory());
+  expect(screen.getByRole("link", { name: "Reference" })).toBeTruthy();
+});
 it("renders ordered information and routes links and files into reusable tabs", async () => {
   render(
     <LinkHandling workspaceId={props.workspaceId}>

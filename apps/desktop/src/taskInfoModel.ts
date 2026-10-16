@@ -1,6 +1,7 @@
 import type { Event, JsonValue } from "./protocol";
 import { referenceMessage } from "./referenceMessage";
 import { webLink } from "./browserLinks";
+import { isTaskResourceFile } from "./taskResourceFiles";
 
 export interface InfoFile {
   path: string;
@@ -72,6 +73,7 @@ function collector(projectPath?: string, state = newState()) {
     title?: string,
     product = false,
     directory = false,
+    attachmentName?: string,
   ) => {
     let path = artifactPath(value);
     if (
@@ -80,7 +82,7 @@ function collector(projectPath?: string, state = newState()) {
       path.startsWith(`${projectPath.replace(/\/$/, "")}/`)
     )
       path = path.slice(projectPath.replace(/\/$/, "").length + 1);
-    if (!path) return;
+    if (!path || !isTaskResourceFile(path, directory, attachmentName)) return;
     path = path.replace(/^\.\//, "");
     const entry: InfoFile = {
       path,
@@ -107,7 +109,7 @@ function collector(projectPath?: string, state = newState()) {
     if (user) {
       const parsed = referenceMessage(body);
       for (const entry of parsed.references)
-        file(entry.path, entry.name, false, entry.directory);
+        file(entry.path, entry.name, false, entry.directory, entry.name);
       body = parsed.text;
     }
     // Ignore fenced examples; inline code can contain actual linked file paths.

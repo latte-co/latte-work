@@ -99,7 +99,9 @@ export function TaskFileRow({
     >
       <Icon size={16} />
       <span>
-        {file.name}
+        <span className="task-info-resource-title" title={file.name}>
+          {file.name}
+        </span>
         <small>
           {outside ? "项目外 · " : ""}
           {file.path}

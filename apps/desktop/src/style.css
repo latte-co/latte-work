@@ -4490,6 +4490,7 @@ button.task-info-row {
 }
 .task-info-file {
   display: flex;
+  align-items: flex-start;
   gap: var(--space-2);
   width: 100%;
   padding: var(--space-2);
@@ -4503,25 +4504,29 @@ button.task-info-row {
 }
 .task-info-file > span {
   min-width: 0;
-  overflow-wrap: anywhere;
+  flex: 1;
 }
-.task-info-file small,
-.task-info-link small {
+.task-info-resource-title {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.task-info-file small {
   display: block;
   margin-top: var(--space-1);
   color: var(--color-text-muted);
   font-size: var(--text-sm);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
-.task-info-link {
-  padding: var(--space-2);
-  overflow-wrap: anywhere;
-}
-.task-info-link a {
+.task-info-web {
   color: var(--color-text);
-  text-decoration-color: var(--color-text-muted);
-  text-underline-offset: 3px;
+  text-decoration: none;
 }
-.task-info-file:hover,
+button.task-info-file:not(:disabled):hover,
+a.task-info-file:hover,
 button.task-info-row:not(:disabled):hover,
 .task-info-earlier:not(:disabled):hover {
   background: var(--color-hover);

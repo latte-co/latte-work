@@ -15,7 +15,9 @@ import {
 } from "lucide-react";
 import { request } from "./api";
 import type { Event, GitReview, Project } from "./protocol";
-import { WebLink } from "./LinkHandling";
+import { TaskLinkRow } from "./TaskLinkRow";
+import { useBrowserHistory } from "./browserHistory";
+import { webLink } from "./browserLinks";
 import { TaskFileRow } from "./TaskFileRow";
 import { SkillRow } from "./SkillRow";
 import { createTaskInfoReader } from "./taskInfoModel";
@@ -51,6 +53,7 @@ function Section({
   );
 }
 const empty = (value: string) => <p className="task-info-empty">{value}</p>;
+const ignorePageTitleError = () => {};
 const todoLabels: Record<string, string> = {
   pending: "待处理",
   in_progress: "进行中",
@@ -90,6 +93,34 @@ export function TaskInfo({
   const [revision, refresh] = useState(0);
   const readInfo = useMemo(() => createTaskInfoReader(), [scope]);
   const data = readInfo(events, sessionId, project?.path, !running);
+  const visits = useBrowserHistory(ignorePageTitleError, active);
+  const pageTitles = useMemo(() => {
+    const titles = new Map<string, string>();
+    for (const visit of visits) {
+      const address = new URL(visit.url);
+      const title = visit.title.replace(/\s+/g, " ").trim();
+      // A newly opened page initially carries only its hostname, not a title.
+      if (
+        !title ||
+        webLink(title) === visit.url ||
+        title.toLowerCase() === address.hostname.toLowerCase()
+      )
+        continue;
+      titles.set(address.href, title);
+      address.hash = "";
+      titles.set(address.href, title);
+    }
+    return titles;
+  }, [visits]);
+  const linkTitle = (url: string, fallback: string) => {
+    const address = new URL(url);
+    address.hash = "";
+    return (
+      pageTitles.get(url) ||
+      pageTitles.get(address.href) ||
+      (webLink(fallback) === url ? address.host : fallback)
+    );
+  };
   const version = events
     .filter(
       (entry) =>
@@ -344,9 +375,11 @@ export function TaskInfo({
           <ul className="task-info-list">
             {entries.map((entry) =>
               entry.kind === "link" ? (
-                <li className="task-info-link" key={`link:${entry.url}`}>
-                  <WebLink href={entry.url}>{entry.title}</WebLink>
-                  {entry.title !== entry.url && <small>{entry.url}</small>}
+                <li key={`link:${entry.url}`}>
+                  <TaskLinkRow
+                    url={entry.url}
+                    title={linkTitle(entry.url, entry.title)}
+                  />
                 </li>
               ) : (
                 <li key={`file:${entry.path}`}>
