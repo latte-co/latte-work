@@ -22,6 +22,7 @@ import {
 } from "lucide-react";
 import { WorkingStatus } from "./WorkingStatus";
 import { SessionHoverCard, ProjectHoverCard } from "./SidebarHoverCard";
+import { SessionTitle } from "./SessionTitle";
 import { agentSessionLabels, agentSessionState } from "./agentSessionState";
 import { useHistoryLoadingIndicator } from "./useHistoryLoadingIndicator";
 import { SessionActions } from "./SessionActions";
@@ -404,7 +405,7 @@ export function Sidebar({
           }}
         >
           <span className="session-label">
-            {s.title}
+            <SessionTitle title={s.title} />
             {duplicateTitle && (
               <small>
                 {sourceProject?.name} · {sourceHost?.name}

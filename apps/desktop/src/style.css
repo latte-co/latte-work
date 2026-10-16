@@ -3809,7 +3809,18 @@ button[aria-checked="true"] .model-option-check {
   min-width: 0;
   flex: 1;
   overflow: hidden;
+}
+.session-title-viewport {
+  display: block;
+  overflow: hidden;
   text-overflow: ellipsis;
+}
+.session-title-viewport[data-scrolling="true"] {
+  text-overflow: clip;
+}
+.session-title-viewport[data-scrolling="true"] .session-title-text {
+  display: inline-block;
+  will-change: transform;
 }
 .session-label small {
   display: block;
