@@ -655,7 +655,7 @@ it("keeps history concealed until it is fully loaded and positioned at the botto
   );
   await waitFor(() => expect(el.getAttribute("aria-busy")).toBe("false"));
   expect(el.scrollTop).toBe(2200);
-  expect(ready).toHaveBeenCalledOnce();
+  await waitFor(() => expect(ready).toHaveBeenCalledOnce());
   expect(screen.queryByText("正在加载")).toBeNull();
   expect(
     view.container.querySelector(".messages")?.getAttribute("aria-hidden"),
