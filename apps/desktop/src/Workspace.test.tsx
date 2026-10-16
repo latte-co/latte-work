@@ -192,6 +192,7 @@ it("opens independent child tabs, reuses a selected child, retains the list and 
   };
   const view = render(<Workspace {...props} subagents={subagents} />);
   await act(async () => {});
+  fireEvent.click(screen.getByRole("button", { name: "完成 · 2" }));
   fireEvent.click(screen.getByRole("button", { name: /alpha.*已完成/ }));
   expect(
     screen.getByRole("tab", { name: "alpha" }).getAttribute("aria-selected"),

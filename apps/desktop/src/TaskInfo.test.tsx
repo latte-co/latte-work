@@ -189,7 +189,9 @@ it("renders ordered information and routes links and files into reusable tabs", 
   expect(
     screen
       .getAllByRole("heading", { level: 2 })
-      .map((node) => node.textContent),
+      .map((node) =>
+        within(node).getAllByRole("button")[0].getAttribute("aria-label"),
+      ),
   ).toEqual([
     "变更概览",
     "子智能体",
@@ -353,4 +355,89 @@ it("keeps Git reads independent of streamed events and refreshes tools at a boun
     cleanup();
     vi.useRealTimers();
   }
+});
+
+it("collapses groups independently, retains counts and leaves refresh separate", async () => {
+  render(<TaskInfo {...props} hostId="collapse-refresh" />);
+  await screen.findByText("1 个文件");
+  const changes = screen.getByRole("button", { name: "变更概览" });
+  const resources = screen.getByRole("button", { name: "任务资源" });
+  fireEvent.click(changes);
+  fireEvent.click(resources);
+  expect(changes.getAttribute("aria-expanded")).toBe("false");
+  expect(resources.getAttribute("aria-expanded")).toBe("false");
+  expect(
+    document.getElementById(resources.getAttribute("aria-describedby")!)
+      ?.textContent,
+  ).toBe("2");
+  expect(screen.queryByRole("link", { name: "Docs" })).toBeNull();
+  expect(
+    screen
+      .getByRole("button", { name: "调用的 Tools" })
+      .getAttribute("aria-expanded"),
+  ).toBe("true");
+  fireEvent.click(screen.getByRole("button", { name: "刷新任务摘要" }));
+  await waitFor(() =>
+    expect(
+      mocks.request.mock.calls.filter(
+        ([, request]) => request.method === "git_review",
+      ),
+    ).toHaveLength(2),
+  );
+  expect(changes.getAttribute("aria-expanded")).toBe("false");
+  expect(resources.getAttribute("aria-expanded")).toBe("false");
+  fireEvent.click(resources);
+  expect(screen.getByRole("link", { name: "Docs" })).toBeTruthy();
+});
+it("remembers this task's explicit choices across reopening without applying them to another task", () => {
+  const view = render(<TaskInfo {...props} hostId="collapse-reopen" />);
+  fireEvent.click(screen.getByRole("button", { name: "调用的 Skill" }));
+  view.unmount();
+  const reopened = render(<TaskInfo {...props} hostId="collapse-reopen" />);
+  expect(
+    screen
+      .getByRole("button", { name: "调用的 Skill" })
+      .getAttribute("aria-expanded"),
+  ).toBe("false");
+  reopened.rerender(<TaskInfo {...props} hostId="another-task" />);
+  expect(
+    screen
+      .getByRole("button", { name: "调用的 Skill" })
+      .getAttribute("aria-expanded"),
+  ).toBe("true");
+  reopened.rerender(<TaskInfo {...props} hostId="collapse-reopen" />);
+  expect(
+    screen
+      .getByRole("button", { name: "调用的 Skill" })
+      .getAttribute("aria-expanded"),
+  ).toBe("false");
+});
+it("updates collapsed group counts without reopening them on incoming records", async () => {
+  const view = render(<TaskInfo {...props} hostId="collapse-events" />);
+  const header = screen.getByRole("button", { name: "任务资源" });
+  fireEvent.click(header);
+  view.rerender(
+    <TaskInfo
+      {...props}
+      hostId="collapse-events"
+      events={[
+        ...props.events,
+        {
+          ...props.events[0],
+          seq: 2,
+          event: { kind: "text", text: "[New guide](https://example.com/new)" },
+        },
+      ]}
+    />,
+  );
+  await waitFor(() =>
+    expect(
+      document.getElementById(header.getAttribute("aria-describedby")!)
+        ?.textContent,
+    ).toBe("3"),
+  );
+  expect(header.getAttribute("aria-expanded")).toBe("false");
+  expect(screen.queryByRole("link", { name: "New guide" })).toBeNull();
+  fireEvent.click(header);
+  expect(screen.getByRole("link", { name: "New guide" })).toBeTruthy();
 });

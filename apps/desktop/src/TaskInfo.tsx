@@ -1,5 +1,6 @@
 import {
   useCallback,
+  useId,
   useLayoutEffect,
   useMemo,
   useState,
@@ -18,6 +19,7 @@ import {
   History,
   Sparkles,
   Wrench,
+  ChevronRight,
 } from "lucide-react";
 import { request } from "./api";
 import type { Event, GitReview, Project } from "./protocol";
@@ -32,6 +34,7 @@ import type { SubagentsState } from "./useSubagents";
 import { openSubagent, openWorkspaceResource } from "./workspaceState";
 import { usePollingSnapshot } from "./usePollingSnapshot";
 import { useStatusIssues } from "./statusNotices";
+import { useTaskDisclosure } from "./useTaskDisclosure";
 
 function Section({
   title,
@@ -39,22 +42,46 @@ function Section({
   children,
   action,
   note,
+  count,
+  scope,
 }: {
   title: string;
   icon: ReactNode;
   children: ReactNode;
   action?: ReactNode;
   note?: ReactNode;
+  count?: number;
+  scope?: string;
 }) {
+  const id = useId();
+  const [open, toggle] = useTaskDisclosure(scope, title);
   return (
-    <section className="task-info-section" aria-label={title}>
+    <section
+      className="task-info-section"
+      aria-label={title}
+      data-collapsed={!open}
+    >
       <h2>
-        {icon}
-        <span>{title}</span>
+        <button
+          type="button"
+          className="task-info-toggle"
+          aria-label={title}
+          aria-expanded={open}
+          aria-controls={id}
+          aria-describedby={count === undefined ? undefined : `${id}-count`}
+          onClick={toggle}
+        >
+          {icon}
+          <span>{title}</span>
+          {count !== undefined && <small id={`${id}-count`}>{count}</small>}
+          <ChevronRight size={14} className="disclosure-chevron" />
+        </button>
         {note}
         {action}
       </h2>
-      {children}
+      <div id={id} hidden={!open}>
+        {children}
+      </div>
     </section>
   );
 }
@@ -97,6 +124,9 @@ export function TaskInfo({
   loadEarlierHistory?: () => Promise<void>;
 }) {
   const scope = JSON.stringify([hostId, project?.id, project?.path, sessionId]);
+  const disclosureScope = sessionId
+    ? JSON.stringify(["summary", hostId, sessionId])
+    : undefined;
   const [revision, refresh] = useState(0);
   const readInfo = useMemo(() => createTaskInfoReader(), [scope]);
   const [info, setInfo] = useState({ scope: "", data: emptyInfo });
@@ -238,6 +268,8 @@ export function TaskInfo({
         title="变更概览"
         icon={<GitCompareArrows size={16} />}
         action={refreshButton}
+        scope={disclosureScope}
+        count={review?.entries.length}
       >
         <button
           className="task-info-row"
@@ -267,7 +299,16 @@ export function TaskInfo({
           </div>
         )}
       </Section>
-      <Section title="子智能体" icon={<Bot size={16} />}>
+      <Section
+        title="子智能体"
+        icon={<Bot size={16} />}
+        scope={disclosureScope}
+        count={
+          subagents.loading && !subagents.tasks.length
+            ? undefined
+            : subagents.tasks.length
+        }
+      >
         {subagents.tasks.length ? (
           <SubagentsPanel
             state={subagents}
@@ -287,7 +328,12 @@ export function TaskInfo({
           )
         )}
       </Section>
-      <Section title="待办事项" icon={<ListTodo size={16} />}>
+      <Section
+        title="待办事项"
+        icon={<ListTodo size={16} />}
+        scope={disclosureScope}
+        count={historyLoading ? undefined : data.todos.length}
+      >
         {!data.todos.length && empty(recordedEmpty)}
         <ul className="task-info-list">
           {data.todos.map((todo) => {
@@ -311,7 +357,12 @@ export function TaskInfo({
           })}
         </ul>
       </Section>
-      <Section title="调用的 Skill" icon={<Sparkles size={16} />}>
+      <Section
+        title="调用的 Skill"
+        icon={<Sparkles size={16} />}
+        scope={disclosureScope}
+        count={historyLoading ? undefined : data.skills.length}
+      >
         {!data.skills.length && empty(recordedEmpty)}
         <ul className="task-info-list">
           {data.skills.map(([name, uses]) => (
@@ -333,6 +384,10 @@ export function TaskInfo({
       <Section
         title="调用的 Tools"
         icon={<Wrench size={16} />}
+        scope={disclosureScope}
+        count={
+          tools?.length ?? (historyLoading ? undefined : data.tools.length)
+        }
         note={
           current.truncated || (!tools && data.tools.length > 0) ? (
             <small title="仅包含已读取的工具调用">部分记录</small>
@@ -386,7 +441,13 @@ export function TaskInfo({
           ["任务资源", data.resources, <FolderInput size={16} />],
         ] as const
       ).map(([title, entries, icon]) => (
-        <Section key={title} title={title} icon={icon}>
+        <Section
+          key={title}
+          title={title}
+          icon={icon}
+          scope={disclosureScope}
+          count={historyLoading ? undefined : entries.length}
+        >
           {!entries.length && empty(recordedEmpty)}
           <ul className="task-info-list">
             {entries.map((entry) =>

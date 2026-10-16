@@ -52,6 +52,7 @@ it("separates running/completed/unknown and shows a selected native result", () 
   expect(screen.getByRole("region", { name: "完成" }).textContent).toContain(
     "completed child",
   );
+  fireEvent.click(screen.getByRole("button", { name: "完成 · 1" }));
   fireEvent.click(screen.getByRole("button", { name: /completed child/ }));
   expect(select).toHaveBeenCalledWith(state.tasks[1]);
   expect(screen.getByRole("region", { name: "已开启" })).toBeTruthy();
@@ -87,6 +88,7 @@ it("shows native roles below names and current tools only while running", () => 
     truncated: false,
   };
   render(<SubagentsPanel state={state} onOpen={select} />);
+  fireEvent.click(screen.getByRole("button", { name: "完成 · 1" }));
   const running = screen.getByRole("button", { name: /Review service/ });
   expect(running.querySelector(".subagent-metadata")?.textContent).toBe(
     `${role} · 处理中 · Read`,
@@ -187,4 +189,59 @@ it("preserves review position across automatic reads and offers return-to-latest
   fireEvent.click(screen.getByRole("button", { name: "回到最新" }));
   expect(scroll.scrollTo).toHaveBeenCalledWith({ top: 1500 });
   expect(screen.queryByRole("button", { name: "回到最新" })).toBeNull();
+});
+
+it("defaults completed children to collapsed, keeps active and uncertain tasks visible, and preserves explicit expansion", () => {
+  const state = {
+    tasks: [
+      task("active-review", "running"),
+      task("done-review", "completed"),
+      task("uncertain-review", "unknown"),
+    ],
+    loading: false,
+    error: "",
+    truncated: false,
+  };
+  const view = render(
+    <SubagentsPanel
+      state={state}
+      hostId="collapse-test"
+      sessionId="disclosure-session"
+    />,
+  );
+  const done = screen.getByRole("button", { name: "完成 · 1" });
+  expect(done.getAttribute("aria-expanded")).toBe("false");
+  expect(screen.queryByRole("button", { name: /done-review/ })).toBeNull();
+  expect(screen.getByRole("button", { name: /active-review/ })).toBeTruthy();
+  expect(screen.getByRole("button", { name: /uncertain-review/ })).toBeTruthy();
+  fireEvent.click(done);
+  expect(screen.getByRole("button", { name: /done-review/ })).toBeTruthy();
+  view.rerender(
+    <SubagentsPanel
+      state={{
+        ...state,
+        tasks: [...state.tasks, task("done-second", "completed")],
+      }}
+      hostId="collapse-test"
+      sessionId="disclosure-session"
+    />,
+  );
+  expect(
+    screen
+      .getByRole("button", { name: "完成 · 2" })
+      .getAttribute("aria-expanded"),
+  ).toBe("true");
+  expect(screen.getByRole("button", { name: /done-second/ })).toBeTruthy();
+  view.rerender(
+    <SubagentsPanel
+      state={state}
+      hostId="collapse-test"
+      sessionId="different-session"
+    />,
+  );
+  expect(
+    screen
+      .getByRole("button", { name: "完成 · 1" })
+      .getAttribute("aria-expanded"),
+  ).toBe("false");
 });

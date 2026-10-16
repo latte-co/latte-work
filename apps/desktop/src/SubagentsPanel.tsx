@@ -1,4 +1,11 @@
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import {
+  useEffect,
+  useId,
+  useLayoutEffect,
+  useRef,
+  useState,
+  type ReactNode,
+} from "react";
 import { ArrowDown, Bot, ChevronRight } from "lucide-react";
 import { MessageContent } from "./MessageContent";
 import { WorkingStatus } from "./WorkingStatus";
@@ -8,6 +15,43 @@ import { useSubagentTranscript } from "./useSubagentTranscript";
 import { SubagentTranscript } from "./SubagentTranscript";
 import { subagentExecutionStatus } from "./executionStatus";
 import { useStatusIssues } from "./statusNotices";
+import { useTaskDisclosure } from "./useTaskDisclosure";
+
+function SubagentGroup({
+  label,
+  count,
+  scope,
+  children,
+}: {
+  label: string;
+  count: number;
+  scope?: string;
+  children: ReactNode;
+}) {
+  const id = useId();
+  const [open, toggle] = useTaskDisclosure(scope, label, label !== "完成");
+  return (
+    <section aria-label={label}>
+      <h2 className="subagent-group-label">
+        <button
+          type="button"
+          className="subagent-group-toggle"
+          aria-expanded={open}
+          aria-controls={id}
+          onClick={toggle}
+        >
+          <span>
+            {label} · {count}
+          </span>
+          <ChevronRight size={14} className="disclosure-chevron" />
+        </button>
+      </h2>
+      <div id={id} hidden={!open}>
+        {children}
+      </div>
+    </section>
+  );
+}
 
 export const subagentLabels: Record<SubagentStatus, string> = {
   running: "处理中",
@@ -225,10 +269,16 @@ export function SubagentsPanel({
       ).map(
         ([label, tasks]) =>
           tasks.length > 0 && (
-            <section key={label} aria-label={label}>
-              <h2 className="subagent-group-label">
-                {label} · {tasks.length}
-              </h2>
+            <SubagentGroup
+              key={label}
+              label={label}
+              count={tasks.length}
+              scope={
+                sessionId
+                  ? JSON.stringify(["subagents", hostId, sessionId])
+                  : undefined
+              }
+            >
               {tasks.map((task) => (
                 <button
                   key={task.id}
@@ -263,7 +313,7 @@ export function SubagentsPanel({
                   <span className="subagent-age">{age(task)}</span>
                 </button>
               ))}
-            </section>
+            </SubagentGroup>
           ),
       )}
       {state.truncated && (

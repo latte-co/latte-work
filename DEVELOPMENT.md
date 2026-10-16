@@ -553,6 +553,14 @@ finish the parent turn. Trailing empty/duplicate success results while idle are
 ignored; result-only autonomous replies and actual failures remain visible.
 
 The Task Summary tab shows compact, read-only sections with uniform empty states.
+Each section has an independent disclosure button and a count that updates while
+collapsed. Child-agent status groups also collapse independently: completed children
+start collapsed, while active and other states start expanded. Explicit choices
+are cached by host/session for the current app run, bounded to 64 scopes; refresh
+and incoming events do not overwrite them. Collapsed content stays mounted to
+preserve nested state. Disclosure is presentation-only and does not change polling
+or execution. The separate refresh control never toggles disclosure; native button
+keyboard behavior and reduced-motion chevrons are preserved.
 Its append-only event projection reuses parsed records; prepended history and
 replaced records reset it. Unfinished streamed text is parsed on settlement, not
 on each token, and Markdown fences are stripped in a linear line scan. TodoWrite
