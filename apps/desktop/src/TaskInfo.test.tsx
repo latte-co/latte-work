@@ -87,8 +87,10 @@ it("uses real page titles when available and keeps link rows aligned with files"
   const url = "https://example.com/docs";
   let link = screen.getByRole("link", { name: "Docs" });
   expect(link.classList.contains("task-info-file")).toBe(true);
-  expect(link.querySelector('svg[aria-hidden="true"]')).toBeTruthy();
-  expect(within(link).getByText(url).tagName).toBe("SMALL");
+  expect(
+    link.querySelector('.task-info-site-icon[aria-hidden="true"]'),
+  ).toBeTruthy();
+  expect(within(link).getByText("example.com/docs").tagName).toBe("SMALL");
   act(() => recordBrowserVisit(url));
   expect(screen.getByRole("link", { name: "Docs" })).toBeTruthy();
   act(() => updateBrowserVisitTitle(url, "Queue reference — Example Docs"));
@@ -164,7 +166,9 @@ it("matches visited page titles across anchors and resumes title updates after r
   ];
   const view = render(<TaskInfo {...props} events={events} />);
   await screen.findByRole("link", { name: "Real document title" });
-  expect(screen.getByRole("link", { name: "unvisited.example" })).toBeTruthy();
+  expect(
+    screen.getByRole("link", { name: "unvisited.example/path" }),
+  ).toBeTruthy();
   view.rerender(<TaskInfo {...props} events={events} active={false} />);
   act(() => updateBrowserVisitTitle(url, "Updated document title"));
   expect(

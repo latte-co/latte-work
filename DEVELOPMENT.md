@@ -563,6 +563,13 @@ while running, with one read in flight. Authentication prompts suspend these rea
 The single hover/focus background on each workspace tab includes its close control.
 Project names and history-scope paragraphs are not repeated in the inspector;
 the footer offers explicit earlier-history reads, with scope in its tooltip.
+Resource links load only the corresponding HTTP(S) origin's `/favicon.ico`, without
+a referrer or a third-party icon service. Missing icons retain a link glyph without
+an error notice. Image loading is lazy and uses the WebView cache; page bodies are
+not fetched to discover icons or titles. The main WebView CSP allows HTTP(S) favicon paths
+while keeping script, connect and frame policies unchanged. Titles still come from
+conversation labels or previously visited browser pages; untitled links show one
+compact address rather than repeating the hostname above the URL.
 
 `skill_info` resolves current installed Skill metadata on the execution host without
 starting an Agent, changing access or evaluating Skill body/template commands.

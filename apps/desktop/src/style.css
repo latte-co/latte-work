@@ -4522,8 +4522,28 @@ button.task-info-row {
   white-space: nowrap;
 }
 .task-info-web {
-  color: var(--color-text);
+  color: var(--color-text-secondary);
+  font-weight: var(--weight-ui);
   text-decoration: none;
+}
+.task-info-file > .task-info-site-icon {
+  position: relative;
+  flex: 0 0 16px;
+  width: 16px;
+  height: 16px;
+  margin-top: 2px;
+  color: var(--color-text-muted);
+}
+.task-info-site-icon > img {
+  position: absolute;
+  inset: 0;
+  width: 16px;
+  height: 16px;
+  object-fit: contain;
+  visibility: hidden;
+}
+.task-info-site-icon > img.is-ready {
+  visibility: visible;
 }
 button.task-info-file:not(:disabled):hover,
 a.task-info-file:hover,
