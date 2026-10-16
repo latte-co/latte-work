@@ -39,6 +39,14 @@ export function BrowserSiteInfo({
   const panel = useRef<HTMLDivElement>(null);
   const address = webLink(url);
   useEffect(() => {
+    const unavailable = (event: Event) => {
+      if ((event as CustomEvent<string>).detail === id) setOpen(false);
+    };
+    window.addEventListener("browser-overlay-unavailable", unavailable);
+    return () =>
+      window.removeEventListener("browser-overlay-unavailable", unavailable);
+  }, [id]);
+  useEffect(() => {
     if (!active) setOpen(false);
   }, [active]);
   useEffect(() => {

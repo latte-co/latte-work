@@ -943,6 +943,7 @@ fn main() {
             browser::browser_close,
             browser::browser_find,
             browser::browser_capture,
+            browser::browser_preview,
             browser::browser_clear_data,
             browser_downloads::browser_downloads,
             browser_downloads::browser_clear_downloads,

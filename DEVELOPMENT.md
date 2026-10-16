@@ -727,8 +727,10 @@ The address field includes an anchored site-information entry. Its dialog shows
 the current domain/title, copy URL and system-browser actions. Connection status
 comes from the native committed WebView's evaluated server trust and secure-content
 state, never from an HTTPS string alone; unavailable trust stays unknown. It does
-not claim to manage website permissions. Opening the dialog hides the native page;
-Escape, outside click and closing restore the surface and keyboard focus. Site-info
+not claim to manage website permissions. Overlapping dialogs and menus retain a
+decoded viewport image behind the overlay before hiding the native surface; closing
+restores the live surface before releasing the image. Escape and outside click
+restore keyboard focus. Site-info
 uses the existing caller-checked, nonce-bound native bridge, with a 128 KiB response
 limit; it grants no page IPC access or additional filesystem permissions.
 
@@ -737,6 +739,16 @@ and native desktop tests. On macOS, `python3 scripts/test-site-icons.py` compile
 temporary native harness and verifies the production image transport against a
 local HTTP fixture (size/MIME/redirect/authentication/timeout/header boundaries).
 Real site icons, native connection status and popup layout require separate UI smoke.
+
+Overlay previews use the same caller-checked, nonce-bound snapshot bridge without
+a save picker. Native JPEG output is limited to 2048 logical pixels on its longest
+side and 8 MiB; the UI receives binary data, decodes it with a 1.5-second deadline,
+and holds only a temporary Blob URL. The private bridge files are removed after the
+request. Images are not added to browser history, downloads or workspace state.
+Capture and geometry changes serialize per pane; late snapshots after close,
+navigation, tab hiding or unmount are discarded. Failed captures keep the live page
+and dismiss browser menu/site-information overlays rather than showing a blank page.
+Overlays outside the native page bounds do not request an image or hide the page.
 
 The browser toolbar's menu supports find, 25–300% page zoom, the system print/PDF
 panel, visible-viewport PNG snapshots, native downloads, searchable visit history,

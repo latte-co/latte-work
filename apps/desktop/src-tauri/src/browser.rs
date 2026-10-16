@@ -285,6 +285,16 @@ pub async fn browser_find(
         .unwrap_or(false))
 }
 #[tauri::command]
+pub async fn browser_preview(view: Webview, id: String) -> Result<tauri::ipc::Response, String> {
+    caller(&view)?;
+    let browser = view
+        .app_handle()
+        .get_webview(&label(&id)?)
+        .ok_or("浏览器标签已关闭")?;
+    let (_, bytes) = super::browser_native::run(&browser, "preview", "", false).await?;
+    Ok(tauri::ipc::Response::new(bytes.ok_or("网页画面暂不可用")?))
+}
+#[tauri::command]
 pub async fn browser_capture(view: Webview, id: String) -> Result<Option<String>, String> {
     caller(&view)?;
     let state = view.app_handle().state::<Tools>();

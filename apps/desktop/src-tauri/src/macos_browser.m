@@ -79,21 +79,24 @@ static void finishTool(NSString *directory, NSDictionary *result) {
             modifiedSince:[NSDate dateWithTimeIntervalSince1970:0] completionHandler:^{
                 finishTool(directory, @{@"ok": @YES});
             }];
-    } else if ([operation isEqualToString:@"capture"]) {
+    } else if ([operation isEqualToString:@"capture"] || [operation isEqualToString:@"preview"]) {
+        BOOL preview = [operation isEqualToString:@"preview"];
         if (view.bounds.size.width <= 0 || view.bounds.size.height <= 0 ||
             view.bounds.size.width > 4096 || view.bounds.size.height > 4096) {
             finishTool(directory, @{@"error": @"截图区域过大或不可见"}); return;
         }
         WKSnapshotConfiguration *config = [WKSnapshotConfiguration new];
         config.rect = view.bounds;
-        config.snapshotWidth = @(view.bounds.size.width);
+        config.snapshotWidth = @(preview ? MIN(view.bounds.size.width,
+            2048 * MIN(1, view.bounds.size.width / view.bounds.size.height)) : view.bounds.size.width);
         [view takeSnapshotWithConfiguration:config completionHandler:^(NSImage *image, NSError *error) {
             if (error || !image) { finishTool(directory, @{@"error": @"网页截图失败"}); return; }
             CGImageRef cg = [image CGImageForProposedRect:NULL context:nil hints:nil];
             NSBitmapImageRep *bitmap = cg ? [[NSBitmapImageRep alloc] initWithCGImage:cg] : nil;
-            NSData *png = [bitmap representationUsingType:NSBitmapImageFileTypePNG properties:@{}];
-            if (!png || png.length > 64 * 1024 * 1024 ||
-                ![png writeToFile:[directory stringByAppendingPathComponent:@"capture.png"] atomically:YES]) {
+            NSData *imageData = [bitmap representationUsingType:preview ? NSBitmapImageFileTypeJPEG : NSBitmapImageFileTypePNG
+                properties:preview ? @{NSImageCompressionFactor:@0.9} : @{}];
+            if (!imageData || imageData.length > (preview ? 8 : 64) * 1024 * 1024 ||
+                ![imageData writeToFile:[directory stringByAppendingPathComponent:preview ? @"preview.jpg" : @"capture.png"] atomically:YES]) {
                 finishTool(directory, @{@"error": @"无法保存网页截图"}); return;
             }
             finishTool(directory, @{@"ok": @YES});
