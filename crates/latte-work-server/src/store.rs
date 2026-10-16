@@ -38,14 +38,16 @@ impl Store {
         CREATE TABLE IF NOT EXISTS subagent_history_sources(session_id TEXT NOT NULL,task_id TEXT NOT NULL,cursor TEXT NOT NULL,PRIMARY KEY(session_id,task_id),FOREIGN KEY(session_id,task_id) REFERENCES subagents(session_id,id));
         CREATE TABLE IF NOT EXISTS subagent_native_transcripts(session_id TEXT NOT NULL,task_id TEXT NOT NULL,data TEXT NOT NULL,PRIMARY KEY(session_id,task_id),FOREIGN KEY(session_id,task_id) REFERENCES subagents(session_id,id));
         CREATE INDEX IF NOT EXISTS events_session ON events(session_id,seq);
-        CREATE INDEX IF NOT EXISTS events_recent_activity_v2 ON events(session_id,seq DESC) WHERE json_extract(data,'$.kind') IN ('user','queued_message_sent','text','tool','tool_result','approval','approval_resolved','subagent');
-        DROP INDEX IF EXISTS events_recent_activity;
         CREATE TABLE IF NOT EXISTS turn_changes(session_id TEXT NOT NULL REFERENCES sessions(id), request_id TEXT NOT NULL REFERENCES requests(id), baseline TEXT, data TEXT, PRIMARY KEY(session_id,request_id));
         CREATE TABLE IF NOT EXISTS task_baselines(session_id TEXT PRIMARY KEY REFERENCES sessions(id), data TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS task_sources(session_id TEXT NOT NULL REFERENCES sessions(id), id TEXT NOT NULL, data TEXT NOT NULL, at REAL NOT NULL, PRIMARY KEY(session_id,id));
         CREATE TABLE IF NOT EXISTS observed_tools(session_id TEXT NOT NULL REFERENCES sessions(id), id TEXT NOT NULL, PRIMARY KEY(session_id,id));
         CREATE TABLE IF NOT EXISTS reference_access(project_id TEXT NOT NULL REFERENCES projects(id), path TEXT NOT NULL, directory INTEGER NOT NULL, PRIMARY KEY(project_id,path));
         CREATE TABLE IF NOT EXISTS requests(id TEXT PRIMARY KEY,session_id TEXT NOT NULL,text TEXT NOT NULL);")?;
+        let migration = db.unchecked_transaction()?;
+        migration.execute_batch("CREATE INDEX IF NOT EXISTS events_recent_activity_v2 ON events(session_id,seq DESC) WHERE json_extract(data,'$.kind') IN ('user','queued_message_sent','text','tool','tool_result','approval','approval_resolved','subagent');
+        DROP INDEX IF EXISTS events_recent_activity;")?;
+        migration.commit()?;
         let columns = db
             .prepare("PRAGMA table_info(requests)")?
             .query_map([], |r| r.get::<_, String>(1))?
@@ -943,15 +945,16 @@ impl Store {
         ))
     }
     pub fn grant_reference(&self, project: &str, path: &str, directory: bool) -> Result<()> {
-        let (count, exists): (u32, bool) = self.db.query_row(
-            "SELECT COUNT(*),COALESCE(MAX(path=?2),0) FROM reference_access WHERE project_id=?1",
-            params![project, path],
-            |r| Ok((r.get(0)?, r.get(1)?)),
+        let changed = self.db.execute(
+            "INSERT INTO reference_access(project_id,path,directory)
+            SELECT ?1,?2,?3 WHERE (SELECT COUNT(*) FROM reference_access WHERE project_id=?1)<512
+            OR EXISTS(SELECT 1 FROM reference_access WHERE project_id=?1 AND path=?2)
+            ON CONFLICT(project_id,path) DO UPDATE SET directory=excluded.directory",
+            params![project, path, directory],
         )?;
-        if count >= 512 && !exists {
-            bail!("项目外预览权限已达上限，请先在任务摘要中撤销不再需要的权限");
+        if changed == 0 {
+            bail!("可预览的项目外文件数量已达上限");
         }
-        self.db.execute("INSERT INTO reference_access(project_id,path,directory) VALUES (?1,?2,?3) ON CONFLICT(project_id,path) DO UPDATE SET directory=excluded.directory", params![project,path,directory])?;
         Ok(())
     }
     pub fn reference_access(
@@ -985,14 +988,14 @@ impl Store {
         }
         Ok((entries, truncated))
     }
-    pub fn revoke_reference_access(&self, project: &str, path: &str) -> Result<()> {
+    pub fn revoke_reference_access(&self, project: &str, path: &str) -> Result<bool> {
         self.project(project)?;
         // Delete the recorded canonical key even if the file was moved or removed.
-        self.db.execute(
+        let removed = self.db.execute(
             "DELETE FROM reference_access WHERE project_id=?1 AND path=?2",
             params![project, path],
         )?;
-        Ok(())
+        Ok(removed != 0)
     }
     pub fn reference_allowed(&self, project: &str, target: &Path) -> Result<bool> {
         let rows = self
@@ -1393,6 +1396,74 @@ fn index_source(
 }
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn concurrent_preview_grants_cannot_exceed_the_limit() {
+        use super::*;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("access.db");
+        let store = Store::open(&path).unwrap();
+        let project = store.add_project(dir.path()).unwrap();
+        for i in 0..511 {
+            store
+                .grant_reference(&project.id, &format!("/outside/{i}"), false)
+                .unwrap();
+        }
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(4));
+        let workers: Vec<_> = (0..4)
+            .map(|i| {
+                let path = path.clone();
+                let project = project.id.clone();
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    let other = Store::open(&path).unwrap();
+                    barrier.wait();
+                    other
+                        .grant_reference(&project, &format!("/racing/{i}"), false)
+                        .is_ok()
+                })
+            })
+            .collect();
+        let granted = workers
+            .into_iter()
+            .map(|worker| usize::from(worker.join().unwrap()))
+            .sum::<usize>();
+        assert_eq!(granted, 1);
+        assert_eq!(store.reference_access(&project.id).unwrap().0.len(), 512);
+    }
+    #[test]
+    fn activity_index_migration_keeps_history_and_survives_reopening() {
+        use super::*;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("legacy.db");
+        let store = Store::open(&path).unwrap();
+        let project = store.add_project(dir.path()).unwrap();
+        let session = store.create_session(project.id, "claude".into()).unwrap();
+        store
+            .event(
+                &session.id,
+                EventKind::Text {
+                    text: "preserved".into(),
+                },
+            )
+            .unwrap();
+        store.db.execute_batch("DROP INDEX events_recent_activity_v2; CREATE INDEX events_recent_activity ON events(session_id,seq);").unwrap();
+        drop(store);
+        for _ in 0..2 {
+            let store = Store::open(&path).unwrap();
+            assert_eq!(
+                store
+                    .db
+                    .query_row(
+                        "SELECT COUNT(*) FROM events WHERE session_id=?1",
+                        [&session.id],
+                        |row| row.get::<_, u32>(0)
+                    )
+                    .unwrap(),
+                1
+            );
+            assert_eq!(store.db.query_row("SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name IN ('events_recent_activity','events_recent_activity_v2')", [], |row| row.get::<_, u32>(0)).unwrap(), 1);
+        }
+    }
     #[test]
     fn retained_preview_access_lists_fit_the_wire_budget_even_with_long_paths() {
         use super::*;

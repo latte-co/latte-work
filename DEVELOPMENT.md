@@ -592,6 +592,10 @@ including escaping nested symlinks. The Server retains the `reference_access` me
 for reading the project's canonical file/directory scopes.
 `revoke_reference_access` removes exactly that project's recorded scope even when
 the original path no longer exists; subsequent preview requests recheck permission.
+If no exact recorded key matches, existing absolute aliases are canonicalized with
+a five-second deadline outside the database lock before deletion. Missing paths
+remain idempotent. Admission checks and upserts share one SQL statement, so concurrent
+connections cannot exceed the 512-scope limit; activity-index replacement is transactional.
 Other explicit task sources or uploaded attachments may independently
 allow access. Retained grants are bounded to 512 per project; list responses also
 stay within half the wire-frame budget, accounting for JSON escaping. Older
@@ -863,6 +867,22 @@ replay and block host-held messages until native confirmation or explicit stop/c
 Outstanding native inputs
 share the 16-message/512-KiB admission budget. Streamed handoffs cannot provide a
 safe independent filesystem boundary, so overlapping turn snapshots cannot be undone.
+
+Active native turns retain their 24-hour execution limit. Each handed-off input has
+an independent 24-hour confirmation deadline measured from its delivery, including
+after its original turn completes. New inputs do not extend older confirmation
+deadlines or the active turn limit. A confirmation timeout identifies unconfirmed
+delivery, preserves its receipt and pauses the queue without replay, instead of
+reporting that an already completed turn exceeded its execution limit.
+
+Reproduce the real CLI queue contract without a model service or login:
+`python3 scripts/smoke-claude-queue.py --binary target/debug/latte-work-server --claude ~/.local/bin/claude --output target/real-queue.json`.
+The local fixture provides only Anthropic API responses. The installed CLI must
+accept `--replay-user-messages` and generate its own replay/UUID receipts; the
+script captures those fields, checks two delivered inputs settle together with
+one native result and no duplicate execution-start event, and closes its isolated
+Server. CLI version, binary/source hashes and the observed UUID fields are saved
+separately from Python-CLI E2E evidence. This smoke is optional and outside CI.
 
 The extra menu's “停止当前并发送” explicitly requests `interrupt: true`. With no
 native backlog, it waits for both the native result and interrupt acknowledgement

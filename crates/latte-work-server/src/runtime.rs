@@ -13,7 +13,7 @@ use nix::{
 };
 use serde_json::Value;
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashMap,
     process::Stdio,
     sync::{
         Arc, Mutex,
@@ -30,6 +30,30 @@ use tokio_util::codec::{FramedRead, LinesCodec};
 
 pub type Database = Arc<Mutex<Store>>;
 pub type Runs = Arc<Mutex<HashMap<String, Run>>>;
+const TURN_LIMIT: Duration = Duration::from_secs(24 * 3600);
+
+#[derive(Default)]
+struct ForwardedInputs(HashMap<String, tokio::time::Instant>);
+impl ForwardedInputs {
+    fn insert(&mut self, id: String) {
+        self.0.insert(id, tokio::time::Instant::now() + TURN_LIMIT);
+    }
+    fn remove(&mut self, id: &str) {
+        self.0.remove(id);
+    }
+    fn clear(&mut self) {
+        self.0.clear();
+    }
+    fn len(&self) -> usize {
+        self.0.len()
+    }
+    fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+    fn deadline(&self) -> Option<tokio::time::Instant> {
+        self.0.values().copied().min()
+    }
+}
 #[derive(Default)]
 pub struct TitleRefreshCache {
     reads: HashMap<String, (String, Instant)>,
@@ -790,7 +814,7 @@ impl Process {
             interrupt_ack_pending: false,
             stop_reply: None,
             init_deadline: tokio::time::Instant::now() + Duration::from_secs(18),
-            turn_deadline: tokio::time::Instant::now() + Duration::from_secs(24 * 3600),
+            turn_deadline: tokio::time::Instant::now() + TURN_LIMIT,
         })
     }
     async fn apply(&mut self, actions: Vec<Action>, database: &Database, id: &str) -> Result<()> {
@@ -816,7 +840,7 @@ impl Process {
         let became_ready = actions.iter().any(|a| matches!(a, Action::Ready));
         if actions.iter().any(|a| matches!(a, Action::TurnStarted)) {
             self.turn_active = true;
-            self.turn_deadline = tokio::time::Instant::now() + Duration::from_secs(24 * 3600);
+            self.turn_deadline = tokio::time::Instant::now() + TURN_LIMIT;
         }
         if actions.iter().any(|a| matches!(a, Action::Interrupted))
             || (self.stopping && actions.iter().any(|a| matches!(a, Action::Finished { .. })))
@@ -1022,7 +1046,7 @@ async fn accept_turn(
         }
         let p = process.as_mut().context("Agent process missing")?;
         p.turn_active = true;
-        p.turn_deadline = tokio::time::Instant::now() + Duration::from_secs(24 * 3600);
+        p.turn_deadline = tokio::time::Instant::now() + TURN_LIMIT;
         let notice = if let Some(provider) = &p.config.provider {
             Some(format!(
                 "Provider：{} · 模型：{}",
@@ -1131,7 +1155,7 @@ async fn actor(
         deadline: tokio::time::Instant,
     }
     let mut immediate: Option<Immediate> = None;
-    let mut forwarded = HashSet::<String>::new();
+    let mut forwarded = ForwardedInputs::default();
     let mut process: Option<Process> = None;
     let mut queued_configs = HashMap::<String, LaunchConfig>::new();
     let mut opening: Vec<oneshot::Sender<Result<(), String>>> = Vec::new();
@@ -1142,8 +1166,12 @@ async fn actor(
             .map(|p| p.init_deadline);
         let turn_deadline = process
             .as_ref()
-            .filter(|p| p.turn_active || !forwarded.is_empty())
+            .filter(|p| p.turn_active)
             .map(|p| p.turn_deadline);
+        // A handoff delivered near the end of a long turn gets its own full
+        // confirmation window. New deliveries never extend older inputs or the
+        // active turn's execution limit.
+        let handoff_deadline = forwarded.deadline();
         let immediate_deadline = immediate.as_ref().map(|v| v.deadline);
         let previous_status = db(&database, |d| Ok(d.session(&session.id)?.status)).ok();
         let result: Result<()> = tokio::select! {
@@ -1477,6 +1505,7 @@ async fn actor(
             },
             _ = deadline(init_deadline) => Err(anyhow::anyhow!("Agent 初始化超时（18 秒）")),
             _ = deadline(turn_deadline) => Err(anyhow::anyhow!("任务超过 24 小时上限")),
+            _ = deadline(handoff_deadline) => Err(anyhow::anyhow!("Agent 未在 24 小时内确认已交付的消息，处理结果待确认；不会自动重发")),
         };
         if let Err(error) = result {
             forwarded.clear();
@@ -1740,6 +1769,28 @@ pub async fn commands(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test(start_paused = true)]
+    async fn late_handoffs_get_a_full_window_without_extending_earlier_inputs() {
+        let start = tokio::time::Instant::now();
+        let original_turn_deadline = start + TURN_LIMIT;
+        tokio::time::advance(Duration::from_secs(23 * 3600)).await;
+        let mut inputs = ForwardedInputs::default();
+        inputs.insert("first".into());
+        let first_deadline = inputs.deadline().unwrap();
+        assert_eq!(first_deadline, start + Duration::from_secs(47 * 3600));
+        tokio::time::advance(Duration::from_secs(2 * 3600)).await;
+        assert!(tokio::time::Instant::now() > original_turn_deadline);
+        assert!(tokio::time::Instant::now() < inputs.deadline().unwrap());
+        inputs.insert("second".into());
+        assert_eq!(inputs.deadline(), Some(first_deadline));
+        inputs.remove("first");
+        assert_eq!(
+            inputs.deadline(),
+            Some(start + Duration::from_secs(49 * 3600))
+        );
+        inputs.clear();
+        assert_eq!(inputs.deadline(), None);
+    }
     #[tokio::test]
     async fn archive_waits_for_close_confirmation_and_preserves_metadata_on_failure() {
         for succeeds in [false, true] {

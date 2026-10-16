@@ -5569,7 +5569,11 @@ async fn external_preview_scopes_are_canonical_project_scoped_and_revocable_afte
         &mut c,
         Request::RevokeReferenceAccess {
             project_id: project.clone(),
-            path: file.clone(),
+            path: root
+                .path()
+                .join("linked-docs/./report.md")
+                .to_string_lossy()
+                .into_owned(),
         },
     )
     .await;

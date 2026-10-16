@@ -1161,12 +1161,26 @@ async fn dispatch(s: &Service, request: Request) -> Result<Response> {
             Response::ReferenceAccess { entries, truncated }
         }
         Request::RevokeReferenceAccess { project_id, path } => {
-            if path.len() > 4096 || path.contains('\0') {
+            if path.len() > 4096 || path.contains('\0') || !Path::new(&path).is_absolute() {
                 bail!("来源路径无效");
             }
-            db(&s.database, |d| {
+            let removed = db(&s.database, |d| {
                 d.revoke_reference_access(&project_id, &path)
             })?;
+            // Preserve deletion of a recorded key after the file has disappeared;
+            // otherwise resolve existing aliases without blocking the database lock.
+            if !removed {
+                let canonical =
+                    tokio::time::timeout(Duration::from_secs(5), tokio::fs::canonicalize(&path))
+                        .await
+                        .context("读取路径超时")?;
+                if let Ok(canonical) = canonical {
+                    let canonical = canonical.to_str().context("路径不是 UTF-8")?;
+                    db(&s.database, |d| {
+                        d.revoke_reference_access(&project_id, canonical)
+                    })?;
+                }
+            }
             Response::Ok
         }
         Request::SkillInfo { session_id, name } => {
