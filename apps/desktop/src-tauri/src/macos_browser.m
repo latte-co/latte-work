@@ -19,6 +19,18 @@ static BOOL macOSAtLeast(NSInteger major) {
     NSOperatingSystemVersion version = {major, 0, 0};
     return [NSProcessInfo.processInfo isOperatingSystemAtLeastVersion:version];
 }
+static NSString *browserApplicationName(void) {
+    // WKWebView's default macOS UA omits Version/Safari and freezes the
+    // AppleWebKit token. Use the installed system Safari's compatibility
+    // version rather than inventing a Chromium version or changing page APIs.
+    NSURL *url = [NSWorkspace.sharedWorkspace URLForApplicationWithBundleIdentifier:@"com.apple.Safari"];
+    NSString *version = url ? [[NSBundle bundleWithURL:url] objectForInfoDictionaryKey:@"CFBundleShortVersionString"] : nil;
+    if (![version isKindOfClass:NSString.class] || version.length > 32 ||
+        ![version rangeOfString:@"^[0-9]+(\\.[0-9]+){0,3}$" options:NSRegularExpressionSearch].length) {
+        return nil;
+    }
+    return [NSString stringWithFormat:@"Version/%@ Safari/605.1.15", version];
+}
 static void finishTool(NSString *directory, NSDictionary *result) {
     NSData *data = [NSJSONSerialization dataWithJSONObject:result options:0 error:nil];
     [data writeToFile:[directory stringByAppendingPathComponent:@"result.json"] atomically:YES];
@@ -112,6 +124,8 @@ static void finishTool(NSString *directory, NSDictionary *result) {
             tools = [LatteBrowserTools new];
         });
         configuration.websiteDataStore = store;
+        NSString *applicationName = browserApplicationName();
+        if (applicationName) configuration.applicationNameForUserAgent = applicationName;
         [configuration.userContentController addScriptMessageHandler:tools name:@"latteBrowserTools"];
     }
     return [self latte_initWithFrame:frame configuration:configuration];

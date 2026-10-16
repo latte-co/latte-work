@@ -725,7 +725,14 @@ Clearing download records preserves user-saved files.
 On macOS, `macos_browser.m` gives only incognito-constructed browser surfaces a
 shared profile separate from the workbench. macOS 14+ uses a persistent named
 WebKit data store; older macOS uses a shared session-only store. Existing default
-store website logins are not migrated. Find/snapshot/clear use a single-use nonce
+store website logins are not migrated. Browser-only configurations append
+`Version/<installed Safari version> Safari/605.1.15` through WebKit's
+`applicationNameForUserAgent`. The default macOS WKWebView UA lacks those tokens,
+which can trigger obsolete-browser detection even on a current WebKit. The version
+is read from the installed `com.apple.Safari` bundle, not hardcoded or replaced with
+a Chromium identity; absent or invalid metadata leaves WebKit's default unchanged.
+The main workbench UA is unaffected. This changes identification, not engine capabilities.
+Find/snapshot/clear use a single-use nonce
 bridge backed by a private per-process request directory, bound to the exact
 WebView, with bounded payloads and ten-second completion timeouts. Pages cannot
 pass paths or arbitrary commands; Rust remains free of unsafe code. Snapshots
