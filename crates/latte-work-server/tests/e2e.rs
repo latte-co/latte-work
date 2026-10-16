@@ -6355,7 +6355,7 @@ async fn dispatch_queue(c: &mut Client, id: &str, request_id: &str, interrupt: b
     .await
 }
 #[tokio::test]
-async fn message_queue_forwarded_activation_failure_pauses_before_the_next_message() {
+async fn message_queue_native_consumption_persistence_failure_pauses_before_the_next_message() {
     let host = Host::start().await;
     let root = tempfile::tempdir().unwrap();
     let mut c = host.client().await;
@@ -6367,10 +6367,10 @@ async fn message_queue_forwarded_activation_failure_pauses_before_the_next_messa
     queue_send(&mut c, &id, "uncertain-tail", "native-message-tail").await;
     dispatch_queue(&mut c, &id, "fail-forwarded", false).await;
     dispatch_queue(&mut c, &id, "uncertain-tail", false).await;
-    // Reproduce a real admission-success / baseline-persistence-failure split,
-    // without a production failpoint or a disk-wide failure affecting other tests.
+    // Reproduce failure while persisting native consumption, without a
+    // production failpoint or a disk-wide failure affecting other tests.
     let db = rusqlite::Connection::open(host.directory.path().join("state.sqlite")).unwrap();
-    db.execute_batch("CREATE TRIGGER fail_forwarded_baseline BEFORE INSERT ON turn_changes WHEN NEW.request_id='fail-forwarded' BEGIN SELECT RAISE(ABORT, 'baseline fixture failure'); END;").unwrap();
+    db.execute_batch("CREATE TRIGGER fail_forwarded_consumption BEFORE UPDATE ON message_queue WHEN OLD.request_id='fail-forwarded' AND OLD.status='forwarded' AND NEW.status='dispatched' BEGIN SELECT RAISE(ABORT, 'consumption fixture failure'); END;").unwrap();
     std::fs::write(root.path().join("native-release"), "go").unwrap();
     let events = wait(&mut c, &id, Status::Failed).await;
     assert!(
@@ -6519,6 +6519,145 @@ async fn closing_a_session_cancels_pending_immediate_confirmation_without_losing
 }
 
 #[tokio::test]
+async fn message_queue_native_result_only_failure_does_not_drain_host_messages() {
+    let host = Host::start_with_environment(&[(
+        "LATTE_FIXTURE_QUEUE_RESULT_ONLY_FAILURE",
+        std::ffi::OsStr::new("1"),
+    )])
+    .await;
+    let root = tempfile::tempdir().unwrap();
+    let mut c = host.client().await;
+    let id = session(&mut c, root.path()).await;
+    queue_send(&mut c, &id, "head", "native-queue-head").await;
+    native_queue_ready(&mut c, &id).await;
+    queue_send(&mut c, &id, "native-failed", "native-message-failed").await;
+    queue_send(&mut c, &id, "held", "native-message-held").await;
+    dispatch_queue(&mut c, &id, "native-failed", false).await;
+    let received = Instant::now() + Duration::from_secs(5);
+    while !root.path().join("native-inputs").exists() {
+        assert!(Instant::now() < received);
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    std::fs::write(root.path().join("native-release"), "go").unwrap();
+    let events = wait(&mut c, &id, Status::Failed).await;
+    // Serialize past result handling and host-queue scheduling.
+    assert!(matches!(
+        ask(
+            &mut c,
+            Request::OpenAgentSession {
+                session_id: id.clone(),
+                provider: None
+            }
+        )
+        .await,
+        Response::Ok
+    ));
+    assert!(
+        matches!(ask(&mut c,Request::MessageQueue {session_id:id}).await,Response::MessageQueue {entries,paused:true,..} if entries.len()==1 && entries[0].request_id=="held")
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(&e.event,EventKind::User {request_id,..} if request_id=="held"))
+    );
+    assert_eq!(
+        std::fs::read_to_string(root.path().join("native-inputs")).unwrap(),
+        "native-message-failed\n"
+    );
+}
+
+#[tokio::test]
+async fn message_queue_native_batch_completion_does_not_invent_another_turn() {
+    let host = Host::start().await;
+    let root = tempfile::tempdir().unwrap();
+    let mut c = host.client().await;
+    let id = session(&mut c, root.path()).await;
+    queue_send(&mut c, &id, "batch-head", "native-queue-batch-head").await;
+    native_queue_ready(&mut c, &id).await;
+    for key in ["batch-a", "batch-b"] {
+        queue_send(&mut c, &id, key, "native-message-same-text").await;
+        assert!(matches!(
+            dispatch_queue(&mut c, &id, key, false).await,
+            Response::MessageQueue { .. }
+        ));
+    }
+    let received = Instant::now() + Duration::from_secs(5);
+    while std::fs::read_to_string(root.path().join("native-inputs"))
+        .unwrap_or_default()
+        .lines()
+        .count()
+        != 2
+    {
+        assert!(Instant::now() < received, "native batch inputs");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    // A native batch consumes both sends but emits only ONE result. Keep the
+    // queue empty: another host-held turn must not mask a phantom activation.
+    std::fs::write(root.path().join("native-release"), "go").unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let events = loop {
+        let Response::Events {
+            events, session, ..
+        } = ask(
+            &mut c,
+            Request::Poll {
+                session_id: id.clone(),
+                after: 0.0,
+            },
+        )
+        .await
+        else {
+            panic!("poll")
+        };
+        if events.iter().filter(|e|matches!(&e.event,EventKind::Text{text} if text=="NATIVE_PROCESSED:native-message-same-text")).count()==2
+            && session.status==Status::Completed && session.agent_session_busy==Some(false) {break events;}
+        assert!(
+            Instant::now() < deadline,
+            "batch finished natively but host remained {:?}, busy {:?}",
+            session.status,
+            session.agent_session_busy
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    };
+    assert_eq!(
+        events
+            .iter()
+            .filter(|e| matches!(e.event, EventKind::User { .. }))
+            .count(),
+        1,
+        "handoffs were already part of the native turn"
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|e| matches!(e.event, EventKind::QueuedMessageSent { .. }))
+            .count(),
+        2
+    );
+    assert_eq!(
+        std::fs::read_to_string(root.path().join("native-inputs")).unwrap(),
+        "native-message-same-text\nnative-message-same-text\n"
+    );
+    for key in ["batch-a", "batch-b"] {
+        assert!(matches!(
+            queue_send(&mut c, &id, key, "native-message-same-text").await,
+            Response::Accepted { duplicate: true }
+        ));
+    }
+    assert!(matches!(
+        ask(
+            &mut c,
+            Request::CloseAgentSession {
+                session_id: id,
+                only_if_idle: Some(true)
+            }
+        )
+        .await,
+        Response::Ok
+    ));
+}
+
+#[tokio::test]
 async fn message_queue_default_send_hands_off_now_without_interrupt_and_never_writes_twice() {
     let host = Host::start().await;
     let root = tempfile::tempdir().unwrap();
@@ -6549,6 +6688,25 @@ async fn message_queue_default_send_hands_off_now_without_interrupt_and_never_wr
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
     assert!(!root.path().join("native-interrupts").exists());
+    assert!(
+        matches!(
+            ask(
+                &mut c,
+                Request::Send {
+                    session_id: id.clone(),
+                    request_id: "native-head".into(),
+                    text: "native-queue-head".into(),
+                    model: None,
+                    effort: None,
+                    permission_mode: None,
+                    provider: Some(latte_work_protocol::TurnProvider::Cli)
+                }
+            )
+            .await,
+            Response::Accepted { duplicate: true }
+        ),
+        "legacy retries reconcile before native-backlog admission checks"
+    );
     let Response::Events {
         events, session, ..
     } = ask(
@@ -6599,7 +6757,7 @@ async fn message_queue_default_send_hands_off_now_without_interrupt_and_never_wr
     drop(c);
     std::fs::write(root.path().join("native-release"), "go").unwrap();
     let mut observer = host.client().await;
-    let events = queue_until(&mut observer, &id, 4).await;
+    let events = queue_until(&mut observer, &id, 2).await;
     assert_eq!(
         events
             .iter()
@@ -6615,7 +6773,21 @@ async fn message_queue_default_send_hands_off_now_without_interrupt_and_never_wr
             _ => None,
         })
         .collect::<Vec<_>>();
-    assert_eq!(ids, ["native-head", "native-b", "native-a", "host-c"]);
+    assert_eq!(ids, ["native-head", "host-c"]);
+    assert_eq!(
+        events
+            .iter()
+            .filter(|e| matches!(
+                e.event,
+                EventKind::State {
+                    status: Status::Running,
+                    ..
+                }
+            ))
+            .count(),
+        4,
+        "only real native follow-ups and host-held sends start turns"
+    );
     assert_eq!(
         std::fs::read_to_string(root.path().join("native-inputs")).unwrap(),
         "native-message-b\nnative-message-a\nnative-message-c\n"

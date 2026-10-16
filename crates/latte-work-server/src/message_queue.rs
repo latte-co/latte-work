@@ -256,6 +256,15 @@ impl Store {
         tx.commit()?;
         Ok(())
     }
+    /// Retire only native-confirmed inputs, without admitting or writing a new turn.
+    pub fn consume_forwarded(&self, id: &str, requests: &[String]) -> Result<()> {
+        let tx = self.db.unchecked_transaction()?;
+        for request in requests {
+            tx.execute("UPDATE message_queue SET status='dispatched' WHERE session_id=?1 AND request_id=?2 AND status='forwarded'",params![id,request])?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
     pub fn uncertain_forwarded(&self, id: &str) -> Result<()> {
         let tx = self.db.unchecked_transaction()?;
         let count=tx.execute("UPDATE message_queue SET status='uncertain' WHERE session_id=?1 AND status='forwarded'",[id])?;
@@ -300,6 +309,57 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn consumed_handoff_retains_references_activity_and_identity_after_restart() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("state.sqlite");
+        let store = Store::open(&path).unwrap();
+        let project = store.add_project(root.path()).unwrap();
+        let session = store.create_session(project.id, "claude".into()).unwrap();
+        let text = "Original prompt\n引用（相对项目；绝对路径在当前主机，按现有权限读取）：\n[{\"type\":\"file\",\"path\":\"README.md\",\"name\":\"README.md\"}]";
+        let entry = QueuedMessage {
+            request_id: "consumed".into(),
+            text: text.into(),
+            model: None,
+            effort: None,
+            permission_mode: None,
+            revision: 0,
+            created_at: 1.0,
+        };
+        let data = serde_json::to_string(&entry).unwrap();
+        store.db.execute("INSERT INTO message_queue(request_id,session_id,admission,data) VALUES ('consumed',?1,?2,?2)",params![session.id,data]).unwrap();
+        store.mark_forwarded(&session.id, "consumed", 0).unwrap();
+        store
+            .consume_forwarded(&session.id, &["consumed".into(), "unknown".into()])
+            .unwrap();
+        store
+            .consume_forwarded(&session.id, &["consumed".into()])
+            .unwrap();
+        drop(store);
+        let store = Store::open(&path).unwrap();
+        assert_eq!(
+            store
+                .db
+                .query_row(
+                    "SELECT status FROM message_queue WHERE request_id='consumed'",
+                    [],
+                    |r| r.get::<_, String>(0)
+                )
+                .unwrap(),
+            "dispatched"
+        );
+        let sources = store.sources(&session.id).unwrap().0;
+        assert!(
+            sources
+                .iter()
+                .any(|s| s.path.as_deref() == Some("README.md"))
+        );
+        let (recent, _) = store.recent_sessions(None).unwrap();
+        let receipt_at:f64=store.db.query_row("SELECT at FROM events WHERE session_id=?1 AND json_extract(data,'$.kind')='queued_message_sent'",[&session.id],|r|r.get(0)).unwrap();
+        assert_eq!(recent[0].updated_at, receipt_at);
+        assert_eq!(store.db.query_row("SELECT COUNT(*) FROM events WHERE session_id=?1 AND json_extract(data,'$.kind') IN ('user','notice')",[&session.id],|r|r.get::<_,u32>(0)).unwrap(),0,"completion and restart do not invent a new user turn or uncertainty");
+    }
+
     #[test]
     fn restart_quarantines_native_handoffs_and_preserves_the_prompt_receipt() {
         let root = tempfile::tempdir().unwrap();

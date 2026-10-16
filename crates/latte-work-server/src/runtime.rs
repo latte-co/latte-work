@@ -13,7 +13,7 @@ use nix::{
 };
 use serde_json::Value;
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::{HashMap, HashSet},
     process::Stdio,
     sync::{
         Arc, Mutex,
@@ -516,6 +516,9 @@ impl TurnState {
                 Action::Write(bytes) => write(input, &bytes).await?,
                 Action::Ready => self.ready = true,
                 Action::Interrupted => {}
+                Action::InputsConsumed(ids) => {
+                    db(database, |s| s.consume_forwarded(session_id, &ids))?
+                }
                 Action::TurnStarted => db(database, |s| {
                     if !s.session(session_id)?.status.active() {
                         s.state(session_id, Status::Running, None)?;
@@ -946,29 +949,6 @@ async fn accept_turn(
     turn: SendTurn,
     session_open: &Arc<AtomicBool>,
 ) -> Result<bool> {
-    accept_turn_mode(
-        process,
-        database,
-        binary,
-        session,
-        path,
-        turn,
-        session_open,
-        false,
-    )
-    .await
-}
-#[allow(clippy::too_many_arguments)]
-async fn accept_turn_mode(
-    process: &mut Option<Process>,
-    database: &Database,
-    binary: &str,
-    session: &Session,
-    path: &str,
-    turn: SendTurn,
-    session_open: &Arc<AtomicBool>,
-    delivered: bool,
-) -> Result<bool> {
     let config = turn.config.clone();
     if db(database, |s| {
         s.already_accepted(
@@ -988,13 +968,6 @@ async fn accept_turn_mode(
     }
     if process.as_ref().is_some_and(|p| !p.state.ready) {
         bail!("Agent 会话正在恢复，请稍后重试；消息未发送");
-    }
-    if delivered
-        && !process
-            .as_ref()
-            .is_some_and(|p| same_config(&p.config, &config))
-    {
-        bail!("已发送的消息失去原生连接，不能自动重发");
     }
     if let Some(current) = process.as_mut()
         && !same_config(&current.config, &config)
@@ -1021,15 +994,9 @@ async fn accept_turn_mode(
     // After durable admission, all failures become explicit terminal events. The
     // accepted request ID still reconciles a lost transport response without replay.
     let result = async {
-        let baseline = if delivered {
-            crate::task_changes::Snapshot::unavailable(
-                "消息已由 Agent 接收，无法提供安全的单轮撤销".into(),
-            )
-        } else {
-            crate::task_changes::Snapshot::capture(std::path::Path::new(path))
-                .await
-                .unwrap_or_else(|e| crate::task_changes::Snapshot::unavailable(e.to_string()))
-        };
+        let baseline = crate::task_changes::Snapshot::capture(std::path::Path::new(path))
+            .await
+            .unwrap_or_else(|e| crate::task_changes::Snapshot::unavailable(e.to_string()));
         db(database, |s| {
             s.save_turn_baseline(&session.id, &turn.request_id, &baseline)
         })?;
@@ -1073,11 +1040,7 @@ async fn accept_turn_mode(
                 s.event(&session.id, EventKind::Notice { text })
             })?;
         }
-        let actions = p.adapter.advance(if delivered {
-            Input::ActivateQueued
-        } else {
-            Input::Start { prompt: &turn.text }
-        })?;
+        let actions = p.adapter.advance(Input::Start { prompt: &turn.text })?;
         p.apply(actions, database, &session.id).await
     }
     .await;
@@ -1108,6 +1071,7 @@ async fn receive_turn(
     turn: SendTurn,
     session_open: &Arc<AtomicBool>,
     allow_queue: bool,
+    pending_inputs: bool,
     configs: &mut HashMap<String, LaunchConfig>,
 ) -> Result<Response> {
     {
@@ -1115,20 +1079,23 @@ async fn receive_turn(
             return Ok(response);
         }
     }
+    if db(database, |d| {
+        d.already_accepted(
+            &session.id,
+            &turn.request_id,
+            &turn.text,
+            turn.model.as_deref(),
+            turn.config.effort,
+            turn.fingerprint.as_deref(),
+            turn.config.permission_mode.as_deref(),
+        )
+    })? {
+        return Ok(Response::Accepted { duplicate: true });
+    }
+    if pending_inputs && !allow_queue {
+        bail!("Agent 尚有已交付的消息待处理");
+    }
     if allow_queue {
-        if db(database, |d| {
-            d.already_accepted(
-                &session.id,
-                &turn.request_id,
-                &turn.text,
-                turn.model.as_deref(),
-                turn.config.effort,
-                turn.fingerprint.as_deref(),
-                turn.config.permission_mode.as_deref(),
-            )
-        })? {
-            return Ok(Response::Accepted { duplicate: true });
-        }
         let queued = db(database, |d| d.queued(&session.id))?;
         let busy = db(database, |d| Ok(d.session(&session.id)?.status.active()))?
             || process
@@ -1164,7 +1131,7 @@ async fn actor(
         deadline: tokio::time::Instant,
     }
     let mut immediate: Option<Immediate> = None;
-    let mut forwarded = VecDeque::<SendTurn>::new();
+    let mut forwarded = HashSet::<String>::new();
     let mut process: Option<Process> = None;
     let mut queued_configs = HashMap::<String, LaunchConfig>::new();
     let mut opening: Vec<oneshot::Sender<Result<(), String>>> = Vec::new();
@@ -1175,7 +1142,7 @@ async fn actor(
             .map(|p| p.init_deadline);
         let turn_deadline = process
             .as_ref()
-            .filter(|p| p.turn_active)
+            .filter(|p| p.turn_active || !forwarded.is_empty())
             .map(|p| p.turn_deadline);
         let immediate_deadline = immediate.as_ref().map(|v| v.deadline);
         let previous_status = db(&database, |d| Ok(d.session(&session.id)?.status)).ok();
@@ -1293,17 +1260,22 @@ async fn actor(
                         if immediate.is_some() || forwarded.len()>=16 {bail!("Agent 正在切换任务或待处理消息已达上限");}
                         let p=process.as_mut().context("Agent 未启动")?;
                         if !p.state.ready || p.stopping || p.interrupt_ack_pending || !same_config(&p.config,&config) {bail!("当前 Agent 尚未就绪或执行配置不一致，消息保留在队列");}
-                        let (entry,fingerprint)=db(&database,|d|d.queued(&session.id))?.into_iter().find(|(e,_)|e.request_id==request_id && e.revision==revision).context("消息已执行、移除或更新，请刷新队列")?;
-                        let actions=p.adapter.advance(Input::Queue{prompt:&entry.text})?;
-                        db(&database,|d|d.mark_forwarded(&session.id,&request_id,revision))?;
-                        Ok((SendTurn{request_id:entry.request_id,text:entry.text,model:entry.model,fingerprint,config},actions))
+                        let (entry,_)=db(&database,|d|d.queued(&session.id))?.into_iter().find(|(e,_)|e.request_id==request_id && e.revision==revision).context("消息已执行、移除或更新，请刷新队列")?;
+                        let actions=p.adapter.advance(Input::Queue{request_id:&request_id,prompt:&entry.text})?;
+                        Ok(actions)
                     })();
                     match prepared {
                         Err(error)=>{let _=reply.send(Err(error.to_string()));Ok(())},
-                        Ok((turn,actions))=> {
-                            forwarded.push_back(turn);
-                            queued_configs.remove(&request_id);
-                            let result=process.as_mut().expect("prepared process").apply(actions,&database,&session.id).await;
+                        Ok(actions)=> {
+                            let result=async {
+                                // After adapter preparation, a failed durable handoff
+                                // must fail/close the actor rather than retain an
+                                // unwritten native UUID in a live adapter.
+                                db(&database,|d|d.mark_forwarded(&session.id,&request_id,revision))?;
+                                forwarded.insert(request_id.clone());
+                                queued_configs.remove(&request_id);
+                                process.as_mut().expect("prepared process").apply(actions,&database,&session.id).await
+                            }.await;
                             match result {
                                 Ok(())=>{let snapshot=db(&database,|d|d.queue_snapshot(&session.id));let _=reply.send(snapshot.map_err(|e|e.to_string()));Ok(())},
                                 Err(error)=>{let _=reply.send(Err("消息交付结果待确认，不会自动重发，请核对 Agent 记录".into()));Err(error)}
@@ -1315,6 +1287,7 @@ async fn actor(
                     let config=*config;
                     let prepared = (|| {
                         if immediate.is_some() { bail!("正在发送，请稍后重试"); }
+                        if !interrupt && !forwarded.is_empty() { bail!("Agent 尚有已交付的消息待处理，请稍后重试"); }
                         if let Some(p) = process.as_ref() {
                             if !p.state.ready || p.stopping || p.interrupt_ack_pending { bail!("Agent 正在准备或停止，请稍后重试"); }
                             if p.turn_active && !same_config(&p.config,&config) { bail!("立即发送需沿用当前 Agent 的执行配置，请编辑后重新发送"); }
@@ -1370,7 +1343,7 @@ async fn actor(
                 }
                 Some(Control::Send { turn, allow_queue, reply }) => {
                     safe_to_close.store(false, Ordering::SeqCst);
-                    let result = receive_turn(&mut process, &database, &binary, &session, &path, turn, &session_open, allow_queue, &mut queued_configs).await;
+                    let result = receive_turn(&mut process, &database, &binary, &session, &path, turn, &session_open, allow_queue, !forwarded.is_empty(), &mut queued_configs).await;
                     let _ = reply.send(result.map_err(|e| e.to_string()));
                     Ok(())
                 }
@@ -1485,7 +1458,12 @@ async fn actor(
                     let p = process.as_mut().context("Agent process missing")?;
                     let line = line.context("Agent 进程意外退出；会话历史已保留，后台任务状态无法恢复")??;
                     let actions = p.adapter.advance(Input::Message(&line))?;
-                    p.apply(actions, &database, &session.id).await
+                    let consumed: Vec<_> = actions.iter().filter_map(|action| match action {
+                        Action::InputsConsumed(ids) => Some(ids.as_slice()), _ => None,
+                    }).flatten().cloned().collect();
+                    p.apply(actions, &database, &session.id).await?;
+                    for id in consumed { forwarded.remove(&id); }
+                    Ok(())
                 }.await
             },
             _ = deadline(immediate_deadline) => {
@@ -1561,7 +1539,9 @@ async fn actor(
         }
         let queue_result = async {
             let status = db(&database, |d| Ok(d.session(&session.id)?.status))?;
-            if previous_status.as_ref().is_some_and(|s| s.active())
+            if previous_status
+                .as_ref()
+                .is_some_and(|s| s.active() || *s != status)
                 && !status.active()
                 && status != Status::Completed
             {
@@ -1569,33 +1549,11 @@ async fn actor(
                     d.pause_queue(&session.id, Some("当前执行未完成，队列已暂停"))
                 })?;
             }
-            if !status.active() && !forwarded.is_empty() && immediate.is_none() {
-                if status != Status::Completed
-                    || process
-                        .as_ref()
-                        .is_none_or(|p| p.stopping || p.interrupt_ack_pending)
-                {
-                    forwarded.clear();
-                    db(&database, |d| d.uncertain_forwarded(&session.id))?;
-                    bail!("已发送消息的处理状态待确认，队列已暂停");
-                }
-                let turn = forwarded.pop_front().expect("checked forwarded");
-                accept_turn_mode(
-                    &mut process,
-                    &database,
-                    &binary,
-                    &session,
-                    &path,
-                    turn,
-                    &session_open,
-                    true,
-                )
-                .await?;
-                if db(&database, |d| {
-                    Ok(d.session(&session.id)?.status == Status::Failed)
-                })? {
-                    bail!("已发送消息未能开始执行，请核对后继续");
-                }
+            // Native completions can consume zero, one or several delivered
+            // inputs. Never invent another turn or replay them at this boundary.
+            if !status.active() && status != Status::Completed && !forwarded.is_empty() {
+                forwarded.clear();
+                db(&database, |d| d.uncertain_forwarded(&session.id))?;
             }
             let status = db(&database, |d| Ok(d.session(&session.id)?.status))?;
             if immediate.is_some()
@@ -1649,6 +1607,7 @@ async fn actor(
                 ))
             })?;
             if !paused
+                && forwarded.is_empty()
                 && !status.active()
                 && process.as_ref().is_none_or(|p| {
                     p.state.ready

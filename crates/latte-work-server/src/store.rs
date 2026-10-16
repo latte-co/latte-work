@@ -38,7 +38,8 @@ impl Store {
         CREATE TABLE IF NOT EXISTS subagent_history_sources(session_id TEXT NOT NULL,task_id TEXT NOT NULL,cursor TEXT NOT NULL,PRIMARY KEY(session_id,task_id),FOREIGN KEY(session_id,task_id) REFERENCES subagents(session_id,id));
         CREATE TABLE IF NOT EXISTS subagent_native_transcripts(session_id TEXT NOT NULL,task_id TEXT NOT NULL,data TEXT NOT NULL,PRIMARY KEY(session_id,task_id),FOREIGN KEY(session_id,task_id) REFERENCES subagents(session_id,id));
         CREATE INDEX IF NOT EXISTS events_session ON events(session_id,seq);
-        CREATE INDEX IF NOT EXISTS events_recent_activity ON events(session_id,seq DESC) WHERE json_extract(data,'$.kind') IN ('user','text','tool','tool_result','approval','approval_resolved','subagent');
+        CREATE INDEX IF NOT EXISTS events_recent_activity_v2 ON events(session_id,seq DESC) WHERE json_extract(data,'$.kind') IN ('user','queued_message_sent','text','tool','tool_result','approval','approval_resolved','subagent');
+        DROP INDEX IF EXISTS events_recent_activity;
         CREATE TABLE IF NOT EXISTS turn_changes(session_id TEXT NOT NULL REFERENCES sessions(id), request_id TEXT NOT NULL REFERENCES requests(id), baseline TEXT, data TEXT, PRIMARY KEY(session_id,request_id));
         CREATE TABLE IF NOT EXISTS task_baselines(session_id TEXT PRIMARY KEY REFERENCES sessions(id), data TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS task_sources(session_id TEXT NOT NULL REFERENCES sessions(id), id TEXT NOT NULL, data TEXT NOT NULL, at REAL NOT NULL, PRIMARY KEY(session_id,id));
@@ -267,7 +268,7 @@ impl Store {
         // The partial event index also supports histories created before this feature.
         let rows = self.db.prepare("WITH recent AS (
             SELECT s.id,s.data,COALESCE((SELECT e.at FROM events e WHERE e.session_id=s.id
-                AND json_extract(e.data,'$.kind') IN ('user','text','tool','tool_result','approval','approval_resolved','subagent')
+                AND json_extract(e.data,'$.kind') IN ('user','queued_message_sent','text','tool','tool_result','approval','approval_resolved','subagent')
                 ORDER BY e.seq DESC LIMIT 1),json_extract(s.data,'$.created_at')) AS updated_at
             FROM sessions s WHERE COALESCE(json_extract(s.data,'$.archived'),0)=0
                 AND s.project_id NOT IN (SELECT project_id FROM hidden_projects))
@@ -917,7 +918,7 @@ impl Store {
     pub fn sources(&self, session: &str) -> Result<(Vec<latte_work_protocol::TaskSource>, bool)> {
         self.session(session)?;
         // Bounded lazy indexing supports older histories without inventing sources.
-        let history = self.db.prepare("SELECT data FROM events WHERE session_id=?1 AND json_extract(data,'$.kind') IN ('user','tool') ORDER BY seq DESC LIMIT 257")?.query_map([session], |r| r.get::<_,String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
+        let history = self.db.prepare("SELECT data FROM events WHERE session_id=?1 AND json_extract(data,'$.kind') IN ('user','queued_message_sent','tool') ORDER BY seq DESC LIMIT 257")?.query_map([session], |r| r.get::<_,String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
         let mut partial = history.len() > 256;
         let tx = self.db.unchecked_transaction()?;
         for data in history.iter().take(256).rev() {

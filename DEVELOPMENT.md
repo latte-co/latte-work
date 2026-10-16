@@ -844,13 +844,18 @@ Claude stream immediately; it never sends an interrupt or waits for the host que
 head. A persisted `queued_message_sent` receipt carries the original text and request
 ID, distinct from the `user` execution-start event. The desktop immediately displays
 it with the shared user-message bubble, original send time, copy and attachment controls.
-It correlates the later execution event by session/request ID and text, keeping one
-visible bubble at delivery time. A history page without the receipt still displays
-the execution event normally. Handoffs never end an in-flight tool or disappear
+For legacy histories with a later execution event, it correlates by session/request
+ID and text, keeping one visible bubble at delivery time. A history page without
+the receipt still displays the execution event normally. Handoffs never end an in-flight tool or disappear
 inside a completed turn's folded process. Legacy prose receipts remain readable;
 the UI does not infer request identity from their text. Native
-completion boundaries activate delivered inputs in their delivery order without
-writing them again, before draining host-held messages. Outstanding native inputs
+completion consumes inputs by their native UUID attribution (`user_message_uuids`,
+or `user_message_uuid`), with replay acknowledgements as compatibility evidence.
+One result can settle several inputs folded into the same turn. Handoffs do not
+create synthetic execution-start events or trigger another turn when a result arrives;
+only native output starts a native follow-up. Unconfirmed inputs remain held without
+replay and block host-held messages until native confirmation or explicit stop/close.
+Outstanding native inputs
 share the 16-message/512-KiB admission budget. Streamed handoffs cannot provide a
 safe independent filesystem boundary, so overlapping turn snapshots cannot be undone.
 

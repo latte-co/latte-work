@@ -114,23 +114,28 @@ for line in sys.stdin:
             continue
         if text=='malformed': print('this is not json',flush=True);sys.exit(0)
         if text=='exit': sys.exit(2)
-        if text=='native-queue-head':
+        if text in ('native-queue-head', 'native-queue-batch-head'):
+            batch=text=='native-queue-batch-head'
             native_mode=True
             with native_lock:
                 native_head=True
                 native_generation+=1
                 generation=native_generation
-            def finish_native_head(generation=generation):
+            def finish_native_head(generation=generation,batch=batch):
                 global native_head
                 deadline=time.monotonic()+min(600,float(os.environ.get('LATTE_FIXTURE_QUEUE_TIMEOUT','20')))
                 while not pathlib.Path('native-release').exists() and time.monotonic()<deadline: time.sleep(.02)
                 with native_lock:
                     if native_generation!=generation: return
                     emit({'type':'assistant','message':{'content':[{'type':'text','text':'NATIVE_HEAD_COMPLETE'}]}})
-                    emit({'type':'result','subtype':'success','is_error':False})
-                    for queued in native_pending:
+                    if not batch: emit({'type':'result','subtype':'success','is_error':False})
+                    for queued,queued_uuid in native_pending:
+                        if os.environ.get('LATTE_FIXTURE_QUEUE_RESULT_ONLY_FAILURE')=='1':
+                            emit({'type':'result','subtype':'error_during_execution','is_error':True,'result':'native queue failure','user_message_uuid':queued_uuid})
+                            continue
                         emit({'type':'assistant','message':{'content':[{'type':'text','text':'NATIVE_PROCESSED:'+queued}]}})
-                        emit({'type':'result','subtype':'success','is_error':False})
+                        if not batch: emit({'type':'result','subtype':'success','is_error':False,'user_message_uuid':queued_uuid})
+                    if batch: emit({'type':'result','subtype':'success','is_error':False,'user_message_uuids':[uuid for _,uuid in native_pending]})
                     native_pending.clear()
                     native_head=False
             threading.Thread(target=finish_native_head,daemon=True).start()
@@ -138,13 +143,13 @@ for line in sys.stdin:
             continue
         if text.startswith('native-message-'):
             native_mode=True
-            with pathlib.Path('native-inputs').open('a') as record: record.write(text+'\n')
             with native_lock:
+                with pathlib.Path('native-inputs').open('a') as record: record.write(text+'\n')
                 if native_head:
-                    native_pending.append(text)
+                    native_pending.append((text,value.get('uuid')))
                     continue
             emit({'type':'assistant','message':{'content':[{'type':'text','text':'NATIVE_PROCESSED:'+text}]}})
-            emit({'type':'result','subtype':'success','is_error':False})
+            emit({'type':'result','subtype':'success','is_error':False,'user_message_uuid':value.get('uuid')})
             continue
         if text=='queue-slow':
             def finish_queue_head():

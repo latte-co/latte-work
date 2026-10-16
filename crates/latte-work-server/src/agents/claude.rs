@@ -241,6 +241,8 @@ pub struct Claude {
     session_state: Option<String>,
     delegated: bool,
     last_result: Option<String>,
+    queued_inputs: HashMap<String, String>,
+    consumed_inputs: HashSet<String>,
 }
 // Gateways may return a provider-prefixed model while CLI accounting uses its
 // bare name plus a context suffix. Only match that same name, never any model.
@@ -367,6 +369,7 @@ impl AgentAdapter for Claude {
     }
     fn can_reconfigure(&self) -> bool {
         matches!(self.phase, Phase::BetweenTurns)
+            && self.queued_inputs.is_empty()
             && self.renaming.is_none()
             && self.tasks.is_empty()
             && self.foreground_agents.is_empty()
@@ -399,6 +402,7 @@ impl AgentAdapter for Claude {
             "stream-json",
             "--verbose",
             "--include-partial-messages",
+            "--replay-user-messages",
             "--permission-prompt-tool",
             "stdio",
         ]);
@@ -525,20 +529,22 @@ impl AgentAdapter for Claude {
                 Ok(vec![write_action(self.initialize())?])
             }
 
-            Input::Queue { prompt } => {
+            Input::Queue { request_id, prompt } => {
                 if !matches!(self.phase, Phase::Running) {
                     bail!("Agent 当前不能接收运行中消息");
                 }
                 self.check_command(prompt)?;
-                Ok(vec![write_action(self.prompt(prompt))?])
-            }
-            Input::ActivateQueued => {
-                if !matches!(self.phase, Phase::BetweenTurns) {
-                    bail!("Agent 上一轮尚未确认完成");
+                if self.queued_inputs.len() >= 16 {
+                    bail!("Agent 待处理消息已达上限");
                 }
-                self.reset_turn();
-                self.phase = Phase::Running;
-                Ok(vec![])
+                // Public request IDs need not be UUIDs. Mint a native UUID and
+                // retain the join until completion, never match prompts by text.
+                let uuid = uuid::Uuid::new_v4().to_string();
+                let mut message = self.prompt(prompt);
+                message["uuid"] = json!(uuid);
+                let action = write_action(message)?;
+                self.queued_inputs.insert(uuid, request_id.into());
+                Ok(vec![action])
             }
             Input::Start { prompt } => {
                 if matches!(self.phase, Phase::BetweenTurns) {
@@ -804,8 +810,36 @@ impl Claude {
         {
             return self.child_message(&m, parent);
         }
+        // Native reply attribution and replay acknowledgements identify inputs
+        // incorporated into the current turn. Commit them only at its result.
+        // Older CLIs can acknowledge the user frame without result attribution.
+        if m["parent_tool_use_id"].is_null()
+            && (matches!(
+                m["type"].as_str(),
+                Some("assistant" | "stream_event" | "result")
+            ) || (m["type"] == "user" && m["isReplay"] == true))
+        {
+            let ids = m["user_message_uuids"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .take(64)
+                .filter_map(Value::as_str)
+                .chain(m["user_message_uuid"].as_str())
+                .chain((m["type"] == "user").then(|| m["uuid"].as_str()).flatten());
+            for uuid in ids {
+                if self.queued_inputs.contains_key(uuid) {
+                    self.consumed_inputs.insert(uuid.into());
+                }
+            }
+        }
         if matches!(self.phase, Phase::BetweenTurns)
-            && matches!(m["type"].as_str(), Some("assistant" | "stream_event"))
+            && (m["type"] == "assistant"
+                || (m["type"] == "stream_event"
+                    && matches!(
+                        m["event"]["type"].as_str(),
+                        Some("message_start" | "content_block_start" | "content_block_delta")
+                    )))
             && m["parent_tool_use_id"].is_null()
         {
             self.reset_turn();
@@ -1251,6 +1285,14 @@ impl Claude {
                         ));
                     }
                     return Ok(output);
+                }
+                let consumed: Vec<_> = self
+                    .consumed_inputs
+                    .drain()
+                    .filter_map(|uuid| self.queued_inputs.remove(&uuid))
+                    .collect();
+                if !consumed.is_empty() {
+                    output.push(Action::InputsConsumed(consumed));
                 }
                 if matches!(self.phase, Phase::BetweenTurns) {
                     let text = m["result"].as_str().filter(|text| !text.is_empty());
@@ -1770,6 +1812,106 @@ fn parse_commands(value: &Value) -> Result<Vec<latte_work_protocol::AgentSlashCo
 
 #[cfg(test)]
 mod tests {
+    fn handoff(agent: &mut super::Claude, request_id: &str) -> String {
+        use super::*;
+        let actions = agent
+            .advance(Input::Queue {
+                request_id,
+                prompt: "same text",
+            })
+            .unwrap();
+        let [Action::Write(bytes)] = actions.as_slice() else {
+            panic!("one native write")
+        };
+        serde_json::from_slice::<Value>(bytes).unwrap()["uuid"]
+            .as_str()
+            .unwrap()
+            .into()
+    }
+
+    #[test]
+    fn native_batch_completion_retires_only_matching_handoffs_once() {
+        use super::*;
+        let mut agent = Claude {
+            phase: Phase::Running,
+            ..Default::default()
+        };
+        let a = handoff(&mut agent, "public-a");
+        let b = handoff(&mut agent, "public-b");
+        let held = handoff(&mut agent, "public-held");
+        assert_ne!(a, b);
+        let result=agent.decode(json!({"type":"result","is_error":false,"user_message_uuid":b,"user_message_uuids":[a,b,"unknown"]})).unwrap();
+        let ids = result
+            .iter()
+            .find_map(|action| match action {
+                Action::InputsConsumed(ids) => Some(ids),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(
+            ids.iter().cloned().collect::<HashSet<_>>(),
+            HashSet::from(["public-a".into(), "public-b".into()])
+        );
+        assert!(
+            !result
+                .iter()
+                .any(|a| matches!(a, Action::Write(_) | Action::TurnStarted))
+        );
+        assert_eq!(agent.queued_inputs.len(), 1);
+        assert!(
+            !agent.can_reconfigure(),
+            "unconfirmed input blocks replacement"
+        );
+        assert!(
+            agent
+                .decode(json!({"type":"result","is_error":false,"user_message_uuids":[a,b]}))
+                .unwrap()
+                .is_empty()
+        );
+        // No result attribution: an explicit native replay ack still provides
+        // identity evidence, without itself marking the input complete.
+        assert!(agent.decode(json!({"type":"user","isReplay":true,"uuid":held,"message":{"content":"same text"}})).unwrap().is_empty());
+        assert!(!agent.can_reconfigure());
+        let result = agent
+            .decode(json!({"type":"result","is_error":false}))
+            .unwrap();
+        assert!(matches!(result.as_slice(),[Action::InputsConsumed(ids)] if ids==&["public-held"]));
+        assert!(agent.can_reconfigure());
+    }
+
+    #[test]
+    fn native_child_and_unattributed_results_do_not_consume_parent_handoffs() {
+        use super::*;
+        let mut agent = Claude {
+            phase: Phase::Running,
+            ..Default::default()
+        };
+        let id = handoff(&mut agent, "public");
+        for message in [
+            json!({"type":"assistant","parent_tool_use_id":"child","user_message_uuid":id,"message":{"content":[]}}),
+            json!({"type":"result","parent_tool_use_id":"child","user_message_uuid":id}),
+            json!({"type":"user","uuid":id,"message":{"content":"same text"}}),
+            json!({"type":"result","is_error":false}),
+        ] {
+            assert!(
+                !agent
+                    .decode(message)
+                    .unwrap()
+                    .iter()
+                    .any(|a| matches!(a, Action::InputsConsumed(_)))
+            );
+        }
+        assert_eq!(agent.queued_inputs.len(), 1);
+        assert!(!agent.can_reconfigure());
+        for kind in ["ping", "message_stop", "content_block_stop"] {
+            let actions = agent
+                .decode(json!({"type":"stream_event","event":{"type":kind}}))
+                .unwrap();
+            assert!(!actions.iter().any(|a| matches!(a, Action::TurnStarted)));
+            assert!(matches!(agent.phase, Phase::BetweenTurns));
+        }
+    }
+
     #[test]
     fn native_title_events_and_rename_acknowledgements_never_start_a_turn() {
         use super::*;
