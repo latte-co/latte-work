@@ -53,10 +53,7 @@ it("loads real hover details without opening an Agent or granting file access", 
   });
   expect(screen.getByRole("tooltip").textContent).toContain(info.description);
   expect(screen.getByRole("tooltip").textContent).toContain(info.name);
-  expect(screen.getByRole("tooltip").textContent).toContain(
-    "此 Skill 目录及其文件的只读预览权限",
-  );
-  expect(screen.getByText(/项目外目录/)).toBeTruthy();
+  expect(screen.getByRole("tooltip").textContent).toContain(info.directory);
   expect(mocks.request).toHaveBeenCalledExactlyOnceWith("remote", {
     method: "skill_info",
     session_id: "s",

@@ -578,16 +578,14 @@ then opens `SKILL.md` directly in the shared Files tab, with the directory tree.
 Task files use the same Files tab. An external file click resolves exactly that file;
 its preview does not browse or grant access to its parent. Explicit directory
 selections retain their canonical preview scope, separate from project browsing.
-External paths are labelled before selection (including normalized parent segments),
-and file/Skill controls explain the retained file or directory preview scope. Hover never grants that directory access;
-preview still enforces canonical containment, including escaping nested symlinks.
-The collapsed “项目外预览权限” control in Task Summary lists the project's retained
-canonical file/directory scopes on demand (`reference_access`). Its records, unlike
-the pre-click lexical path hint, also identify symlinks resolving outside the project.
+Task Summary presents file names, paths and Skill descriptions with direct open actions;
+it does not expose retained permission scopes or authorization management. Hover only reads
+metadata and never grants directory access. Preview still enforces canonical containment,
+including escaping nested symlinks. The Server retains the `reference_access` metadata API
+for reading the project's canonical file/directory scopes.
 `revoke_reference_access` removes exactly that project's recorded scope even when
 the original path no longer exists; subsequent preview requests recheck permission.
-Successful revocation closes matching loaded file previews across conversations on
-that host/project. Other explicit task sources or uploaded attachments may independently
+Other explicit task sources or uploaded attachments may independently
 allow access. Retained grants are bounded to 512 per project; list responses also
 stay within half the wire-frame budget, accounting for JSON escaping. Older
 oversized lists are disclosed as truncated and can be reduced by revoking entries. Neither listing

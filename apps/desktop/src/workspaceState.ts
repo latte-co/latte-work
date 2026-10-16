@@ -422,25 +422,3 @@ export function openArtifact(
     conversationActive: false,
   }));
 }
-
-/** Discard mounted previews after the Server confirms a retained scope was revoked. */
-export function closeReferencePreviews(
-  hostId: string,
-  projectId: string,
-  entry: FileEntry,
-) {
-  const includes = (path: string | undefined) =>
-    !!path &&
-    (path === entry.path ||
-      (entry.directory &&
-        path.startsWith(`${entry.path.replace(/\/$/, "")}/`)));
-  for (const [key, state] of cache) {
-    const tabs = state.tabs.filter((tab) => {
-      if (tab.hostId !== hostId || tab.project?.id !== projectId) return true;
-      if (tab.kind === "artifact") return !includes(tab.path);
-      if (tab.kind !== "files") return true;
-      return !includes(tab.reference?.path) && !includes(tab.file);
-    });
-    if (tabs.length !== state.tabs.length) updateWorkspace(key, { tabs });
-  }
-}

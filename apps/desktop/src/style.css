@@ -4525,60 +4525,6 @@ button.task-info-row {
   color: var(--color-text);
   text-decoration: none;
 }
-.task-info-access {
-  margin-top: var(--space-4);
-  color: var(--color-text-muted);
-}
-.task-info-access > summary {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  cursor: pointer;
-  font-size: var(--text-sm);
-  border-radius: var(--radius-control);
-}
-.task-info-access > summary:hover,
-.task-info-access > summary:focus-visible {
-  background: var(--color-hover);
-}
-.task-info-access[open] .task-info-access-chevron {
-  transform: rotate(90deg);
-}
-.task-info-access-note {
-  display: flex;
-  align-items: flex-start;
-  gap: var(--space-2);
-  margin-top: var(--space-2);
-}
-.task-info-access-note p {
-  flex: 1;
-  margin: 0;
-  font-size: var(--text-sm);
-  line-height: 1.6;
-}
-.task-info-access-row {
-  display: flex;
-  align-items: center;
-  gap: var(--space-2);
-  padding: var(--space-2) 0;
-}
-.task-info-access-row > span {
-  flex: 1;
-  min-width: 0;
-  color: var(--color-text);
-}
-.task-info-access-row small {
-  display: block;
-  overflow: hidden;
-  white-space: nowrap;
-  text-overflow: ellipsis;
-  font-size: var(--text-sm);
-  color: var(--color-text-muted);
-}
-.task-info-access-row > svg,
-.task-info-access-row > button {
-  flex-shrink: 0;
-}
 button.task-info-file:not(:disabled):hover,
 a.task-info-file:hover,
 button.task-info-row:not(:disabled):hover,

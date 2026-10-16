@@ -22,7 +22,6 @@ import {
 import { request } from "./api";
 import type { Event, GitReview, Project } from "./protocol";
 import { TaskLinkRow } from "./TaskLinkRow";
-import { ReferenceAccess } from "./ReferenceAccess";
 import { useBrowserHistory } from "./browserHistory";
 import { webLink } from "./browserLinks";
 import { TaskFileRow } from "./TaskFileRow";
@@ -427,15 +426,6 @@ export function TaskInfo({
         </button>
       )}
       {data.truncated && empty("各项最多显示 128 条记录")}
-      {project && (
-        <ReferenceAccess
-          key={JSON.stringify([hostId, project.id])}
-          hostId={hostId}
-          projectId={project.id}
-          active={active}
-          connected={connected}
-        />
-      )}
     </div>
   );
 }
