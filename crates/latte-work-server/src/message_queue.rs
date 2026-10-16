@@ -237,8 +237,9 @@ impl Store {
             "UPDATE message_queue SET status='forwarded' WHERE session_id=?1 AND request_id=?2",
             params![id, request_id],
         )?;
-        let event = latte_work_protocol::EventKind::Notice {
-            text: format!("发送给 Agent：\n{}", entry.text),
+        let event = latte_work_protocol::EventKind::QueuedMessageSent {
+            text: entry.text,
+            request_id: entry.request_id,
         };
         tx.execute(
             "INSERT INTO events(session_id,at,data) VALUES (?1,?2,?3)",
@@ -341,6 +342,8 @@ mod tests {
             .unwrap()
             .join("\n");
         assert!(receipts.contains("Native handoff original prompt"));
+        assert!(receipts.lines().any(|row| matches!(serde_json::from_str::<latte_work_protocol::EventKind>(row).unwrap(),
+            latte_work_protocol::EventKind::QueuedMessageSent {request_id,text} if request_id=="sent" && text=="Native handoff original prompt")));
         assert!(receipts.contains("不会自动重发"));
     }
     #[test]

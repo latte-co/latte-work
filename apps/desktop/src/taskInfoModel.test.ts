@@ -3,6 +3,21 @@ import type { Event, EventKind } from "./protocol";
 import { artifactPath, taskInfo, createTaskInfoReader } from "./taskInfoModel";
 const events = (...items: EventKind[]): Event[] =>
   items.map((event, i) => ({ seq: i + 1, session_id: "s", at: i, event }));
+it("includes references in handed-off input before its execution starts", () => {
+  const input = {
+    request_id: "queued",
+    text: "[参考文档](https://example.com/docs) [报告](/project/report.md)",
+  };
+  const sent = events({ kind: "queued_message_sent", ...input });
+  const before = taskInfo(sent, "s", "/project");
+  expect(before.resources).toHaveLength(2);
+  const after = taskInfo(
+    [...sent, { ...events({ kind: "user", ...input })[0], seq: 2 }],
+    "s",
+    "/project",
+  );
+  expect(after.resources).toEqual(before.resources);
+});
 it("uses successful todo results, replaces snapshots, and ignores rejected or duplicated calls", () => {
   const history = events(
     {

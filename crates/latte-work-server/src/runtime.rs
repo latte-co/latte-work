@@ -1301,12 +1301,11 @@ async fn actor(
                     match prepared {
                         Err(error)=>{let _=reply.send(Err(error.to_string()));Ok(())},
                         Ok((turn,actions))=> {
-                            let receipt="消息已交给 Agent，等待其处理".to_owned();
                             forwarded.push_back(turn);
                             queued_configs.remove(&request_id);
                             let result=process.as_mut().expect("prepared process").apply(actions,&database,&session.id).await;
                             match result {
-                                Ok(())=>{let snapshot=db(&database,|d|{d.event(&session.id,EventKind::Notice{text:receipt})?;d.queue_snapshot(&session.id)});let _=reply.send(snapshot.map_err(|e|e.to_string()));Ok(())},
+                                Ok(())=>{let snapshot=db(&database,|d|d.queue_snapshot(&session.id));let _=reply.send(snapshot.map_err(|e|e.to_string()));Ok(())},
                                 Err(error)=>{let _=reply.send(Err("消息交付结果待确认，不会自动重发，请核对 Agent 记录".into()));Err(error)}
                             }
                         }

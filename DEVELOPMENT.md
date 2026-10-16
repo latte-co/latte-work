@@ -841,7 +841,14 @@ smoke evidence is separate from real-model behavior.
 The queued-row send arrow uses `dispatch_queued_message` with `interrupt: false`.
 While a native turn is running, the server writes the selected prompt to that same
 Claude stream immediately; it never sends an interrupt or waits for the host queue
-head. A persisted handoff receipt is distinct from a user/execution turn. Native
+head. A persisted `queued_message_sent` receipt carries the original text and request
+ID, distinct from the `user` execution-start event. The desktop immediately displays
+it with the shared user-message bubble, original send time, copy and attachment controls.
+It correlates the later execution event by session/request ID and text, keeping one
+visible bubble at delivery time. A history page without the receipt still displays
+the execution event normally. Handoffs never end an in-flight tool or disappear
+inside a completed turn's folded process. Legacy prose receipts remain readable;
+the UI does not infer request identity from their text. Native
 completion boundaries activate delivered inputs in their delivery order without
 writing them again, before draining host-held messages. Outstanding native inputs
 share the 16-message/512-KiB admission budget. Streamed handoffs cannot provide a

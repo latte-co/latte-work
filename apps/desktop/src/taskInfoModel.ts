@@ -166,9 +166,14 @@ function collector(projectPath?: string, state = newState()) {
     body = "";
   };
   const append = (event: Event["event"]) => {
-    if (event.kind === "text" || event.kind === "user") {
-      if (event.kind !== bodyKind || event.kind === "user") flush();
-      bodyKind = event.kind;
+    if (
+      event.kind === "text" ||
+      event.kind === "user" ||
+      event.kind === "queued_message_sent"
+    ) {
+      const kind = event.kind === "text" ? "text" : "user";
+      if (kind !== bodyKind || kind === "user") flush();
+      bodyKind = kind;
       body += event.text;
       return;
     }

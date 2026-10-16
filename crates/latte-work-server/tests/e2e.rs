@@ -6563,6 +6563,23 @@ async fn message_queue_default_send_hands_off_now_without_interrupt_and_never_wr
         panic!("poll")
     };
     assert_eq!(session.status, Status::Running);
+    let sent = events
+        .iter()
+        .filter_map(|e| match &e.event {
+            EventKind::QueuedMessageSent { request_id, text } => {
+                Some((request_id.as_str(), text.as_str()))
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        sent,
+        [
+            ("native-b", "native-message-b"),
+            ("native-a", "native-message-a")
+        ]
+    );
+    assert!(!events.iter().any(|e| matches!(&e.event,EventKind::Notice {text} if text.starts_with("发送给 Agent：") || text=="消息已交给 Agent，等待其处理")), "handoff content belongs in the user bubble, not duplicate prose notices");
     assert_eq!(
         events
             .iter()
@@ -6583,6 +6600,14 @@ async fn message_queue_default_send_hands_off_now_without_interrupt_and_never_wr
     std::fs::write(root.path().join("native-release"), "go").unwrap();
     let mut observer = host.client().await;
     let events = queue_until(&mut observer, &id, 4).await;
+    assert_eq!(
+        events
+            .iter()
+            .filter(|e| matches!(e.event, EventKind::QueuedMessageSent { .. }))
+            .count(),
+        2,
+        "delivery replay and execution must not duplicate the original handoff receipts"
+    );
     let ids = events
         .iter()
         .filter_map(|e| match &e.event {

@@ -191,6 +191,11 @@ pub enum EventKind {
         text: String,
         request_id: String,
     },
+    /// Persisted native-input handoff; does not claim execution has started.
+    QueuedMessageSent {
+        text: String,
+        request_id: String,
+    },
     Text {
         text: String,
     },

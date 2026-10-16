@@ -97,6 +97,7 @@ export type EventKind =
   | { kind: "progress"; phase: ExecutionPhase }
   | { kind: "usage"; context: ContextUsage | null; totals: TurnUsage | null }
   | { kind: "user"; text: string; request_id: string }
+  | { kind: "queued_message_sent"; text: string; request_id: string }
   | { kind: "text"; text: string }
   | { kind: "tool"; id: string; name: string; input: JsonValue }
   | { kind: "tool_result"; id: string; content: JsonValue; is_error: boolean }
