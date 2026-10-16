@@ -73,6 +73,24 @@ static void loadIcon(NSURL *url, void (^completion)(NSString *)) {
     [[loader.session dataTaskWithRequest:request] resume];
 }
 
+static NSDictionary *siteCertificate(SecTrustRef trust) {
+    NSOperatingSystemVersion minimum = {12, 0, 0};
+    if (!trust || ![NSProcessInfo.processInfo isOperatingSystemAtLeastVersion:minimum]) return nil;
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wunguarded-availability-new"
+    NSArray *chain = CFBridgingRelease(SecTrustCopyCertificateChain(trust));
+#pragma clang diagnostic pop
+    if (!chain.count) return nil;
+    NSMutableDictionary *info = [NSMutableDictionary new];
+    NSString *subject = CFBridgingRelease(SecCertificateCopySubjectSummary((__bridge SecCertificateRef)chain[0]));
+    if (subject.length && subject.length <= 512) info[@"subject"] = subject;
+    if (chain.count > 1) {
+        NSString *issuer = CFBridgingRelease(SecCertificateCopySubjectSummary((__bridge SecCertificateRef)chain[1]));
+        if (issuer.length && issuer.length <= 512) info[@"issuer"] = issuer;
+    }
+    return info.count ? info : nil;
+}
+
 void latteBrowserSiteInfo(WKWebView *view, NSString *directory, BOOL includeIcon) {
     static dispatch_semaphore_t slots;
     static dispatch_once_t once;
@@ -94,6 +112,8 @@ void latteBrowserSiteInfo(WKWebView *view, NSString *directory, BOOL includeIcon
         }
     }
     NSMutableDictionary *info = [@{@"url":url, @"title":title, @"connection":connection} mutableCopy];
+    NSDictionary *certificate = !view.loading && [view.URL.scheme isEqual:@"https"] ? siteCertificate(view.serverTrust) : nil;
+    if (certificate) info[@"certificate"] = certificate;
     __block BOOL completed = NO;
     void (^finish)(NSString *) = ^(NSString *image) {
       dispatch_async(dispatch_get_main_queue(), ^{

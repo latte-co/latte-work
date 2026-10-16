@@ -215,16 +215,6 @@
   color: var(--color-text-muted);
   margin-top: var(--space-1);
 }
-.browser-site-info footer {
-  border-top: 1px solid var(--color-border-subtle);
-  padding-top: var(--space-2);
-}
-.browser-site-info footer button {
-  width: 100%;
-  justify-content: flex-start;
-  font-size: var(--text-md);
-  gap: var(--space-2);
-}
 .browser-surface {
   position: relative;
   order: 2;
@@ -266,4 +256,80 @@
 }
 .link-context-menu {
   min-width: 240px;
+}
+.browser-site-info {
+  max-height: calc(100dvh - 32px);
+  overflow-y: auto;
+}
+.browser-site-rows {
+  margin-top: var(--space-3);
+}
+.browser-site-row {
+  width: 100%;
+  min-height: var(--button-height);
+  gap: var(--space-3);
+  padding: var(--space-3) 0;
+  font-size: var(--text-md);
+  text-align: left;
+}
+.browser-site-row + .browser-site-row {
+  border-top: 1px solid var(--color-border-subtle);
+  border-radius: 0;
+}
+.browser-site-row span {
+  flex: 1;
+}
+.browser-site-row svg {
+  flex-shrink: 0;
+  color: var(--color-text-secondary);
+}
+.browser-site-details {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: var(--space-2) var(--space-3);
+  font-size: var(--text-sm);
+  margin: 0;
+  padding-top: var(--space-3);
+  border-top: 1px solid var(--color-border-subtle);
+}
+.browser-site-details dt {
+  color: var(--color-text-muted);
+}
+.browser-site-details dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+.browser-site-data {
+  padding-top: var(--space-3);
+  font-size: var(--text-md);
+}
+.browser-site-data ul {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+.browser-site-data li {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-2) 0;
+}
+.browser-site-data p {
+  margin: var(--space-3) 0;
+  font-size: var(--text-sm);
+  overflow-wrap: anywhere;
+}
+.browser-site-clear {
+  width: 100%;
+  margin-top: var(--space-2);
+  justify-content: flex-start;
+}
+.browser-site-confirm-backdrop {
+  z-index: 1001;
+}
+.browser-site-confirm footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--space-2);
+  margin-top: var(--space-5);
 }

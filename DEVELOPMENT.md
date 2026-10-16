@@ -724,10 +724,13 @@ document URL; navigation fences discard stale results. No third-party icon servi
 or website login credentials are used. Other platforms retain the origin fallback.
 
 The address field includes an anchored site-information entry. Its dialog shows
-the current domain/title, copy URL and system-browser actions. Connection status
+the current domain/title and two entries: connection details and Cookie/website data.
+Copy URL and system-browser actions remain outside this dialog. Connection status
 comes from the native committed WebView's evaluated server trust and secure-content
 state, never from an HTTPS string alone; unavailable trust stays unknown. It does
-not claim to manage website permissions. Overlapping dialogs and menus retain a
+not claim to manage website permissions. Connection details include the committed
+native certificate subject and issuer when available (macOS 12+). Overlapping
+dialogs and menus retain a
 decoded viewport image behind the overlay before hiding the native surface; closing
 restores the live surface before releasing the image. Escape and outside click
 restore keyboard focus. Site-info
@@ -799,6 +802,22 @@ Browser preference lives in `latte-work.link-target.v1` local storage (default
 created lazily when selected. Native IDs are per-mounted-pane, so first-send draft
 migration does not collide with a retained draft surface. Focused tests cover link
 routing, preference write failure, unsafe URL restoration and surface lifecycle.
+
+Site-data reads enumerate only the isolated browser profile, select matching WebKit
+records using their public-suffix-grouped domain names, and return domain/type
+metadata without cookie values. Subdomains can share a data scope; the UI names
+that scope before an explicit confirmation. The clear token expires after two
+minutes and is single-use, bound to the exact surface, URL, store, records and
+scope. The bridge limits reads to 4,096 records/cookies, eight selected records,
+32 types, 512 selected cookies and an 8 KiB response. Navigation and store changes
+reject stale operations. Clearing removes only the selected records, then explicitly
+deletes matching HTTP session cookies, and refreshes the current page without
+creating a new history visit. A failed or lost clear response is not replayed;
+the UI requires a fresh read. Other domains and the workbench data store are
+preserved. `python3 scripts/test-site-data.py` exercises this implementation against
+a real ephemeral WebKit cookie store without browsing or using a user profile.
+Native UI checks and the data-store test are recorded separately in
+`docs/validation/browser-site-info-2026-10-16.md`.
 
 ## Native session titles
 

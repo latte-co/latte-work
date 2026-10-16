@@ -200,6 +200,50 @@ pub async fn browser_sync(view: Webview, id: String, bounds: Option<Bounds>) -> 
     }
 }
 #[tauri::command]
+pub async fn browser_site_data(
+    view: Webview,
+    id: String,
+    url: String,
+    token: Option<String>,
+) -> Result<serde_json::Value, String> {
+    caller(&view)?;
+    let expected = parse_url(&url, view.app_handle().config().build.dev_url.as_ref())?;
+    let state = view.app_handle().state::<Tools>();
+    let _guard = state
+        .operation
+        .try_lock()
+        .map_err(|_| "浏览器操作进行中，请稍后再试")?;
+    let browser = view
+        .app_handle()
+        .get_webview(&label(&id)?)
+        .ok_or("浏览器标签已关闭")?;
+    if browser.url().map_err(|e| e.to_string())? != expected {
+        return Err("页面已变化，请重新查看网站数据".into());
+    }
+    let mut query = serde_json::json!({"host": expected.host_str().ok_or("站点地址无效")?});
+    if let Some(token) = token {
+        uuid::Uuid::parse_str(&token).map_err(|_| "网站数据确认已失效")?;
+        query["token"] = token.into();
+    }
+    let (result, _) =
+        super::browser_native::run(&browser, "site-data", &query.to_string(), false).await?;
+    // Clearing only removes the records bound to this view's one-shot token.
+    // Reload this page; other site tabs retain their normal navigation state.
+    if result.get("cleared").and_then(serde_json::Value::as_bool) == Some(true)
+        && browser.url().ok().as_ref() == Some(&expected)
+    {
+        state
+            .suppressed
+            .lock()
+            .map_err(|e| e.to_string())?
+            .insert(browser.label().to_string(), expected.to_string());
+        if browser.reload().is_err() {
+            return Ok(serde_json::json!({"cleared":true,"reloadFailed":true}));
+        }
+    }
+    Ok(result)
+}
+#[tauri::command]
 pub async fn browser_site_info(
     view: Webview,
     id: String,

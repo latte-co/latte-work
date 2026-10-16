@@ -6,6 +6,7 @@
 #import <objc/runtime.h>
 #import <unistd.h>
 extern void latteBrowserSiteInfo(WKWebView *view, NSString *directory, BOOL includeIcon);
+extern void latteBrowserSiteData(WKWebView *view, NSString *directory, NSString *query);
 
 @interface LatteBrowserTools : NSObject <WKScriptMessageHandler>
 @end
@@ -54,7 +55,9 @@ static void finishTool(NSString *directory, NSDictionary *result) {
     [NSFileManager.defaultManager removeItemAtPath:file error:nil];
     WKWebView *view = message.webView;
     NSString *operation = request[@"operation"];
-    if ([operation isEqualToString:@"site-info"]) {
+    if ([operation isEqualToString:@"site-data"]) {
+        latteBrowserSiteData(view, directory, request[@"query"]);
+    } else if ([operation isEqualToString:@"site-info"]) {
         latteBrowserSiteInfo(view, directory, [request[@"query"] isEqual:@"icon"]);
     } else if ([operation isEqualToString:@"find"]) {
         NSString *query = request[@"query"];

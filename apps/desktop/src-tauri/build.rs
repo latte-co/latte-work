@@ -4,6 +4,7 @@ fn main() {
             .file("src/macos_quit.m")
             .file("src/macos_browser.m")
             .file("src/macos_site_info.m")
+            .file("src/macos_site_data.m")
             .flag("-fobjc-arc")
             .compile("latte_macos_quit");
         println!("cargo:rustc-link-arg=-ObjC");
@@ -11,6 +12,7 @@ fn main() {
         println!("cargo:rerun-if-changed=src/macos_quit.m");
         println!("cargo:rerun-if-changed=src/macos_browser.m");
         println!("cargo:rerun-if-changed=src/macos_site_info.m");
+        println!("cargo:rerun-if-changed=src/macos_site_data.m");
     }
     tauri_build::build()
 }

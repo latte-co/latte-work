@@ -939,6 +939,7 @@ fn main() {
             browser::browser_create,
             browser::browser_sync,
             browser::browser_site_info,
+            browser::browser_site_data,
             browser::browser_action,
             browser::browser_close,
             browser::browser_find,

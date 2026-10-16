@@ -36,7 +36,7 @@ pub async fn run(
             let path = directory.join("result.json");
             loop {
                 if let Ok(meta) = std::fs::metadata(&path) {
-                    let limit = if operation == "site-info" { 128 * 1024 } else { 4096 };
+                    let limit = match operation { "site-info" => 128 * 1024, "site-data" => 8192, _ => 4096 };
                     if meta.len() > limit { return Err("浏览器响应过大".to_string()); }
                     return std::fs::read(&path).map_err(|e| e.to_string());
                 }
