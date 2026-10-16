@@ -9,6 +9,7 @@ import {
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { renderWithStatus as render } from "./test/renderWithStatus";
 import { BrowserPane } from "./BrowserPane";
+import { SiteIcon } from "./SiteIcon";
 import { readWorkspace, updateWorkspace } from "./workspaceState";
 import { appClose } from "./appLifecycle";
 import { readBrowserHistory, clearBrowserHistory } from "./browserHistory";
@@ -66,6 +67,59 @@ afterEach(() => {
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
 });
+it.each([false, true])(
+  "fences icon metadata across title changes and navigation (navigated=%s)",
+  async (navigated) => {
+    let finish!: (value: unknown) => void;
+    mocks.invoke.mockImplementation(async (command: string) =>
+      command === "browser_site_info"
+        ? new Promise((resolve) => {
+            finish = resolve;
+          })
+        : undefined,
+    );
+    const url = `https://metadata-${navigated}.example/doc`;
+    const tab = { ...props.tab, url };
+    const view = render(
+      <>
+        <BrowserPane {...props} tab={tab} />
+        <SiteIcon url={url} />
+      </>,
+    );
+    await waitFor(() =>
+      expect(mocks.invoke).toHaveBeenCalledWith(
+        "browser_create",
+        expect.anything(),
+      ),
+    );
+    const id = mocks.invoke.mock.calls.find(
+      ([command]) => command === "browser_create",
+    )![1].id;
+    await act(async () =>
+      mocks.events.get("browser-location")!({
+        payload: { id, url, record: true },
+      }),
+    );
+    await act(async () =>
+      mocks.events.get("browser-location")!({
+        payload: {
+          id,
+          url: navigated ? "https://next.example/" : url,
+          record: false,
+          title: "Updated title",
+        },
+      }),
+    );
+    const icon = "data:image/png;base64,aWNvbg==";
+    await act(async () =>
+      finish({ url, title: "Page", connection: "secure", icon }),
+    );
+    const image = view.container.querySelector(".site-icon img")!;
+    expect(image.getAttribute("src")).toBe(
+      navigated ? `${new URL(url).origin}/favicon.ico` : icon,
+    );
+  },
+);
 it("submits a bare domain as an HTTPS navigation from the address field", async () => {
   render(<BrowserPane {...props} />);
   const address = screen.getByRole("textbox", { name: "网页地址" });
@@ -84,6 +138,40 @@ it("submits a bare domain as an HTTPS navigation from the address field", async 
     ),
   );
   expect((address as HTMLInputElement).value).toBe("https://www.baidu.com/");
+});
+it("hides the native surface behind site information and restores it after Escape", async () => {
+  mocks.invoke.mockImplementation(async (command: string) =>
+    command === "browser_site_info"
+      ? { url: props.tab.url, title: "Example", connection: "secure" }
+      : undefined,
+  );
+  render(<BrowserPane {...props} />);
+  const trigger = screen.getByRole("button", { name: "站点信息" });
+  await waitFor(() =>
+    expect((trigger as HTMLButtonElement).disabled).toBe(false),
+  );
+  fireEvent.click(trigger);
+  expect(await screen.findByText("连接是安全的")).toBeTruthy();
+  await waitFor(() =>
+    expect(mocks.invoke).toHaveBeenCalledWith(
+      "browser_sync",
+      expect.objectContaining({ bounds: null }),
+    ),
+  );
+  fireEvent.keyDown(window, { key: "Escape" });
+  expect(document.activeElement).toBe(trigger);
+  await waitFor(() =>
+    expect(mocks.invoke).toHaveBeenLastCalledWith(
+      "browser_sync",
+      expect.objectContaining({
+        bounds: expect.objectContaining({ width: 320 }),
+      }),
+    ),
+  );
+  expect(mocks.invoke).not.toHaveBeenCalledWith(
+    "browser_action",
+    expect.objectContaining({ action: "navigate" }),
+  );
 });
 it("find submissions do not navigate through the address form across the portal", async () => {
   mocks.invoke.mockImplementation(async (command: string) =>

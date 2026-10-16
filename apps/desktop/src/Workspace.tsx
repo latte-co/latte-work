@@ -1,5 +1,6 @@
 import { SourcePreview } from "./SourcePreview";
 import { BrowserPane } from "./BrowserPane";
+import { SiteIcon } from "./SiteIcon";
 import { TaskChangesView } from "./TaskChangesView";
 import { ChangesView } from "./ChangesView";
 import {
@@ -500,7 +501,11 @@ function WorkspacePage({
                   onClick={() => select(tab.id)}
                   onKeyDown={navigateTabs}
                 >
-                  <Icon size={16} />
+                  {tab.kind === "browser" ? (
+                    <SiteIcon url={tab.url} />
+                  ) : (
+                    <Icon size={16} />
+                  )}
                   <span>{title(tab)}</span>
                 </button>
                 <button

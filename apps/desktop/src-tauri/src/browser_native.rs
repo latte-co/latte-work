@@ -36,7 +36,8 @@ pub async fn run(
             let path = directory.join("result.json");
             loop {
                 if let Ok(meta) = std::fs::metadata(&path) {
-                    if meta.len() > 4096 { return Err("浏览器响应过大".to_string()); }
+                    let limit = if operation == "site-info" { 128 * 1024 } else { 4096 };
+                    if meta.len() > limit { return Err("浏览器响应过大".to_string()); }
                     return std::fs::read(&path).map_err(|e| e.to_string());
                 }
                 tokio::time::sleep(Duration::from_millis(30)).await;

@@ -5,6 +5,7 @@
 #import <WebKit/WebKit.h>
 #import <objc/runtime.h>
 #import <unistd.h>
+extern void latteBrowserSiteInfo(WKWebView *view, NSString *directory, BOOL includeIcon);
 
 @interface LatteBrowserTools : NSObject <WKScriptMessageHandler>
 @end
@@ -53,7 +54,9 @@ static void finishTool(NSString *directory, NSDictionary *result) {
     [NSFileManager.defaultManager removeItemAtPath:file error:nil];
     WKWebView *view = message.webView;
     NSString *operation = request[@"operation"];
-    if ([operation isEqualToString:@"find"]) {
+    if ([operation isEqualToString:@"site-info"]) {
+        latteBrowserSiteInfo(view, directory, [request[@"query"] isEqual:@"icon"]);
+    } else if ([operation isEqualToString:@"find"]) {
         NSString *query = request[@"query"];
         if (![query isKindOfClass:NSString.class] || query.length > 512) {
             finishTool(directory, @{@"error": @"查找内容过长"}); return;

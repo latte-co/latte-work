@@ -200,6 +200,27 @@ pub async fn browser_sync(view: Webview, id: String, bounds: Option<Bounds>) -> 
     }
 }
 #[tauri::command]
+pub async fn browser_site_info(
+    view: Webview,
+    id: String,
+    icon: bool,
+) -> Result<serde_json::Value, String> {
+    caller(&view)?;
+    let browser = view
+        .app_handle()
+        .get_webview(&label(&id)?)
+        .ok_or("浏览器标签已关闭")?;
+    let (info, _) =
+        super::browser_native::run(&browser, "site-info", if icon { "icon" } else { "" }, false)
+            .await?;
+    let url = info
+        .get("url")
+        .and_then(serde_json::Value::as_str)
+        .ok_or("网页地址不可用")?;
+    parse_url(url, view.app_handle().config().build.dev_url.as_ref())?;
+    Ok(info)
+}
+#[tauri::command]
 pub async fn browser_action(
     view: Webview,
     id: String,

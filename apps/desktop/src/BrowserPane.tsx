@@ -13,6 +13,8 @@ import {
 import { browserAddress, webLink } from "./browserLinks";
 import { recordBrowserVisit, updateBrowserVisitTitle } from "./browserHistory";
 import { BrowserTools } from "./BrowserTools";
+import { BrowserSiteInfo, type SiteInfo } from "./BrowserSiteInfo";
+import { rememberSiteIcon } from "./SiteIcon";
 type BrowserTab = Extract<WorkspaceTab, { kind: "browser" }>;
 export function BrowserPane({
   workspaceId,
@@ -70,6 +72,8 @@ export function BrowserPane({
       return;
     }
     let disposed = false;
+    let metadataVersion = 0;
+    let metadataUrl = initial.current;
     setReady(false);
     const listeners = [
       listen<{ id: string; url: string; title?: string; record?: boolean }>(
@@ -78,6 +82,27 @@ export function BrowserPane({
           if (disposed || payload.id !== nativeId) return;
           const url = payload.url === "about:blank" ? "" : webLink(payload.url);
           if (url === null) return;
+          if (metadataUrl !== url || payload.record === true) {
+            metadataVersion++;
+            metadataUrl = url;
+          }
+          const version = metadataVersion;
+          if (url && payload.record === true) {
+            void invoke<SiteInfo>("browser_site_info", {
+              id: nativeId,
+              icon: true,
+            })
+              .then((info) => {
+                if (
+                  !disposed &&
+                  info &&
+                  version === metadataVersion &&
+                  webLink(info.url) === url
+                )
+                  rememberSiteIcon(url, info.icon);
+              })
+              .catch(() => undefined);
+          }
           if (payload.title) pageTitle.current = { url, title: payload.title };
           if (url)
             try {
@@ -270,14 +295,23 @@ export function BrowserPane({
         >
           <RotateCw size={16} />
         </button>
-        <input
-          aria-label="网页地址"
-          value={address}
-          placeholder="输入域名或网页地址"
-          spellCheck={false}
-          onChange={(event) => setAddress(event.target.value)}
-          disabled={!ready}
-        />
+        <div className="browser-address">
+          <BrowserSiteInfo
+            key={tab.url}
+            id={nativeId}
+            url={tab.url}
+            active={active}
+            ready={ready}
+          />
+          <input
+            aria-label="网页地址"
+            value={address}
+            placeholder="输入域名或网页地址"
+            spellCheck={false}
+            onChange={(event) => setAddress(event.target.value)}
+            disabled={!ready}
+          />
+        </div>
         <button
           type="button"
           className="icon-button"

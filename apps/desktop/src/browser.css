@@ -137,6 +137,94 @@
   margin: 0;
   font-size: 12px;
 }
+.browser-address {
+  display: flex;
+  align-items: center;
+  flex: 1;
+  min-width: 120px;
+  height: 32px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-pill);
+  background: var(--color-input);
+  padding: 0 var(--space-1);
+}
+.browser-address:focus-within {
+  background: var(--color-focus-background);
+}
+.browser-toolbar .browser-address input {
+  background: transparent;
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
+  padding: 0 var(--space-2);
+  height: 30px;
+  min-width: 0;
+}
+.browser-address .browser-site-trigger {
+  width: 28px;
+  height: 28px;
+  border-radius: var(--radius-pill);
+}
+.browser-site-info {
+  position: fixed;
+  z-index: 1000;
+  width: min(344px, calc(100vw - 16px));
+  padding: var(--space-4);
+  background: var(--color-elevated);
+  color: var(--color-text);
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-panel);
+  box-shadow: var(--shadow-popover);
+}
+.browser-site-info header {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+.browser-site-info header strong {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--text-lg);
+}
+.browser-site-title {
+  color: var(--color-text-muted);
+  font-size: var(--text-sm);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  margin: var(--space-2) 0 0;
+}
+.browser-site-connection {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-3);
+  padding: var(--space-4) 0;
+  font-size: var(--text-md);
+}
+.browser-site-connection > svg {
+  flex-shrink: 0;
+  margin-top: 2px;
+  color: var(--color-text-secondary);
+}
+.browser-site-connection small {
+  display: block;
+  font-size: var(--text-sm);
+  color: var(--color-text-muted);
+  margin-top: var(--space-1);
+}
+.browser-site-info footer {
+  border-top: 1px solid var(--color-border-subtle);
+  padding-top: var(--space-2);
+}
+.browser-site-info footer button {
+  width: 100%;
+  justify-content: flex-start;
+  font-size: var(--text-md);
+  gap: var(--space-2);
+}
 .browser-surface {
   order: 2;
   flex: 1;

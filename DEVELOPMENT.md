@@ -563,10 +563,11 @@ while running, with one read in flight. Authentication prompts suspend these rea
 The single hover/focus background on each workspace tab includes its close control.
 Project names and history-scope paragraphs are not repeated in the inspector;
 the footer offers explicit earlier-history reads, with scope in its tooltip.
-Resource links load only the corresponding HTTP(S) origin's `/favicon.ico`, without
-a referrer or a third-party icon service. Missing icons retain a link glyph without
-an error notice. Image loading is lazy and uses the WebView cache; page bodies are
-not fetched to discover icons or titles. The main WebView CSP allows HTTP(S) favicon paths
+Resource links reuse a visited page's declared favicon when available, otherwise
+load the corresponding HTTP(S) origin's `/favicon.ico`, without a referrer or a
+third-party icon service. Missing icons retain a link glyph without an error notice.
+Image loading is lazy; summary collection does not fetch page bodies to discover
+icons or titles. The main WebView CSP allows HTTP(S) favicon paths
 while keeping script, connect and frame policies unchanged. Titles still come from
 conversation labels or previously visited browser pages; untitled links show one
 compact address rather than repeating the hostname above the URL.
@@ -709,6 +710,33 @@ idempotently. Independent external writers are not locked; post-turn conflicts
 are rejected and an interrupted restoration requires manual workspace inspection.
 
 ## Embedded browser
+
+Browser tabs use site favicons; a missing or failed image keeps a small link glyph
+without layout changes. On macOS, finished navigation reads at most eight declared
+icon URLs from the current document, then requests the first valid HTTP(S) icon
+with an origin `/favicon.ico` fallback. The native image transport uses ephemeral
+cookie-free and credential-free requests, accepts only supported image MIME types,
+limits each response to 64 KiB, follows at most three validated redirects without
+HTTPS downgrade, and applies two-second request / three-second resource deadlines.
+At most four icon collections run concurrently, with an eight-second completion
+deadline. A 64-entry in-memory cache contains only bounded image data, keyed by
+document URL; navigation fences discard stale results. No third-party icon service
+or website login credentials are used. Other platforms retain the origin fallback.
+
+The address field includes an anchored site-information entry. Its dialog shows
+the current domain/title, copy URL and system-browser actions. Connection status
+comes from the native committed WebView's evaluated server trust and secure-content
+state, never from an HTTPS string alone; unavailable trust stays unknown. It does
+not claim to manage website permissions. Opening the dialog hides the native page;
+Escape, outside click and closing restore the surface and keyboard focus. Site-info
+uses the existing caller-checked, nonce-bound native bridge, with a 128 KiB response
+limit; it grants no page IPC access or additional filesystem permissions.
+
+Focused checks: `BrowserSiteInfo.test.tsx`, `SiteIcon.test.tsx`, `BrowserPane.test.tsx`
+and native desktop tests. On macOS, `python3 scripts/test-site-icons.py` compiles a
+temporary native harness and verifies the production image transport against a
+local HTTP fixture (size/MIME/redirect/authentication/timeout/header boundaries).
+Real site icons, native connection status and popup layout require separate UI smoke.
 
 The browser toolbar's menu supports find, 25–300% page zoom, the system print/PDF
 panel, visible-viewport PNG snapshots, native downloads, searchable visit history,
