@@ -1156,6 +1156,19 @@ async fn dispatch(s: &Service, request: Request) -> Result<Response> {
             }
             Response::FileReference { entry }
         }
+        Request::ReferenceAccess { project_id } => {
+            let (entries, truncated) = db(&s.database, |d| d.reference_access(&project_id))?;
+            Response::ReferenceAccess { entries, truncated }
+        }
+        Request::RevokeReferenceAccess { project_id, path } => {
+            if path.len() > 4096 || path.contains('\0') {
+                bail!("来源路径无效");
+            }
+            db(&s.database, |d| {
+                d.revoke_reference_access(&project_id, &path)
+            })?;
+            Response::Ok
+        }
         Request::SkillInfo { session_id, name } => {
             let session = db(&s.database, |d| d.session(&session_id))?;
             let project = db(&s.database, |d| d.project(&session.project_id))?;

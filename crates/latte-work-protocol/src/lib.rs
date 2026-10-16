@@ -658,6 +658,13 @@ pub enum Request {
         project_id: String,
         path: String,
     },
+    ReferenceAccess {
+        project_id: String,
+    },
+    RevokeReferenceAccess {
+        project_id: String,
+        path: String,
+    },
     ReadFile {
         project_id: String,
         path: String,
@@ -1033,6 +1040,10 @@ pub enum Response {
     },
     FileReference {
         entry: FileEntry,
+    },
+    ReferenceAccess {
+        entries: Vec<FileEntry>,
+        truncated: bool,
     },
     Directories {
         path: String,

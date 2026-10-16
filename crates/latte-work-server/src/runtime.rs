@@ -1377,11 +1377,14 @@ async fn actor(
                 }
                 Some(Control::Cancel { reply, only_if_idle }) => {
                     if !only_if_idle { forwarded.clear(); let _=db(&database,|d|d.uncertain_forwarded(&session.id)); }
-                    if only_if_idle && (process.as_ref().is_some_and(|p| p.turn_active || !p.state.pending.is_empty() || !p.adapter.can_reconfigure()) || db(&database,|d|Ok(!d.queue_state(&session.id)?.0 && !d.queued(&session.id)?.is_empty())).unwrap_or(true)) {
+                    if only_if_idle && (immediate.is_some() || !forwarded.is_empty() || process.as_ref().is_some_and(|p| p.turn_active || p.interrupt_ack_pending || !p.state.pending.is_empty() || !p.adapter.can_reconfigure()) || db(&database,|d|Ok(!d.queue_state(&session.id)?.0 && !d.queued(&session.id)?.is_empty())).unwrap_or(true)) {
                         if let Some(reply) = reply { let _ = reply.send(Err("会话有运行任务、审批或后台任务，请确认后关闭".into())); }
                         continue;
                     }
                     let _ = db(&database, |d| d.pause_queue(&session.id,Some("当前执行已停止，队列已暂停")));
+                    if let Some(pending) = immediate.take() {
+                        let _ = pending.reply.send(Err("发送已取消，消息保留在队列".into()));
+                    }
                     if let Some(p) = process.as_mut() {
                         p.close().await;
                     }
@@ -1700,10 +1703,13 @@ async fn actor(
         .unwrap_or(false);
         safe_to_close.store(
             queue_idle
+                && immediate.is_none()
                 && forwarded.is_empty()
-                && process
-                    .as_ref()
-                    .is_none_or(|p| p.state.pending.is_empty() && p.adapter.can_reconfigure()),
+                && process.as_ref().is_none_or(|p| {
+                    !p.interrupt_ack_pending
+                        && p.state.pending.is_empty()
+                        && p.adapter.can_reconfigure()
+                }),
             Ordering::SeqCst,
         );
     }

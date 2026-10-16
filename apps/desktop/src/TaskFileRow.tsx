@@ -93,7 +93,7 @@ export function TaskFileRow({
   return (
     <button
       className="task-info-file"
-      title={`${file.path}\n${outside ? "项目外 · " : ""}点击打开并保留${scopeNote}的只读预览权限`}
+      title={`${file.path}\n${outside ? "项目外 · " : ""}点击打开并保留${scopeNote}的只读预览权限；实际范围可在“项目外预览权限”中查看和撤销`}
       disabled={!connected || !project || busy}
       onClick={() => void open()}
     >

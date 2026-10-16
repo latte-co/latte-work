@@ -1,4 +1,5 @@
 // @vitest-environment jsdom
+import { StrictMode, Suspense } from "react";
 import {
   act,
   cleanup,
@@ -112,6 +113,43 @@ it("uses real page titles when available and keeps link rows aligned with files"
   ).toBe(true);
 });
 afterEach(cleanup);
+it("advances the incremental reader only after a render commits", () => {
+  let suspended = true;
+  const pending = new Promise<void>(() => {});
+  const text = vi.fn(() => "[Committed report](/project/report.md)");
+  const events = [
+    {
+      ...props.events[0],
+      event: {
+        kind: "text" as const,
+        get text() {
+          return text();
+        },
+      },
+    },
+  ];
+  function Gate() {
+    if (suspended) throw pending;
+    return null;
+  }
+  const pane = () => (
+    <StrictMode>
+      <Suspense fallback={<p>Waiting to commit</p>}>
+        <TaskInfo {...props} active={false} events={events} />
+        <Gate />
+      </Suspense>
+    </StrictMode>
+  );
+  const view = render(pane());
+  expect(screen.getByText("Waiting to commit")).toBeTruthy();
+  expect(text).not.toHaveBeenCalled();
+  suspended = false;
+  view.rerender(pane());
+  expect(screen.getByRole("button", { name: /Committed report/ })).toBeTruthy();
+  expect(text).toHaveBeenCalledTimes(1);
+  view.rerender(pane());
+  expect(text).toHaveBeenCalledTimes(1);
+});
 it("matches visited page titles across anchors and resumes title updates after returning to the pane", async () => {
   const url = "https://example.com/docs";
   recordBrowserVisit(url, "Real document title");

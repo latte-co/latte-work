@@ -149,6 +149,8 @@ export function SkillRow({
               {info.directory}
               <br />
               点击查看 SKILL.md，并保留此 Skill 目录及其文件的只读预览权限
+              <br />
+              实际范围可在任务摘要的“项目外预览权限”中查看和撤销
             </div>
           )}
         </>

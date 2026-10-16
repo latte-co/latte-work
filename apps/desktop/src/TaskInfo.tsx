@@ -1,4 +1,10 @@
-import { useCallback, useMemo, useState, type ReactNode } from "react";
+import {
+  useCallback,
+  useLayoutEffect,
+  useMemo,
+  useState,
+  type ReactNode,
+} from "react";
 import {
   Bot,
   Check,
@@ -16,6 +22,7 @@ import {
 import { request } from "./api";
 import type { Event, GitReview, Project } from "./protocol";
 import { TaskLinkRow } from "./TaskLinkRow";
+import { ReferenceAccess } from "./ReferenceAccess";
 import { useBrowserHistory } from "./browserHistory";
 import { webLink } from "./browserLinks";
 import { TaskFileRow } from "./TaskFileRow";
@@ -54,6 +61,7 @@ function Section({
 }
 const empty = (value: string) => <p className="task-info-empty">{value}</p>;
 const ignorePageTitleError = () => {};
+const emptyInfo = createTaskInfoReader()([]);
 const todoLabels: Record<string, string> = {
   pending: "待处理",
   in_progress: "进行中",
@@ -89,10 +97,19 @@ export function TaskInfo({
   earlierHistoryLoading?: boolean;
   loadEarlierHistory?: () => Promise<void>;
 }) {
-  const scope = JSON.stringify([hostId, project?.id, sessionId]);
+  const scope = JSON.stringify([hostId, project?.id, project?.path, sessionId]);
   const [revision, refresh] = useState(0);
   const readInfo = useMemo(() => createTaskInfoReader(), [scope]);
-  const data = readInfo(events, sessionId, project?.path, !running);
+  const [info, setInfo] = useState({ scope: "", data: emptyInfo });
+  // Only committed renders may advance the incremental reader. A suspended or
+  // abandoned render must not change the cache shared with the visible pane.
+  useLayoutEffect(() => {
+    setInfo({
+      scope,
+      data: readInfo(events, sessionId, project?.path, !running),
+    });
+  }, [scope, readInfo, events, sessionId, project?.path, running]);
+  const data = info.scope === scope ? info.data : emptyInfo;
   const visits = useBrowserHistory(ignorePageTitleError, active);
   const pageTitles = useMemo(() => {
     const titles = new Map<string, string>();
@@ -410,6 +427,15 @@ export function TaskInfo({
         </button>
       )}
       {data.truncated && empty("各项最多显示 128 条记录")}
+      {project && (
+        <ReferenceAccess
+          key={JSON.stringify([hostId, project.id])}
+          hostId={hostId}
+          projectId={project.id}
+          active={active}
+          connected={connected}
+        />
+      )}
     </div>
   );
 }

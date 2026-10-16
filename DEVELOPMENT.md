@@ -581,6 +581,17 @@ selections retain their canonical preview scope, separate from project browsing.
 External paths are labelled before selection (including normalized parent segments),
 and file/Skill controls explain the retained file or directory preview scope. Hover never grants that directory access;
 preview still enforces canonical containment, including escaping nested symlinks.
+The collapsed “项目外预览权限” control in Task Summary lists the project's retained
+canonical file/directory scopes on demand (`reference_access`). Its records, unlike
+the pre-click lexical path hint, also identify symlinks resolving outside the project.
+`revoke_reference_access` removes exactly that project's recorded scope even when
+the original path no longer exists; subsequent preview requests recheck permission.
+Successful revocation closes matching loaded file previews across conversations on
+that host/project. Other explicit task sources or uploaded attachments may independently
+allow access. Retained grants are bounded to 512 per project; list responses also
+stay within half the wire-frame budget, accounting for JSON escaping. Older
+oversized lists are disclosed as truncated and can be reduced by revoking entries. Neither listing
+nor revocation opens an Agent or grants new access; older Servers fail explicitly.
 Local and SSH hosts share this additive request; older Servers must update for
 metadata. Failures do not fabricate descriptions or paths. Focused checks include
 `claude_skills` unit tests, `SkillRow`/`TaskInfo` frontend tests and the final-binary

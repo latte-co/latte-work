@@ -942,13 +942,61 @@ impl Store {
         ))
     }
     pub fn grant_reference(&self, project: &str, path: &str, directory: bool) -> Result<()> {
+        let (count, exists): (u32, bool) = self.db.query_row(
+            "SELECT COUNT(*),COALESCE(MAX(path=?2),0) FROM reference_access WHERE project_id=?1",
+            params![project, path],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?;
+        if count >= 512 && !exists {
+            bail!("项目外预览权限已达上限，请先在任务摘要中撤销不再需要的权限");
+        }
         self.db.execute("INSERT INTO reference_access(project_id,path,directory) VALUES (?1,?2,?3) ON CONFLICT(project_id,path) DO UPDATE SET directory=excluded.directory", params![project,path,directory])?;
+        Ok(())
+    }
+    pub fn reference_access(
+        &self,
+        project: &str,
+    ) -> Result<(Vec<latte_work_protocol::FileEntry>, bool)> {
+        self.project(project)?;
+        let mut query = self.db.prepare("SELECT path,directory FROM reference_access WHERE project_id=?1 ORDER BY path LIMIT 513")?;
+        let rows = query.query_map([project], |r| {
+            let path: String = r.get(0)?;
+            Ok(latte_work_protocol::FileEntry {
+                name: Path::new(&path)
+                    .file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| path.clone()),
+                path,
+                directory: r.get(1)?,
+            })
+        })?;
+        let mut entries = Vec::new();
+        let mut bytes = 0;
+        let mut truncated = false;
+        for row in rows {
+            let entry = row?;
+            bytes += serde_json::to_vec(&entry)?.len();
+            if entries.len() == 512 || bytes > latte_work_protocol::MAX_FRAME / 2 {
+                truncated = true;
+                break;
+            }
+            entries.push(entry);
+        }
+        Ok((entries, truncated))
+    }
+    pub fn revoke_reference_access(&self, project: &str, path: &str) -> Result<()> {
+        self.project(project)?;
+        // Delete the recorded canonical key even if the file was moved or removed.
+        self.db.execute(
+            "DELETE FROM reference_access WHERE project_id=?1 AND path=?2",
+            params![project, path],
+        )?;
         Ok(())
     }
     pub fn reference_allowed(&self, project: &str, target: &Path) -> Result<bool> {
         let rows = self
             .db
-            .prepare("SELECT path,directory FROM reference_access WHERE project_id=?1 LIMIT 512")?
+            .prepare("SELECT path,directory FROM reference_access WHERE project_id=?1 ORDER BY path LIMIT 512")?
             .query_map([project], |r| {
                 Ok((r.get::<_, String>(0)?, r.get::<_, bool>(1)?))
             })?
@@ -1344,6 +1392,101 @@ fn index_source(
 }
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn retained_preview_access_lists_fit_the_wire_budget_even_with_long_paths() {
+        use super::*;
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(&dir.path().join("access.db")).unwrap();
+        let project = store.add_project(dir.path()).unwrap();
+        for i in 0..512 {
+            let path = format!("/{}{i}.md", "many\\folder/".repeat(300));
+            store.grant_reference(&project.id, &path, false).unwrap();
+        }
+        let (entries, truncated) = store.reference_access(&project.id).unwrap();
+        assert!(truncated && !entries.is_empty() && entries.len() < 512);
+        let response = latte_work_protocol::Response::ReferenceAccess { entries, truncated };
+        assert!(serde_json::to_vec(&response).unwrap().len() < latte_work_protocol::MAX_FRAME);
+    }
+    #[test]
+    fn retained_preview_access_is_bounded_durable_and_revocable_without_the_file() {
+        use super::*;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("access.db");
+        let store = Store::open(&path).unwrap();
+        let project = store.add_project(dir.path()).unwrap();
+        for i in 0..512 {
+            store
+                .grant_reference(&project.id, &format!("/outside/{i:03}"), true)
+                .unwrap();
+        }
+        assert!(
+            store
+                .grant_reference(&project.id, "/overflow", false)
+                .is_err()
+        );
+        store
+            .grant_reference(&project.id, "/outside/000", false)
+            .unwrap();
+        assert!(
+            !store
+                .reference_allowed(&project.id, Path::new("/outside/000/child.md"))
+                .unwrap()
+        );
+        assert!(
+            store
+                .reference_allowed(&project.id, Path::new("/outside/001/child.md"))
+                .unwrap()
+        );
+        assert!(
+            !store
+                .reference_allowed(&project.id, Path::new("/outside/001-other/child.md"))
+                .unwrap()
+        );
+        drop(store);
+        let store = Store::open(&path).unwrap();
+        let (entries, truncated) = store.reference_access(&project.id).unwrap();
+        assert_eq!(entries.len(), 512);
+        assert!(!truncated);
+        assert_eq!(entries[0].path, "/outside/000");
+        // Legacy versions could retain more than the new admission limit.
+        store.db.execute("INSERT INTO reference_access(project_id,path,directory) VALUES (?1,'/legacy-a',0),(?1,'/legacy-b',0)", [&project.id]).unwrap();
+        let (entries, truncated) = store.reference_access(&project.id).unwrap();
+        assert_eq!(entries.len(), 512);
+        assert!(truncated);
+        store
+            .revoke_reference_access(&project.id, "/legacy-a")
+            .unwrap();
+        store
+            .revoke_reference_access(&project.id, "/legacy-b")
+            .unwrap();
+        store
+            .revoke_reference_access(&project.id, "/outside/001")
+            .unwrap();
+        store
+            .revoke_reference_access(&project.id, "/outside/001")
+            .unwrap();
+        assert!(
+            !store
+                .reference_allowed(&project.id, Path::new("/outside/001/child.md"))
+                .unwrap()
+        );
+        store
+            .grant_reference(&project.id, "/overflow", false)
+            .unwrap();
+        assert!(store.reference_access("missing-project").is_err());
+        assert!(
+            store
+                .revoke_reference_access("missing-project", "/overflow")
+                .is_err()
+        );
+        drop(store);
+        let store = Store::open(&path).unwrap();
+        assert!(
+            !store
+                .reference_allowed(&project.id, Path::new("/outside/001"))
+                .unwrap()
+        );
+    }
     #[test]
     fn native_names_follow_external_renames_while_generated_titles_preserve_manual_names() {
         use super::*;

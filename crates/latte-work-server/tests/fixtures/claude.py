@@ -45,6 +45,7 @@ for line in sys.stdin:
                 emit({'type':'control_response','response':{'subtype':'success','request_id':value['request_id']}})
             continue
         if value['request']['subtype']=='interrupt':
+            if native_mode: pathlib.Path('native-interrupt-pending').write_text('received')
             result_first=os.environ.get('LATTE_FIXTURE_INTERRUPT_RESULT_FIRST')=='1'
             if result_first: emit({'type':'result','subtype':'success','is_error':False})
             time.sleep(min(15,float(os.environ.get('LATTE_FIXTURE_INTERRUPT_DELAY','0'))))

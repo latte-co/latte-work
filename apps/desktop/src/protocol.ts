@@ -467,6 +467,8 @@ export type Request =
   | { method: "finish_attachment"; id: string }
   | { method: "abort_attachment"; id: string }
   | { method: "resolve_reference"; project_id: string; path: string }
+  | { method: "reference_access"; project_id: string }
+  | { method: "revoke_reference_access"; project_id: string; path: string }
   | { method: "read_file"; project_id: string; path: string }
   | { method: "diff"; project_id: string }
   | { method: "changes"; project_id: string }
@@ -639,6 +641,7 @@ export type Response =
   | { kind: "files"; entries: Array<FileEntry> }
   | { kind: "attachment_upload"; id: string }
   | { kind: "file_reference"; entry: FileEntry }
+  | { kind: "reference_access"; entries: Array<FileEntry>; truncated: boolean }
   | {
       kind: "directories";
       path: string;

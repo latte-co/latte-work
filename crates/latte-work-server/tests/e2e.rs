@@ -1366,11 +1366,21 @@ async fn archive_serializes_with_concurrent_open_and_refuses_running_tasks() {
     assert!(
         matches!(archived, Response::Session {session} if session.archived && session.agent_session_open==Some(false))
     );
-    assert!(matches!(opened, Response::Ok | Response::Error { .. }));
+    // Opening can win admission before archive, or lose to the archived-state
+    // check. An unrelated error must not make this race test pass.
+    match opened {
+        Response::Ok => {}
+        Response::Error { message, .. } => assert!(message.contains("请先取消归档"), "{message}"),
+        other => panic!("unexpected concurrent open response: {other:?}"),
+    }
     assert_gone(pid).await;
     assert!(
         matches!(ask(&mut other, Request::Session {session_id:id.clone()}).await,
         Response::Session {session} if session.archived && session.agent_session_open==Some(false))
+    );
+    assert!(
+        matches!(ask(&mut other, Request::OpenAgentSession {session_id:id.clone(),provider:None}).await,
+        Response::Error {message,..} if message.contains("请先取消归档"))
     );
     ask(
         &mut client,
@@ -5479,6 +5489,169 @@ async fn skill_metadata_is_host_local_read_only_and_preview_requires_explicit_re
     assert!(!root.path().join("SHOULD_NOT_RUN").exists());
 }
 
+#[tokio::test]
+async fn external_preview_scopes_are_canonical_project_scoped_and_revocable_after_restart() {
+    let mut host = Host::start().await;
+    let mut c = host.client().await;
+    let root = tempfile::tempdir().unwrap();
+    let other = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    std::fs::write(outside.path().join("report.md"), "report body").unwrap();
+    std::fs::write(outside.path().join("sibling.md"), "sibling body").unwrap();
+    std::os::unix::fs::symlink(outside.path(), root.path().join("linked-docs")).unwrap();
+    let id = session(&mut c, root.path()).await;
+    let Response::Session { session } = ask(&mut c, Request::Session { session_id: id }).await
+    else {
+        panic!("session")
+    };
+    let project = session.project_id;
+    let Response::Project { project: other } = ask(
+        &mut c,
+        Request::AddProject {
+            path: other.path().to_string_lossy().into_owned(),
+            name: None,
+        },
+    )
+    .await
+    else {
+        panic!("project")
+    };
+    let canonical = std::fs::canonicalize(outside.path()).unwrap();
+    let file = canonical.join("report.md").to_string_lossy().into_owned();
+    let directory = canonical.to_string_lossy().into_owned();
+    let preview = |project_id: &str, path: &str| Request::PreviewSource {
+        project_id: project_id.into(),
+        session_id: None,
+        path: path.into(),
+        offset: 0,
+    };
+    assert!(matches!(
+        ask(&mut c, preview(&project, &file)).await,
+        Response::Error { .. }
+    ));
+    assert!(
+        matches!(ask(&mut c, Request::ResolveReference { project_id: project.clone(), path: root.path().join("linked-docs/report.md").to_string_lossy().into_owned() }).await,
+        Response::FileReference {entry} if entry.path==file && !entry.directory)
+    );
+    assert!(
+        matches!(ask(&mut c, Request::ReferenceAccess { project_id: project.clone() }).await,
+        Response::ReferenceAccess {entries,truncated:false} if entries.len()==1 && entries[0].path==file && !entries[0].directory)
+    );
+    assert!(matches!(
+        ask(&mut c, preview(&project, &file)).await,
+        Response::SourcePreview { .. }
+    ));
+    assert!(matches!(
+        ask(&mut c, preview(&project, &directory)).await,
+        Response::Error { .. }
+    ));
+    assert!(matches!(
+        ask(&mut c, preview(&other.id, &file)).await,
+        Response::Error { .. }
+    ));
+    // Another project's idempotent deletion cannot remove this project's grant.
+    assert!(matches!(
+        ask(
+            &mut c,
+            Request::RevokeReferenceAccess {
+                project_id: other.id.clone(),
+                path: file.clone()
+            }
+        )
+        .await,
+        Response::Ok
+    ));
+    assert!(matches!(
+        ask(&mut c, preview(&project, &file)).await,
+        Response::SourcePreview { .. }
+    ));
+    ask(
+        &mut c,
+        Request::RevokeReferenceAccess {
+            project_id: project.clone(),
+            path: file.clone(),
+        },
+    )
+    .await;
+    assert!(matches!(
+        ask(&mut c, preview(&project, &file)).await,
+        Response::Error { .. }
+    ));
+    assert!(
+        matches!(ask(&mut c, Request::ResolveReference { project_id: project.clone(), path: root.path().join("linked-docs").to_string_lossy().into_owned() }).await,
+        Response::FileReference {entry} if entry.path==directory && entry.directory)
+    );
+    let sibling = canonical.join("sibling.md").to_string_lossy().into_owned();
+    assert!(matches!(
+        ask(&mut c, preview(&project, &sibling)).await,
+        Response::SourcePreview { .. }
+    ));
+    let escape = tempfile::NamedTempFile::new().unwrap();
+    std::os::unix::fs::symlink(escape.path(), outside.path().join("escape.md")).unwrap();
+    assert!(matches!(
+        ask(
+            &mut c,
+            preview(&project, &canonical.join("escape.md").to_string_lossy())
+        )
+        .await,
+        Response::Error { .. }
+    ));
+    drop(c);
+    kill(Pid::from_raw(host.process.id() as i32), Signal::SIGINT).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while host.process.try_wait().unwrap().is_none() {
+        assert!(Instant::now() < deadline, "server did not shut down");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    host.process = Command::new(env!("CARGO_BIN_EXE_latte-work-server"))
+        .arg("serve")
+        .arg("--state-dir")
+        .arg(host.directory.path())
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !host.directory.path().join("control.sock").exists() {
+        assert!(Instant::now() < deadline, "restart readiness");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let mut c = host.client().await;
+    assert!(
+        matches!(ask(&mut c, Request::ReferenceAccess { project_id: project.clone() }).await,
+        Response::ReferenceAccess {entries,truncated:false} if entries.len()==1 && entries[0].path==directory && entries[0].directory)
+    );
+    assert!(matches!(
+        ask(&mut c, preview(&project, &sibling)).await,
+        Response::SourcePreview { .. }
+    ));
+    std::fs::remove_dir_all(outside.path()).unwrap();
+    assert!(matches!(
+        ask(
+            &mut c,
+            Request::RevokeReferenceAccess {
+                project_id: project.clone(),
+                path: directory
+            }
+        )
+        .await,
+        Response::Ok
+    ));
+    let mut reconnect = host.client().await;
+    assert!(
+        matches!(ask(&mut reconnect, Request::ReferenceAccess { project_id: project.clone() }).await,
+        Response::ReferenceAccess {entries,truncated:false} if entries.is_empty())
+    );
+    // Recreating the same pathname does not recreate a revoked grant.
+    std::fs::create_dir_all(outside.path()).unwrap();
+    std::fs::write(outside.path().join("sibling.md"), "replacement body").unwrap();
+    assert!(matches!(
+        ask(&mut reconnect, preview(&project, &sibling)).await,
+        Response::Error { .. }
+    ));
+}
+
 async fn queue_send(c: &mut Client, id: &str, request: &str, text: &str) -> Response {
     ask(
         c,
@@ -6212,7 +6385,19 @@ async fn message_queue_forwarded_activation_failure_pauses_before_the_next_messa
             |e| matches!(&e.event, EventKind::Notice { text } if text.contains("不会自动重发"))
         )
     );
-    tokio::time::sleep(Duration::from_millis(150)).await;
+    // A control round trip is an actor barrier: the previous queue transition
+    // must finish before Open replies, without relying on a scheduling grace.
+    assert!(matches!(
+        ask(
+            &mut c,
+            Request::OpenAgentSession {
+                session_id: id.clone(),
+                provider: None
+            }
+        )
+        .await,
+        Response::Ok
+    ));
     assert_eq!(
         db.query_row(
             "SELECT COUNT(*) FROM requests WHERE id='held-next'",
@@ -6262,6 +6447,74 @@ async fn message_queue_confirmation_timeout_preserves_the_native_process_and_pen
     assert!(
         matches!(ask(&mut c, Request::MessageQueue { session_id:id }).await,
         Response::MessageQueue {entries,paused:true,..} if entries.len()==1 && entries[0].request_id=="held")
+    );
+}
+
+#[tokio::test]
+async fn closing_a_session_cancels_pending_immediate_confirmation_without_losing_the_message() {
+    let host = Host::start_with_environment(&[
+        ("LATTE_FIXTURE_INTERRUPT_DELAY", std::ffi::OsStr::new("9")),
+        (
+            "LATTE_FIXTURE_INTERRUPT_RESULT_FIRST",
+            std::ffi::OsStr::new("1"),
+        ),
+    ])
+    .await;
+    let root = tempfile::tempdir().unwrap();
+    let mut c = host.client().await;
+    let id = session(&mut c, root.path()).await;
+    queue_send(&mut c, &id, "head", "native-queue-head").await;
+    native_queue_ready(&mut c, &id).await;
+    queue_send(&mut c, &id, "pending", "native-message-pending").await;
+    let mut sending = host.client().await;
+    let sending_id = id.clone();
+    let delivery =
+        tokio::spawn(
+            async move { dispatch_queue(&mut sending, &sending_id, "pending", true).await },
+        );
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !root.path().join("native-interrupt-pending").exists() {
+        assert!(
+            Instant::now() < deadline,
+            "native interrupt was not received"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    // A result can precede interrupt acknowledgement: the session is stopped,
+    // but a pending send still makes an idle-only close unsafe.
+    wait(&mut c, &id, Status::Stopped).await;
+    assert!(matches!(ask(&mut c, Request::CloseAgentSession {
+        session_id: id.clone(), only_if_idle: Some(true)
+    }).await, Response::Error {message,..} if message.contains("确认后关闭")));
+    assert!(
+        !delivery.is_finished(),
+        "rejected idle close cancelled the pending send"
+    );
+    assert!(matches!(
+        ask(
+            &mut c,
+            Request::CloseAgentSession {
+                session_id: id.clone(),
+                only_if_idle: Some(false)
+            }
+        )
+        .await,
+        Response::Ok
+    ));
+    let result = tokio::time::timeout(Duration::from_secs(2), delivery)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        matches!(result, Response::Error {message,..} if message=="发送已取消，消息保留在队列")
+    );
+    assert!(
+        matches!(ask(&mut c, Request::MessageQueue { session_id: id.clone() }).await,
+        Response::MessageQueue {entries,paused:true,..} if entries.len()==1 && entries[0].request_id=="pending")
+    );
+    assert!(
+        matches!(ask(&mut c, Request::Poll { session_id: id, after: 0.0 }).await,
+        Response::Events {events,..} if !events.iter().any(|e| matches!(&e.event,EventKind::User {request_id,..} if request_id=="pending")))
     );
 }
 
