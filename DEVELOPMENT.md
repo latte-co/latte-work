@@ -15,7 +15,11 @@ finish with project-owned ad-hoc signing and strict bundle verification. The CLI
 `make test-unit` runs Rust crate-local and frontend reducer tests.
 `make test-e2e` runs the final server binary through its real socket bridge with
 a deterministic Claude CLI fixture. `make test-doc` runs Rust documentation
-tests. `make test` runs all three layers; `make ci` also checks formatting,
+tests. On macOS, `make test-native` compiles and runs the standalone WebKit
+site-data boundary and localhost favicon transport harnesses. They use a disposable
+cookie store and loopback HTTP fixture, without browsing, login state or model calls.
+`make test` runs all three portable layers and includes `test-native` on macOS;
+`make ci` also checks formatting,
 generated protocol types, Clippy, workflow/shell scripts, the frontend build,
 and Rustdoc. `make setup` uses public npm registry URLs recorded in the lockfile.
 
@@ -23,7 +27,10 @@ GitHub Actions runs host check/Clippy, UT, final-binary E2E, and release builds
 on Linux and macOS. Frontend UT/build runs on Linux, macOS, and Windows;
 Windows also checks, lints, and tests the portable Rust protocol and client.
 The server uses Unix sockets and process groups, so Windows CI does not claim
-server or native desktop support. A separate macOS job builds the native app.
+server or native desktop support. A separate macOS job runs `make test-native`
+with a three-minute step deadline before building the native app. A failed native
+test fails that job and therefore `PR Gate`; successful compilation alone is not
+treated as native behavioral coverage.
 `PR Gate` fails when any dependent job fails, is cancelled, or is skipped.
 The repository ruleset must require `PR Gate` on `main` for this to block a
 merge; a workflow file alone does not activate that remote rule.
