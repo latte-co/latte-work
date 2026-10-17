@@ -280,9 +280,10 @@ button svg {
   flex: 1;
   min-height: 0;
   padding-right: var(--space-2);
-  overflow-y: auto;
+  /* WebKit reserves a wider native gutter before overflow with `stable`.
+     Always reserve the actual custom scrollbar so rows keep the same width. */
+  overflow-y: scroll;
   overflow-x: hidden;
-  scrollbar-gutter: stable;
 }
 #sidebar-recent[hidden] {
   display: none;
