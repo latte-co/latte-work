@@ -188,7 +188,8 @@ export function useWorkbench() {
   );
   const [connecting, setConnecting] = useState(false);
   const [serverId, setServerId] = useState("");
-  const [agent, setAgent] = useState<AgentInfo>();
+  const [agents, setAgents] = useState<AgentInfo[]>([]);
+  const [draftAgents, setDraftAgents] = useState<Record<string, string>>({});
   const [catalog, setCatalog] = useState(readCatalog);
   const [projectOrder, setProjectOrder] = useState(readProjectOrder);
   useEffect(() => writeProjectOrder(projectOrder), [projectOrder]);
@@ -361,6 +362,23 @@ export function useWorkbench() {
     (p) => p.id === projectId && p.hostId === hostId,
   );
   const session = sessions.find((s) => s.id === sessionId);
+  const agent = session
+    ? agents.find((a) => a.id === session.agent)
+    : (agents.find((a) => a.id === draftAgents[hostId]) ??
+      agents.find((a) => a.available) ??
+      agents[0]);
+  function selectAgent(id: string) {
+    if (
+      session ||
+      sending.current ||
+      !connected ||
+      !agents.some((a) => a.id === id && a.available)
+    )
+      return;
+    navigationRevision.current++;
+    setDraftAgents((old) => ({ ...old, [hostId]: id }));
+    setError("");
+  }
   const selection = useRef({ hostId, projectId });
   selection.current = { hostId, projectId };
   useEffect(() => {
@@ -510,7 +528,7 @@ export function useWorkbench() {
         }
         seenServers.current.set(host.id, r.server_id);
         setServerId(r.server_id);
-        setAgent(r.agents.find((a) => a.id === "claude"));
+        setAgents(r.agents);
         let missingProject = false;
         if (!reused) updateProjects(host.id, hostProjects);
         missingProject =
@@ -1003,11 +1021,11 @@ export function useWorkbench() {
   async function persistSession(
     revision: number,
   ): Promise<Session | undefined> {
-    if (!project) return;
+    if (!project || !agent?.available) return;
     const r = await request(hostId, {
       method: "create_session",
       project_id: project.id,
-      agent: "claude",
+      agent: agent.id,
     });
     if (r.kind === "session") {
       if (
@@ -1227,7 +1245,7 @@ export function useWorkbench() {
     const target = hosts.find((value) => value.id === id);
     const hello = target ? cachedHello(target) : undefined;
     setConnected(!!hello);
-    setAgent(hello?.agents.find((value) => value.id === "claude"));
+    setAgents(hello?.agents ?? []);
     setServerId(hello?.server_id ?? "");
     setHostId(id);
   }
@@ -1383,6 +1401,8 @@ export function useWorkbench() {
     connecting,
     serverId,
     agent,
+    agents,
+    selectAgent,
     projects,
     moveProject,
     hostErrors,

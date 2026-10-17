@@ -1,4 +1,6 @@
-//! Final-binary tests: real daemon, real socket/bridge, deterministic Claude process.
+//! Final-binary tests: real daemon, real socket/bridge, deterministic native processes.
+#[path = "support/traex.rs"]
+mod traex_e2e;
 use latte_work_client::Client;
 use latte_work_protocol::{EventKind, Request, Response, Status, VERSION};
 use nix::{
@@ -30,6 +32,10 @@ impl Host {
             .arg("--state-dir")
             .arg(directory.path())
             .env("LATTE_WORK_CLAUDE", fixture)
+            .env(
+                "LATTE_WORK_TRAEX",
+                PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/traex.py"),
+            )
             .env("CLAUDE_CONFIG_DIR", directory.path().join("claude-config"))
             .envs(env.iter().copied())
             .stdin(Stdio::null())

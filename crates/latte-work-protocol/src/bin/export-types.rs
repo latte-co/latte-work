@@ -8,6 +8,7 @@ fn main() {
         TerminalInfo::decl(),
         Status::decl(),
         Effort::decl(),
+        ModelVariant::decl(),
         Session::decl(),
         RecentCursor::decl(),
         RecentSession::decl(),

@@ -717,9 +717,9 @@ impl TurnState {
         Ok(None)
     }
 }
-struct Group {
-    child: Child,
-    pid: i32,
+pub(crate) struct Group {
+    pub(crate) child: Child,
+    pub(crate) pid: i32,
 }
 impl Drop for Group {
     fn drop(&mut self) {
@@ -949,6 +949,7 @@ async fn finish_turn(
 }
 fn same_config(a: &LaunchConfig, b: &LaunchConfig) -> bool {
     a.model == b.model
+        && a.traex_model == b.traex_model
         && a.effort == b.effort
         && a.permission_mode == b.permission_mode
         && match (&a.provider, &b.provider) {
@@ -1914,6 +1915,7 @@ mod tests {
             Store::open(&dir.path().join("state.sqlite")).unwrap(),
         ));
         let config = LaunchConfig {
+            traex_model: None,
             provider: None,
             model: None,
             effort: None,

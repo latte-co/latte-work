@@ -2107,6 +2107,7 @@ mod tests {
     fn bounded_child_window_keeps_a_complete_first_record_at_a_nonzero_offset() {
         use super::*;
         let config = LaunchConfig {
+            traex_model: None,
             provider: None,
             settings_dir: PathBuf::from("/tmp"),
             model: None,
@@ -2140,6 +2141,7 @@ mod tests {
     fn complete_child_history_preserves_long_reports_and_cross_page_confirmation() {
         use super::*;
         let config = LaunchConfig {
+            traex_model: None,
             provider: None,
             settings_dir: PathBuf::from("/tmp"),
             model: None,
@@ -2182,6 +2184,7 @@ mod tests {
         use super::*;
         let secret = "fixture-provider-secret";
         let config = LaunchConfig {
+            traex_model: None,
             provider: Some(crate::providers::ResolvedProvider { metadata: serde_json::from_value(json!({"id":"p","name":"fixture","protocol":"anthropic_messages","base_url":"http://127.0.0.1","model":"m","models":[],"model_labels":{},"auth":"bearer","has_credential":true,"revision":"1"})).unwrap(), credential: secret.into() }),
             settings_dir: PathBuf::from("/tmp"), model: None, effort: None, permission_mode: None,
         };
@@ -2227,6 +2230,7 @@ mod tests {
     fn native_handback_promotes_only_confirmed_report_before_tool_input_clipping() {
         use super::*;
         let config = LaunchConfig {
+            traex_model: None,
             provider: None,
             settings_dir: PathBuf::from("/tmp"),
             model: None,
@@ -2577,6 +2581,7 @@ mod tests {
     fn usage_matches_explicit_launch_alias_without_using_child_capacity() {
         let dir = tempfile::tempdir().unwrap();
         let config = crate::providers::LaunchConfig {
+            traex_model: None,
             provider: None,
             model: Some("relay/seed-0812".into()),
             effort: None,
@@ -2725,6 +2730,7 @@ mod tests {
     fn permission_launch_omits_inheritance_and_passes_explicit_modes_on_resume() {
         let dir = tempfile::tempdir().unwrap();
         let mut config = crate::providers::LaunchConfig {
+            traex_model: None,
             provider: None,
             model: None,
             effort: None,
@@ -2830,6 +2836,7 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().unwrap();
         let mut config = LaunchConfig {
+            traex_model: None,
             provider: None,
             model: None,
             effort: None,

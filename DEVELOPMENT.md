@@ -116,8 +116,8 @@ cleanup remains visible for explicit retry rather than automatically replaying i
 ## Agent adapter development
 
 `crates/latte-work-server/src/agents/adapter.rs` defines the internal contract;
-`agents/mod.rs` registers implementations, and `agents/claude.rs` implements the
-only supported Agent. Keep protocol order and wire messages in the implementation.
+`agents/mod.rs` registers implementations: `agents/claude.rs` owns Claude Code
+and `agents/traex.rs` owns Traex app-server v2. Keep protocol order and wire messages in the implementation.
 Runtime consumes common actions and retains approval authorization, process
 supervision and persistence. Each opened conversation has a persistent actor and
 native process. The additive `open_agent_session` and `close_agent_session`
@@ -655,7 +655,6 @@ It does not verify a live model's delegation decisions. `--pause-for-ui` prints
 an isolated state directory and bounded release/finish markers for native UI checks.
 SDK lifecycle reference: [native task types](https://github.com/anthropics/claude-agent-sdk-python/blob/main/src/claude_agent_sdk/types.py).
 
-
 ### Task changes and source previews
 
 Before the first accepted agent request spawns, the server stores a durable file
@@ -1002,3 +1001,79 @@ Previously acknowledged requests produce an informational receipt on explicit
 reconciliation. Taken-for-edit and cancelled requests retain distinct explanations.
 The edit/clear queue protocol requests remain for existing clients and host tests;
 the desktop exposes take-to-edit and per-item deletion only.
+
+## Traex integration
+
+New tasks can select Claude Code or Traex above the composer. A saved task keeps
+its Agent; model, effort and permission preferences are isolated per host/Agent.
+The Server discovers both CLIs independently through the host shell environment.
+`LATTE_WORK_TRAEX` overrides the executable; otherwise discovery checks
+`~/.local/bin/traex` and PATH. Install on the selected execution host; native CLI
+configuration additionally needs its own service login. App Providers supply their
+own authentication.
+Local and SSH requests use the same selected-adapter path.
+
+Traex uses a dedicated `app-server --stdio` child, never the shared CLI daemon.
+The adapter owns JSON-RPC initialize, thread start/resume, turn start/interrupt,
+streamed assistant text, shell/file/MCP tool records, single-use approvals,
+structured user questions, and live title changes. Approval responses use
+`accept`/`decline`, without session approval caches or policy amendments. Unknown
+server requests return explicit unsupported errors. EOF or a successful process
+exit cannot complete a turn. Native thread/turn identities fence unrelated or
+stale notifications; hidden reasoning text is not stored.
+Completion-only assistant items share the bounded per-turn text deduplication set.
+A completion that precedes both forms of start evidence is buffered (at most 32
+turn IDs) and applied only after the start response/notification confirms its ID.
+An interrupt RPC error is obsolete only after that exact turn has explicitly
+completed; active-turn failures still surface, without rewriting a stopped turn.
+
+An empty Traex thread has no durable rollout until a turn is admitted. Its ID
+stays in the actor until native turn admission, so closing/reconfiguring an empty
+task starts another prompt-free thread rather than resuming a nonexistent file.
+After admission, native identity persists; failed resumes never create a replacement
+thread or replay a prompt. Completed sessions can close/reopen and continue.
+
+Model metadata comes from bounded, prompt-free `model/list` probes of the installed
+CLI, with native IDs, display names, default and per-model reasoning efforts.
+Models reporting native backend variants expose a Standard / Max submenu, separate
+from Effort, with catalog-reported context windows. The selected Max backend key is
+stored through the existing model/request/queue identity; the host resolves it from
+the current catalog to the base model and explicit `model_backend_variant` for thread
+start/resume and `modelBackendVariant` for each turn. Standard explicitly resets Max;
+CLI defaults resolve the current native mode rather than inheriting a saved Max mode.
+Variant-specific reasoning lists take precedence. An optional `model_variants` map
+extends model responses; older catalogs retain the direct model menu. App Provider
+models do not synthesize native modes. Remote Servers need the updated adapter.
+There are no hardcoded Traex models or inherited Claude effort levels. Probes have
+a 12-second deadline, 1 MiB total output, 256 models, five pages and 128 messages,
+share the host's two-probe limit, and reap their process groups. Permission discovery
+reads the installed CLI help. Explicit `default` maps to on-request/workspace-write
+with the user as reviewer; `bypass_permissions` maps to never/danger-full-access.
+An omitted mode leaves native policy resolution intact; `auto` is not exposed.
+
+Traex supports App-owned Anthropic Messages, OpenAI Chat Completions and OpenAI
+Responses providers using native wire APIs. Provider metadata is injected through
+process-local CLI config overrides; the credential uses a dedicated child environment
+variable, never argv, JSON-RPC or user config. No-auth sends no authentication header.
+Bare Anthropic origins gain `/v1`; explicit API prefixes are retained. Bound model
+catalogs use App metadata only and expose no reasoning overrides without native
+capability evidence. CLI-backed sessions resolve the current native provider through
+`config/read`; thread start/resume and each turn explicitly select that provider,
+so removing a binding cannot retain the preceding App provider from a rollout.
+See `docs/providers.md` and `scripts/smoke-traex-providers.py` for native protocol checks.
+
+Native slash-command discovery, offline native title edits, child transcript reads
+and running-turn message insertion are not implemented and fail explicitly.
+Ordinary durable FIFO queueing and explicit stop-and-send use the shared runtime.
+Native child activity fences reconfiguration; it is not inferred to be finished
+when the main turn completes. No dependencies or send-request fields are added.
+
+Focused checks: `cargo test -p latte-work-server --bin latte-work-server --locked traex`
+and `cargo test -p latte-work-server --test e2e --locked traex_ -- --test-threads=1`.
+The deterministic CLI fixture runs no model and requires no login.
+`python3 scripts/smoke-traex.py` validates a real installed CLI's metadata and
+prompt-free open in an isolated Server/project. Add `--live` for two small model
+turns and close/resume verification; this uses the CLI account's model service.
+`--model <native-id>` checks explicit selection, and `--live-tools` verifies a
+real file write in the disposable project.
+Native UI and actual SSH execution remain separate acceptance evidence.

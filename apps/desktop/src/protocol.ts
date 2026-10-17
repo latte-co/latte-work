@@ -24,6 +24,14 @@ export type Status =
   | "stopped"
   | "unknown";
 export type Effort = "low" | "medium" | "high" | "xhigh" | "max";
+export type ModelVariant = {
+  /**
+   * Native selectable ID; travels through existing model persistence and queue identity.
+   */
+  model: string;
+  label: string;
+  context_window: number | null;
+};
 export type Session = {
   id: string;
   project_id: string;
@@ -584,6 +592,7 @@ export type Response =
        * Display metadata only; keys remain the original selectable model IDs.
        */
       model_labels: { [key in string]?: string };
+      model_variants?: { [key in string]?: Array<ModelVariant> };
     }
   | {
       kind: "provider_snapshot";

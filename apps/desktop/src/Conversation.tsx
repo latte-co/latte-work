@@ -1,3 +1,4 @@
+import { Select } from "./Select";
 import { referenceMessage } from "./referenceMessage";
 import { MessageQueue } from "./MessageQueue";
 import { TurnChangesCard } from "./TurnChangesCard";
@@ -51,6 +52,8 @@ interface Props {
   openTurnChanges?: (changes: TurnChanges, path?: string) => void;
   drafts: DraftStore;
   agent?: AgentInfo;
+  agents?: AgentInfo[];
+  selectAgent?: (id: string) => void;
   session?: Session;
   hostId: string;
   settingsOpen: boolean;
@@ -97,6 +100,8 @@ export function Conversation({
   openTurnChanges,
   drafts,
   agent,
+  agents = [],
+  selectAgent,
   session,
   hostId,
   settingsOpen,
@@ -528,8 +533,8 @@ export function Conversation({
               <h1>{projectName ? "从一个想法开始" : "开始一项新任务"}</h1>
               <p>
                 {projectName
-                  ? `在 ${projectName} 中与 Claude Code 一起工作。`
-                  : "选择本地或远程项目，与 Claude Code 一起工作。"}
+                  ? `在 ${projectName} 中与 ${agentName} 一起工作。`
+                  : `选择本地或远程项目，与 ${agentName} 一起工作。`}
               </p>
               {!text.trim() && (
                 <div className="suggestions">
@@ -741,16 +746,38 @@ export function Conversation({
               onAddProject={openProject}
             />
           )}
-          <span className="agent-badge" title={agentName}>
-            {agentId === "claude" ? (
-              <span className="claude-mark" aria-hidden="true">
-                ✳
-              </span>
-            ) : (
-              <Bot size={15} aria-hidden="true" />
-            )}
-            <span>{agentName}</span>
-          </span>
+          {!session && selectAgent && agents.length > 1 ? (
+            <div className="agent-picker">
+              <Select
+                label="Code Agent"
+                value={agentId}
+                options={agents
+                  .filter((a) => a.available || a.id === agentId)
+                  .map((a) => ({
+                    value: a.id,
+                    label: a.name,
+                    description: a.available ? undefined : "暂不可用",
+                  }))}
+                onChange={selectAgent}
+                disabled={
+                  sending || !connected || !agents.some((a) => a.available)
+                }
+                compact
+                minMenuWidth={180}
+              />
+            </div>
+          ) : (
+            <span className="agent-badge" title={agentName}>
+              {agentId === "claude" ? (
+                <span className="claude-mark" aria-hidden="true">
+                  ✳
+                </span>
+              ) : (
+                <Bot size={15} aria-hidden="true" />
+              )}
+              <span>{agentName}</span>
+            </span>
+          )}
         </div>
         {pendingQuestions.length > 0 && (
           <section
