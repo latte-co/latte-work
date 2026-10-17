@@ -3,6 +3,7 @@ import type { SelectOption } from "./Select";
 export function modelOptions(
   models: string[],
   labels?: Partial<Record<string, string>>,
+  showAliases = true,
 ): SelectOption[] {
   return [
     { value: "", label: "default" },
@@ -10,7 +11,7 @@ export function modelOptions(
       value: model,
       label: labels?.[model] || model,
       description:
-        labels?.[model] && labels[model] !== model
+        showAliases && labels?.[model] && labels[model] !== model
           ? model.charAt(0).toUpperCase() + model.slice(1)
           : undefined,
     })),

@@ -180,13 +180,14 @@ export function AgentSettings({
                   label={`${agent.name} 关联 Provider`}
                   value={choices[agent.id] || ""}
                   options={options}
-                  disabled={busy}
+                  disabled={busy || !agent.provider_protocols.length}
                   onChange={(id) => setChoices({ ...choices, [agent.id]: id })}
                 />
               </label>
               <p className="form-note">
-                支持{" "}
-                {agent.provider_protocols.map((p) => protocols[p]).join("、")}。
+                {agent.provider_protocols.length
+                  ? `支持 ${agent.provider_protocols.map((p) => protocols[p]).join("、")}。`
+                  : "暂不支持 App Provider 关联。"}
                 {provider
                   ? `当前使用 App 中的 ${provider.name}，每轮发送时读取最新配置。`
                   : `当前使用 ${host.name} 上的 Agent CLI 配置。`}

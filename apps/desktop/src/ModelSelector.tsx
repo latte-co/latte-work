@@ -33,7 +33,7 @@ export function ModelSelector({
   ref,
 }: {
   value: string;
-  options: SelectOption[];
+  options: (SelectOption & { variants?: SelectOption[] })[];
   onChange: (value: string) => void;
   effort: Effort | null;
   levels: Effort[];
@@ -47,14 +47,29 @@ export function ModelSelector({
       openMenu(target) {
         if (disabled || (target === "effort" && !levels.length)) return false;
         setOpen(true);
-        setReasoning(target === "effort");
+        setSubmenuTarget(target === "effort" ? "effort" : null);
         return true;
       },
     }),
     [disabled, levels.length],
   );
   const [open, setOpen] = useState(false);
-  const [reasoning, setReasoning] = useState(false);
+  const [submenuTarget, setSubmenuTarget] = useState<string | null>(null);
+  const reasoning = submenuTarget === "effort";
+  const variantOptions = options.find(
+    (o) => `model:${o.value}` === submenuTarget,
+  )?.variants;
+  const submenuOpen = reasoning || !!variantOptions;
+  const anchor = () =>
+    reasoning
+      ? footer.current
+      : Array.from(
+          menu.current?.querySelectorAll<HTMLButtonElement>(
+            "[data-variant-model]",
+          ) ?? [],
+        ).find(
+          (button) => `model:${button.dataset.variantModel}` === submenuTarget,
+        );
   const [position, setPosition] = useState({
     left: 0,
     top: 0,
@@ -71,20 +86,29 @@ export function ModelSelector({
   const submenu = useRef<HTMLDivElement>(null);
   const footer = useRef<HTMLButtonElement>(null);
   const id = useId();
-  const selected = options.find((o) => o.value === value)?.label ?? value;
+  const selected =
+    options
+      .flatMap(
+        (o) =>
+          o.variants?.map((v) => ({
+            value: v.value,
+            label: `${o.label} / ${v.label}`,
+          })) ?? [o],
+      )
+      .find((o) => o.value === value)?.label ?? value;
   const effortValue = effort && levels.includes(effort) ? effort : "跟随 Agent";
   function close(restoreFocus = true) {
     setOpen(false);
-    setReasoning(false);
+    setSubmenuTarget(null);
     if (restoreFocus) trigger.current?.focus();
   }
   function showReasoning() {
-    if (levels.length) setReasoning(true);
+    if (levels.length) setSubmenuTarget("effort");
   }
   useEffect(() => {
     if (disabled) {
       setOpen(false);
-      setReasoning(false);
+      setSubmenuTarget(null);
     }
   }, [disabled]);
   useLayoutEffect(() => {
@@ -110,14 +134,15 @@ export function ModelSelector({
       ?.focus();
   }, [open, options.length]);
   useLayoutEffect(() => {
-    if (!reasoning || !footer.current || !menu.current) return;
-    const row = footer.current.getBoundingClientRect();
+    const source = anchor();
+    if (!submenuOpen || !source || !menu.current) return;
+    const row = source.getBoundingClientRect();
     const parent = menu.current.getBoundingClientRect();
     const maxHeight = Math.min(
-      (levels.length + 1) * 36 + 10,
+      (reasoning ? levels.length + 1 : (variantOptions?.length ?? 0)) * 36 + 10,
       window.innerHeight - 16,
     );
-    const width = 140;
+    const width = reasoning ? 140 : 220;
     setSubPosition({
       left: Math.max(
         8,
@@ -132,10 +157,12 @@ export function ModelSelector({
       ),
       maxHeight,
     });
-    submenu.current
-      ?.querySelector<HTMLButtonElement>('[aria-checked="true"]')
-      ?.focus();
-  }, [reasoning, levels.length, position]);
+    (
+      submenu.current?.querySelector<HTMLButtonElement>(
+        '[aria-checked="true"]',
+      ) ?? submenu.current?.querySelector<HTMLButtonElement>("button")
+    )?.focus();
+  }, [submenuTarget, levels.length, position]);
   useEffect(() => {
     if (!open) return;
     const outside = (e: PointerEvent) => {
@@ -170,17 +197,22 @@ export function ModelSelector({
       }
       e.preventDefault();
       if (e.key === "Escape" || e.key === "ArrowLeft") {
-        if (reasoning) {
-          setReasoning(false);
-          footer.current?.focus();
+        if (submenuOpen) {
+          anchor()?.focus();
+          setSubmenuTarget(null);
         } else if (e.key === "Escape") close();
         return;
       }
       if (e.key === "ArrowRight") {
         if (document.activeElement === footer.current) showReasoning();
+        else {
+          const model = (document.activeElement as HTMLElement)?.dataset
+            .variantModel;
+          if (model) setSubmenuTarget(`model:${model}`);
+        }
         return;
       }
-      const root = reasoning ? submenu.current : menu.current;
+      const root = submenuOpen ? submenu.current : menu.current;
       const buttons = Array.from(
         root?.querySelectorAll<HTMLButtonElement>("button:not(:disabled)") ??
           [],
@@ -210,7 +242,7 @@ export function ModelSelector({
       window.removeEventListener("keydown", key, true);
       window.removeEventListener("resize", resize);
     };
-  }, [open, reasoning, levels.length]);
+  }, [open, submenuTarget, levels.length, options]);
   return (
     <>
       <button
@@ -257,21 +289,46 @@ export function ModelSelector({
                     key={o.value}
                     type="button"
                     role="menuitemradio"
-                    aria-checked={o.value === value}
+                    data-variant-model={o.variants ? o.value : undefined}
+                    aria-haspopup={o.variants ? "menu" : undefined}
+                    aria-expanded={
+                      o.variants
+                        ? submenuTarget === `model:${o.value}`
+                        : undefined
+                    }
+                    aria-controls={
+                      o.variants && submenuTarget === `model:${o.value}`
+                        ? `${id}-variants`
+                        : undefined
+                    }
+                    aria-checked={
+                      o.value === value ||
+                      !!o.variants?.some((v) => v.value === value)
+                    }
                     title={
-                      o.description ? `${o.label} · ${o.description}` : o.label
+                      o.description
+                        ? `${o.label} · ${o.description}`
+                        : o.value && o.value !== o.label
+                          ? `${o.label} · ${o.value}`
+                          : o.label
                     }
                     tabIndex={-1}
                     onMouseEnter={(e) => {
-                      setReasoning(false);
+                      setSubmenuTarget(o.variants ? `model:${o.value}` : null);
                       e.currentTarget.focus();
                     }}
                     onClick={() => {
-                      onChange(o.value);
-                      close();
+                      if (o.variants) setSubmenuTarget(`model:${o.value}`);
+                      else {
+                        onChange(o.value);
+                        close();
+                      }
                     }}
                   >
                     <span className="model-option-name">{o.label}</span>
+                    {o.variants && (
+                      <ChevronRight size={15} aria-hidden="true" />
+                    )}
                     {o.description && (
                       <span className="model-option-alias">
                         {o.description}
@@ -312,31 +369,40 @@ export function ModelSelector({
                 <ChevronRight size={15} />
               </button>
             </div>
-            {reasoning && (
+            {submenuOpen && (
               <div
                 ref={submenu}
-                id={`${id}-effort`}
+                id={`${id}-${reasoning ? "effort" : "variants"}`}
                 role="menu"
-                aria-label="Reasoning effort"
+                aria-label={reasoning ? "Reasoning effort" : "Model mode"}
                 className="select-popover compact model-effort-menu"
-                style={subPosition}
+                style={{ ...subPosition, width: reasoning ? 140 : 220 }}
               >
-                {([null, ...levels] as (Effort | null)[]).map((level) => (
+                {variantOptions?.map((variant) => (
                   <button
-                    key={level ?? "auto"}
+                    key={variant.value}
                     type="button"
                     role="menuitemradio"
-                    aria-checked={
-                      level === effort || (!effort && level === null)
-                    }
+                    aria-checked={variant.value === value}
                     tabIndex={-1}
+                    aria-label={[variant.label, variant.description]
+                      .filter(Boolean)
+                      .join(" ")}
+                    title={[variant.label, variant.description]
+                      .filter(Boolean)
+                      .join(" · ")}
                     onMouseEnter={(e) => e.currentTarget.focus()}
                     onClick={() => {
-                      onEffortChange(level);
+                      onChange(variant.value);
                       close();
                     }}
                   >
-                    <span>{level ?? "跟随 Agent"}</span>
+                    <span>{variant.label}</span>
+                    {variant.description && (
+                      <span className="model-effort-value">
+                        {variant.description}
+                      </span>
+                    )}
                     <Check
                       size={15}
                       className="model-option-check"
@@ -344,6 +410,30 @@ export function ModelSelector({
                     />
                   </button>
                 ))}
+                {reasoning &&
+                  ([null, ...levels] as (Effort | null)[]).map((level) => (
+                    <button
+                      key={level ?? "auto"}
+                      type="button"
+                      role="menuitemradio"
+                      aria-checked={
+                        level === effort || (!effort && level === null)
+                      }
+                      tabIndex={-1}
+                      onMouseEnter={(e) => e.currentTarget.focus()}
+                      onClick={() => {
+                        onEffortChange(level);
+                        close();
+                      }}
+                    >
+                      <span>{level ?? "跟随 Agent"}</span>
+                      <Check
+                        size={15}
+                        className="model-option-check"
+                        aria-hidden="true"
+                      />
+                    </button>
+                  ))}
               </div>
             )}
           </>,

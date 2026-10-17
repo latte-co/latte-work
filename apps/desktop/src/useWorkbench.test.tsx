@@ -53,7 +53,15 @@ beforeEach(() => {
   mocks.connect.mockImplementation(async (host: { id: string }) => ({
     kind: "hello",
     server_id: `server-${host.id}`,
-    agents: [],
+    agents: [
+      {
+        id: "claude",
+        name: "Claude Code",
+        available: true,
+        detail: "fixture",
+        provider_protocols: ["anthropic_messages"],
+      },
+    ],
   }));
   unread = true;
   hasMore = false;
@@ -1284,3 +1292,54 @@ it.each([false, true])(
     }
   },
 );
+
+it("creates the selected native Agent and keeps the saved session Agent fixed", async () => {
+  const agents = [
+    {
+      id: "claude",
+      name: "Claude Code",
+      available: true,
+      detail: "",
+      provider_protocols: [],
+    },
+    {
+      id: "traex",
+      name: "Traex",
+      available: true,
+      detail: "",
+      provider_protocols: [],
+    },
+  ];
+  mocks.connect.mockResolvedValue({
+    kind: "hello",
+    server_id: "server-local",
+    agents,
+  });
+  const base = mocks.request.getMockImplementation()!;
+  const created = { ...session(), id: "native", agent: "traex" };
+  mocks.request.mockImplementation(async (host: string, r: Request) => {
+    if (r.method === "create_session")
+      return { kind: "session", session: created };
+    if (r.method === "send_queued")
+      return { kind: "accepted", duplicate: false };
+    if (r.method === "poll" && r.session_id === created.id)
+      return { kind: "events", session: created, events: [], has_more: false };
+    return base(host, r);
+  });
+  const { result } = renderHook(useWorkbench);
+  await act(async () => {});
+  act(() => result.current.selectAgent("traex"));
+  expect(result.current.agent?.id).toBe("traex");
+  await act(async () => {
+    expect(await result.current.send("native turn", null, null, null)).toBe(
+      true,
+    );
+  });
+  expect(
+    mocks.request.mock.calls.find(
+      ([, r]) => r.method === "create_session",
+    )?.[1],
+  ).toMatchObject({ agent: "traex" });
+  act(() => result.current.selectAgent("claude"));
+  expect(result.current.agent?.id).toBe("traex");
+});

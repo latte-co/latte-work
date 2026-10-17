@@ -43,10 +43,49 @@ struct Service {
     title_refresh: Arc<Mutex<runtime::TitleRefreshCache>>,
     command_probes: Arc<tokio::sync::Semaphore>,
     file_admission: Arc<tokio::sync::RwLock<()>>,
-    agent_binary: String,
-    agent: AgentInfo,
+    agents: Vec<(String, AgentInfo)>,
     server_id: String,
     providers: Arc<Mutex<providers::ProviderStore>>,
+}
+impl Service {
+    async fn resolve_traex_model(
+        &self,
+        agent: &str,
+        path: &str,
+        config: &mut providers::LaunchConfig,
+    ) -> Result<()> {
+        if agent != "traex" || config.provider.is_some() {
+            return Ok(());
+        }
+        let _permit = self
+            .command_probes
+            .try_acquire()
+            .context("模型能力正在加载，请稍后重试")?;
+        config.traex_model = agents::traex::validate_selection(
+            self.agent_binary(agent)?,
+            Some(path),
+            config.model.as_deref(),
+            config.effort,
+        )
+        .await?;
+        Ok(())
+    }
+    fn agent_entry(&self, id: &str) -> Result<&(String, AgentInfo)> {
+        self.agents
+            .iter()
+            .find(|(_, info)| info.id == id)
+            .context("此 Agent 尚未实现")
+    }
+    fn agent_binary(&self, id: &str) -> Result<&str> {
+        let (binary, info) = self.agent_entry(id)?;
+        if !info.available {
+            bail!(
+                "{} CLI 不可用；请在此 Host 安装并登录后重启 Server",
+                info.name
+            );
+        }
+        Ok(binary)
+    }
 }
 #[tokio::main]
 async fn main() {
@@ -59,7 +98,7 @@ async fn entry() -> Result<()> {
     let args: Vec<_> = std::env::args().skip(1).collect();
     if args.is_empty() || args[0] == "--help" {
         println!(
-            "latte-work-server 0.1.0\nUsage: latte-work-server <serve|connect|connect-local> [--state-dir PATH]\nOne daemon per host user; connect starts it if absent.\nLATTE_WORK_CLAUDE: absolute CLI path override (default auto-detected claude)."
+            "latte-work-server 0.1.0\nUsage: latte-work-server <serve|connect|connect-local> [--state-dir PATH]\nOne daemon per host user; connect starts it if absent.\nLATTE_WORK_CLAUDE / LATTE_WORK_TRAEX: CLI path overrides (default auto-detected claude / traex)."
         );
         return Ok(());
     }
@@ -162,9 +201,11 @@ async fn serve(dir: &Path) -> Result<()> {
     }
     let database = Arc::new(Mutex::new(store::Store::open(&dir.join("state.sqlite"))?));
     let environment_warning = agent_environment::initialize().await;
-    let (agent_binary, mut agent) = agents::discover().await;
+    let mut agents = agents::discover().await;
     if let Some(warning) = environment_warning {
-        agent.detail = format!("{} · {warning}", agent.detail);
+        for (_, agent) in &mut agents {
+            agent.detail = format!("{} · {warning}", agent.detail);
+        }
     }
     let service = Service {
         attachments: Arc::new(Mutex::new(attachments::Attachments::new(dir)?)),
@@ -176,8 +217,7 @@ async fn serve(dir: &Path) -> Result<()> {
         title_refresh: Arc::new(Mutex::new(runtime::TitleRefreshCache::default())),
         command_probes: Arc::new(tokio::sync::Semaphore::new(2)),
         file_admission: Arc::new(tokio::sync::RwLock::new(())),
-        agent_binary,
-        agent,
+        agents,
         server_id: uuid::Uuid::new_v4().to_string(),
     };
     let listener = UnixListener::bind(&socket)?;
@@ -253,7 +293,11 @@ async fn connection(stream: UnixStream, service: Service) -> Result<()> {
                         Response::Hello {
                             version: VERSION,
                             server_id: service.server_id.clone(),
-                            agents: vec![service.agent.clone()],
+                            agents: service
+                                .agents
+                                .iter()
+                                .map(|(_, agent)| agent.clone())
+                                .collect(),
                             permission_settings: true,
                             history_window: true,
                         }
@@ -361,21 +405,17 @@ async fn dispatch(s: &Service, request: Request) -> Result<Response> {
             .map_err(|_| anyhow::anyhow!("Provider 配置锁异常"))?
             .list(),
         Request::AgentPermissions { agent } => {
-            if agent != s.agent.id || !s.agent.available {
-                bail!("此 Agent 不可用或尚未实现：{agent}");
-            }
+            let binary = s.agent_binary(&agent)?;
             let _permit = s
                 .command_probes
                 .try_acquire()
                 .context("权限选项正在加载，请稍后重试")?;
             Response::AgentPermissions {
-                modes: agents::permission_modes(&agent, &s.agent_binary).await?,
+                modes: agents::permission_modes(&agent, binary).await?,
             }
         }
         Request::AgentCommands { agent, project_id } => {
-            if agent != s.agent.id || !s.agent.available {
-                bail!("此 Agent 不可用或尚未实现：{agent}");
-            }
+            let binary = s.agent_binary(&agent)?;
             let project = db(&s.database, |d| d.project(&project_id))?;
             let _permit = s
                 .command_probes
@@ -387,8 +427,7 @@ async fn dispatch(s: &Service, request: Request) -> Result<Response> {
                 .map_err(|_| anyhow::anyhow!("Provider 配置锁异常"))?
                 .selected_config(&agent, None)?;
             Response::AgentCommands {
-                commands: runtime::commands(&s.agent_binary, &agent, &project.path, &config)
-                    .await?,
+                commands: runtime::commands(binary, &agent, &project.path, &config).await?,
             }
         }
         Request::Models {
@@ -404,11 +443,25 @@ async fn dispatch(s: &Service, request: Request) -> Result<Response> {
                 .lock()
                 .map_err(|_| anyhow::anyhow!("Provider 配置锁异常"))?
                 .models(&agent, model.as_deref())?;
-            if let Response::Models {
-                provider: None,
-                model_labels,
-                ..
-            } = &mut response
+            if agent == "traex" && matches!(&response, Response::Models { provider: None, .. }) {
+                let binary = s.agent_binary(&agent)?;
+                let _permit = s
+                    .command_probes
+                    .try_acquire()
+                    .context("模型列表正在加载，请稍后重试")?;
+                response = agents::traex::models(
+                    binary,
+                    project.as_ref().map(|p| p.path.as_str()),
+                    model.as_deref(),
+                )
+                .await?;
+            }
+            if agent != "traex"
+                && let Response::Models {
+                    provider: None,
+                    model_labels,
+                    ..
+                } = &mut response
             {
                 *model_labels = agents::model_labels(
                     &agent,
@@ -499,11 +552,25 @@ async fn dispatch(s: &Service, request: Request) -> Result<Response> {
                 .transpose()?;
             let mut response =
                 providers::ProviderStore::models_for_provider(&agent, model.as_deref(), provider)?;
-            if let Response::Models {
-                provider: None,
-                model_labels,
-                ..
-            } = &mut response
+            if agent == "traex" && matches!(&response, Response::Models { provider: None, .. }) {
+                let binary = s.agent_binary(&agent)?;
+                let _permit = s
+                    .command_probes
+                    .try_acquire()
+                    .context("模型列表正在加载，请稍后重试")?;
+                response = agents::traex::models(
+                    binary,
+                    project.as_ref().map(|p| p.path.as_str()),
+                    model.as_deref(),
+                )
+                .await?;
+            }
+            if agent != "traex"
+                && let Response::Models {
+                    provider: None,
+                    model_labels,
+                    ..
+                } = &mut response
             {
                 *model_labels = agents::model_labels(
                     &agent,
@@ -623,9 +690,7 @@ async fn dispatch(s: &Service, request: Request) -> Result<Response> {
             session: runtime::archive(&s.database, &s.runs, &session_id, archived).await?,
         },
         Request::CreateSession { project_id, agent } => {
-            if agent != s.agent.id {
-                bail!("此 Agent 尚未实现");
-            }
+            s.agent_binary(&agent)?;
             Response::Session {
                 session: db(&s.database, |d| d.create_session(project_id, agent))?,
             }
@@ -634,14 +699,12 @@ async fn dispatch(s: &Service, request: Request) -> Result<Response> {
             session_id,
             provider,
         } => {
-            if !s.agent.available {
-                bail!("此 Host 的 Agent CLI 不可用");
-            }
             let (session, path) = db(&s.database, |d| {
                 let session = d.session(&session_id)?;
                 let path = d.project(&session.project_id)?.path;
                 Ok((session, path))
             })?;
+            let binary = s.agent_binary(&session.agent)?;
             if session.archived {
                 bail!("请先取消归档再打开 Agent 会话");
             }
@@ -651,13 +714,17 @@ async fn dispatch(s: &Service, request: Request) -> Result<Response> {
                 .map_err(|_| anyhow::anyhow!("Provider 配置锁异常"))?
                 .open_config(&session.agent, session.model.as_deref(), provider)?;
             config.effort = session.effort.filter(|level| {
-                agents::effort_levels(&session.agent, config.model.as_deref()).contains(level)
+                (session.agent == "traex" && config.provider.is_none())
+                    || agents::effort_levels(&session.agent, config.model.as_deref())
+                        .contains(level)
             });
             config.permission_mode = session.permission_mode.clone();
+            s.resolve_traex_model(&session.agent, &path, &mut config)
+                .await?;
             runtime::open(
                 s.database.clone(),
                 s.runs.clone(),
-                s.agent_binary.clone(),
+                binary.to_owned(),
                 session,
                 path,
                 config,
@@ -707,16 +774,8 @@ async fn dispatch(s: &Service, request: Request) -> Result<Response> {
             {
                 return Ok(Response::Accepted { duplicate: true });
             }
-            if !s.agent.available {
-                bail!(
-                    "{} CLI 不可用；请在此 Host 安装并登录后重启 Server",
-                    s.agent.name
-                );
-            }
             let agent_id = db(&s.database, |d| Ok(d.session(&session_id)?.agent))?;
-            if agent_id != s.agent.id {
-                bail!("此 Agent 尚未实现：{agent_id}");
-            }
+            let binary = s.agent_binary(&agent_id)?;
             let mut launch_config = s
                 .providers
                 .lock()
@@ -728,9 +787,11 @@ async fn dispatch(s: &Service, request: Request) -> Result<Response> {
                     .as_ref()
                     .map(|p| p.metadata.model.as_str())
             });
-            if effort.is_some_and(|level| {
-                !agents::effort_levels(&agent_id, selected_model).contains(&level)
-            }) {
+            if (agent_id != "traex" || launch_config.provider.is_some())
+                && effort.is_some_and(|level| {
+                    !agents::effort_levels(&agent_id, selected_model).contains(&level)
+                })
+            {
                 bail!("此 Agent 不支持所选思考强度");
             }
             if let Some(mode) = &permission_mode {
@@ -738,7 +799,7 @@ async fn dispatch(s: &Service, request: Request) -> Result<Response> {
                     .command_probes
                     .try_acquire()
                     .context("权限能力正在加载，请稍后重试")?;
-                if !agents::permission_modes(&agent_id, &s.agent_binary)
+                if !agents::permission_modes(&agent_id, binary)
                     .await?
                     .iter()
                     .any(|item| &item.id == mode)
@@ -753,10 +814,12 @@ async fn dispatch(s: &Service, request: Request) -> Result<Response> {
                 let path = d.project(&session.project_id)?.path;
                 Ok((session, path))
             })?;
+            s.resolve_traex_model(&agent_id, &path, &mut launch_config)
+                .await?;
             runtime::submit(
                 s.database.clone(),
                 s.runs.clone(),
-                s.agent_binary.clone(),
+                binary.to_owned(),
                 session,
                 path,
                 runtime::SendTurn {
@@ -809,7 +872,8 @@ async fn dispatch(s: &Service, request: Request) -> Result<Response> {
                     provider,
                     ..
                 } => {
-                    if provider.is_none() || !s.agent.available || session.archived {
+                    s.agent_binary(&session.agent)?;
+                    if provider.is_none() || session.archived {
                         bail!("Agent 不可用、会话已归档或执行配置未确认");
                     }
                     let fingerprint = providers::turn_fingerprint(provider.as_ref())?;
@@ -827,6 +891,8 @@ async fn dispatch(s: &Service, request: Request) -> Result<Response> {
                         .turn_config(&session.agent, entry.model.as_deref(), provider)?;
                     config.effort = entry.effort;
                     config.permission_mode = entry.permission_mode;
+                    s.resolve_traex_model(&session.agent, &path, &mut config)
+                        .await?;
                     runtime::QueueAction::Dispatch {
                         interrupt,
                         request_id,
@@ -858,11 +924,9 @@ async fn dispatch(s: &Service, request: Request) -> Result<Response> {
                 },
                 Request::ClearMessageQueue { .. } => runtime::QueueAction::Clear,
                 Request::ResumeMessageQueue { provider, .. } => {
+                    s.agent_binary(&session.agent)?;
                     if provider.is_none() {
                         bail!("继续排队需要重新确认执行配置，请更新客户端");
-                    }
-                    if !s.agent.available {
-                        bail!("Agent CLI 不可用，请检查主机");
                     }
                     if session.archived {
                         bail!("请先取消归档再继续排队");
@@ -870,31 +934,37 @@ async fn dispatch(s: &Service, request: Request) -> Result<Response> {
                     let fingerprint = providers::turn_fingerprint(provider.as_ref())?;
                     let entries = db(&s.database, |d| d.queued(&id))?;
                     let mut configs = HashMap::new();
-                    let providers = s
-                        .providers
-                        .lock()
-                        .map_err(|_| anyhow::anyhow!("Provider 配置锁异常"))?;
-                    for (entry, original) in entries {
-                        if fingerprint != original {
-                            bail!("排队时的 Provider 配置已改变，请核对后取消并重新发送消息");
+                    {
+                        let providers = s
+                            .providers
+                            .lock()
+                            .map_err(|_| anyhow::anyhow!("Provider 配置锁异常"))?;
+                        for (entry, original) in entries {
+                            if fingerprint != original {
+                                bail!("排队时的 Provider 配置已改变，请核对后取消并重新发送消息");
+                            }
+                            let mut config = providers.turn_config(
+                                &session.agent,
+                                entry.model.as_deref(),
+                                provider.clone(),
+                            )?;
+                            config.effort = entry.effort;
+                            config.permission_mode = entry.permission_mode;
+                            configs.insert(entry.request_id, config);
                         }
-                        let mut config = providers.turn_config(
-                            &session.agent,
-                            entry.model.as_deref(),
-                            provider.clone(),
-                        )?;
-                        config.effort = entry.effort;
-                        config.permission_mode = entry.permission_mode;
-                        configs.insert(entry.request_id, config);
+                    }
+                    for config in configs.values_mut() {
+                        s.resolve_traex_model(&session.agent, &path, config).await?;
                     }
                     runtime::QueueAction::Resume { configs }
                 }
                 _ => unreachable!(),
             };
+            let binary = s.agent_entry(&session.agent)?.0.as_str();
             runtime::queue_action(
                 s.database.clone(),
                 s.runs.clone(),
-                s.agent_binary.clone(),
+                binary.to_owned(),
                 session,
                 path,
                 action,

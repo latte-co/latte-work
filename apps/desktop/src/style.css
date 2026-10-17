@@ -1399,6 +1399,22 @@ button.recent-notice {
   height: 100%;
   background: var(--color-text-secondary);
 }
+.agent-picker {
+  margin-left: auto;
+  min-width: 0;
+  max-width: 50%;
+}
+.agent-picker .select-trigger {
+  width: auto;
+  min-height: 28px;
+  height: 28px;
+  margin: 0;
+  padding: 0 var(--space-2);
+  border-color: transparent;
+  background: transparent;
+  color: var(--color-text-secondary);
+}
+
 .agent-badge {
   display: flex;
   margin-left: auto;
@@ -3719,6 +3735,7 @@ button.recent-notice {
 }
 .model-menu-options {
   min-height: 0;
+  overflow-x: hidden;
   overflow-y: auto;
   overscroll-behavior: contain;
 }
@@ -3734,7 +3751,8 @@ button.recent-notice {
   min-width: 0;
 }
 .model-menu-options .model-option-alias {
-  flex: none;
+  flex: 0 1 auto;
+  max-width: 40%;
   color: var(--color-text-muted);
   font-size: var(--text-sm);
 }
