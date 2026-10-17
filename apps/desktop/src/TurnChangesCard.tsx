@@ -41,6 +41,8 @@ export function TurnChangesCard({
   const undoable =
     canUndo &&
     changes.undo === "ready" &&
+    !changes.undo_unavailable &&
+    summary.entries.length > 0 &&
     !summary.truncated &&
     !summary.unavailable &&
     !changes.background_pending;
@@ -63,7 +65,10 @@ export function TurnChangesCard({
       if (mounted.current) setBusy(false);
     }
   }
-  if (!summary.entries.length) return null;
+  if (!summary.entries.length && !changes.undo_unavailable) return null;
+  let heading = `已编辑 ${summary.entries.length} 个文件`;
+  if (summary.unavailable) heading = "本轮变更未能记录";
+  else if (!summary.entries.length) heading = "本轮修改无法撤销";
   return (
     <section className="turn-changes-card" aria-label="本轮文件变更">
       <header>
@@ -71,12 +76,8 @@ export function TurnChangesCard({
           <SquarePlus size={22} aria-hidden="true" />
         </span>
         <div className="turn-changes-heading">
-          <strong>
-            {summary.unavailable
-              ? "本轮变更未能记录"
-              : `已编辑 ${summary.entries.length} 个文件`}
-          </strong>
-          {!summary.unavailable && (
+          <strong>{heading}</strong>
+          {summary.entries.length > 0 && !summary.unavailable && (
             <span className="change-totals">
               <b>+{summary.added}</b>
               <em>-{summary.removed}</em>
@@ -94,7 +95,8 @@ export function TurnChangesCard({
                   ? "本轮文件修改已撤销"
                   : changes.undo === "unknown"
                     ? "撤销未能确认，请核对工作区"
-                    : "仅可在本轮结束后撤销最近一轮的完整快照"
+                    : changes.undo_unavailable ||
+                      "仅可在本轮结束后撤销最近一轮的完整快照"
             }
             onClick={() => void undo()}
           >
@@ -145,10 +147,12 @@ export function TurnChangesCard({
       {(summary.unavailable ||
         summary.truncated ||
         changes.interrupted ||
+        changes.undo_unavailable ||
         changes.background_pending) && (
         <p className="turn-changes-note">
           {summary.unavailable ||
             [
+              changes.undo_unavailable,
               changes.interrupted && "本轮中断，保留已记录的修改",
               changes.background_pending &&
                 "采集快照时后台任务尚未结束，此处保留当时的修改",

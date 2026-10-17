@@ -7,6 +7,14 @@ use ts_rs::TS;
 pub const VERSION: u32 = 1;
 pub const MAX_FRAME: usize = 2 * 1024 * 1024;
 
+/// Syntax of native absolute paths on the execution host, not the UI platform.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+pub enum PathSyntax {
+    Posix,
+    Windows,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 pub struct Project {
     pub id: String,
@@ -859,6 +867,10 @@ pub struct TurnChanges {
     pub interrupted: bool,
     pub background_pending: bool,
     pub undo: TurnUndoStatus,
+    /// Why these stored snapshots cannot be restored on this host; absent on older servers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub undo_unavailable: Option<String>,
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "snake_case")]
@@ -877,6 +889,12 @@ pub struct TaskSource {
     pub mime_type: Option<String>,
     pub tools: Vec<String>,
     pub uses: u32,
+}
+
+/// Host capabilities default to supported so older Servers keep working; new
+/// Servers report an explicit `false` for a capability they cannot serve yet.
+fn default_true() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
@@ -990,11 +1008,19 @@ pub enum Response {
     Hello {
         version: u32,
         server_id: String,
+        /// Absent on older hosts; clients must not infer it from their own OS.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        path_syntax: Option<PathSyntax>,
         agents: Vec<AgentInfo>,
         #[serde(default)]
         permission_settings: bool,
         #[serde(default)]
         history_window: bool,
+        #[serde(default = "default_true")]
+        terminal: bool,
+        #[serde(default = "default_true")]
+        undo: bool,
     },
     Projects {
         projects: Vec<Project>,
@@ -1052,6 +1078,10 @@ pub enum Response {
     },
     Directories {
         path: String,
+        /// Native basename (or root label), absent on older hosts.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        name: Option<String>,
         parent: Option<String>,
         entries: Vec<FileEntry>,
         truncated: bool,
@@ -1098,6 +1128,34 @@ mod tests {
         assert!(serde_json::from_str::<Request>(r#"{"method":"shell","command":"rm"}"#).is_err());
         assert!(!Status::Unknown.active());
         assert!(Status::Waiting.active());
+    }
+    #[test]
+    fn hello_host_capabilities_default_to_supported_for_older_servers() {
+        let response: Response = serde_json::from_str(
+            r#"{"kind":"hello","version":1,"server_id":"s","agents":[],
+                "permission_settings":true,"history_window":true}"#,
+        )
+        .unwrap();
+        let Response::Hello {
+            terminal,
+            undo,
+            path_syntax,
+            ..
+        } = response
+        else {
+            panic!("expected hello");
+        };
+        assert_eq!(path_syntax, None);
+        assert!(terminal, "missing terminal capability must stay compatible");
+        assert!(undo, "missing undo capability must stay compatible");
+    }
+    #[test]
+    fn old_directory_listings_do_not_invent_a_native_name() {
+        let response: Response = serde_json::from_str(
+            r#"{"kind":"directories","path":"/tmp","parent":"/","entries":[],"truncated":false}"#,
+        )
+        .unwrap();
+        assert!(matches!(response, Response::Directories { name: None, .. }));
     }
 }
 

@@ -84,6 +84,9 @@ it("blocks undo for old, incomplete, background or unconfirmed turns", () => {
     { changes: { ...changes, background_pending: true } },
     { changes: { ...changes, undo: "unknown" as const } },
     {
+      changes: { ...changes, undo_unavailable: "缺少 Windows 文件权限元数据" },
+    },
+    {
       changes: { ...changes, summary: { ...changes.summary, truncated: true } },
     },
   ]) {
@@ -97,6 +100,25 @@ it("blocks undo for old, incomplete, background or unconfirmed turns", () => {
     ).toBe(true);
     cleanup();
   }
+});
+it("explains unavailable snapshots while preserving diff access", () => {
+  const reason = "此历史快照缺少 Windows 文件权限元数据，不能撤销";
+  render(
+    <TurnChangesCard
+      {...props}
+      changes={{ ...changes, undo_unavailable: reason }}
+    />,
+  );
+  expect(screen.getByText(reason)).toBeTruthy();
+  const undo = screen.getByRole("button", {
+    name: "撤销",
+  }) as HTMLButtonElement;
+  expect(undo.disabled).toBe(true);
+  expect(undo.title).toBe(reason);
+  fireEvent.click(undo);
+  expect(mocks.request).not.toHaveBeenCalled();
+  fireEvent.click(screen.getByRole("button", { name: "查看变更" }));
+  expect(props.open).toHaveBeenCalled();
 });
 it("keeps the changes card outside folded execution and replaces undo updates in place", () => {
   const turns = turnTranscript([
@@ -166,3 +188,46 @@ it.each([
     expect(screen.queryByText(/已编辑|本轮变更未能记录/)).toBeNull();
   },
 );
+
+it("keeps the Windows Undo reason visible for an empty saved snapshot", () => {
+  const reason =
+    "Windows 普通目录支持变更快照和差异；撤销需要同卷 NTFS Git 恢复目录";
+  render(
+    <TurnChangesCard
+      {...props}
+      changes={{
+        ...changes,
+        undo_unavailable: reason,
+        summary: { ...changes.summary, entries: [], added: 0, removed: 0 },
+      }}
+    />,
+  );
+  expect(screen.getByText("本轮修改无法撤销")).toBeTruthy();
+  expect(screen.getByText(reason)).toBeTruthy();
+  expect(screen.queryByText("+0")).toBeNull();
+  expect(
+    (screen.getByRole("button", { name: "撤销" }) as HTMLButtonElement)
+      .disabled,
+  ).toBe(true);
+  fireEvent.click(screen.getByRole("button", { name: "撤销" }));
+  expect(mocks.request).not.toHaveBeenCalled();
+});
+
+it("enables ordinary-directory Undo when the server supplies complete eligible changes", async () => {
+  mocks.request.mockResolvedValue({
+    kind: "turn_changes",
+    changes: { ...changes, undo: "reverted" },
+  });
+  render(<TurnChangesCard {...props} />);
+  const undo = screen.getByRole("button", {
+    name: "撤销",
+  }) as HTMLButtonElement;
+  expect(undo.disabled).toBe(false);
+  fireEvent.click(undo);
+  expect(mocks.request).toHaveBeenCalledExactlyOnceWith("local", {
+    method: "undo_turn_changes",
+    session_id: "s1",
+    request_id: "r1",
+  });
+  expect(await screen.findByRole("button", { name: "已撤销" })).toBeTruthy();
+});

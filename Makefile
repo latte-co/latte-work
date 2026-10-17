@@ -1,6 +1,11 @@
 SHELL := /bin/bash
 .SHELLFLAGS := -euo pipefail -c
 .DEFAULT_GOAL := help
+ifeq ($(OS),Windows_NT)
+DESKTOP := pwsh -NoProfile -File scripts/desktop.ps1
+else
+DESKTOP := ./scripts/desktop.sh
+endif
 # Per-checkout targets avoid Cargo lock contention; sccache shares compiled dependencies.
 export CARGO_TARGET_DIR ?= $(CURDIR)/target
 SCCACHE := $(shell command -v sccache 2>/dev/null)
@@ -24,12 +29,12 @@ fmt-check: ## Check Rust and frontend formatting
 	cargo fmt --all -- --check
 	npm run format:check
 lint: prepare ## Check all Rust crates, denying warnings
-	cargo clippy --workspace --all-targets --locked -- -D warnings
+	cargo clippy --workspace --all-targets --features latte-work-server/test-fixture --locked -- -D warnings
 test-unit: ## Rust crate-local unit tests and frontend reducers
 	cargo test --workspace --exclude latte-work-desktop --lib --bins --locked
 	npm test
-test-e2e: ## Final server binary, socket bridge, and deterministic Claude fixture
-	cargo test -p latte-work-server --test e2e --locked -- --test-threads=1
+test-e2e: ## Final server binary, IPC bridge, and deterministic native/Unix fixtures
+	cargo test -p latte-work-server --features test-fixture --test e2e --test native --test native_upgrade --test stdio_bridge --locked -- --test-threads=1
 test-doc: ## Rust documentation tests
 	cargo test --workspace --exclude latte-work-desktop --doc --locked
 test-native: ## macOS WebKit site-data boundaries and localhost favicon transport
@@ -44,11 +49,11 @@ web-build: ## Typecheck and bundle React
 ci: fmt-check types-check lint-ci lint test web-build ## Full local gate
 	RUSTDOCFLAGS='-D warnings' cargo doc --workspace --no-deps --locked
 build: ## Build server and native app
-	./scripts/desktop.sh build
+	$(DESKTOP) build
 dev: ## Launch real desktop with development UI
-	./scripts/desktop.sh dev
-package: ## Build release app/server and verified drag-install DMG on macOS
-	./scripts/desktop.sh package
+	$(DESKTOP) dev
+package: ## Build unsigned native app/server (macOS DMG or Windows x64 NSIS)
+	$(DESKTOP) package
 server: ## Start host service in foreground
 	cargo run -p latte-work-server --locked -- serve
 clean: ## Remove only this checkout's Cargo build artifacts
@@ -60,7 +65,7 @@ cache-info: ## Show build cache configuration
 
 .PHONY: prepare
 prepare: ## Prepare native sidecar before checking desktop
-	./scripts/desktop.sh prepare
+	$(DESKTOP) prepare
 
 .PHONY: types-check
 types-check: ## Check generated Rust/TypeScript protocol stays synchronized
