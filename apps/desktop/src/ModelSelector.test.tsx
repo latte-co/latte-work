@@ -25,6 +25,92 @@ const options = [
   },
   { value: "seed", label: "Seed" },
 ];
+it.each(["click", "ArrowRight"])(
+  "previews modes on hover without stealing focus, then enters via %s",
+  (enter) => {
+    render(
+      <ModelSelector
+        value="seed"
+        options={options}
+        onChange={vi.fn()}
+        effort="high"
+        levels={["low", "high"]}
+        onEffortChange={vi.fn()}
+        disabled={false}
+      />,
+    );
+    fireEvent.click(
+      screen.getByRole("button", { name: "Model and reasoning effort" }),
+    );
+    const group = screen.getByRole("menuitemradio", { name: "GPT Test" });
+    const seed = screen.getByRole("menuitemradio", { name: "Seed" });
+    fireEvent.mouseEnter(group);
+    expect(screen.getByRole("menu", { name: "Model mode" })).toBeTruthy();
+    expect(document.activeElement).toBe(group);
+    fireEvent.keyDown(window, { key: "ArrowDown" });
+    expect(document.activeElement).toBe(seed);
+    expect(screen.queryByRole("menu", { name: "Model mode" })).toBeNull();
+    fireEvent.mouseEnter(group);
+    if (enter === "click") fireEvent.click(group);
+    else fireEvent.keyDown(window, { key: enter });
+    expect(document.activeElement).toBe(
+      screen.getByRole("menuitemradio", { name: "Standard 475K context" }),
+    );
+    fireEvent.keyDown(window, { key: "ArrowLeft" });
+    expect(document.activeElement).toBe(group);
+  },
+);
+it("keeps hover focus on Effort until explicitly entering its submenu", () => {
+  render(
+    <ModelSelector
+      value="seed"
+      options={options}
+      onChange={vi.fn()}
+      effort="high"
+      levels={["low", "high"]}
+      onEffortChange={vi.fn()}
+      disabled={false}
+    />,
+  );
+  fireEvent.click(
+    screen.getByRole("button", { name: "Model and reasoning effort" }),
+  );
+  const footer = screen.getByRole("menuitem", { name: /Effort/ });
+  fireEvent.mouseEnter(footer);
+  expect(document.activeElement).toBe(footer);
+  expect(screen.getByRole("menu", { name: "Reasoning effort" })).toBeTruthy();
+  fireEvent.keyDown(window, { key: "ArrowUp" });
+  expect(document.activeElement).toBe(
+    screen.getByRole("menuitemradio", { name: "Seed" }),
+  );
+  fireEvent.mouseEnter(footer);
+  fireEvent.keyDown(window, { key: "ArrowRight" });
+  expect(document.activeElement).toBe(
+    screen.getByRole("menuitemradio", { name: "high" }),
+  );
+});
+it("treats an empty variants list as a direct model choice", () => {
+  const change = vi.fn();
+  render(
+    <ModelSelector
+      value="seed"
+      options={[{ value: "seed", label: "Seed", variants: [] }]}
+      onChange={change}
+      effort={null}
+      levels={[]}
+      onEffortChange={vi.fn()}
+      disabled={false}
+    />,
+  );
+  const trigger = screen.getByRole("button", {
+    name: "Model and reasoning effort",
+  });
+  expect(trigger.title).toBe("Seed");
+  fireEvent.click(trigger);
+  fireEvent.click(screen.getByRole("menuitemradio", { name: "Seed" }));
+  expect(change).toHaveBeenCalledWith("seed");
+  expect(screen.queryByRole("menu")).toBeNull();
+});
 it("opens model modes separately from reasoning and selects the native backend ID", () => {
   const model = vi.fn(),
     effort = vi.fn();

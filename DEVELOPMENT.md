@@ -1021,6 +1021,11 @@ structured user questions, and live title changes. Approval responses use
 server requests return explicit unsupported errors. EOF or a successful process
 exit cannot complete a turn. Native thread/turn identities fence unrelated or
 stale notifications; hidden reasoning text is not stored.
+Completion-only assistant items share the bounded per-turn text deduplication set.
+A completion that precedes both forms of start evidence is buffered (at most 32
+turn IDs) and applied only after the start response/notification confirms its ID.
+An interrupt RPC error is obsolete only after that exact turn has explicitly
+completed; active-turn failures still surface, without rewriting a stopped turn.
 
 An empty Traex thread has no durable rollout until a turn is admitted. Its ID
 stays in the actor until native turn admission, so closing/reconfiguring an empty

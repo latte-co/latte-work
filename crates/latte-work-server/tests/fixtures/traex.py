@@ -74,6 +74,11 @@ for line in sys.stdin:
         assert params['threadId'] == thread
         with pathlib.Path('traex-inputs').open('a') as record:
             record.write(json.dumps({'prompt': prompt, 'params': params, 'pid': os.getpid()}) + '\n')
+        if prompt == 'early-complete':
+            complete()
+            reply(value, {'turn': {'id': turn, 'status': 'completed'}})
+            notify('turn/started', {'turn': {'id': turn, 'status': 'inProgress'}})
+            continue
         notify('turn/started', {'turn': {'id': turn, 'status': 'inProgress'}})
         reply(value, {'turn': {'id': turn, 'status': 'inProgress'}})
         if prompt == 'eof':
@@ -84,8 +89,12 @@ for line in sys.stdin:
                 emit({'id': 73, 'method': 'item/commandExecution/requestApproval', 'params': {'threadId': thread, 'turnId': turn, 'itemId': 'bash', 'command': 'echo approved', 'cwd': os.getcwd()}})
             else:
                 emit({'id': 'ask', 'method': 'item/tool/requestUserInput', 'params': {'threadId': thread, 'turnId': turn, 'itemId': 'ask-tool', 'questions': [{'id': 'q', 'header': 'Pick', 'question': 'Choose one', 'options': [{'label': 'A', 'description': 'first'}, {'label': 'B', 'description': 'second'}]}]}})
-        elif prompt == 'wait':
+        elif prompt in ('wait', 'wait-interrupt-race'):
             text('WAITING')
+        elif prompt == 'complete-only':
+            for _ in range(2):
+                notify('item/completed', {'item': {'id': 'msg-' + turn, 'type': 'agentMessage', 'text': 'ONCE'}})
+            complete()
         elif prompt == 'credential':
             text(os.environ['LATTE_WORK_TRAEX_PROVIDER_TOKEN'])
             complete()
@@ -98,8 +107,12 @@ for line in sys.stdin:
             complete()
     elif method == 'turn/interrupt':
         assert params['turnId'] == turn
-        complete('interrupted')
-        reply(value, {})
+        if prompt == 'wait-interrupt-race':
+            complete()
+            emit({'id': value['id'], 'error': {'code': -32602, 'message': 'turn not found'}})
+        else:
+            complete('interrupted')
+            reply(value, {})
     elif method is None and waiting:
         if waiting == 'approval':
             assert value['id'] == 73

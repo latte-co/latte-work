@@ -41,25 +41,22 @@ export function ModelSelector({
   disabled: boolean;
   ref?: Ref<ModelSelectorHandle>;
 }) {
-  useImperativeHandle(
-    ref,
-    () => ({
-      openMenu(target) {
-        if (disabled || (target === "effort" && !levels.length)) return false;
-        setOpen(true);
-        setSubmenuTarget(target === "effort" ? "effort" : null);
-        return true;
-      },
-    }),
-    [disabled, levels.length],
-  );
+  useImperativeHandle(ref, () => ({
+    openMenu(target) {
+      if (disabled || (target === "effort" && !levels.length)) return false;
+      setOpen(true);
+      showSubmenu(target === "effort" ? "effort" : null, target === "effort");
+      return true;
+    },
+  }));
   const [open, setOpen] = useState(false);
   const [submenuTarget, setSubmenuTarget] = useState<string | null>(null);
   const reasoning = submenuTarget === "effort";
   const variantOptions = options.find(
     (o) => `model:${o.value}` === submenuTarget,
   )?.variants;
-  const submenuOpen = reasoning || !!variantOptions;
+  const submenuOpen = reasoning || !!variantOptions?.length;
+  const focusSubmenu = useRef(false);
   const anchor = () =>
     reasoning
       ? footer.current
@@ -88,27 +85,44 @@ export function ModelSelector({
   const id = useId();
   const selected =
     options
-      .flatMap(
-        (o) =>
-          o.variants?.map((v) => ({
-            value: v.value,
-            label: `${o.label} / ${v.label}`,
-          })) ?? [o],
+      .flatMap((o) =>
+        o.variants?.length
+          ? o.variants.map((v) => ({
+              value: v.value,
+              label: `${o.label} / ${v.label}`,
+            }))
+          : [o],
       )
       .find((o) => o.value === value)?.label ?? value;
   const effortValue = effort && levels.includes(effort) ? effort : "跟随 Agent";
   function close(restoreFocus = true) {
     setOpen(false);
-    setSubmenuTarget(null);
+    showSubmenu(null);
     if (restoreFocus) trigger.current?.focus();
   }
-  function showReasoning() {
-    if (levels.length) setSubmenuTarget("effort");
+  function focusSubmenuItem() {
+    (
+      submenu.current?.querySelector<HTMLButtonElement>(
+        '[aria-checked="true"]',
+      ) ??
+      submenu.current?.querySelector<HTMLButtonElement>("button:not(:disabled)")
+    )?.focus();
+  }
+  function showSubmenu(target: string | null, moveFocus = false) {
+    focusSubmenu.current = moveFocus;
+    setSubmenuTarget(target);
+    if (moveFocus && target === submenuTarget && submenu.current) {
+      focusSubmenuItem();
+      focusSubmenu.current = false;
+    }
+  }
+  function showReasoning(moveFocus = false) {
+    if (levels.length) showSubmenu("effort", moveFocus);
   }
   useEffect(() => {
     if (disabled) {
       setOpen(false);
-      setSubmenuTarget(null);
+      showSubmenu(null);
     }
   }, [disabled]);
   useLayoutEffect(() => {
@@ -157,11 +171,10 @@ export function ModelSelector({
       ),
       maxHeight,
     });
-    (
-      submenu.current?.querySelector<HTMLButtonElement>(
-        '[aria-checked="true"]',
-      ) ?? submenu.current?.querySelector<HTMLButtonElement>("button")
-    )?.focus();
+    if (focusSubmenu.current) {
+      focusSubmenuItem();
+      focusSubmenu.current = false;
+    }
   }, [submenuTarget, levels.length, position]);
   useEffect(() => {
     if (!open) return;
@@ -199,20 +212,21 @@ export function ModelSelector({
       if (e.key === "Escape" || e.key === "ArrowLeft") {
         if (submenuOpen) {
           anchor()?.focus();
-          setSubmenuTarget(null);
+          showSubmenu(null);
         } else if (e.key === "Escape") close();
         return;
       }
       if (e.key === "ArrowRight") {
-        if (document.activeElement === footer.current) showReasoning();
+        if (document.activeElement === footer.current) showReasoning(true);
         else {
           const model = (document.activeElement as HTMLElement)?.dataset
             .variantModel;
-          if (model) setSubmenuTarget(`model:${model}`);
+          if (model) showSubmenu(`model:${model}`, true);
         }
         return;
       }
-      const root = submenuOpen ? submenu.current : menu.current;
+      const inSubmenu = submenu.current?.contains(document.activeElement);
+      const root = inSubmenu ? submenu.current : menu.current;
       const buttons = Array.from(
         root?.querySelectorAll<HTMLButtonElement>("button:not(:disabled)") ??
           [],
@@ -233,6 +247,7 @@ export function ModelSelector({
               buttons.length;
       buttons[next]?.focus();
       buttons[next]?.scrollIntoView({ block: "nearest" });
+      if (!inSubmenu) showSubmenu(null);
     };
     document.addEventListener("pointerdown", outside);
     window.addEventListener("keydown", key, true);
@@ -289,15 +304,18 @@ export function ModelSelector({
                     key={o.value}
                     type="button"
                     role="menuitemradio"
-                    data-variant-model={o.variants ? o.value : undefined}
-                    aria-haspopup={o.variants ? "menu" : undefined}
+                    data-variant-model={
+                      o.variants?.length ? o.value : undefined
+                    }
+                    aria-haspopup={o.variants?.length ? "menu" : undefined}
                     aria-expanded={
-                      o.variants
+                      o.variants?.length
                         ? submenuTarget === `model:${o.value}`
                         : undefined
                     }
                     aria-controls={
-                      o.variants && submenuTarget === `model:${o.value}`
+                      !!o.variants?.length &&
+                      submenuTarget === `model:${o.value}`
                         ? `${id}-variants`
                         : undefined
                     }
@@ -314,11 +332,14 @@ export function ModelSelector({
                     }
                     tabIndex={-1}
                     onMouseEnter={(e) => {
-                      setSubmenuTarget(o.variants ? `model:${o.value}` : null);
+                      showSubmenu(
+                        o.variants?.length ? `model:${o.value}` : null,
+                      );
                       e.currentTarget.focus();
                     }}
                     onClick={() => {
-                      if (o.variants) setSubmenuTarget(`model:${o.value}`);
+                      if (o.variants?.length)
+                        showSubmenu(`model:${o.value}`, true);
                       else {
                         onChange(o.value);
                         close();
@@ -326,7 +347,7 @@ export function ModelSelector({
                     }}
                   >
                     <span className="model-option-name">{o.label}</span>
-                    {o.variants && (
+                    {!!o.variants?.length && (
                       <ChevronRight size={15} aria-hidden="true" />
                     )}
                     {o.description && (
@@ -358,8 +379,11 @@ export function ModelSelector({
                 }
                 className="model-menu-effort"
                 tabIndex={-1}
-                onMouseEnter={showReasoning}
-                onClick={showReasoning}
+                onMouseEnter={(e) => {
+                  showReasoning();
+                  e.currentTarget.focus();
+                }}
+                onClick={() => showReasoning(true)}
               >
                 <SlidersHorizontal size={16} />
                 <span>Effort</span>

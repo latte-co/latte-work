@@ -93,3 +93,36 @@ provenance were also preserved outside the build target. Scoped Rust build outpu
 were cleaned only after checking occupancy; dependency caches and unrelated
 worktrees were preserved. Generated bundles, credentials, databases and logs are
 excluded from the PR.
+
+## PR #15 review follow-up
+
+The follow-up to `30a296f` fixes duplicate completion-only assistant text,
+hover-driven submenu focus and late interrupt errors after an explicitly
+completed turn. Early completions are bounded and wait for matching native start
+evidence; unrelated turn IDs cannot settle the admitted turn. Active-turn
+interrupt failures remain errors.
+
+The follow-up's complete serial `make ci` passed with 132 Server unit tests,
+631 frontend tests and 78 final-binary E2E tests, plus formatting, generated
+types, workflow/shell lint, all-target Clippy, native WebKit boundary tests,
+frontend typecheck/build and documentation checks. No test was skipped or weakened.
+
+Focused checks passed: 14 Traex adapter/metadata/provider unit tests, 12 model
+selector/picker tests and seven final-binary Traex E2E tests. Regressions cover
+completion deduplication/reset/limits, both start-evidence orders, stopping before
+admission, stale completions, late interrupt errors and follow-up execution in the
+same native process. Approval coverage adds file/permission accept/deny/single-use
+unit cases and a valid command-accept E2E flow; empty-thread close/reopen remains
+prompt-free and never attempts to resume a missing rollout.
+
+The actual updated ModelSelector also passed 19 assertions in an isolated native
+WKWebView: hover preview keeps focus on the parent, arrows navigate the correct
+menu, explicit click/Right enters modes, Escape restores focus, and disabled
+triggers/unsupported Effort cannot open menus. Input events were dispatched
+inside the page; this is native WebKit component evidence, separate from a full
+installed-app interaction claim. The harness yields to browser tasks for rendering
+rather than relying on background-throttled timers. Reports and harness sources
+are retained under ignored `log/traex-review-fixes/`.
+
+The earlier DMG and deployed SSH Server hashes above describe the build before
+this follow-up; those artifacts were not replaced as part of the PR repair.

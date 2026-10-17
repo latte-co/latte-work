@@ -78,6 +78,93 @@ async fn until(
     }
 }
 #[tokio::test]
+async fn traex_completed_items_and_early_completions_settle_without_duplicate_text() {
+    let host = Host::start().await;
+    let root = tempfile::tempdir().unwrap();
+    let mut client = host.client().await;
+    let id = session(&mut client, root.path()).await;
+    send(&mut client, &id, "completed", "complete-only").await;
+    let (_, events) = until(&mut client, &id, Status::Completed).await;
+    let text = events
+        .iter()
+        .filter_map(|e| match &e.event {
+            EventKind::Text { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect::<String>();
+    assert_eq!(text, "ONCE");
+    send(&mut client, &id, "early", "early-complete").await;
+    let (saved, _) = until(&mut client, &id, Status::Completed).await;
+    assert_eq!(saved.native_id.as_deref(), Some("traex-native-thread"));
+    send(&mut client, &id, "following", "following").await;
+    let (_, events) = until(&mut client, &id, Status::Completed).await;
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(&e.event, EventKind::Text {text} if text == "TRAE:following"))
+    );
+    assert_eq!(
+        std::fs::read_to_string(root.path().join("traex-inputs"))
+            .unwrap()
+            .lines()
+            .count(),
+        3
+    );
+}
+#[tokio::test]
+async fn traex_late_interrupt_error_keeps_stopped_state_and_same_process_for_followup() {
+    let host = Host::start().await;
+    let root = tempfile::tempdir().unwrap();
+    let mut client = host.client().await;
+    let id = session(&mut client, root.path()).await;
+    send(&mut client, &id, "waiting", "wait-interrupt-race").await;
+    until(&mut client, &id, Status::Running).await;
+    assert!(matches!(
+        ask(
+            &mut client,
+            Request::Cancel {
+                session_id: id.clone()
+            }
+        )
+        .await,
+        Response::Ok
+    ));
+    until(&mut client, &id, Status::Stopped).await;
+    send(&mut client, &id, "following", "following").await;
+    assert!(matches!(
+        ask(
+            &mut client,
+            Request::ResumeMessageQueue {
+                session_id: id.clone(),
+                provider: Some(TurnProvider::Cli)
+            }
+        )
+        .await,
+        Response::MessageQueue { .. }
+    ));
+    let (_, events) = until(&mut client, &id, Status::Completed).await;
+    assert!(
+        !events.iter().any(|e| matches!(
+            &e.event,
+            EventKind::State {
+                status: Status::Failed,
+                ..
+            }
+        )),
+        "a completed turn's late interrupt error must not overwrite Stopped"
+    );
+    let inputs = std::fs::read_to_string(root.path().join("traex-inputs"))
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(inputs.len(), 2);
+    assert_eq!(
+        inputs[0]["pid"], inputs[1]["pid"],
+        "the native process must remain usable after the stop race"
+    );
+}
+#[tokio::test]
 async fn traex_discovery_open_stream_reconnect_resume_and_queue_use_the_selected_adapter() {
     let host = Host::start().await;
     let root = tempfile::tempdir().unwrap();
@@ -148,6 +235,38 @@ async fn traex_discovery_open_stream_reconnect_resume_and_queue_use_the_selected
     assert!(
         !root.path().join("traex-inputs").exists(),
         "Open must not send a prompt"
+    );
+    assert!(matches!(
+        ask(
+            &mut client,
+            Request::CloseAgentSession {
+                session_id: id.clone(),
+                only_if_idle: Some(true),
+            }
+        )
+        .await,
+        Response::Ok
+    ));
+    assert!(matches!(
+        ask(
+            &mut client,
+            Request::OpenAgentSession {
+                session_id: id.clone(),
+                provider: Some(TurnProvider::Cli)
+            }
+        )
+        .await,
+        Response::Ok
+    ));
+    let opens = std::fs::read_to_string(root.path().join("traex-opens")).unwrap();
+    assert_eq!(opens.lines().count(), 2);
+    assert!(
+        !opens.contains("thread/resume"),
+        "empty threads have no durable native rollout to resume"
+    );
+    assert!(
+        !root.path().join("traex-inputs").exists(),
+        "close/reopen must remain prompt-free"
     );
     assert!(matches!(
         send(&mut client, &id, "one", "hello").await,
@@ -345,6 +464,34 @@ async fn traex_approvals_questions_eof_and_failed_turns_keep_native_evidence() {
         .await,
         Response::Error { .. }
     ));
+    send(&mut client, &id, "approval-accept", "approval").await;
+    let (_, events) = until(&mut client, &id, Status::Waiting).await;
+    let approval = events
+        .iter()
+        .rev()
+        .find_map(|e| match &e.event {
+            EventKind::Approval { request_id, .. } => Some(request_id.clone()),
+            _ => None,
+        })
+        .unwrap();
+    assert!(matches!(
+        ask(
+            &mut client,
+            Request::Approve {
+                session_id: id.clone(),
+                request_id: approval,
+                allow: true
+            }
+        )
+        .await,
+        Response::Ok
+    ));
+    let (_, events) = until(&mut client, &id, Status::Completed).await;
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(&e.event, EventKind::Text {text} if text == "APPROVED"))
+    );
     send(&mut client, &id, "question", "question").await;
     let (_, events) = until(&mut client, &id, Status::Waiting).await;
     let question = events
@@ -384,7 +531,7 @@ async fn traex_approvals_questions_eof_and_failed_turns_keep_native_evidence() {
     send(&mut client, &id, "eof", "eof").await;
     until(&mut client, &id, Status::Failed).await;
     let inputs = std::fs::read_to_string(root.path().join("traex-inputs")).unwrap();
-    assert_eq!(inputs.lines().count(), 4);
+    assert_eq!(inputs.lines().count(), 5);
     drop(client);
     let mut client = host.client().await;
     let Response::Session { session } = ask(

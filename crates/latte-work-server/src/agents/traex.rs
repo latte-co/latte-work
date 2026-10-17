@@ -23,6 +23,10 @@ enum Phase {
     Starting,
     Running,
 }
+struct PendingRequest {
+    method: &'static str,
+    interrupt_turn: Option<String>,
+}
 #[derive(Default)]
 pub struct Traex {
     phase: Phase,
@@ -31,12 +35,14 @@ pub struct Traex {
     resume: Option<String>,
     thread: Option<String>,
     turn: Option<String>,
+    completed_turn: Option<String>,
+    early_completions: HashMap<String, Value>,
     title: Option<String>,
     pending_prompt: Option<String>,
     config: Option<LaunchConfig>,
     model_provider: Option<String>,
     counter: u64,
-    pending: HashMap<String, &'static str>,
+    pending: HashMap<String, PendingRequest>,
     approvals: HashMap<String, &'static str>,
     streamed: HashSet<String>,
     tools: HashSet<String>,
@@ -65,7 +71,15 @@ impl Traex {
             .checked_add(1)
             .context("Traex 请求编号超出限制")?;
         let id = format!("latte-{}", self.counter);
-        self.pending.insert(id.clone(), method);
+        self.pending.insert(
+            id.clone(),
+            PendingRequest {
+                method,
+                interrupt_turn: (method == "turn/interrupt")
+                    .then(|| self.turn.clone())
+                    .flatten(),
+            },
+        );
         write(json!({"id":id,"method":method,"params":params}))
     }
     fn initialize(&mut self) -> Result<Vec<Action>> {
@@ -80,6 +94,7 @@ impl Traex {
             bail!("Traex 尚不支持原生命令，请使用普通消息");
         }
         self.phase = Phase::Starting;
+        self.early_completions.clear();
         self.streamed.clear();
         self.tools.clear();
         let config = self.config.as_ref().context("Traex 启动配置缺失")?;
@@ -88,6 +103,25 @@ impl Traex {
             params["modelBackendVariant"] = json!(selection.backend_variant);
         }
         Ok(vec![self.request("turn/start", params)?])
+    }
+    fn admit_turn(&mut self, turn: &Value) -> Result<Vec<Action>> {
+        let id = field(turn, "id")?.to_owned();
+        self.turn = Some(id.clone());
+        self.phase = Phase::Running;
+        let mut actions = vec![Action::NativeSession(
+            self.thread.clone().context("Traex 会话 ID 缺失")?,
+        )];
+        // Do not trust a completion's ID to admit a turn. Wait for the start
+        // response/notification, then replay only the matching buffered result.
+        let completion = self.early_completions.remove(&id);
+        self.early_completions.clear();
+        if let Some(completion) = completion {
+            actions.extend(self.notification(&completion)?);
+        }
+        if std::mem::take(&mut self.interrupt_requested) {
+            actions.extend(self.interrupt()?);
+        }
+        Ok(actions)
     }
     fn interrupt(&mut self) -> Result<Vec<Action>> {
         match self.turn.clone() {
@@ -134,10 +168,19 @@ impl Traex {
         let Some(id) = message["id"].as_str() else {
             return Ok(vec![]);
         };
-        let Some(method) = self.pending.remove(id) else {
+        let Some(request) = self.pending.remove(id) else {
             return Ok(vec![]);
         };
+        let method = request.method;
         if let Some(error) = message.get("error") {
+            // Completion can win the race with interrupt processing. Only an
+            // explicitly completed, identity-bound turn makes this error obsolete.
+            if method == "turn/interrupt"
+                && request.interrupt_turn.is_some()
+                && request.interrupt_turn == self.completed_turn
+            {
+                return Ok(vec![Action::Interrupted]);
+            }
             if method == "thread/name/set" {
                 self.rename = None;
                 return Ok(vec![Action::TitleRenamed(Err(error["message"]
@@ -218,19 +261,11 @@ impl Traex {
                 Ok(actions)
             }
             "turn/start" => {
-                let turn = field(&result["turn"], "id")?.to_owned();
                 if self.phase == Phase::Starting {
-                    self.turn = Some(turn);
-                    self.phase = Phase::Running;
+                    self.admit_turn(&result["turn"])
+                } else {
+                    Ok(vec![])
                 }
-                let mut actions = vec![Action::NativeSession(
-                    self.thread.clone().context("Traex 会话 ID 缺失")?,
-                )];
-                if self.interrupt_requested && self.turn.is_some() {
-                    self.interrupt_requested = false;
-                    actions.extend(self.interrupt()?);
-                }
-                Ok(actions)
             }
             // Stop needs native turn/completed too; an RPC ack alone cannot settle a turn.
             "turn/interrupt" => Ok(vec![Action::Interrupted]),
@@ -316,16 +351,15 @@ impl Traex {
                 .collect());
         }
         if method == "turn/started" && matches!(self.phase, Phase::Starting) {
-            self.turn = Some(field(&params["turn"], "id")?.into());
-            self.phase = Phase::Running;
-            let mut actions = vec![Action::NativeSession(
-                self.thread.clone().context("Traex 会话 ID 缺失")?,
-            )];
-            if self.interrupt_requested {
-                self.interrupt_requested = false;
-                actions.extend(self.interrupt()?);
+            return self.admit_turn(&params["turn"]);
+        }
+        if method == "turn/completed" && self.phase == Phase::Starting && self.turn.is_none() {
+            let id = field(&params["turn"], "id")?.to_owned();
+            if self.early_completions.len() >= 32 && !self.early_completions.contains_key(&id) {
+                bail!("Traex 提前完成消息超出限制");
             }
-            return Ok(actions);
+            self.early_completions.insert(id, message.clone());
+            return Ok(vec![]);
         }
         if !matches!(self.phase, Phase::Running | Phase::Starting) {
             return Ok(vec![]);
@@ -370,7 +404,7 @@ impl Traex {
                 };
                 self.phase = Phase::Ready;
                 self.approvals.clear();
-                self.turn = None;
+                self.completed_turn = self.turn.take();
                 self.streamed.clear();
                 self.tools.clear();
                 let message = if failed {
@@ -408,9 +442,12 @@ impl Traex {
         }
         if kind == "agentMessage" {
             return Ok(if completed && !self.streamed.contains(&id) {
-                vec![Action::Event(EventKind::Text {
-                    text: item["text"].as_str().context("Traex 回复无效")?.into(),
-                })]
+                let text = item["text"].as_str().context("Traex 回复无效")?.into();
+                if self.streamed.len() >= 4096 {
+                    bail!("Traex 消息数量超出限制");
+                }
+                self.streamed.insert(id);
+                vec![Action::Event(EventKind::Text { text })]
             } else {
                 vec![]
             });
@@ -797,6 +834,153 @@ mod tests {
         assert!(agent.can_reconfigure());
     }
     #[test]
+    fn completion_before_start_evidence_is_replayed_only_for_the_admitted_turn() {
+        for started_notification in [false, true] {
+            for stop in [false, true] {
+                let mut agent = opened();
+                agent.advance(Input::Start { prompt: "hello" }).unwrap();
+                if stop {
+                    assert!(agent.advance(Input::Interrupt).unwrap().is_empty());
+                }
+                for (thread, turn) in [("other", "turn"), ("t", "stale"), ("t", "turn")] {
+                    assert!(message(&mut agent, json!({"method":"turn/completed","params":{"threadId":thread,"turn":{"id":turn,"status":"completed"}}})).is_empty());
+                }
+                assert!(!agent.can_reconfigure());
+                let actions = message(
+                    &mut agent,
+                    if started_notification {
+                        json!({"method":"turn/started","params":{"threadId":"t","turn":{"id":"turn"}}})
+                    } else {
+                        json!({"id":"latte-4","result":{"turn":{"id":"turn"}}})
+                    },
+                );
+                assert!(matches!(actions[0], Action::NativeSession(_)));
+                assert!(matches!(actions[1], Action::Finished { failed: false, .. }));
+                assert_eq!(actions.len(), if stop { 3 } else { 2 });
+                if stop {
+                    assert!(matches!(actions[2], Action::Interrupted));
+                }
+                if started_notification {
+                    assert!(
+                        message(
+                            &mut agent,
+                            json!({"id":"latte-4","result":{"turn":{"id":"turn"}}})
+                        )
+                        .is_empty()
+                    );
+                }
+                assert!(agent.can_reconfigure());
+                assert!(agent.early_completions.is_empty());
+            }
+        }
+        let mut agent = opened();
+        agent.advance(Input::Start { prompt: "hello" }).unwrap();
+        message(
+            &mut agent,
+            json!({"method":"turn/completed","params":{"threadId":"t","turn":{"id":"stale","status":"completed"}}}),
+        );
+        let actions = message(
+            &mut agent,
+            json!({"id":"latte-4","result":{"turn":{"id":"current"}}}),
+        );
+        assert!(matches!(actions.as_slice(), [Action::NativeSession(_)]));
+        assert!(
+            !agent.can_reconfigure(),
+            "stale completion cannot settle the admitted turn"
+        );
+    }
+    #[test]
+    fn completion_only_text_is_bounded_deduplicated_and_reset_each_turn() {
+        let mut agent = running();
+        let completed = json!({"method":"item/completed","params":{"threadId":"t","turnId":"turn","item":{"id":"msg","type":"agentMessage","text":"hello"}}});
+        let actions = message(&mut agent, completed.clone());
+        assert!(
+            matches!(actions.as_slice(), [Action::Event(EventKind::Text {text})] if text == "hello")
+        );
+        assert!(message(&mut agent, completed.clone()).is_empty());
+        message(
+            &mut agent,
+            json!({"method":"turn/completed","params":{"threadId":"t","turn":{"id":"turn","status":"completed"}}}),
+        );
+        agent.advance(Input::Start { prompt: "again" }).unwrap();
+        message(
+            &mut agent,
+            json!({"id":"latte-5","result":{"turn":{"id":"turn"}}}),
+        );
+        assert!(matches!(
+            message(&mut agent, completed).as_slice(),
+            [Action::Event(EventKind::Text { .. })]
+        ));
+        for index in 1..4096 {
+            agent
+                .item(
+                    &json!({"id":format!("msg-{index}"),"type":"agentMessage","text":"text"}),
+                    true,
+                )
+                .unwrap();
+        }
+        assert!(
+            agent
+                .item(
+                    &json!({"id":"overflow","type":"agentMessage","text":"text"}),
+                    true
+                )
+                .is_err()
+        );
+        assert!(
+            agent
+                .item(
+                    &json!({"id":"msg","type":"agentMessage","text":"hello"}),
+                    true
+                )
+                .unwrap()
+                .is_empty()
+        );
+    }
+    #[test]
+    fn interrupt_errors_are_obsolete_only_after_that_turn_completes() {
+        for completion_first in [false, true] {
+            let mut agent = running();
+            agent.advance(Input::Interrupt).unwrap();
+            if completion_first {
+                message(
+                    &mut agent,
+                    json!({"method":"turn/completed","params":{"threadId":"t","turn":{"id":"turn","status":"completed"}}}),
+                );
+            }
+            let result = agent.advance(Input::Message(
+                r#"{"id":"latte-5","error":{"code":-32602,"message":"turn not found"}}"#,
+            ));
+            if completion_first {
+                assert!(matches!(result.unwrap().as_slice(), [Action::Interrupted]));
+                assert!(agent.can_reconfigure());
+            } else {
+                assert!(
+                    result.is_err(),
+                    "an active turn's interrupt failure must be reported"
+                );
+            }
+        }
+        let mut agent = running();
+        message(
+            &mut agent,
+            json!({"method":"turn/completed","params":{"threadId":"t","turn":{"id":"turn","status":"completed"}}}),
+        );
+        agent.advance(Input::Start { prompt: "again" }).unwrap();
+        message(
+            &mut agent,
+            json!({"id":"latte-5","result":{"turn":{"id":"next"}}}),
+        );
+        agent.advance(Input::Interrupt).unwrap();
+        assert!(
+            agent
+                .advance(Input::Message(
+                    r#"{"id":"latte-6","error":{"message":"failed to interrupt next turn"}}"#
+                ))
+                .is_err()
+        );
+    }
+    #[test]
     fn approvals_preserve_numeric_native_ids_and_never_grant_session_cache() {
         let mut agent = running();
         let actions = message(
@@ -823,6 +1007,49 @@ mod tests {
             json!({"id":"new","method":"account/relogin","params":{"threadId":"t","turnId":"turn"}}),
         ));
         assert_eq!(unknown[0]["error"]["code"], -32601);
+    }
+    #[test]
+    fn file_and_permission_approvals_are_single_use_and_grant_only_turn_scope() {
+        for method in [
+            "item/fileChange/requestApproval",
+            "item/permissions/requestApproval",
+        ] {
+            for allow in [false, true] {
+                let mut agent = running();
+                let permissions = json!({"fileSystem":{"write":["/tmp/project"]}});
+                let actions = message(
+                    &mut agent,
+                    json!({"id":"approval","method":method,"params":{"threadId":"t","turnId":"turn","itemId":"tool","permissions":permissions}}),
+                );
+                let Action::Approval { input, .. } = &actions[0] else {
+                    panic!("expected native approval")
+                };
+                let response = encoded(
+                    &agent
+                        .advance(Input::Approval {
+                            id: r#""approval""#,
+                            input: input.clone(),
+                            allow,
+                        })
+                        .unwrap(),
+                );
+                let expected = if method == "item/fileChange/requestApproval" {
+                    json!({"decision": if allow {"accept"} else {"decline"}})
+                } else {
+                    json!({"permissions": if allow {permissions} else {json!({})},"scope":"turn"})
+                };
+                assert_eq!(response, [json!({"id":"approval","result":expected})]);
+                assert!(
+                    agent
+                        .advance(Input::Approval {
+                            id: r#""approval""#,
+                            input: input.clone(),
+                            allow
+                        })
+                        .is_err()
+                );
+            }
+        }
     }
     #[test]
     fn user_answers_map_indices_to_native_labels_and_skip_is_explicit() {
