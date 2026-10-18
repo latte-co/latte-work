@@ -4,6 +4,7 @@ mod claude;
 mod claude_models;
 mod claude_sessions;
 mod claude_skills;
+pub(crate) mod traex;
 pub use adapter::{Action, AgentAdapter, AgentCommand, Input};
 use anyhow::{Result, bail};
 pub type ChildTranscript = (Vec<latte_work_protocol::Event>, bool);
@@ -96,19 +97,26 @@ pub async fn child_transcript(
 pub fn create(agent: &str) -> Result<Box<dyn AgentAdapter>> {
     match agent {
         "claude" => Ok(Box::<claude::Claude>::default()),
+        "traex" => Ok(Box::<traex::Traex>::default()),
         _ => bail!("此 Agent 尚未实现：{agent}"),
     }
 }
 
-/// The registry currently contains one implementation. Discovery stays implementation-owned.
-pub async fn discover() -> (String, latte_work_protocol::AgentInfo) {
-    claude::discover().await
+/// Discovery and CLI identities stay implementation-owned.
+pub async fn discover() -> Vec<(String, latte_work_protocol::AgentInfo)> {
+    let (claude, traex) = tokio::join!(claude::discover(), traex::discover());
+    vec![claude, traex]
 }
 
 /// Protocol compatibility belongs to the adapter registry, never to presentation code.
 pub fn provider_protocols(agent: &str) -> Option<&'static [latte_work_protocol::ProviderProtocol]> {
     match agent {
         "claude" => Some(&[latte_work_protocol::ProviderProtocol::AnthropicMessages]),
+        "traex" => Some(&[
+            latte_work_protocol::ProviderProtocol::AnthropicMessages,
+            latte_work_protocol::ProviderProtocol::OpenaiChat,
+            latte_work_protocol::ProviderProtocol::OpenaiResponses,
+        ]),
         _ => None,
     }
 }
@@ -136,6 +144,7 @@ pub async fn permission_modes(
 ) -> Result<Vec<latte_work_protocol::AgentPermissionMode>> {
     match agent {
         "claude" => claude::permission_modes(binary).await,
+        "traex" => traex::permission_modes(binary).await,
         _ => bail!("此 Agent 尚未实现权限设置：{agent}"),
     }
 }

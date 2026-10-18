@@ -137,23 +137,42 @@ export function ModelPicker({
   const options = modelOptions(
     catalog?.models ?? [],
     catalog?.model_labels,
+    agent === "claude",
   ).filter((option) => catalog?.provider == null || option.value !== "");
+  const groupedOptions = options
+    .filter(
+      (option) =>
+        !Object.values(catalog?.model_variants ?? {}).some((variants) =>
+          variants?.slice(1).some((variant) => variant.model === option.value),
+        ),
+    )
+    .map((option) => ({
+      ...option,
+      variants: catalog?.model_variants?.[option.value]?.map((variant) => ({
+        value: variant.model,
+        label: variant.label,
+        description: variant.context_window
+          ? `${new Intl.NumberFormat("en", { notation: "compact" }).format(variant.context_window)} context`
+          : undefined,
+      })),
+    }));
   if (
     value &&
     catalog &&
     catalog.provider == null &&
     !catalog.models.includes(value)
   )
-    options.push({
+    groupedOptions.push({
       value,
       label: `${value} (unavailable)`,
+      variants: undefined,
     });
   return (
     <div className="model-picker">
       <ModelSelector
         ref={selector}
         value={providerFallback ?? value ?? ""}
-        options={options}
+        options={groupedOptions}
         onChange={(id) => onChange(id || null)}
         effort={effort}
         levels={catalog?.effort_levels ?? []}

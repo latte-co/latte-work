@@ -24,4 +24,27 @@ describe("native model names", () => {
       },
     ]);
   });
+  it("keeps Traex display names without putting long native IDs beside them", () => {
+    expect(
+      modelOptions(
+        ["Doubao-Seed-Evolving", "alwaysday1"],
+        {
+          "Doubao-Seed-Evolving": "Seed-Evolving",
+          alwaysday1: "auto_model/alwaysday1",
+        },
+        false,
+      ).slice(1),
+    ).toEqual([
+      {
+        value: "Doubao-Seed-Evolving",
+        label: "Seed-Evolving",
+        description: undefined,
+      },
+      {
+        value: "alwaysday1",
+        label: "auto_model/alwaysday1",
+        description: undefined,
+      },
+    ]);
+  });
 });

@@ -7,6 +7,14 @@ use ts_rs::TS;
 pub const VERSION: u32 = 1;
 pub const MAX_FRAME: usize = 2 * 1024 * 1024;
 
+/// Selectable native backend variants of one displayed model.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+pub struct ModelVariant {
+    /// Native selectable ID; travels through existing model persistence and queue identity.
+    pub model: String,
+    pub label: String,
+    pub context_window: Option<f64>,
+}
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 pub struct Project {
     pub id: String,
@@ -976,6 +984,9 @@ pub enum Response {
         /// Display metadata only; keys remain the original selectable model IDs.
         #[serde(default)]
         model_labels: std::collections::BTreeMap<String, String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        model_variants: Option<std::collections::BTreeMap<String, Vec<ModelVariant>>>,
     },
     /// Native-only response. Must never be forwarded to the WebView.
     ProviderSnapshot {

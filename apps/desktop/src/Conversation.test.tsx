@@ -1116,3 +1116,59 @@ it("takes a queued message into the composer, retains existing draft and referen
     undefined,
   );
 });
+
+it("offers Agent selection only for drafts and preserves draft text", () => {
+  const agents = [
+    {
+      id: "claude",
+      name: "Claude Code",
+      available: true,
+      detail: "",
+      provider_protocols: [],
+    },
+    {
+      id: "traex",
+      name: "Traex",
+      available: true,
+      detail: "",
+      provider_protocols: [],
+    },
+  ];
+  const selectAgent = vi.fn();
+  const draftProps = props();
+  draftProps.drafts.update("new-task", { text: "keep my draft" });
+  const view = render(
+    <Conversation
+      {...draftProps}
+      agent={agents[0]}
+      agents={agents}
+      selectAgent={selectAgent}
+    />,
+  );
+  fireEvent.click(screen.getByRole("combobox", { name: "Code Agent" }));
+  fireEvent.click(screen.getByRole("option", { name: "Traex" }));
+  expect(selectAgent).toHaveBeenCalledWith("traex");
+  expect((screen.getByRole("textbox") as HTMLTextAreaElement).value).toBe(
+    "keep my draft",
+  );
+  view.rerender(
+    <Conversation
+      {...draftProps}
+      agent={agents[1]}
+      agents={agents}
+      selectAgent={selectAgent}
+    />,
+  );
+  expect(screen.getByText("在 Test 中与 Traex 一起工作。")).toBeTruthy();
+  view.rerender(
+    <Conversation
+      {...draftProps}
+      agent={agents[1]}
+      agents={agents}
+      selectAgent={selectAgent}
+      session={{ ...session("native"), agent: "traex" }}
+    />,
+  );
+  expect(screen.queryByRole("combobox", { name: "Code Agent" })).toBeNull();
+  expect(screen.getByTitle("Traex")).toBeTruthy();
+});

@@ -77,76 +77,88 @@ it("manages App Providers while every Server is unavailable", async () => {
     request: { method: "delete_provider", id: "saved" },
   });
 });
-it("loads and saves remote Agent associations without connecting to the local Server", async () => {
-  const remote = {
-    id: "devbox",
-    name: "Devbox",
-    ssh: "devbox",
-    server_path: null,
-  };
-  invoke.mockImplementation(async (command, args) => {
-    if (command === "connect_host") {
-      if (args.host.id === "local") throw new Error("Local Server unavailable");
-      return {
-        kind: "hello",
-        server_id: "remote",
-        agents: [
-          {
-            id: "claude",
-            name: "Claude Code",
-            detail: "Remote",
-            provider_protocols: ["anthropic_messages"],
-          },
-        ],
-      };
-    }
-    if (command === "agent_providers" || command === "bind_agent_provider")
-      return {
-        kind: "providers",
-        providers: [
-          {
-            id: "test-provider",
-            name: "Test Provider",
-            protocol: "anthropic_messages",
-            base_url: "https://example.test",
-            model: "model",
-            models: [],
-            auth: "bearer",
-            has_credential: true,
-            revision: "r",
-          },
-        ],
-        bindings:
-          command === "bind_agent_provider"
-            ? [{ agent: "claude", provider_id: "test-provider" }]
-            : [],
-      };
-    throw new Error("Unexpected call");
-  });
-  render(
-    <AgentSettings
-      state={{ host: remote, hosts: [remote] } as Workbench}
-      active
-      onBusy={() => {}}
-    />,
-  );
-  const save = await screen.findByRole("button", { name: "保存关联" });
-  expect((save as HTMLButtonElement).disabled).toBe(true);
-  fireEvent.click(
-    screen.getByRole("combobox", { name: "Claude Code 关联 Provider" }),
-  );
-  fireEvent.click(screen.getByRole("option", { name: /Test Provider/ }));
-  fireEvent.click(save);
-  await screen.findByText("关联已保存；下次发送消息时使用最新配置。");
-  expect(invoke).toHaveBeenCalledWith("bind_agent_provider", {
-    hostId: "devbox",
-    agent: "claude",
-    providerId: "test-provider",
-  });
-  expect(
-    invoke.mock.calls.filter(([command]) => command === "connect_host"),
-  ).toEqual([["connect_host", { host: remote, password: undefined }]]);
-});
+it.each([
+  ["claude", "Claude Code", "anthropic_messages"],
+  ["traex", "Traex", "anthropic_messages"],
+  ["traex", "Traex", "openai_chat"],
+  ["traex", "Traex", "openai_responses"],
+])(
+  "loads and saves remote %s %s %s associations without the local Server",
+  async (agent, name, protocol) => {
+    const remote = {
+      id: "devbox",
+      name: "Devbox",
+      ssh: "devbox",
+      server_path: null,
+    };
+    invoke.mockImplementation(async (command, args) => {
+      if (command === "connect_host") {
+        if (args.host.id === "local")
+          throw new Error("Local Server unavailable");
+        return {
+          kind: "hello",
+          server_id: "remote",
+          agents: [
+            {
+              id: agent,
+              name,
+              detail: "Remote",
+              provider_protocols:
+                agent === "traex"
+                  ? ["anthropic_messages", "openai_chat", "openai_responses"]
+                  : ["anthropic_messages"],
+            },
+          ],
+        };
+      }
+      if (command === "agent_providers" || command === "bind_agent_provider")
+        return {
+          kind: "providers",
+          providers: [
+            {
+              id: "test-provider",
+              name: "Test Provider",
+              protocol,
+              base_url: "https://example.test",
+              model: "model",
+              models: [],
+              auth: "bearer",
+              has_credential: true,
+              revision: "r",
+            },
+          ],
+          bindings:
+            command === "bind_agent_provider"
+              ? [{ agent, provider_id: "test-provider" }]
+              : [],
+        };
+      throw new Error("Unexpected call");
+    });
+    render(
+      <AgentSettings
+        state={{ host: remote, hosts: [remote] } as Workbench}
+        active
+        onBusy={() => {}}
+      />,
+    );
+    const save = await screen.findByRole("button", { name: "保存关联" });
+    expect((save as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.click(
+      screen.getByRole("combobox", { name: `${name} 关联 Provider` }),
+    );
+    fireEvent.click(screen.getByRole("option", { name: /Test Provider/ }));
+    fireEvent.click(save);
+    await screen.findByText("关联已保存；下次发送消息时使用最新配置。");
+    expect(invoke).toHaveBeenCalledWith("bind_agent_provider", {
+      hostId: "devbox",
+      agent,
+      providerId: "test-provider",
+    });
+    expect(
+      invoke.mock.calls.filter(([command]) => command === "connect_host"),
+    ).toEqual([["connect_host", { host: remote, password: undefined }]]);
+  },
+);
 it("retains an unsaved Provider form while settings are hidden, without saving credentials", async () => {
   invoke.mockResolvedValue({ kind: "providers", providers: [], bindings: [] });
   const view = render(<ProviderSettings active onBusy={() => {}} />);

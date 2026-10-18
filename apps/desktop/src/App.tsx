@@ -306,6 +306,8 @@ export default function App() {
             }}
             drafts={drafts}
             agent={agent}
+            agents={workbench.agents}
+            selectAgent={workbench.selectAgent}
             session={session}
             hostId={hostId}
             agentSessionState={

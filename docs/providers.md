@@ -7,7 +7,8 @@ Provider 页面没有主机选择，也不会因为保存配置而自动关联 A
 
 Code Agent 是主机上的执行程序。在「设置 → 连接与 Agent」中选择运行主机，
 为 Agent 关联一个协议兼容的 Provider。当前 Claude Code Adapter 只接受
-Anthropic Messages；两种 OpenAI 配置可保存，当前没有能使用它们的 Agent Adapter。
+Anthropic Messages；Traex 接受 Anthropic Messages、OpenAI Chat Completions 和
+OpenAI Responses，直接使用原生协议。
 不会自动把 OpenAI 转换成 Anthropic。前端过滤选项，server 与 Adapter 同时校验。
 未关联 Provider 时沿用 Agent CLI 自己的配置。
 
@@ -69,7 +70,9 @@ Provider 定义及凭据仍完整迁移。无旧配置时创建空 App 配置，
 
 列表仅返回凭据是否存在，编辑留空保留原值；改地址或认证方式需重新填写凭据。
 凭据只经过原生层及认证通道，不进入 WebView、事件或请求账本；运行中的目标 CLI 可读取
-临时 settings，正常结束后清理。Server 被强制杀死可能遗留私有临时文件。
+临时启动配置。Claude 使用私有临时 settings，正常结束后清理；Server 被强制杀死可能
+遗留该临时文件。Traex 的凭据只注入专用子进程环境变量，不进入命令行参数、原生
+JSON-RPC 或 rollout；原生配置文件保持不变。
 
 此改动复用已有的 `ModelsForProvider` / `TurnProvider` 协议，不新增 wire 字段。
 目标 Server 需支持显式 CLI / Snapshot；旧版接口仍供独立 Server 客户端使用，App 不再调用。
@@ -108,8 +111,8 @@ python3 scripts/smoke-providers.py --binary target/debug/latte-work-server --cla
 思考档位属于 Code Agent 的能力，不属于 Provider 协议的通用属性。每个 Agent
 适配器负责可选档位、模型限制、自动行为和原生参数映射；公共注册表只按 Agent
 分发，未实现的 Agent 不继承 Claude 档位。前端只展示 Host 返回的 `effort_levels`，
-发送时由服务端再次使用同一能力规则校验。当前只有 Claude 适配器已实现；下列
-档位和自动行为仅描述 Claude，不代表其他 Code Agent 的能力。
+发送时由服务端再次使用同一能力规则校验。Claude 的档位与自动行为见下文；Traex 从原生模型目录读取当前模型明确公布的档位，
+不继承 Claude 规则。没有公布档位时只提供 Agent 原生默认行为。
 
 模型选择器的 `Reasoning effort` 子菜单使用 Agent 原生英文档位；Claude 为 `auto / low / medium / high / xhigh / max`，按模型能力筛选。选择随下一条消息提交并保存在会话中，
 不会修改 Provider 默认模型或用户的 Claude 配置文件。已知不支持 effort 的模型禁用调整，
@@ -142,3 +145,25 @@ MDM、云端托管策略、managed-settings.d 及自定义 modelPicker 行不在
 
 依据：[Claude 自定义模型显示名称](https://code.claude.com/docs/en/model-config#customize-pinned-model-display-and-capabilities)
 与 [设置优先级](https://code.claude.com/docs/en/settings#settings-precedence)。
+
+## Traex Provider
+
+关联 Provider 后，模型菜单只使用该 Provider 的模型与显示名称，不再读取原生模型目录。
+每轮启动使用本次配置快照，映射到 Traex 的 `anthropic_messages`、`chat_completions` 或
+`responses` wire API；认证支持 Bearer、`x-api-key` 和无认证。Anthropic 的裸域名自动补
+`/v1`，已有 API 路径保持原样；OpenAI 按填写的 API base 追加 endpoint。
+
+Provider 定义通过进程级 `-c` 覆盖注入，凭据只放入专用环境变量。每次线程启动／恢复及
+turn 都显式选择本次 Provider，续聊可以更换协议、地址、凭据和模型；解除关联后读取当前
+CLI 的原生 Provider，不保留上轮 App Provider。运行中任务继续使用原快照。
+自定义 Provider 没有原生模型档位证据，因此当前不提供 effort 覆盖；发送携带非空 effort
+会明确拒绝。未关联时继续使用 Traex 原生模型目录及其公布的档位。
+
+真实 CLI 与本地模拟上游（无付费 API 请求）验证：
+
+```sh
+python3 scripts/smoke-traex-providers.py --binary target/debug/latte-work-server
+```
+
+该检查覆盖三种协议的真实流式回复、认证、模型与 Provider 切换后的原生续聊、恢复 CLI
+配置，以及持久文件中不包含凭据；不代表实际远程主机或用户模型服务已经验证。

@@ -50,6 +50,7 @@ pub struct LaunchConfig {
     pub provider: Option<ResolvedProvider>,
     pub settings_dir: PathBuf,
     pub model: Option<String>,
+    pub traex_model: Option<crate::agents::traex::ModelSelection>,
     pub effort: Option<latte_work_protocol::Effort>,
     pub permission_mode: Option<String>,
 }
@@ -61,8 +62,8 @@ pub struct ResolvedProvider {
 impl LaunchConfig {
     pub fn redact(&self, text: &str) -> String {
         match &self.provider {
-            Some(p) => text.replace(&p.credential, "[redacted]"),
-            None => text.to_owned(),
+            Some(p) if !p.credential.is_empty() => text.replace(&p.credential, "[redacted]"),
+            _ => text.to_owned(),
         }
     }
     pub fn redact_event(
@@ -405,17 +406,23 @@ impl ProviderStore {
                 default_model: Some(p.model),
                 effort_levels,
                 model_labels: p.model_labels,
+                model_variants: None,
             })
         } else {
             Ok(Response::Models {
-                models: crate::agents::model_aliases(agent)
-                    .iter()
-                    .map(|m| (*m).into())
-                    .collect(),
+                models: if agent == "traex" {
+                    model.map(str::to_owned).into_iter().collect()
+                } else {
+                    crate::agents::model_aliases(agent)
+                        .iter()
+                        .map(|m| (*m).into())
+                        .collect()
+                },
                 provider: None,
                 default_model: None,
                 effort_levels,
                 model_labels: BTreeMap::new(),
+                model_variants: None,
             })
         }
     }
@@ -489,6 +496,7 @@ impl ProviderStore {
     }
     pub fn launch_config(&self, agent: &str) -> LaunchConfig {
         LaunchConfig {
+            traex_model: None,
             effort: None,
             permission_mode: None,
             model: None,
@@ -576,6 +584,21 @@ mod tests {
             "model":"real-id", "models":["other"], "model_labels":{"real-id":"Friendly"},
             "auth":"none", "has_credential":false
         })).unwrap();
+        let config = LaunchConfig {
+            traex_model: None,
+            provider: Some(ResolvedProvider {
+                metadata: provider.clone(),
+                credential: String::new(),
+            }),
+            settings_dir: std::env::temp_dir(),
+            model: None,
+            effort: None,
+            permission_mode: None,
+        };
+        assert_eq!(config.redact("no authentication"), "no authentication");
+        assert!(
+            matches!(config.redact_event(latte_work_protocol::EventKind::Text{text:"no authentication".into()}).unwrap(),latte_work_protocol::EventKind::Text{text} if text=="no authentication")
+        );
         let Response::Models {
             models,
             model_labels,

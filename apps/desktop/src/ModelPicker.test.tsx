@@ -5,13 +5,60 @@ import { ModelPicker } from "./ModelPicker";
 import type { Response } from "./protocol";
 const mocks = vi.hoisted(() => ({
   request: vi.fn(),
-  selector: vi.fn(() => null),
+  selector: vi.fn((_props: unknown) => null),
 }));
 vi.mock("./api", () => ({ request: mocks.request, message: String }));
 vi.mock("./ModelSelector", () => ({ ModelSelector: mocks.selector }));
 afterEach(() => {
   cleanup();
   vi.clearAllMocks();
+});
+it("presents Traex native names and sends the unchanged native ID when selected", async () => {
+  mocks.request.mockResolvedValue({
+    kind: "models",
+    models: ["Doubao-Seed-Evolving", "alwaysday1"],
+    provider: null,
+    default_model: "Doubao-Seed-Evolving",
+    effort_levels: [],
+    model_labels: {
+      "Doubao-Seed-Evolving": "Seed-Evolving",
+      alwaysday1: "auto_model/alwaysday1",
+    },
+  });
+  const onChange = vi.fn();
+  render(
+    <ModelPicker
+      hostId="local"
+      agent="traex"
+      connected
+      settingsOpen={false}
+      value="Doubao-Seed-Evolving"
+      onChange={onChange}
+      effort={null}
+      onEffortChange={vi.fn()}
+      disabled={false}
+    />,
+  );
+  await act(async () => {});
+  const props = mocks.selector.mock.calls.at(-1)![0] as unknown as {
+    options: { value: string; label: string; description?: string }[];
+    onChange: (value: string) => void;
+  };
+  expect(props.options).toEqual([
+    { value: "", label: "default" },
+    {
+      value: "Doubao-Seed-Evolving",
+      label: "Seed-Evolving",
+      description: undefined,
+    },
+    {
+      value: "alwaysday1",
+      label: "auto_model/alwaysday1",
+      description: undefined,
+    },
+  ]);
+  props.onChange("alwaysday1");
+  expect(onChange).toHaveBeenCalledWith("alwaysday1");
 });
 it("ignores stale catalogs and clears unsupported effort without recording a user preference", async () => {
   const responses: ((value: Response) => void)[] = [];
@@ -142,5 +189,62 @@ it("keeps sending blocked until a provider fallback and its capabilities are bot
   view.rerender(<ModelPicker {...props} value="real-id" connected={false} />);
   expect(ready).toHaveBeenLastCalledWith(
     expect.objectContaining({ ready: false }),
+  );
+});
+
+it("groups native backend modes and keeps the persisted Max value ready", async () => {
+  mocks.request.mockResolvedValue({
+    kind: "models",
+    models: ["gpt", "backend-large"],
+    provider: null,
+    default_model: "gpt",
+    effort_levels: ["low"],
+    model_labels: { gpt: "GPT", "backend-large": "GPT / Max" },
+    model_variants: {
+      gpt: [
+        { model: "gpt", label: "Standard", context_window: 475000 },
+        { model: "backend-large", label: "Max", context_window: 800000 },
+      ],
+    },
+  });
+  const ready = vi.fn();
+  render(
+    <ModelPicker
+      hostId="devbox"
+      agent="traex"
+      connected
+      settingsOpen={false}
+      value="backend-large"
+      onChange={vi.fn()}
+      effort="low"
+      onEffortChange={vi.fn()}
+      disabled={false}
+      onReadyChange={ready}
+    />,
+  );
+  await act(async () => {});
+  expect(mocks.selector).toHaveBeenLastCalledWith(
+    expect.objectContaining({
+      value: "backend-large",
+      levels: ["low"],
+      options: [
+        expect.objectContaining({ value: "" }),
+        expect.objectContaining({
+          value: "gpt",
+          variants: [
+            { value: "gpt", label: "Standard", description: "475K context" },
+            {
+              value: "backend-large",
+              label: "Max",
+              description: "800K context",
+            },
+          ],
+        }),
+      ],
+    }),
+    undefined,
+  );
+  expect(ready).toHaveBeenLastCalledWith(
+    expect.objectContaining({ ready: true }),
   );
 });

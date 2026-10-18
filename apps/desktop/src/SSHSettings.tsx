@@ -171,8 +171,9 @@ export function SSHSettings({
             在终端运行 <code>ssh 你的主机</code>，核对并确认主机指纹。
           </li>
           <li>
-            在远端安装并登录 Claude Code，用 <code>claude --version</code>{" "}
-            检查。Server 与桌面端应从同一版本源码构建。
+            在远端安装并登录所需 Agent，用 <code>claude --version</code> 或{" "}
+            <code>traex --version</code> 检查。Server
+            与桌面端应从同一版本源码构建。
           </li>
           <li>
             在远端源码目录执行（需要 Rust 1.97 和 C 编译器）：
