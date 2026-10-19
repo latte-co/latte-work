@@ -33,7 +33,7 @@ import {
 } from "./composerActions";
 
 import {
-  attachmentLabels,
+  MAX_PASTE_FILE,
   clipboardFilePaths,
   importClipboardFile,
   isLongPaste,
@@ -95,6 +95,12 @@ export function Composer(props: Props) {
   } = props;
   const root = useRef<HTMLDivElement>(null);
   const input = useRef<HTMLTextAreaElement>(null);
+  const fileInput = useRef<HTMLInputElement>(null);
+  const pickerContext = useRef<string | null>(null);
+  const [addMenu, setAddMenu] = useState(false);
+  const [dragging, setDragging] = useState(false);
+  const dragDepth = useRef(0);
+  const [retryFiles, setRetryFiles] = useState<File[]>([]);
   useEffect(() => {
     if (props.focusRequest && !props.hidden) input.current?.focus();
   }, [props.focusRequest, props.hidden]);
@@ -140,10 +146,14 @@ export function Composer(props: Props) {
     pasteBusy.current = false;
     setPasting(false);
     setPasteProgress("");
+    setRetryFiles([]);
+    pickerContext.current = null;
+    setDragging(false);
+    dragDepth.current = 0;
     return () => {
       pasteOperation.current++;
     };
-  }, [scope, sessionId, hidden, disabled, sending]);
+  }, [scope, sessionId, hidden, disabled, sending, connected]);
   const [trigger, setTrigger] = useState<ComposerTrigger | null>(null);
   const [browse, setBrowse] = useState<string | null>(null);
   const [search, setSearch] = useState("");
@@ -159,7 +169,7 @@ export function Composer(props: Props) {
   const [externalBusy, setExternalBusy] = useState(false);
   const referenceOperation = useRef(0);
   const currentContext = useRef("");
-  currentContext.current = `${scope}:${sessionId}:${disabled}:${sending}:${hidden}`;
+  currentContext.current = `${scope}:${sessionId}:${disabled}:${sending}:${hidden}:${connected}`;
   useEffect(
     () => () => {
       referenceOperation.current++;
@@ -169,8 +179,11 @@ export function Composer(props: Props) {
   const [revision, retry] = useState(0);
   const listId = useId();
   const menu =
-    !disabled && !sending && !hidden && (browse !== null || trigger !== null);
-  const mode = browse !== null ? "files" : trigger?.kind;
+    !disabled &&
+    !sending &&
+    !hidden &&
+    (addMenu || browse !== null || trigger !== null);
+  const mode = addMenu ? "add" : browse !== null ? "files" : trigger?.kind;
   const query = browse !== null ? search : (trigger?.query ?? "");
   const slash = query.lastIndexOf("/");
   const path =
@@ -181,6 +194,7 @@ export function Composer(props: Props) {
     browse !== null ? search : slash < 0 ? query : query.slice(slash + 1)
   ).toLowerCase();
   function close() {
+    setAddMenu(false);
     referenceOperation.current++;
     setExternal(false);
     setExternalPath("");
@@ -215,7 +229,7 @@ export function Composer(props: Props) {
     return () => document.removeEventListener("pointerdown", outside);
   }, [menu]);
   useEffect(() => {
-    if (!menu) return;
+    if (!menu || mode === "add") return;
     let disposed = false;
     setEntries([]);
     setCommands([]);
@@ -403,6 +417,119 @@ export function Composer(props: Props) {
             : []),
         ];
   const index = Math.min(selected, Math.max(0, options.length - 1));
+  useEffect(() => {
+    if (addMenu)
+      root.current
+        ?.querySelector<HTMLButtonElement>(".composer-add-menu button")
+        ?.focus();
+  }, [addMenu]);
+  async function storeAttachments(
+    files: File[],
+    paths: string[],
+    valid: () => boolean,
+    longText = false,
+  ) {
+    if (!connected || !projectId)
+      throw new Error("请先连接项目所在主机，再添加附件");
+    const count = paths.length || files.length;
+    if (attached.length + count > 20)
+      throw new Error("最多添加 20 个附件或引用");
+    if (files.some((file) => file.size > MAX_PASTE_FILE))
+      throw new Error("单个附件不能超过 64 MiB");
+    const added: ComposerReference[] = [];
+    for (let i = 0; i < count; i++) {
+      if (!valid()) return;
+      const label = `正在保存附件 ${i + 1}/${count}`;
+      setPasteProgress(`${label}…`);
+      const entry = paths.length
+        ? await importClipboardFile(hostId, projectId, paths[i])
+        : await storePastedFile(
+            files[i],
+            hostId,
+            valid,
+            (percent) => {
+              if (valid())
+                setPasteProgress(
+                  percent === 100 && hostId !== "local"
+                    ? `正在上传到远程主机 ${i + 1}/${count}…`
+                    : `${label} · ${percent}%`,
+                );
+            },
+            longText ? "text" : undefined,
+          );
+      if (!valid()) return;
+      added.push(entry);
+    }
+    setReferences({
+      scope,
+      entries: [
+        ...attached,
+        ...added.filter(
+          (entry) => !attached.some((old) => old.path === entry.path),
+        ),
+      ],
+    });
+    input.current?.focus();
+  }
+  async function addFiles(files: File[], retrying = false) {
+    if (
+      !files.length ||
+      disabled ||
+      sending ||
+      hidden ||
+      pasteBusy.current ||
+      externalBusy
+    )
+      return;
+    if (retryFiles.length && !retrying) {
+      setNotice("请先重试或移除未添加附件");
+      return;
+    }
+    const context = currentContext.current;
+    const operation = ++pasteOperation.current;
+    const valid = () =>
+      context === currentContext.current &&
+      operation === pasteOperation.current;
+    pasteBusy.current = true;
+    setPasting(true);
+    setNotice("");
+    setRetryFiles([]);
+    close();
+    try {
+      await storeAttachments(files, [], valid);
+    } catch (cause) {
+      if (valid()) {
+        setNotice(`${message(cause)}（未添加本次附件，草稿已保留）`);
+        setRetryFiles(files);
+      }
+    } finally {
+      if (valid()) {
+        pasteBusy.current = false;
+        setPasting(false);
+        setPasteProgress("");
+        input.current?.focus();
+      }
+    }
+  }
+  function dropFiles(event: React.DragEvent<HTMLDivElement>) {
+    if (!Array.from(event.dataTransfer.types).includes("Files")) return;
+    event.preventDefault();
+    event.stopPropagation();
+    dragDepth.current = 0;
+    setDragging(false);
+    if (disabled || sending || hidden || pasteBusy.current || externalBusy)
+      return;
+    const directories = Array.from(event.dataTransfer.items ?? []).some(
+      (item) => item.webkitGetAsEntry?.()?.isDirectory,
+    );
+    if (directories) {
+      setNotice(
+        "暂不支持上传文件夹，请选择其中的文件；工作区目录可通过引用添加",
+      );
+      return;
+    }
+    void addFiles(Array.from(event.dataTransfer.files));
+  }
   async function paste(event: React.ClipboardEvent<HTMLTextAreaElement>) {
     event.preventDefault();
     if (disabled || sending || pasteBusy.current || externalBusy) return;
@@ -455,8 +582,6 @@ export function Composer(props: Props) {
         });
         return;
       }
-      if (!connected || !projectId)
-        throw new Error("请先连接项目所在主机，再粘贴附件");
       const items = longText
         ? [
             new File([text], `粘贴文本-${Date.now()}.txt`, {
@@ -464,43 +589,7 @@ export function Composer(props: Props) {
             }),
           ]
         : files;
-      const count = paths.length || items.length;
-      if (attached.length + count > 20)
-        throw new Error("最多添加 20 个文件或目录引用");
-      const added: ComposerReference[] = [];
-      for (let i = 0; i < count; i++) {
-        if (!valid()) return;
-        const label = `正在保存附件 ${i + 1}/${count}`;
-        setPasteProgress(`${label}…`);
-        const entry = paths.length
-          ? await importClipboardFile(hostId, projectId, paths[i])
-          : await storePastedFile(
-              items[i],
-              hostId,
-              valid,
-              (percent) => {
-                if (valid())
-                  setPasteProgress(
-                    percent === 100 && hostId !== "local"
-                      ? `正在传送到远程主机 ${i + 1}/${count}…`
-                      : `${label} · ${percent}%`,
-                  );
-              },
-              longText ? "text" : undefined,
-            );
-        if (!valid()) return;
-        added.push(entry);
-      }
-      setReferences({
-        scope,
-        entries: [
-          ...attached,
-          ...added.filter(
-            (entry) => !attached.some((old) => old.path === entry.path),
-          ),
-        ],
-      });
-      input.current?.focus();
+      await storeAttachments(items, paths, valid, longText);
     } catch (cause) {
       if (valid())
         setNotice(`${message(cause)}（未添加本次附件，剪贴板内容未改变）`);
@@ -516,7 +605,14 @@ export function Composer(props: Props) {
     }
   }
   async function submit() {
-    if (disabled || sending || submitting.current || pasteBusy.current) return;
+    if (
+      disabled ||
+      sending ||
+      submitting.current ||
+      pasteBusy.current ||
+      retryFiles.length
+    )
+      return;
     if (localNavigation) {
       openAppCommand(localNavigation);
       return;
@@ -604,6 +700,7 @@ export function Composer(props: Props) {
     )
       return;
     if (menu) {
+      if (addMenu && event.key !== "Escape") return;
       if (event.key === "Escape") {
         event.preventDefault();
         event.stopPropagation();
@@ -636,14 +733,134 @@ export function Composer(props: Props) {
     }
   }
   return (
-    <div className={`composer ${!connected ? "disabled" : ""}`} ref={root}>
-      {menu && (
+    <div
+      className={`composer ${!connected ? "disabled" : ""}${dragging ? " composer-dragging" : ""}`}
+      ref={root}
+      onDragEnter={(event) => {
+        if (!Array.from(event.dataTransfer.types).includes("Files")) return;
+        event.preventDefault();
+        if (
+          !disabled &&
+          !sending &&
+          !hidden &&
+          !pasteBusy.current &&
+          !externalBusy
+        ) {
+          dragDepth.current++;
+          setDragging(true);
+        }
+      }}
+      onDragOver={(event) => {
+        if (!Array.from(event.dataTransfer.types).includes("Files")) return;
+        event.preventDefault();
+        event.dataTransfer.dropEffect =
+          disabled || sending || hidden || pasting || externalBusy
+            ? "none"
+            : "copy";
+      }}
+      onDragLeave={(event) => {
+        event.preventDefault();
+        dragDepth.current = Math.max(0, dragDepth.current - 1);
+        if (!dragDepth.current) setDragging(false);
+      }}
+      onDrop={dropFiles}
+    >
+      <input
+        type="file"
+        multiple
+        hidden
+        ref={fileInput}
+        aria-label="选择本机附件"
+        onChange={(event) => {
+          const files = Array.from(event.currentTarget.files ?? []);
+          event.currentTarget.value = "";
+          if (pickerContext.current === currentContext.current)
+            void addFiles(files);
+          pickerContext.current = null;
+        }}
+      />
+      {dragging && (
+        <div className="composer-drop-hint" role="status">
+          松开以添加附件
+        </div>
+      )}
+      {menu && addMenu && (
+        <div
+          className="composer-menu composer-add-menu"
+          role="menu"
+          aria-label="添加文件"
+          onKeyDown={(event) => {
+            if (event.key === "Escape") {
+              keys(event);
+              return;
+            }
+            if (event.key === "Tab") {
+              close();
+              return;
+            }
+            if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+              event.preventDefault();
+              const buttons = Array.from(
+                event.currentTarget.querySelectorAll<HTMLButtonElement>(
+                  "button:not(:disabled)",
+                ),
+              );
+              const index = buttons.indexOf(
+                document.activeElement as HTMLButtonElement,
+              );
+              buttons[
+                (index +
+                  (event.key === "ArrowDown" ? 1 : -1) +
+                  buttons.length) %
+                  buttons.length
+              ]?.focus();
+            }
+          }}
+        >
+          <button
+            role="menuitem"
+            disabled={
+              !connected || !projectId || pasting || !!retryFiles.length
+            }
+            onClick={() => {
+              pickerContext.current = currentContext.current;
+              close();
+              fileInput.current?.click();
+            }}
+          >
+            <FileText size={16} />
+            <span>
+              添加本机文件…<small>从这台电脑选择文件，可多选</small>
+            </span>
+          </button>
+          <button
+            role="menuitem"
+            disabled={!connected || !projectId || pasting}
+            onClick={() => {
+              close();
+              setBrowse("");
+              input.current?.focus();
+            }}
+          >
+            <Folder size={16} />
+            <span>
+              引用工作区文件…
+              <small>
+                {hostId === "local"
+                  ? "浏览本机工作区，仅引用路径"
+                  : "浏览远程工作区，仅引用路径"}
+              </small>
+            </span>
+          </button>
+        </div>
+      )}
+      {menu && !addMenu && (
         <div
           className={`composer-menu${mode === "commands" ? " composer-command-menu" : ""}`}
           onKeyDown={keys}
         >
           <div className="composer-menu-heading">
-            <span>{mode === "commands" ? "命令" : "添加文件和文件夹"}</span>
+            <span>{mode === "commands" ? "命令" : "引用工作区文件"}</span>
             <span>
               {mode === "commands"
                 ? agent === "claude"
@@ -816,14 +1033,14 @@ export function Composer(props: Props) {
                     onClick={() => void addExternal(false)}
                   >
                     <FileText size={16} />
-                    选择文件…
+                    选择文件并引用…
                   </button>
                   <button
                     disabled={externalBusy || !connected}
                     onClick={() => void addExternal(true)}
                   >
                     <Folder size={16} />
-                    选择文件夹…
+                    选择文件夹并引用…
                   </button>
                 </>
               )}
@@ -837,7 +1054,7 @@ export function Composer(props: Props) {
                 {external
                   ? "返回项目目录"
                   : hostId === "local"
-                    ? "工作区外引用…"
+                    ? "引用本机路径…"
                     : "引用远程路径…"}
               </button>
             </div>
@@ -852,9 +1069,12 @@ export function Composer(props: Props) {
         </div>
       )}
       {!!attached.length && (
-        <div className="composer-references" aria-label="已添加项目引用">
+        <div className="composer-references" aria-label="已添加附件和引用">
           {attached.map((entry) => (
             <span key={entry.path} title={entry.path}>
+              <small className="composer-reference-kind">
+                {entry.attachmentKind ? "附件" : "引用"}
+              </small>
               {!entry.directory && referenceKind(entry) === "image" ? (
                 <AttachmentImage
                   reference={entry}
@@ -877,14 +1097,14 @@ export function Composer(props: Props) {
                   )}
                   <span>
                     {entry.attachmentKind && !entry.directory
-                      ? `${attachmentLabels[entry.attachmentKind]} · ${entry.name}`
+                      ? entry.name
                       : entry.path}
                   </span>
                 </>
               )}
               <button
                 disabled={sending || pasting}
-                aria-label={`移除引用 ${entry.path}`}
+                aria-label={`${entry.attachmentKind ? "移除附件" : "移除引用"} ${entry.path}`}
                 onClick={() =>
                   setReferences({
                     scope,
@@ -905,10 +1125,10 @@ export function Composer(props: Props) {
         rows={1}
         aria-label="任务输入"
         aria-autocomplete="list"
-        aria-controls={menu ? listId : undefined}
-        aria-expanded={menu}
+        aria-controls={menu && !addMenu ? listId : undefined}
+        aria-expanded={menu && !addMenu}
         aria-activedescendant={
-          menu && options.length ? `${listId}-${index}` : undefined
+          menu && !addMenu && options.length ? `${listId}-${index}` : undefined
         }
         placeholder={placeholder}
         value={value}
@@ -918,6 +1138,7 @@ export function Composer(props: Props) {
           onChange(event.target.value);
           setNotice("");
           setBrowse(null);
+          setAddMenu(false);
           setTrigger(
             composing.current
               ? null
@@ -966,27 +1187,46 @@ export function Composer(props: Props) {
           {notice}
         </div>
       )}
+      {!!retryFiles.length && !pasting && (
+        <div className="composer-attachment-retry">
+          <button
+            disabled={disabled || sending || !connected}
+            onClick={() => void addFiles(retryFiles, true)}
+          >
+            重试添加附件
+          </button>
+          <button
+            disabled={disabled || sending}
+            onClick={() => {
+              setRetryFiles([]);
+              setNotice("");
+            }}
+          >
+            移除未添加附件
+          </button>
+        </div>
+      )}
       <div className="composer-toolbar">
         <button
           className="icon-button composer-add"
-          title="添加项目文件和文件夹 (@)"
-          aria-label="添加项目引用"
-          aria-expanded={menu && mode === "files"}
+          title="添加附件或引用工作区文件"
+          aria-label="添加文件"
+          aria-haspopup="menu"
+          aria-expanded={menu && addMenu}
           disabled={disabled || sending || pasting}
           onClick={() => {
-            if (menu) close();
-            else {
-              setTrigger(null);
-              setBrowse("");
-              setSearch("");
-            }
+            const open = !menu;
+            close();
+            setAddMenu(open);
           }}
         >
           <Plus size={19} />
         </button>
         {toolbar(
           () => void submit(),
-          !pasting && (!!value.trim() || !!attached.length),
+          !pasting &&
+            !retryFiles.length &&
+            (!!value.trim() || !!attached.length),
           localNavigation,
         )}
       </div>

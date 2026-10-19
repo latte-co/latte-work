@@ -291,7 +291,8 @@ it("keeps independent text and references across remounts, never replaces a none
   const view = render(<Conversation {...p} key="a" session={session("a")} />);
   fireEvent.change(input(), { target: { value: "keep this" } });
   expect(screen.queryByRole("button", { name: "梳理项目结构" })).toBeNull();
-  fireEvent.click(screen.getByRole("button", { name: "添加项目引用" }));
+  fireEvent.click(screen.getByRole("button", { name: "添加文件" }));
+  fireEvent.click(screen.getByRole("menuitem", { name: /引用工作区文件/ }));
   fireEvent.click(await screen.findByRole("option", { name: "note.md" }));
   view.rerender(<Conversation {...p} key="b" session={session("b")} />);
   expect(input().value).toBe("");

@@ -166,7 +166,7 @@ model/effort commands if a caller bypasses composer navigation.
 The `@` picker reuses the server's bounded, canonical project-file listing for local
 and SSH hosts. It attaches relative path references for the Agent to read, not file
 uploads or clipboard screenshots. A remote server must be updated for command discovery.
-The `+` menu also accepts explicitly chosen files/folders outside the project:
+The workspace-reference browser also accepts explicitly chosen files/folders outside the project:
 native pickers are local-only, while manual absolute paths are resolved by the
 selected execution host through `resolve_reference`. This bounded metadata-only
 request returns a canonical absolute reference (or a project-relative path when
@@ -212,6 +212,23 @@ Permission changes do not edit native settings or expand sandbox/network policie
 The Hello capability `permission_settings` prevents a new client from sending
 an override to an older server that would silently ignore the field. Remote hosts
 must update their server; local and SSH transports share the same implementation.
+
+## Local file attachments
+
+The composer `+` menu separates local file attachments from execution-host workspace
+references (`@` remains a direct reference shortcut). A multiple-file HTML input uses
+Wry's native file panel on macOS; its File objects and HTML5 file drops share the
+bounded clipboard byte-staging and SSH upload pipeline. The main window disables
+Tauri drag interception so WebKit can deliver File objects, rather than exposing
+arbitrary local paths through a new IPC command. File drops outside the composer
+are prevented from navigating the app. Directory drops fail explicitly; workspace
+directories remain path references. No server protocol or permission change is needed.
+
+Selection/drop batches attach atomically, never send a prompt, and retain the draft
+on failure. Failed files may be retried or removed before sending. Pending panels,
+uploads and failures are invalidated on host/project/session or composer-state changes.
+Focused checks: Composer.test.tsx, Conversation.test.tsx and pasteAttachments.test.ts;
+native smoke should separately verify the system file panel and Finder file drops.
 
 ## Clipboard attachments
 

@@ -30,7 +30,10 @@ export async function importClipboardFile(
     projectId,
     path,
   });
-  return { ...entry, attachmentKind: attachmentKind(entry.name) };
+  return {
+    ...entry,
+    attachmentKind: entry.directory ? undefined : attachmentKind(entry.name),
+  };
 }
 async function stage(request: Request): Promise<Response> {
   const response = await invoke<Response>("paste_stage", { request });
@@ -44,24 +47,23 @@ export async function storePastedFile(
   progress: (percent: number) => void,
   kind = attachmentKind(file.name, file.type),
 ): Promise<ComposerReference> {
-  if (file.size > MAX_PASTE_FILE)
-    throw new Error("单个粘贴附件不能超过 64 MiB");
-  if (!native) throw new Error("粘贴附件需要在 Latte Work 桌面应用中使用");
-  if (!valid()) throw new Error("粘贴已取消");
+  if (file.size > MAX_PASTE_FILE) throw new Error("单个附件不能超过 64 MiB");
+  if (!native) throw new Error("附件需要在 Latte Work 桌面应用中使用");
+  if (!valid()) throw new Error("附件添加已取消");
   const start = await stage({
     method: "begin_attachment",
     name: file.name,
     size: file.size,
   });
   if (start.kind !== "attachment_upload")
-    throw new Error("Server 不支持粘贴附件，请更新后重试");
+    throw new Error("Server 不支持附件，请更新后重试");
   try {
     for (let offset = 0; offset < file.size; offset += 65536) {
-      if (!valid()) throw new Error("粘贴已取消");
+      if (!valid()) throw new Error("附件添加已取消");
       const data = Array.from(
         new Uint8Array(await file.slice(offset, offset + 65536).arrayBuffer()),
       );
-      if (!valid()) throw new Error("粘贴已取消");
+      if (!valid()) throw new Error("附件添加已取消");
       await stage({ method: "attachment_chunk", id: start.id, offset, data });
       progress(
         Math.round(
@@ -69,7 +71,7 @@ export async function storePastedFile(
         ),
       );
     }
-    if (!valid()) throw new Error("粘贴已取消");
+    if (!valid()) throw new Error("附件添加已取消");
     progress(100);
     const entry = await invoke<FileEntry>("finish_paste_upload", {
       hostId,
