@@ -311,7 +311,12 @@ async fn connection(stream: UnixStream, service: Service) -> Result<()> {
                 Ok(request) if ready => match dispatch(&service, request).await {
                     Ok(response) => response,
                     Err(error) => Response::Error {
-                        code: "request_failed".into(),
+                        code: if error.is::<files::NotGitRepository>() {
+                            "not_git_repository"
+                        } else {
+                            "request_failed"
+                        }
+                        .into(),
                         message: error.to_string(),
                     },
                 },

@@ -7002,3 +7002,65 @@ async fn message_queue_desktop_provider_bridge_accepts_both_dispatch_responses()
         .collect::<Vec<_>>();
     assert_eq!(ids, ["bridge-head", "bridge-b"]);
 }
+
+#[tokio::test]
+async fn non_git_summary_error_is_typed_without_disabling_project_reads() {
+    use latte_work_protocol::GitReviewScope;
+    let host = Host::start().await;
+    let mut client = host.client().await;
+    let root = tempfile::tempdir().unwrap();
+    std::fs::write(root.path().join("report.md"), "resource\n").unwrap();
+    let Response::Project { project } = ask(
+        &mut client,
+        Request::AddProject {
+            path: root.path().to_string_lossy().into(),
+            name: None,
+        },
+    )
+    .await
+    else {
+        panic!("project response")
+    };
+    for _ in 0..2 {
+        match ask(
+            &mut client,
+            Request::GitReview {
+                project_id: project.id.clone(),
+                scope: GitReviewScope::Branch,
+                base: None,
+            },
+        )
+        .await
+        {
+            Response::Error { code, .. } => assert_eq!(code, "not_git_repository"),
+            response => panic!("unexpected: {response:?}"),
+        }
+        client = host.client().await;
+    }
+    assert!(matches!(
+        ask(
+            &mut client,
+            Request::ReadFile {
+                project_id: project.id.clone(),
+                path: "report.md".into(),
+            }
+        )
+        .await,
+        Response::Content { text, truncated: false } if text == "resource\n"
+    ));
+    // An incomplete .git directory remains an actionable failure.
+    std::fs::create_dir(root.path().join(".git")).unwrap();
+    match ask(
+        &mut client,
+        Request::GitReview {
+            project_id: project.id,
+            scope: GitReviewScope::Branch,
+            base: None,
+        },
+    )
+    .await
+    {
+        Response::Error { code, .. } => assert_eq!(code, "request_failed"),
+        response => panic!("unexpected: {response:?}"),
+    }
+}

@@ -76,9 +76,7 @@ async fn inventory(root: &Path) -> Result<(Vec<String>, bool)> {
     let (inside, truncated) = match files::git(root, &["rev-parse", "--is-inside-work-tree"]).await
     {
         Ok(result) => result,
-        Err(error) if error.to_string() == "无法读取 Git 状态，请确认项目是 Git 仓库" => {
-            (String::new(), false)
-        }
+        Err(error) if error.is::<files::NotGitRepository>() => (String::new(), false),
         Err(error) => return Err(error),
     };
     if inside.trim() == "true" && !truncated {

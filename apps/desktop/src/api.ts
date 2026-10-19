@@ -67,6 +67,15 @@ export function chooseReferencePath(
 export function chooseIdentityFile(): Promise<string | null> {
   return invoke("choose_identity_file");
 }
+export class ServerRequestError extends Error {
+  constructor(
+    public readonly code: string,
+    message: string,
+  ) {
+    super(message);
+    this.name = "ServerRequestError";
+  }
+}
 export async function request(
   hostId: string,
   request: Request,
@@ -88,7 +97,8 @@ export async function request(
       );
     throw error;
   }
-  if (response.kind === "error") throw new Error(response.message);
+  if (response.kind === "error")
+    throw new ServerRequestError(response.code, response.message);
   return response;
 }
 export async function loadHosts(): Promise<Host[]> {

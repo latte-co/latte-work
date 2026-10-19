@@ -573,8 +573,13 @@ replaced records reset it. Unfinished streamed text is parsed on settlement, not
 on each token, and Markdown fences are stripped in a linear line scan. TodoWrite
 replaces its own snapshot while retaining TaskCreate records. Branch reviews are
 read on opening, settlement and explicit refresh, independent of streamed tool
-activity; the lightweight source inventory refreshes at most once every two seconds
-while running, with one read in flight. Authentication prompts suspend these reads.
+activity. Confirmed non-Git directories return `not_git_repository` through the
+existing error envelope; Task Summary shows a disabled branch row without a status
+alert or invented zero totals. Resources, tools and non-Git turn snapshots remain
+available. Other Git failures stay actionable, including incomplete `.git` markers.
+The desktop retains Server error codes; older remote Servers must update to provide
+this distinction. The lightweight source inventory refreshes at most once every
+two seconds while running, with one read in flight. Authentication prompts suspend these reads.
 The single hover/focus background on each workspace tab includes its close control.
 Project names and history-scope paragraphs are not repeated in the inspector;
 the footer offers explicit earlier-history reads, with scope in its tooltip.
