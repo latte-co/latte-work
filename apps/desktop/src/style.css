@@ -5690,3 +5690,46 @@ button.task-info-row:not(:disabled):hover,
   visibility: hidden;
   pointer-events: none;
 }
+
+/* Files selected or dropped on the composer are attachments, not path references. */
+.composer-dragging {
+  outline: 2px solid var(--color-brand);
+  outline-offset: -2px;
+}
+.composer-drop-hint {
+  padding: var(--space-2);
+  color: var(--color-text-secondary);
+  text-align: center;
+  pointer-events: none;
+}
+.composer-add-menu {
+  width: min(360px, 100%);
+  padding: var(--space-2);
+}
+.composer-add-menu button {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  width: 100%;
+  padding: var(--space-2);
+  text-align: left;
+  border-radius: var(--radius-sm);
+}
+.composer-add-menu button:hover:not(:disabled) {
+  background: var(--color-hover);
+}
+.composer-add-menu small {
+  display: block;
+  color: var(--color-text-muted);
+  font-size: var(--text-sm);
+}
+.composer-reference-kind {
+  color: var(--color-text-muted);
+  flex-shrink: 0;
+  font-size: var(--text-xs);
+}
+.composer-attachment-retry {
+  display: flex;
+  gap: var(--space-2);
+  font-size: var(--text-sm);
+}
