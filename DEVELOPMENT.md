@@ -1013,6 +1013,15 @@ mouse movement beyond the threshold starts a drag; accessibility clicks and
 ordinary hover must not become a drag or suppress project expansion. No Server
 mutation or Agent request is used to save this display order.
 
+Pinned conversations share the pointer/keyboard reorder implementation with projects.
+Their independent App preference (`latte-work.pinned-order.v1`) uses host/session
+identity, retaining absent entries and appending newly discovered pins after an
+explicit order exists. Live timestamps, status and title refreshes do not override
+this order. Reordering never sends a host request, opens a conversation or changes
+project/recent ordering. Unpinning a dragged source or collapsing its section
+cancels the gesture. Focused checks: SidebarReorder.test.tsx, pinnedOrder.test.ts
+and the pinned-order persistence case in useWorkbench.test.tsx.
+
 Queue dispatch failures are checked after each activation, before considering the
 next item; auto-drain reads the current session status. A delayed immediate-send
 confirmation pauses the queue without classifying the native process as failed or

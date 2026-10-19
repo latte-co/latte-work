@@ -5606,17 +5606,21 @@ button.task-info-row:not(:disabled):hover,
   box-shadow: inset 0 -2px var(--color-text-secondary);
 }
 
-.project-list:not([data-reordering="true"]) .project-row {
+.project-list:not([data-reordering="true"]) .project-row,
+.pinned-session-list:not([data-reordering="true"]) .pinned-session {
   cursor: grab;
 }
-.project-list[data-reordering="true"] {
+.project-list[data-reordering="true"],
+.pinned-session-list[data-reordering="true"] {
   cursor: grabbing;
   user-select: none;
 }
-.project-list[data-reordering="true"] .project-row {
+.project-list[data-reordering="true"] .project-row,
+.pinned-session-list[data-reordering="true"] .pinned-session {
   cursor: grabbing;
 }
-.project-group[data-dragging="true"] {
+.project-group[data-dragging="true"],
+.pinned-session-list .session-item[data-dragging="true"] {
   opacity: 0.3;
 }
 .project-drop-indicator {
@@ -5732,4 +5736,9 @@ button.task-info-row:not(:disabled):hover,
   display: flex;
   gap: var(--space-2);
   font-size: var(--text-sm);
+}
+
+.pinned-session-list[data-reordering="true"] .session-row-actions {
+  visibility: hidden;
+  pointer-events: none;
 }

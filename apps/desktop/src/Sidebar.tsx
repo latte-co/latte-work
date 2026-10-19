@@ -1,5 +1,7 @@
 import { useEffect, useState } from "react";
 import { createPortal } from "react-dom";
+import { useListReorder } from "./useListReorder";
+import { pinnedOrderKey } from "./pinnedOrder";
 import { useProjectReorder } from "./useProjectReorder";
 import { projectOrderKey } from "./projectOrder";
 import {
@@ -154,17 +156,26 @@ export function Sidebar({
     enabled: visible && sections.projects && !state.modal,
     onMove: state.moveProject,
   });
-  const interactionActive = !!sessionContext || !!context || !!reorder.drag;
+  const pinReorder = useListReorder({
+    items: state.pinned,
+    enabled: visible && sections.pinned && !state.modal,
+    onMove: state.movePinnedSession,
+    rowSelector: ".session-item[data-pinned-key]",
+    rowKey: "pinnedKey",
+    label: (session) => session.title,
+  });
+  const interactionActive =
+    !!sessionContext || !!context || !!reorder.drag || !!pinReorder.drag;
   useEffect(() => {
     onInteractionChange?.(interactionActive);
     return () => onInteractionChange?.(false);
   }, [interactionActive, onInteractionChange]);
   useEffect(() => {
-    if (reorder.drag) {
+    if (reorder.drag || pinReorder.drag) {
       setSessionContext(null);
       setContext(null);
     }
-  }, [!!reorder.drag]);
+  }, [!!reorder.drag, !!pinReorder.drag]);
   const connectionStatus = (id: string) =>
     state.hostConnectionStatus?.(id) ??
     (hostErrors[id]
@@ -373,6 +384,7 @@ export function Sidebar({
         : null;
     const row = (
       <SessionHoverCard
+        disabled={!!reorder.drag || !!pinReorder.drag}
         title={s.title}
         project={sourceProject?.name ?? "项目"}
         host={sourceHost?.name ?? s.hostId}
@@ -382,7 +394,15 @@ export function Sidebar({
         <button
           className={`session-row ${list === "pinned" ? "pinned-session" : list === "recent" ? "recent-session" : ""} ${s.id === sessionId && s.hostId === hostId ? "active" : ""}`}
           aria-label={s.title}
-          aria-description={`${sourceProject?.name ?? "项目"} · ${sourceHost?.name ?? s.hostId} · ${statusNames[s.status]}${liveState === "closed" ? "" : ` · ${liveLabel}`}`}
+          aria-description={`${sourceProject?.name ?? "项目"} · ${sourceHost?.name ?? s.hostId} · ${statusNames[s.status]}${liveState === "closed" ? "" : ` · ${liveLabel}`}${list === "pinned" ? " · 拖动调整顺序，或按 Option + 上下方向键" : ""}`}
+          onPointerDown={
+            list === "pinned"
+              ? (event) => pinReorder.start(event, s)
+              : undefined
+          }
+          aria-keyshortcuts={
+            list === "pinned" ? "Alt+ArrowUp Alt+ArrowDown" : undefined
+          }
           onClick={() => {
             if (list === "project")
               setExpandedProjects((old) => ({
@@ -397,6 +417,7 @@ export function Sidebar({
             showMenu({ x: e.clientX, y: e.clientY });
           }}
           onKeyDown={(e) => {
+            if (list === "pinned") pinReorder.keyboard(e, s);
             if (e.key === "ContextMenu" || (e.shiftKey && e.key === "F10")) {
               e.preventDefault();
               const rect = e.currentTarget.getBoundingClientRect();
@@ -488,6 +509,12 @@ export function Sidebar({
     return (
       <div
         className="session-item"
+        data-pinned-key={list === "pinned" ? pinnedOrderKey(s) : undefined}
+        data-dragging={
+          list === "pinned" && pinReorder.drag
+            ? pinnedOrderKey(pinReorder.drag.item) === pinnedOrderKey(s)
+            : undefined
+        }
         data-menu-open={menuOpen}
         key={`${s.hostId}:${s.id}`}
       >
@@ -595,6 +622,9 @@ export function Sidebar({
             <div
               id="sidebar-pinned"
               className="pinned-session-list"
+              ref={pinReorder.list}
+              onClickCapture={pinReorder.click}
+              data-reordering={!!pinReorder.drag}
               hidden={!sections.pinned}
             >
               {state.pinned.map((s) => sessionRow(s, "pinned"))}
@@ -892,7 +922,7 @@ export function Sidebar({
           )}
         </div>
         <span className="visually-hidden" role="status">
-          {reorder.announcement}
+          {reorder.announcement} {pinReorder.announcement}
         </span>
         <section className="recent-section" aria-label="最近对话">
           <div className="section-heading">
@@ -973,6 +1003,35 @@ export function Sidebar({
                 />
               )}
               <span>{reorder.drag.project.name}</span>
+            </div>
+          </>,
+          document.body,
+        )}
+      {pinReorder.drag &&
+        createPortal(
+          <>
+            {pinReorder.drag.target && (
+              <div
+                className="project-drop-indicator"
+                aria-hidden="true"
+                style={{
+                  left: pinReorder.drag.target.left,
+                  top: pinReorder.drag.target.top,
+                  width: pinReorder.drag.target.width,
+                }}
+              />
+            )}
+            <div
+              className="project-drag-preview"
+              aria-hidden="true"
+              style={{
+                left: pinReorder.drag.x,
+                top: pinReorder.drag.y,
+                width: pinReorder.drag.width,
+              }}
+            >
+              <Pin size={16} />
+              <span>{pinReorder.drag.item.title}</span>
             </div>
           </>,
           document.body,
