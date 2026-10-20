@@ -66,6 +66,11 @@ pub enum Action {
     /// Native completion evidence for inputs consumed in this turn (possibly a batch).
     /// A delivered input does not necessarily start an independent native turn.
     InputsConsumed(Vec<String>),
+    /// A native RPC definitively rejected an input; preserve the active turn.
+    InputRejected {
+        request_id: String,
+        message: String,
+    },
     Interrupted,
     Event(EventKind),
     /// Native child output; never changes the parent turn's text or execution state.
@@ -94,6 +99,12 @@ pub enum Action {
 }
 
 pub trait AgentAdapter: Send {
+    /// Bound native stdout independently of the public protocol's frame limit.
+    fn max_output_frame_length(&self) -> usize {
+        1024 * 1024
+    }
+    /// Native foreground input is ready; background work may remain alive.
+    fn can_start_turn(&self) -> bool;
     /// Only true between turns when replacing the process cannot discard live work.
     fn can_reconfigure(&self) -> bool;
     /// Actual native tasks that outlive the main turn; distinct from reconfiguration readiness.

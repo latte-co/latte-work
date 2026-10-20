@@ -71,6 +71,17 @@ for line in sys.stdin:
         metadata({'type':'user','message':{'content':text},'sessionId':native_id})
         if name: metadata({'type':'custom-title','customTitle':name,'sessionId':native_id})
         emit({'type':'system','subtype':'init','session_id':native_id})
+        if text.startswith('/project:check skill-load'):
+            catalog_only=text.endswith('native-catalog')
+            if catalog_only: emit({'type':'system','subtype':'init','session_id':native_id,'skills':['project:check']})
+            echo={'type':'user','isReplay':True,'message':{'content':'<command-message>project:check</command-message>\n<command-name>/project:check</command-name>\n<command-args>skill-load</command-args>'}}
+            context={'type':'user','isSynthetic':True,'message':{'content':[{'type':'text','text':'Base directory for this skill: /tmp/fixture-skill\n\nPRIVATE_SKILL_BODY'}]}}
+            for _ in range(2):
+                emit(echo)
+                if not catalog_only: emit(context)
+            emit({'type':'assistant','message':{'content':[{'type':'text','text':'SKILL_LOADED'}]}})
+            emit({'type':'result','subtype':'success','is_error':False})
+            continue
         if text=='native-generated-title':
             metadata({'type':'ai-title','aiTitle':'Generated native title','sessionId':native_id})
             emit({'type':'assistant','message':{'content':[{'type':'text','text':'TITLE_OK'}]}})
@@ -231,10 +242,16 @@ for line in sys.stdin:
         elif text=='identity':
             emit({'type':'assistant','message':{'content':[{'type':'text','text':json.dumps({'pid':os.getpid(),'turns':turns,'background_pid':background.pid if background else None})}]}})
             emit({'type':'result','subtype':'success','is_error':False})
-        elif text in ('background','background-report'):
-            background=subprocess.Popen(['sleep','120' if text=='background' else '0.5'])
+        elif text in ('background','background-report','background-held'):
+            background=subprocess.Popen(['sleep','120' if text in ('background','background-held') else '0.5'])
             emit({'type':'system','subtype':'task_started','task_id':'bg-task','task_type':'local_agent'})
             emit({'type':'assistant','message':{'content':[{'type':'text','text':f'background:{background.pid}'}]}})
+            if text=='background-held':
+                pathlib.Path('background-main-waiting').touch()
+                deadline=time.monotonic()+10
+                while not pathlib.Path('background-release-main').exists():
+                    assert time.monotonic()<deadline, 'fixture main release timed out'
+                    time.sleep(.01)
             emit({'type':'result','subtype':'success','is_error':False})
             if text=='background-report':
                 def report():

@@ -152,6 +152,19 @@ The existing send request ID, persistence, resume, cancellation and approval flo
 shared by native commands. Terminal-only commands absent from the native SDK catalog
 are not synthesized. Agent command effects and configuration scope remain native;
 Latte's explicit model/effort selections continue to apply on each launched turn.
+Claude slash Skills are confirmed by the native `init.skills` catalog plus a CLI
+command-expansion replay (`isReplay`), checked against the discovered command
+catalog. CLI variants that expose synthetic user context (`isSynthetic`, or legacy
+`isMeta`) also support a command echo followed by the Skill base-directory header
+and body. The adapter persists one `notice` (`已加载 Skill：<name>`) per Skill per turn.
+It never exposes the body or directory, invents a `Skill` tool call, or reports a
+load from a submitted slash string alone. Child, idle and discovery frames do not
+claim a parent load. Native context replay within the turn is deduplicated; a later
+explicit invocation can report a new load. The UI keeps these notices visible
+outside a completed turn's collapsed process. This uses the existing protocol;
+the execution host Server must be updated to produce the notice. Old history is
+not backfilled and old Servers continue without the extra load indicator.
+
 App-owned `/agents` (and listing aliases), `/model` and `/effort` are resolved before
 native command discovery or turn admission. The latter two open the existing model
 selector or effort submenu; they never change native configuration via a CLI command.
@@ -919,6 +932,14 @@ message and optional skip, never an empty approval. Focused final-binary check:
 `send_queued` is an explicit additive alternative to `send`; an idle session starts
 immediately, a busy session saves the prompt in the host's SQLite FIFO. The desktop
 uses this API and the same native provider injection for local and SSH hosts.
+Foreground readiness is separate from safe process reconfiguration. Once the main
+turn completes, same-config messages start immediately and existing FIFO messages
+can drain while native children/background tasks stay alive in the same process.
+Pending approvals, interrupts and unconfirmed inputs still block new foreground
+turns. A model/Provider/permission/effort change that requires replacing a busy
+background process fails explicitly instead of silently queueing new input or
+terminating background work. A previously queued incompatible configuration pauses
+the queue with its reason; user resumption remains explicit.
 `message_queued` acknowledges durable admission, not execution; the user event and
 request record are written only when the actor starts that turn. Starting a queued
 turn and retiring its pending row share a transaction. Original admission identities
@@ -951,8 +972,11 @@ smoke evidence is separate from real-model behavior.
 
 The queued-row send arrow uses `dispatch_queued_message` with `interrupt: false`.
 While a native turn is running, the server writes the selected prompt to that same
-Claude stream immediately; it never sends an interrupt or waits for the host queue
-head. A persisted `queued_message_sent` receipt carries the original text and request
+Claude stream immediately, or uses Traex `turn/steer` with the active native
+`expectedTurnId`; it never sends an interrupt or waits for the host queue head.
+The row shows a pending indicator during its request and a local delivery/error
+result, including startup/configuration failures, without replaying the action.
+A persisted `queued_message_sent` receipt carries the original text and request
 ID, distinct from the `user` execution-start event. The desktop immediately displays
 it with the shared user-message bubble, original send time, copy and attachment controls.
 For legacy histories with a later execution event, it correlates by session/request
@@ -969,6 +993,16 @@ replay and block host-held messages until native confirmation or explicit stop/c
 Outstanding native inputs
 share the 16-message/512-KiB admission budget. Streamed handoffs cannot provide a
 safe independent filesystem boundary, so overlapping turn snapshots cannot be undone.
+
+Traex steering stays inside the current native turn while waiting for a model,
+thinking, replying or awaiting approval. Its RPC acknowledgement must match the
+expected turn; processing is retired only after that same turn completes
+successfully (including completion before the RPC acknowledgement). Interrupt,
+failure or transport loss retain uncertainty rather than infer execution. An
+explicit native RPC rejection returns just that input to the host queue with a
+new revision and pauses automatic drain; the current task and approval remain
+intact. A missing native turn ID fails clearly and retains the queued message.
+The wire protocol is unchanged; execution hosts need the updated Server.
 
 Active native turns retain their 24-hour execution limit. Each handed-off input has
 an independent 24-hour confirmation deadline measured from its delivery, including
@@ -1052,6 +1086,11 @@ structured user questions, and live title changes. Approval responses use
 server requests return explicit unsupported errors. EOF or a successful process
 exit cannot complete a turn. Native thread/turn identities fence unrelated or
 stale notifications; hidden reasoning text is not stored.
+Traex native stdout allows a bounded 16 MiB per frame because `thread/resume`
+returns persisted turns in one response. Restored turns are control metadata,
+not new public events or replayed prompts. Other Agent streams retain the 1 MiB
+limit; public protocol and metadata-probe limits are unchanged. Oversized native
+frames fail explicitly with the configured limit while preserving session history.
 Completion-only assistant items share the bounded per-turn text deduplication set.
 A completion that precedes both forms of start evidence is buffered (at most 32
 turn IDs) and applied only after the start response/notification confirms its ID.
@@ -1093,8 +1132,9 @@ capability evidence. CLI-backed sessions resolve the current native provider thr
 so removing a binding cannot retain the preceding App provider from a rollout.
 See `docs/providers.md` and `scripts/smoke-traex-providers.py` for native protocol checks.
 
-Native slash-command discovery, offline native title edits, child transcript reads
-and running-turn message insertion are not implemented and fail explicitly.
+Native slash-command discovery, offline native title edits and child transcript
+reads are not implemented and fail explicitly. Running-turn input uses native
+`turn/steer`; an unsupported/rejected request never falls back to interrupting.
 Ordinary durable FIFO queueing and explicit stop-and-send use the shared runtime.
 Native child activity fences reconfiguration; it is not inferred to be finished
 when the main turn completes. No dependencies or send-request fields are added.

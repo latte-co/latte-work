@@ -124,7 +124,7 @@ afterEach(() => {
   cleanup();
   vi.unstubAllGlobals();
 });
-it("detects only standalone mention and leading slash triggers", () => {
+it("detects only standalone mention and slash triggers", () => {
   expect(composerTrigger("mail@host", 9)).toBeNull();
   expect(composerTrigger("https://host/", 13)).toBeNull();
   expect(composerTrigger("/compact 参数", 11)).toBeNull();
@@ -132,6 +132,52 @@ it("detects only standalone mention and leading slash triggers", () => {
     kind: "files",
     start: 3,
   });
+});
+it.each([
+  ["local", "请检查 /comp", "Enter"],
+  ["remote", "请检查   /comp", "Tab"],
+])(
+  "completes a command after text on %s, preserving spaces without submitting",
+  async (hostId, draft, key) => {
+    render(<Harness hostId={hostId} />);
+    type(draft);
+    await screen.findByRole("option", { name: /compact/ });
+    expect(mocks.request).toHaveBeenCalledWith(hostId, {
+      method: "agent_commands",
+      project_id: "p",
+      agent: "claude",
+    });
+    fireEvent.keyDown(screen.getByRole("textbox"), { key });
+    const completed = draft.replace(/\/comp$/, "/compact ");
+    expect(screen.getByRole("textbox")).toHaveProperty("value", completed);
+    expect(mocks.send).not.toHaveBeenCalled();
+    expect(screen.queryByRole("listbox")).toBeNull();
+    fireEvent.keyDown(screen.getByRole("textbox"), { key: "Enter" });
+    await waitFor(() =>
+      expect(mocks.send).toHaveBeenCalledWith(completed.trim()),
+    );
+  },
+);
+it("completes a command at the caret without replacing surrounding text", async () => {
+  vi.stubGlobal("requestAnimationFrame", (fn: FrameRequestCallback) =>
+    window.setTimeout(() => fn(0), 0),
+  );
+  render(<Harness />);
+  const before = "前文  ";
+  const after = " 后文";
+  type(`${before}/comp${after}`, before.length + "/comp".length);
+  fireEvent.click(await screen.findByRole("option", { name: /compact/ }));
+  expect(screen.getByRole("textbox")).toHaveProperty(
+    "value",
+    `${before}/compact ${after}`,
+  );
+  await waitFor(() =>
+    expect(screen.getByRole("textbox")).toHaveProperty(
+      "selectionStart",
+      before.length + "/compact ".length,
+    ),
+  );
+  expect(mocks.send).not.toHaveBeenCalled();
 });
 it("loads native commands from the selected host and inserts without running; sends exact arguments", async () => {
   render(<Harness />);

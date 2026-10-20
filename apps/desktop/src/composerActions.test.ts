@@ -1,5 +1,34 @@
 import { expect, it } from "vitest";
-import { commandTitle } from "./composerActions";
+import { commandTitle, composerTrigger } from "./composerActions";
+it.each(["", "前文 ", "前文   ", "前文\n", "前文\t", "前文　"])(
+  "opens commands after the start or whitespace: %j",
+  (prefix) => {
+    for (const query of ["", "comp", "project:check", "压缩"]) {
+      const text = `${prefix}/${query}`;
+      expect(composerTrigger(text, text.length)).toEqual({
+        kind: "commands",
+        start: prefix.length,
+        end: text.length,
+        query,
+      });
+    }
+  },
+);
+it.each([
+  "前文/comp",
+  "https://host/comp",
+  "查看 https://host/comp",
+  "src/comp",
+  "前文 ./comp",
+  "前文 /tmp/comp",
+  "前文 //comp",
+  "前文 /compact 参数",
+])(
+  "does not treat a path, URL or command arguments as a trigger: %s",
+  (text) => {
+    expect(composerTrigger(text, text.length)).toBeNull();
+  },
+);
 const command = {
   name: "lark-calendar",
   description: "飞书日历：管理日历与会议",

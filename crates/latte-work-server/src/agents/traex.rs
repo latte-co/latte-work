@@ -26,6 +26,7 @@ enum Phase {
 struct PendingRequest {
     method: &'static str,
     interrupt_turn: Option<String>,
+    queued_input: Option<(String, String)>,
 }
 #[derive(Default)]
 pub struct Traex {
@@ -36,6 +37,8 @@ pub struct Traex {
     thread: Option<String>,
     turn: Option<String>,
     completed_turn: Option<String>,
+    completed_success: bool,
+    steered: HashSet<String>,
     early_completions: HashMap<String, Value>,
     title: Option<String>,
     pending_prompt: Option<String>,
@@ -75,6 +78,7 @@ impl Traex {
             id.clone(),
             PendingRequest {
                 method,
+                queued_input: None,
                 interrupt_turn: (method == "turn/interrupt")
                     .then(|| self.turn.clone())
                     .flatten(),
@@ -88,6 +92,31 @@ impl Traex {
             "initialize",
             json!({"clientInfo":{"name":"latte-work","version":"0.1.0"}}),
         )?])
+    }
+    fn steer(&mut self, request_id: &str, prompt: &str) -> Result<Vec<Action>> {
+        if self.phase != Phase::Running || self.turn.is_none() {
+            bail!("Traex 正在准备本轮任务，消息保留在队列，请稍后再发送");
+        }
+        if prompt.trim_start().starts_with('/') {
+            bail!("Traex 尚不支持原生命令，消息保留在队列");
+        }
+        if self.steered.len()
+            + self
+                .pending
+                .values()
+                .filter(|p| p.queued_input.is_some())
+                .count()
+            >= 16
+        {
+            bail!("Traex 待处理消息已达上限，消息保留在队列");
+        }
+        let turn = self.turn.clone().expect("checked turn");
+        let action = self.request("turn/steer", json!({"threadId":self.thread,"expectedTurnId":turn,"input":[{"type":"text","text":prompt}]}))?;
+        self.pending
+            .get_mut(&format!("latte-{}", self.counter))
+            .expect("inserted request")
+            .queued_input = Some((request_id.into(), turn));
+        Ok(vec![action])
     }
     fn start(&mut self, prompt: &str) -> Result<Vec<Action>> {
         if prompt.trim_start().starts_with('/') {
@@ -173,6 +202,15 @@ impl Traex {
         };
         let method = request.method;
         if let Some(error) = message.get("error") {
+            if let Some((request_id, _)) = request.queued_input {
+                return Ok(vec![Action::InputRejected {
+                    request_id,
+                    message: format!(
+                        "Traex 未接收消息：{}",
+                        error["message"].as_str().unwrap_or("原生发送请求被拒绝")
+                    ),
+                }]);
+            }
             // Completion can win the race with interrupt processing. Only an
             // explicitly completed, identity-bound turn makes this error obsolete.
             if method == "turn/interrupt"
@@ -194,6 +232,23 @@ impl Traex {
             );
         }
         let result = message.get("result").context("Traex 控制响应缺少 result")?;
+        if let Some((request_id, expected)) = request.queued_input {
+            if result["turnId"].as_str() != Some(expected.as_str()) {
+                bail!("Traex 消息交付返回了不同的 turn，处理状态待确认");
+            }
+            if self.turn.as_deref() == Some(expected.as_str()) && self.phase == Phase::Running {
+                self.steered.insert(request_id);
+                return Ok(vec![]);
+            }
+            if self.completed_turn.as_deref() == Some(expected.as_str()) {
+                return Ok(if self.completed_success {
+                    vec![Action::InputsConsumed(vec![request_id])]
+                } else {
+                    vec![]
+                });
+            }
+            bail!("Traex 消息交付所属 turn 已变化，处理状态待确认");
+        }
         match method {
             "initialize" => {
                 if self.discovering {
@@ -405,6 +460,7 @@ impl Traex {
                 self.phase = Phase::Ready;
                 self.approvals.clear();
                 self.completed_turn = self.turn.take();
+                self.completed_success = !failed;
                 self.streamed.clear();
                 self.tools.clear();
                 let message = if failed {
@@ -421,7 +477,13 @@ impl Traex {
                 } else {
                     None
                 };
-                Ok(vec![Action::Finished { failed, message }])
+                let mut actions = Vec::new();
+                if !failed && !self.steered.is_empty() {
+                    actions.push(Action::InputsConsumed(self.steered.drain().collect()));
+                }
+                self.steered.clear();
+                actions.push(Action::Finished { failed, message });
+                Ok(actions)
             }
             "error" if params["willRetry"] != true => bail!(
                 "Traex：{}",
@@ -539,8 +601,16 @@ impl Traex {
     }
 }
 impl AgentAdapter for Traex {
+    fn max_output_frame_length(&self) -> usize {
+        // thread/resume returns persisted turns in a single control response.
+        // That history is not emitted as a public event or replayed to the model.
+        16 * 1024 * 1024
+    }
+    fn can_start_turn(&self) -> bool {
+        self.phase == Phase::Ready && self.pending.is_empty()
+    }
     fn can_reconfigure(&self) -> bool {
-        self.phase == Phase::Ready && self.children.is_empty() && self.pending.is_empty()
+        self.can_start_turn() && self.children.is_empty()
     }
     fn has_background_work(&self) -> bool {
         !self.children.is_empty()
@@ -607,9 +677,7 @@ impl AgentAdapter for Traex {
                 _ => bail!("Traex 当前不能开始新一轮任务"),
             },
             Input::Interrupt => self.interrupt(),
-            Input::Queue { .. } => bail!(
-                "Traex 尚不支持运行中插入消息；消息保留在队列，可等待本轮结束或停止当前并发送"
-            ),
+            Input::Queue { request_id, prompt } => self.steer(request_id, prompt),
             Input::RenameTitle { title, .. } => {
                 if !matches!(self.phase, Phase::Ready | Phase::Running) || self.rename.is_some() {
                     bail!("Traex 会话尚未就绪或标题修改待确认");
@@ -807,6 +875,16 @@ mod tests {
                 ))
                 .is_err()
         );
+    }
+    #[test]
+    fn idle_parent_can_continue_while_children_still_prevent_reconfiguration() {
+        let mut agent = opened();
+        agent.children.insert("child-thread".into());
+        assert!(agent.can_start_turn());
+        assert!(!agent.can_reconfigure());
+        agent.advance(Input::Start { prompt: "followup" }).unwrap();
+        assert!(!agent.can_start_turn());
+        assert!(agent.children.contains("child-thread"));
     }
     #[test]
     fn only_the_active_native_turn_can_stream_or_finish() {
@@ -1123,8 +1201,122 @@ mod tests {
         assert!(agent.can_reconfigure());
     }
     #[test]
-    fn malformed_frames_fail_and_unsupported_actions_never_become_prompts() {
+    fn steer_is_turn_bound_and_only_completion_retires_the_input() {
         let mut agent = running();
+        let writes = encoded(
+            &agent
+                .advance(Input::Queue {
+                    request_id: "q",
+                    prompt: "补充信息",
+                })
+                .unwrap(),
+        );
+        assert_eq!(writes[0]["method"], "turn/steer");
+        assert_eq!(
+            writes[0]["params"],
+            json!({"threadId":"t","expectedTurnId":"turn","input":[{"type":"text","text":"补充信息"}]})
+        );
+        assert!(
+            message(
+                &mut agent,
+                json!({"id":writes[0]["id"],"result":{"turnId":"turn"}})
+            )
+            .is_empty()
+        );
+        let done = message(
+            &mut agent,
+            json!({"method":"turn/completed","params":{"threadId":"t","turn":{"id":"turn","status":"completed"}}}),
+        );
+        assert!(
+            matches!(&done[..],[Action::InputsConsumed(ids),Action::Finished{failed:false,..}] if ids==&["q"])
+        );
+    }
+    #[test]
+    fn steer_rejection_preserves_the_turn_and_late_ack_needs_matching_completion() {
+        let mut agent = running();
+        let write = encoded(
+            &agent
+                .advance(Input::Queue {
+                    request_id: "q",
+                    prompt: "extra",
+                })
+                .unwrap(),
+        )
+        .remove(0);
+        let rejection = message(
+            &mut agent,
+            json!({"id":write["id"],"error":{"code":-32601,"message":"unsupported steer"}}),
+        );
+        assert!(matches!(&rejection[..],[Action::InputRejected{request_id,..}] if request_id=="q"));
+        assert!(agent.phase == Phase::Running);
+        let write = encoded(
+            &agent
+                .advance(Input::Queue {
+                    request_id: "q2",
+                    prompt: "extra",
+                })
+                .unwrap(),
+        )
+        .remove(0);
+        message(
+            &mut agent,
+            json!({"method":"turn/completed","params":{"threadId":"t","turn":{"id":"turn","status":"completed"}}}),
+        );
+        assert!(
+            matches!(&message(&mut agent,json!({"id":write["id"],"result":{"turnId":"turn"}}))[..],[Action::InputsConsumed(ids)] if ids==&["q2"])
+        );
+        let mut agent = running();
+        let write = encoded(
+            &agent
+                .advance(Input::Queue {
+                    request_id: "q",
+                    prompt: "extra",
+                })
+                .unwrap(),
+        )
+        .remove(0);
+        assert!(
+            agent
+                .advance(Input::Message(
+                    &json!({"id":write["id"],"result":{"turnId":"wrong"}}).to_string()
+                ))
+                .is_err()
+        );
+    }
+    #[test]
+    fn interrupted_steers_are_not_reported_as_processed_and_startup_is_explicit() {
+        let mut agent = running();
+        let write = encoded(
+            &agent
+                .advance(Input::Queue {
+                    request_id: "q",
+                    prompt: "extra",
+                })
+                .unwrap(),
+        )
+        .remove(0);
+        message(
+            &mut agent,
+            json!({"id":write["id"],"result":{"turnId":"turn"}}),
+        );
+        let done = message(
+            &mut agent,
+            json!({"method":"turn/completed","params":{"threadId":"t","turn":{"id":"turn","status":"interrupted"}}}),
+        );
+        assert!(!done.iter().any(|a| matches!(a, Action::InputsConsumed(_))));
+        let mut agent = opened();
+        assert!(
+            agent
+                .advance(Input::Queue {
+                    request_id: "q",
+                    prompt: "extra"
+                })
+                .is_err()
+        );
+    }
+    #[test]
+    fn malformed_frames_fail_and_unsupported_actions_never_become_prompts() {
+        let mut agent = opened();
         assert!(
             agent
                 .advance(Input::Queue {

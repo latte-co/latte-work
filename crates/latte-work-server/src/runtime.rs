@@ -31,6 +31,7 @@ use tokio_util::codec::{FramedRead, LinesCodec};
 pub type Database = Arc<Mutex<Store>>;
 pub type Runs = Arc<Mutex<HashMap<String, Run>>>;
 const TURN_LIMIT: Duration = Duration::from_secs(24 * 3600);
+const RECONFIGURE_BLOCKED: &str = "当前会话仍有后台任务或待确认状态，无法更换模型、Provider、权限或思考强度；请沿用当前配置发送，消息未发送";
 
 #[derive(Default)]
 struct ForwardedInputs(HashMap<String, tokio::time::Instant>);
@@ -543,6 +544,14 @@ impl TurnState {
                 Action::InputsConsumed(ids) => {
                     db(database, |s| s.consume_forwarded(session_id, &ids))?
                 }
+                Action::InputRejected {
+                    request_id,
+                    message,
+                } => {
+                    db(database, |s| {
+                        s.reject_forwarded(session_id, &request_id, &config.redact(&message))
+                    })?;
+                }
                 Action::TurnStarted => db(database, |s| {
                     if !s.session(session_id)?.status.active() {
                         s.state(session_id, Status::Running, None)?;
@@ -755,6 +764,14 @@ impl Drop for Process {
     }
 }
 impl Process {
+    fn can_start_turn(&self) -> bool {
+        self.state.ready
+            && !self.turn_active
+            && !self.stopping
+            && !self.interrupt_ack_pending
+            && self.state.pending.is_empty()
+            && self.adapter.can_start_turn()
+    }
     fn spawn(
         binary: &str,
         session: &Session,
@@ -785,7 +802,7 @@ impl Process {
         let input = group.child.stdin.take().context("Agent stdin missing")?;
         let output = FramedRead::new(
             group.child.stdout.take().context("Agent stdout missing")?,
-            LinesCodec::new_with_max_length(1024 * 1024),
+            LinesCodec::new_with_max_length(adapter.max_output_frame_length()),
         );
         let mut stderr = group.child.stderr.take().context("Agent stderr missing")?;
         let drain = tokio::spawn(async move {
@@ -994,13 +1011,14 @@ async fn accept_turn(
     if process.as_ref().is_some_and(|p| !p.state.ready) {
         bail!("Agent 会话正在恢复，请稍后重试；消息未发送");
     }
+    if process.as_ref().is_some_and(|p| !p.can_start_turn()) {
+        bail!("Agent 尚有本轮响应、审批或发送确认待处理；消息未发送");
+    }
     if let Some(current) = process.as_mut()
         && !same_config(&current.config, &config)
     {
         if !current.adapter.can_reconfigure() {
-            bail!(
-                "此会话仍有后台 Agent 或待处理的回复；请先在会话菜单中关闭，再更换模型、Provider、权限或思考强度。当前任务未被中断"
-            );
+            bail!(RECONFIGURE_BLOCKED);
         }
         current.close().await;
         *process = None;
@@ -1122,10 +1140,18 @@ async fn receive_turn(
     }
     if allow_queue {
         let queued = db(database, |d| d.queued(&session.id))?;
-        let busy = db(database, |d| Ok(d.session(&session.id)?.status.active()))?
-            || process
-                .as_ref()
-                .is_some_and(|p| !p.state.ready || p.turn_active || !p.adapter.can_reconfigure());
+        let busy = pending_inputs
+            || db(database, |d| Ok(d.session(&session.id)?.status.active()))?
+            || process.as_ref().is_some_and(|p| !p.can_start_turn());
+        // An idle foreground can accept same-config input while its children run.
+        // A config change still needs safe process replacement, even with a queue.
+        if !busy
+            && let Some(p) = process.as_ref()
+            && !same_config(&p.config, &turn.config)
+            && !p.adapter.can_reconfigure()
+        {
+            bail!(RECONFIGURE_BLOCKED);
+        }
         if busy || !queued.is_empty() {
             db(database, |d| d.enqueue(&session.id, &turn))?;
             configs.insert(turn.request_id, turn.config);
@@ -1485,11 +1511,13 @@ async fn actor(
             line = async { match process.as_mut() { Some(p) => p.output.next().await, None => std::future::pending().await } } => {
                 async {
                     let p = process.as_mut().context("Agent process missing")?;
-                    let line = line.context("Agent 进程意外退出；会话历史已保留，后台任务状态无法恢复")??;
+                    let line = line.context("Agent 进程意外退出；会话历史已保留，后台任务状态无法恢复")?.map_err(|error|anyhow::anyhow!("读取 {} 原生消息失败（单条上限 {} MiB）：{error}；会话历史已保留",session.agent,p.adapter.max_output_frame_length() / (1024 * 1024)))?;
                     let actions = p.adapter.advance(Input::Message(&line))?;
                     let consumed: Vec<_> = actions.iter().filter_map(|action| match action {
                         Action::InputsConsumed(ids) => Some(ids.as_slice()), _ => None,
-                    }).flatten().cloned().collect();
+                    }).flatten().cloned().chain(actions.iter().filter_map(|action| match action {
+                        Action::InputRejected { request_id, .. } => Some(request_id.clone()), _ => None,
+                    })).collect();
                     p.apply(actions, &database, &session.id).await?;
                     for id in consumed { forwarded.remove(&id); }
                     Ok(())
@@ -1639,14 +1667,7 @@ async fn actor(
             if !paused
                 && forwarded.is_empty()
                 && !status.active()
-                && process.as_ref().is_none_or(|p| {
-                    p.state.ready
-                        && !p.stopping
-                        && !p.interrupt_ack_pending
-                        && !p.turn_active
-                        && p.state.pending.is_empty()
-                        && p.adapter.can_reconfigure()
-                })
+                && process.as_ref().is_none_or(Process::can_start_turn)
                 && let Some((entry, fingerprint)) =
                     db(&database, |d| d.queued(&session.id))?.into_iter().next()
             {
@@ -1770,6 +1791,36 @@ pub async fn commands(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn native_output_limits_allow_traex_history_and_reject_oversized_frames() {
+        for (agent, size, accepted) in [
+            ("claude", 1024 * 1024, true),
+            ("claude", 1024 * 1024 + 1, false),
+            ("traex", 16 * 1024 * 1024, true),
+            ("traex", 16 * 1024 * 1024 + 1, false),
+        ] {
+            let (mut writer, reader) = tokio::io::duplex(65536);
+            let task = tokio::spawn(async move {
+                let mut bytes = vec![b'x'; size];
+                bytes.push(b'\n');
+                let _ = writer.write_all(&bytes).await;
+            });
+            let adapter = agents::create(agent).unwrap();
+            let mut output = FramedRead::new(
+                reader,
+                LinesCodec::new_with_max_length(adapter.max_output_frame_length()),
+            );
+            let line = tokio::time::timeout(Duration::from_secs(5), output.next())
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(line.is_ok(), accepted, "{agent} size {size}");
+            if accepted {
+                assert_eq!(line.unwrap().len(), size);
+            }
+            task.abort();
+        }
+    }
     #[tokio::test(start_paused = true)]
     async fn late_handoffs_get_a_full_window_without_extending_earlier_inputs() {
         let start = tokio::time::Instant::now();

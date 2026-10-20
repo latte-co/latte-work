@@ -399,6 +399,102 @@ it("sends without interrupt by default and requests interrupt only from the expl
     }),
   );
 });
+it("shows pending delivery across phase changes, prevents duplicate clicks, and reports rejection beside the queue", async () => {
+  let fail!: (error: Error) => void;
+  mocks.request.mockImplementation(async (_, request) =>
+    request.method === "dispatch_queued_message"
+      ? new Promise((_, reject) => {
+          fail = reject;
+        })
+      : {
+          kind: "message_queue",
+          entries: [entry],
+          paused: false,
+          reason: null,
+        },
+  );
+  const view = render(<MessageQueue {...props} />);
+  const send = await screen.findByRole("button", {
+    name: "发送排队消息：Original message",
+  });
+  fireEvent.click(send);
+  expect(screen.getByText("正在交给 Agent…")).toBeTruthy();
+  expect(send.getAttribute("aria-busy")).toBe("true");
+  expect((send as HTMLButtonElement).disabled).toBe(true);
+  fireEvent.click(send);
+  view.rerender(<MessageQueue {...props} revision="thinking" />);
+  expect(screen.getByText("正在交给 Agent…")).toBeTruthy();
+  await act(async () => fail(new Error("Traex 正在准备，消息保留在队列")));
+  expect(screen.getByRole("alert").textContent).toContain("未发送");
+  expect(screen.getByRole("alert").textContent).toContain("消息保留在队列");
+  expect((send as HTMLButtonElement).disabled).toBe(false);
+  expect(
+    mocks.request.mock.calls.filter(
+      ([, r]) => r.method === "dispatch_queued_message",
+    ),
+  ).toHaveLength(1);
+});
+it("does not carry a late dispatch failure into another conversation", async () => {
+  let fail!: (error: Error) => void;
+  mocks.request.mockImplementation(async (_, request) =>
+    request.method === "dispatch_queued_message"
+      ? new Promise((_, reject) => {
+          fail = reject;
+        })
+      : {
+          kind: "message_queue",
+          entries: [entry],
+          paused: false,
+          reason: null,
+        },
+  );
+  const view = render(<MessageQueue {...props} />);
+  fireEvent.click(
+    await screen.findByRole("button", {
+      name: "发送排队消息：Original message",
+    }),
+  );
+  view.rerender(<MessageQueue {...props} sessionId="other" />);
+  await act(async () => fail(new Error("old dispatch failure")));
+  expect(screen.queryByText(/old dispatch failure|正在交给 Agent/)).toBeNull();
+});
+it("clears the handoff confirmation when native rejection returns a new queue revision", async () => {
+  let rejected = false;
+  mocks.request.mockImplementation(async (_, request) => {
+    if (request.method === "dispatch_queued_message") {
+      rejected = true;
+      return {
+        kind: "message_queue",
+        entries: [],
+        paused: false,
+        reason: null,
+      };
+    }
+    return {
+      kind: "message_queue",
+      entries: [{ ...entry, revision: rejected ? 4 : 3 }],
+      paused: rejected,
+      reason: rejected ? "原生发送被拒绝，已退回队列" : null,
+    };
+  });
+  render(<MessageQueue {...props} />);
+  fireEvent.click(
+    await screen.findByRole("button", {
+      name: "发送排队消息：Original message",
+    }),
+  );
+  await screen.findByText("原生发送被拒绝，已退回队列");
+  await waitFor(() =>
+    expect(
+      (
+        screen.getByRole("button", {
+          name: "发送排队消息：Original message",
+        }) as HTMLButtonElement
+      ).disabled,
+    ).toBe(false),
+  );
+  expect(screen.queryByText("已交给 Agent，等待处理")).toBeNull();
+});
 it("navigates the extra actions with arrow keys and restores the menu trigger on Escape", async () => {
   render(<MessageQueue {...props} onEdit={vi.fn()} />);
   const trigger = await screen.findByRole("button", {

@@ -13,6 +13,7 @@ import {
   MoreHorizontal,
   ArrowUp,
   GripVertical,
+  LoaderCircle,
 } from "lucide-react";
 import { createPortal } from "react-dom";
 import { request, message } from "./api";
@@ -64,6 +65,13 @@ export function MessageQueue({
   }, []);
   const [reload, setReload] = useState(0);
   const [busy, setBusy] = useState(false);
+  const acting = useRef<number | null>(null);
+  const [feedback, setFeedback] = useState<{
+    id: string;
+    revision: number;
+    kind: "pending" | "success" | "error";
+    text: string;
+  }>();
   const [error, setError] = useState("");
   const [recover, setRecover] =
     useState<Extract<Request, { method: "take_queued_message" }>>();
@@ -95,11 +103,18 @@ export function MessageQueue({
   }
   useEffect(() => {
     setBusy(false);
+    acting.current = null;
+    setFeedback(undefined);
     setError("");
     setAnnouncement("");
     focusAfterReorder.current = undefined;
     endDrag();
   }, [context]);
+  useEffect(() => {
+    if (feedback?.kind !== "success") return;
+    const timer = setTimeout(() => setFeedback(undefined), 4000);
+    return () => clearTimeout(timer);
+  }, [feedback]);
   const read = useCallback(async () => {
     const response = await request(hostId, {
       method: "message_queue",
@@ -118,6 +133,17 @@ export function MessageQueue({
     LIVE_POLL_MS,
     0,
   );
+  useEffect(() => {
+    if (
+      feedback?.kind === "success" &&
+      state.data.entries.some(
+        (entry) =>
+          entry.request_id === feedback.id &&
+          entry.revision !== feedback.revision,
+      )
+    )
+      setFeedback(undefined);
+  }, [feedback, state.data]);
   latestSnapshot.current = state.data;
   useEffect(() => {
     const pending = focusAfterReorder.current;
@@ -127,8 +153,17 @@ export function MessageQueue({
     }
   }, [busy, state.data]);
   async function act(command: Request, focusId?: string) {
-    if (busy || !connected || !active) return;
+    if (acting.current === version || !connected || !active) return;
+    acting.current = version;
     setBusy(true);
+    if (command.method === "dispatch_queued_message")
+      setFeedback({
+        id: command.request_id,
+        revision: command.revision,
+        kind: "pending",
+        text: command.interrupt ? "正在停止当前任务并发送…" : "正在交给 Agent…",
+      });
+    else setFeedback(undefined);
     setAnnouncement("");
     try {
       const response = await request(hostId, command);
@@ -142,6 +177,13 @@ export function MessageQueue({
         throw new Error("队列操作未确认，请刷新后核对");
       }
       setError("");
+      if (command.method === "dispatch_queued_message")
+        setFeedback({
+          id: command.request_id,
+          revision: command.revision,
+          kind: "success",
+          text: "已交给 Agent，等待处理",
+        });
       if (command.method === "reorder_message_queue") {
         setAnnouncement("待发送顺序已保存");
         if (focusId)
@@ -161,10 +203,20 @@ export function MessageQueue({
         setRecover(command);
       if (valid()) {
         setError(message(cause));
+        if (command.method === "dispatch_queued_message")
+          setFeedback({
+            id: command.request_id,
+            revision: command.revision,
+            kind: "error",
+            text: `未发送：${message(cause)}`,
+          });
         setReload((v) => v + 1);
       }
     } finally {
-      if (valid()) setBusy(false);
+      if (valid()) {
+        acting.current = null;
+        setBusy(false);
+      }
     }
   }
   useStatusIssues([
@@ -191,7 +243,8 @@ export function MessageQueue({
     },
   ]);
   const { entries, paused, reason } = state.data;
-  if (!entries.length) return null;
+  if (!entries.length && (!feedback || feedback.kind === "success"))
+    return null;
   const disabled = busy || !connected || !active;
   const canReorder = entries.length > 1 && !disabled;
   function reorder(
@@ -393,7 +446,15 @@ export function MessageQueue({
                   className="icon-button"
                   aria-label={`发送排队消息：${content.text}`}
                   title="发送给 Agent（不中断当前任务）"
-                  disabled={disabled}
+                  disabled={
+                    disabled ||
+                    (feedback?.id === entry.request_id &&
+                      feedback.kind === "success")
+                  }
+                  aria-busy={
+                    feedback?.id === entry.request_id &&
+                    feedback.kind === "pending"
+                  }
                   onClick={() =>
                     void act({
                       method: "dispatch_queued_message",
@@ -405,7 +466,12 @@ export function MessageQueue({
                     })
                   }
                 >
-                  <ArrowUp size={14} />
+                  {feedback?.id === entry.request_id &&
+                  feedback.kind === "pending" ? (
+                    <LoaderCircle size={14} className="spin" />
+                  ) : (
+                    <ArrowUp size={14} />
+                  )}
                 </button>
                 <button
                   className="icon-button"
@@ -450,6 +516,14 @@ export function MessageQueue({
           );
         })}
       </ol>
+      {feedback && (
+        <p
+          className="message-queue-reason"
+          role={feedback.kind === "error" ? "alert" : "status"}
+        >
+          {feedback.text}
+        </p>
+      )}
     </section>
   );
 }

@@ -2678,6 +2678,53 @@ async fn upgrade_racing_send_either_preserves_task_or_rejects_before_launch() {
 }
 
 #[tokio::test]
+async fn native_skill_load_notice_survives_reconnect_without_exposing_context() {
+    let host = Host::start().await;
+    let mut client = host.client().await;
+    let folder = tempfile::tempdir().unwrap();
+    let id = session(&mut client, folder.path()).await;
+    for (request, mode) in [
+        ("first-skill", "native-catalog"),
+        ("second-skill", "synthetic-context"),
+    ] {
+        send(
+            &mut client,
+            &id,
+            request,
+            &format!("/project:check skill-load {mode}"),
+        )
+        .await;
+        let events = wait(&mut client, &id, Status::Completed).await;
+        let count = events.iter().filter(|event| matches!(&event.event, EventKind::Notice { text } if text == "已加载 Skill：project:check")).count();
+        assert_eq!(count, if request == "first-skill" { 1 } else { 2 });
+        assert!(
+            !serde_json::to_string(&events)
+                .unwrap()
+                .contains("PRIVATE_SKILL_BODY")
+        );
+        assert!(
+            !events.iter().any(
+                |event| matches!(&event.event, EventKind::Tool { name, .. } if name == "Skill")
+            )
+        );
+    }
+    drop(client);
+    let mut client = host.client().await;
+    let Response::Events { events, .. } = ask(
+        &mut client,
+        Request::Poll {
+            session_id: id,
+            after: 0.0,
+        },
+    )
+    .await
+    else {
+        panic!("events response");
+    };
+    assert_eq!(events.iter().filter(|event| matches!(&event.event, EventKind::Notice { text } if text == "已加载 Skill：project:check")).count(), 2);
+}
+
+#[tokio::test]
 async fn agent_commands_discovery_dispatch_resume_and_unsupported_are_native() {
     let host = Host::start().await;
     let mut client = host.client().await;
@@ -5709,6 +5756,250 @@ async fn queue_until(c: &mut Client, id: &str, count: usize) -> Vec<latte_work_p
         );
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
+}
+#[tokio::test]
+async fn message_queue_continues_foreground_while_background_work_stays_alive() {
+    let host = Host::start().await;
+    let mut client = host.client().await;
+    let project = tempfile::tempdir().unwrap();
+    let id = session(&mut client, project.path()).await;
+    let queued = |key: &str, model: Option<&str>| Request::SendQueued {
+        session_id: id.clone(),
+        request_id: key.into(),
+        text: "identity".into(),
+        model: model.map(str::to_owned),
+        effort: None,
+        permission_mode: None,
+        provider: Some(latte_work_protocol::TurnProvider::Cli),
+    };
+    send(&mut client, &id, "background-main", "background-held").await;
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !project.path().join("background-main-waiting").exists() {
+        assert!(Instant::now() < deadline);
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let pid = agent_pid(project.path());
+    assert!(matches!(
+        ask(&mut client, queued("queued-before-result", None)).await,
+        Response::MessageQueued { duplicate: false }
+    ));
+    std::fs::write(project.path().join("background-release-main"), "release").unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let background = loop {
+        let events = wait(&mut client, &id, Status::Completed).await;
+        if let Some(identity) = events.iter().rev().find_map(|event| match &event.event {
+            EventKind::Text { text } => serde_json::from_str::<serde_json::Value>(text).ok(),
+            _ => None,
+        }) {
+            assert_eq!(identity["pid"], pid);
+            assert_eq!(identity["turns"], 2);
+            break identity["background_pid"].as_i64().unwrap() as i32;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "queue waited for background completion"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    };
+    assert!(kill(Pid::from_raw(background), None).is_ok());
+    assert!(matches!(
+        ask(&mut client, queued("sent-after-result", None)).await,
+        Response::Accepted { duplicate: false }
+    ));
+    let events = wait(&mut client, &id, Status::Completed).await;
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event.event, EventKind::User { .. }))
+            .count(),
+        3
+    );
+    assert!(matches!(
+        ask(&mut client, queued("sent-after-result", None)).await,
+        Response::Accepted { duplicate: true }
+    ));
+    assert!(
+        matches!(ask(&mut client, queued("changed-model", Some("opus"))).await, Response::Error {message,..} if message.contains("请沿用当前配置发送"))
+    );
+    assert!(
+        matches!(ask(&mut client, Request::MessageQueue {session_id:id.clone()}).await, Response::MessageQueue {entries,..} if entries.is_empty())
+    );
+    assert_eq!(agent_pid(project.path()), pid);
+    assert!(kill(Pid::from_raw(background), None).is_ok());
+    assert!(matches!(
+        ask(
+            &mut client,
+            Request::CloseAgentSession {
+                session_id: id.clone(),
+                only_if_idle: Some(true)
+            }
+        )
+        .await,
+        Response::Error { .. }
+    ));
+    assert!(matches!(
+        ask(
+            &mut client,
+            Request::CloseAgentSession {
+                session_id: id,
+                only_if_idle: Some(false)
+            }
+        )
+        .await,
+        Response::Ok
+    ));
+    assert_gone(background).await;
+    assert_gone(pid).await;
+}
+#[tokio::test]
+async fn message_queue_accepts_next_turn_while_native_subagent_runs() {
+    let host = Host::start().await;
+    let mut client = host.client().await;
+    let project = tempfile::tempdir().unwrap();
+    let id = session(&mut client, project.path()).await;
+    send(&mut client, &id, "spawn-child", "subagents").await;
+    wait(&mut client, &id, Status::Completed).await;
+    let pid = agent_pid(project.path());
+    let response = ask(
+        &mut client,
+        Request::SendQueued {
+            session_id: id.clone(),
+            request_id: "next-with-child".into(),
+            text: "identity".into(),
+            model: None,
+            effort: None,
+            permission_mode: None,
+            provider: Some(latte_work_protocol::TurnProvider::Cli),
+        },
+    )
+    .await;
+    assert!(
+        matches!(response, Response::Accepted { duplicate: false }),
+        "{response:?}"
+    );
+    let events = wait(&mut client, &id, Status::Completed).await;
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event.event, EventKind::User { .. }))
+            .count(),
+        2
+    );
+    assert_eq!(agent_pid(project.path()), pid);
+    assert!(
+        matches!(ask(&mut client,Request::Subagents {session_id:id.clone()}).await,Response::Subagents {tasks,..} if tasks.iter().any(|task|task.status==latte_work_protocol::SubagentStatus::Running))
+    );
+    assert!(matches!(
+        ask(
+            &mut client,
+            Request::CloseAgentSession {
+                session_id: id.clone(),
+                only_if_idle: Some(true)
+            }
+        )
+        .await,
+        Response::Error { .. }
+    ));
+    assert!(matches!(
+        ask(
+            &mut client,
+            Request::CloseAgentSession {
+                session_id: id,
+                only_if_idle: Some(false)
+            }
+        )
+        .await,
+        Response::Ok
+    ));
+}
+#[tokio::test]
+async fn message_queue_pauses_incompatible_config_without_stopping_background_work() {
+    let host = Host::start().await;
+    let mut client = host.client().await;
+    let project = tempfile::tempdir().unwrap();
+    let id = session(&mut client, project.path()).await;
+    send(&mut client, &id, "main", "background-held").await;
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !project.path().join("background-main-waiting").exists() {
+        assert!(Instant::now() < deadline);
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let changed = |key: &str| Request::SendQueued {
+        session_id: id.clone(),
+        request_id: key.into(),
+        text: "identity".into(),
+        model: Some("opus".into()),
+        effort: None,
+        permission_mode: None,
+        provider: Some(latte_work_protocol::TurnProvider::Cli),
+    };
+    assert!(matches!(
+        ask(&mut client, changed("queued-model-change")).await,
+        Response::MessageQueued { duplicate: false }
+    ));
+    std::fs::write(project.path().join("background-release-main"), "release").unwrap();
+    let events = wait(&mut client, &id, Status::Completed).await;
+    let pid = agent_pid(project.path());
+    let background = events
+        .iter()
+        .find_map(|event| match &event.event {
+            EventKind::Text { text } => text
+                .strip_prefix("background:")
+                .and_then(|text| text.parse::<i32>().ok()),
+            _ => None,
+        })
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let response = ask(
+            &mut client,
+            Request::MessageQueue {
+                session_id: id.clone(),
+            },
+        )
+        .await;
+        if let Response::MessageQueue {
+            entries,
+            paused: true,
+            reason: Some(reason),
+        } = response
+            && reason.contains("请沿用当前配置发送")
+        {
+            assert_eq!(entries.len(), 1);
+            assert_eq!(entries[0].request_id, "queued-model-change");
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "incompatible queue did not expose its blocking reason"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(
+        matches!(ask(&mut client,changed("new-model-change")).await,Response::Error {message,..} if message.contains("请沿用当前配置发送"))
+    );
+    let events = wait(&mut client, &id, Status::Completed).await;
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event.event, EventKind::User { .. }))
+            .count(),
+        1
+    );
+    assert_eq!(agent_pid(project.path()), pid);
+    assert!(kill(Pid::from_raw(background), None).is_ok());
+    assert!(matches!(
+        ask(
+            &mut client,
+            Request::CloseAgentSession {
+                session_id: id,
+                only_if_idle: Some(false)
+            }
+        )
+        .await,
+        Response::Ok
+    ));
+    assert_gone(background).await;
 }
 #[tokio::test]
 async fn message_queue_is_durable_fifo_editable_and_not_client_driven() {
