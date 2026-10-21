@@ -11,8 +11,12 @@ use std::{
 };
 use uuid::Uuid;
 
+// SQL bounds legacy payloads before allocating a Rust String. Preserve sequence
+// numbers so a pre-upgrade oversized event cannot block every subsequent poll.
+const PRESENTATION_DATA: &str = "CASE WHEN octet_length(data)>524288 THEN '{\"kind\":\"notice\",\"text\":\"旧事件过大，已省略展示；原始记录保留。\"}' ELSE data END";
 pub struct Store {
     pub(crate) db: Connection,
+    pub(crate) snapshot_dir: std::path::PathBuf,
 }
 pub fn now() -> f64 {
     SystemTime::now()
@@ -68,7 +72,9 @@ impl Store {
             db.execute("ALTER TABLE requests ADD COLUMN permission_mode TEXT", [])?;
         }
         crate::message_queue::initialize(&db)?;
-        let store = Self { db };
+        let snapshot_dir = crate::snapshot_storage::prepare(&path.with_extension("snapshots"))?;
+        crate::snapshot_migration::migrate(&db, &snapshot_dir)?;
+        let store = Self { db, snapshot_dir };
         let forwarded = store
             .db
             .prepare("SELECT DISTINCT session_id FROM message_queue WHERE status='forwarded'")?
@@ -95,6 +101,9 @@ impl Store {
             .collect::<rusqlite::Result<Vec<_>>>()?;
         for (id, request_id) in pending {
             let summary = latte_work_protocol::ChangeSummary {
+                total_files: None,
+                next_offset: None,
+                offset: None,
                 entries: vec![],
                 added: 0,
                 removed: 0,
@@ -131,6 +140,9 @@ impl Store {
                     message: Some("Server 已重启，先前执行结果未知；请核对文件后继续。".into()),
                 },
             )?;
+        }
+        if let Err(error) = store.collect_snapshot_garbage() {
+            eprintln!("snapshot cleanup skipped: {error}");
         }
         Ok(store)
     }
@@ -733,6 +745,10 @@ impl Store {
         Ok((events, truncated))
     }
     pub fn event(&self, id: &str, mut event: EventKind) -> Result<()> {
+        if matches!(&event, EventKind::TurnChanges { .. }) {
+            crate::snapshot_storage::small_json(&event)?;
+        }
+
         let at = now();
         let tx = self.db.unchecked_transaction()?;
         if let EventKind::Subagent { update } = &mut event {
@@ -793,6 +809,49 @@ impl Store {
         tx.commit()?;
         Ok(())
     }
+    fn collect_snapshot_garbage(&self) -> Result<()> {
+        let mut keys = std::collections::HashSet::new();
+        for query in [
+            "SELECT data FROM task_baselines",
+            "SELECT baseline FROM turn_changes WHERE baseline IS NOT NULL",
+        ] {
+            let mut statement = self.db.prepare(query)?;
+            let mut rows = statement.query([])?;
+            while let Some(row) = rows.next()? {
+                let data: String = row.get(0)?;
+                let mut snapshot: crate::task_changes::Snapshot = serde_json::from_str(&data)?;
+                snapshot.attach(&self.snapshot_dir);
+                snapshot.referenced_objects(&mut keys)?;
+            }
+        }
+        let mut statement = self
+            .db
+            .prepare("SELECT data FROM turn_changes WHERE data IS NOT NULL")?;
+        let mut rows = statement.query([])?;
+        while let Some(row) = rows.next()? {
+            let data: String = row.get(0)?;
+            let mut turn: crate::task_changes::FrozenTurn = serde_json::from_str(&data)?;
+            turn.attach(&self.snapshot_dir);
+            turn.referenced_objects(&mut keys)?;
+        }
+        // Run only during startup, before any capture can publish new objects.
+        // Unknown files and the append-only legacy archive are never touched.
+        for entry in std::fs::read_dir(&self.snapshot_dir)? {
+            let entry = entry?;
+            let name = entry.file_name();
+            let Some(key) = name.to_str() else {
+                continue;
+            };
+            if key.len() == 64
+                && key.bytes().all(|b| b.is_ascii_hexdigit())
+                && entry.file_type()?.is_file()
+                && !keys.contains(key)
+            {
+                std::fs::remove_file(entry.path())?;
+            }
+        }
+        Ok(())
+    }
     pub fn baseline(&self, id: &str) -> Result<Option<crate::task_changes::Snapshot>> {
         self.session(id)?;
         self.db
@@ -802,13 +861,17 @@ impl Store {
                 |r| r.get::<_, String>(0),
             )
             .optional()?
-            .map(|s| serde_json::from_str(&s).map_err(Into::into))
+            .map(|s| {
+                let mut snapshot: crate::task_changes::Snapshot = serde_json::from_str(&s)?;
+                snapshot.attach(&self.snapshot_dir);
+                Ok::<_, anyhow::Error>(snapshot)
+            })
             .transpose()
     }
     pub fn save_baseline(&self, id: &str, snapshot: &crate::task_changes::Snapshot) -> Result<()> {
         self.db.execute(
             "INSERT OR IGNORE INTO task_baselines(session_id,data) VALUES (?1,?2)",
-            params![id, serde_json::to_string(snapshot)?],
+            params![id, crate::snapshot_storage::small_json(snapshot)?],
         )?;
         Ok(())
     }
@@ -820,7 +883,11 @@ impl Store {
     ) -> Result<()> {
         self.db.execute(
             "INSERT OR IGNORE INTO turn_changes(session_id,request_id,baseline) VALUES (?1,?2,?3)",
-            params![id, request_id, serde_json::to_string(baseline)?],
+            params![
+                id,
+                request_id,
+                crate::snapshot_storage::small_json(baseline)?
+            ],
         )?;
         Ok(())
     }
@@ -830,19 +897,19 @@ impl Store {
     ) -> Result<Option<(String, crate::task_changes::Snapshot)>> {
         self.db.query_row("SELECT request_id,baseline FROM turn_changes WHERE session_id=?1 AND baseline IS NOT NULL ORDER BY rowid DESC LIMIT 1",[id],
             |r| Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?))).optional()?
-            .map(|(id,data)| Ok((id,serde_json::from_str(&data)?))).transpose()
+            .map(|(id,data)| {let mut snapshot:crate::task_changes::Snapshot=serde_json::from_str(&data)?;snapshot.attach(&self.snapshot_dir);Ok((id,snapshot))}).transpose()
     }
     pub fn finish_turn(&self, id: &str, turn: &crate::task_changes::FrozenTurn) -> Result<()> {
         let tx = self.db.unchecked_transaction()?;
         let updated = tx.execute("UPDATE turn_changes SET baseline=NULL,data=?3 WHERE session_id=?1 AND request_id=?2 AND baseline IS NOT NULL",
-            params![id,turn.changes.request_id,serde_json::to_string(turn)?])?;
+            params![id,turn.changes.request_id,crate::snapshot_storage::small_json(turn)?])?;
         if updated == 1 {
             tx.execute(
                 "INSERT INTO events(session_id,at,data) VALUES (?1,?2,?3)",
                 params![
                     id,
                     now(),
-                    serde_json::to_string(&EventKind::TurnChanges {
+                    crate::snapshot_storage::small_json(&EventKind::TurnChanges {
                         changes: turn.changes.clone()
                     })?
                 ],
@@ -866,7 +933,10 @@ impl Store {
             )
             .optional()?
             .flatten();
-        serde_json::from_str(&data.context("此轮尚未结束或没有保存变更快照")?).map_err(Into::into)
+        let mut turn: crate::task_changes::FrozenTurn =
+            serde_json::from_str(&data.context("此轮尚未结束或没有保存变更快照")?)?;
+        turn.attach(&self.snapshot_dir);
+        Ok(turn)
     }
     pub fn last_turn_changes(&self, id: &str) -> Result<Option<crate::task_changes::FrozenTurn>> {
         self.session(id)?;
@@ -890,13 +960,13 @@ impl Store {
     pub fn update_turn(&self, id: &str, turn: &crate::task_changes::FrozenTurn) -> Result<()> {
         let tx = self.db.unchecked_transaction()?;
         if tx.execute("UPDATE turn_changes SET data=?3 WHERE session_id=?1 AND request_id=?2 AND data IS NOT NULL",
-            params![id,turn.changes.request_id,serde_json::to_string(turn)?])? != 1 { bail!("本轮变更记录缺失"); }
+            params![id,turn.changes.request_id,crate::snapshot_storage::small_json(turn)?])? != 1 { bail!("本轮变更记录缺失"); }
         tx.execute(
             "INSERT INTO events(session_id,at,data) VALUES (?1,?2,?3)",
             params![
                 id,
                 now(),
-                serde_json::to_string(&EventKind::TurnChanges {
+                crate::snapshot_storage::small_json(&EventKind::TurnChanges {
                     changes: turn.changes.clone()
                 })?
             ],
@@ -1169,7 +1239,7 @@ impl Store {
             bail!("事件游标无效");
         }
         let mut statement = self.db.prepare(
-            "SELECT seq,at,data FROM events WHERE session_id=?1 AND seq<?2 ORDER BY seq DESC LIMIT 16385"
+            &format!("SELECT seq,at,{PRESENTATION_DATA} FROM events WHERE session_id=?1 AND seq<?2 ORDER BY seq DESC LIMIT 16385")
         )?;
         let mut rows = statement.query(params![id, before.unwrap_or(f64::MAX)])?;
         let mut events: Vec<Event> = Vec::new();
@@ -1260,18 +1330,21 @@ impl Store {
         if !after.is_finite() || after < 0.0 {
             bail!("事件游标无效");
         }
-        let rows=self.db.prepare("SELECT seq,at,data FROM events WHERE session_id=?1 AND seq>?2 ORDER BY seq LIMIT 201")?.query_map(params![id,after],|r|Ok((r.get::<_,i64>(0)?,r.get::<_,f64>(1)?,r.get::<_,String>(2)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;
+        let mut statement=self.db.prepare(&format!("SELECT seq,at,{PRESENTATION_DATA} FROM events WHERE session_id=?1 AND seq>?2 ORDER BY seq LIMIT 201"))?;
+        let mut rows = statement.query(params![id, after])?;
         let mut events = Vec::new();
         let mut bytes = 0;
-        for (seq, at, data) in rows {
-            bytes += data.len();
-            if events.len() == 200 || (bytes > 1024 * 1024 && !events.is_empty()) {
+        while let Some(row) = rows.next()? {
+            let data: String = row.get(2)?;
+            let size = data.len() + id.len() + 96;
+            if events.len() == 200 || bytes + size > 1024 * 1024 {
                 return Ok((events, true));
             }
+            bytes += size;
             events.push(Event {
-                seq: seq as f64,
+                seq: row.get::<_, i64>(0)? as f64,
                 session_id: id.into(),
-                at,
+                at: row.get(1)?,
                 event: serde_json::from_str(&data)?,
             });
         }
@@ -2793,5 +2866,358 @@ mod source_tests {
         assert_eq!(sources.len(), 1);
         assert_eq!(sources[0].uses, 2);
         assert_eq!(sources[0].tools.len(), 2);
+    }
+}
+
+#[cfg(test)]
+mod large_snapshot_tests {
+    use super::*;
+    use crate::task_changes::{FrozenTurn, Snapshot};
+    use tokio::io::AsyncReadExt;
+    #[test]
+    fn oversized_legacy_events_cannot_block_poll_or_reverse_history() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(&dir.path().join("state.sqlite")).unwrap();
+        let project = store.add_project(dir.path()).unwrap();
+        let session = store.create_session(project.id, "claude".into()).unwrap();
+        let entries:Vec<_>=(0..20_000).map(|n|serde_json::json!({"path":format!("{n:05}-{}", "a".repeat(180)),"status":"A","added":1,"removed":0})).collect();
+        let old=serde_json::json!({"kind":"turn_changes","changes":{"request_id":"legacy","summary":{"entries":entries,"added":20000,"removed":0,"binary_files":0,"truncated":false,"baseline_at":1,"unavailable":null},"interrupted":false,"background_pending":false,"undo":"ready"}}).to_string();
+        assert!(old.len() > latte_work_protocol::MAX_FRAME);
+        store
+            .db
+            .execute(
+                "INSERT INTO events(session_id,at,data) VALUES (?1,1,?2)",
+                params![session.id, old],
+            )
+            .unwrap();
+        let oversized_seq = store.db.last_insert_rowid() as f64;
+        store
+            .event(
+                &session.id,
+                EventKind::Text {
+                    text: "visible final reply".into(),
+                },
+            )
+            .unwrap();
+        store
+            .event(
+                &session.id,
+                EventKind::State {
+                    status: Status::Completed,
+                    message: None,
+                },
+            )
+            .unwrap();
+        let (events, more) = store.events(&session.id, 0.0).unwrap();
+        assert!(!more);
+        assert_eq!(events[0].seq, oversized_seq);
+        assert!(matches!(events[0].event, EventKind::Notice { .. }));
+        assert!(matches!(&events[1].event,EventKind::Text {text} if text=="visible final reply"));
+        assert!(matches!(
+            events[2].event,
+            EventKind::State {
+                status: Status::Completed,
+                ..
+            }
+        ));
+        assert!(serde_json::to_vec(&events).unwrap().len() < latte_work_protocol::MAX_FRAME / 2);
+        assert!(
+            store
+                .events(&session.id, events.last().unwrap().seq)
+                .unwrap()
+                .0
+                .is_empty()
+        );
+        let (history, ..) = store.history(&session.id, None).unwrap();
+        assert!(
+            history
+                .iter()
+                .any(|e| e.seq == oversized_seq && matches!(e.event, EventKind::Notice { .. }))
+        );
+        let preserved: String = store
+            .db
+            .query_row(
+                "SELECT data FROM events WHERE seq=?1",
+                [oversized_seq],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(preserved, old);
+    }
+    #[tokio::test]
+    async fn large_file_bytes_stay_on_disk_and_small_references_survive_restart_and_undo() {
+        use std::io::{Seek, SeekFrom, Write};
+        let state = tempfile::tempdir().unwrap();
+        let project_root = tempfile::tempdir().unwrap();
+        let root = project_root.path();
+        let path = state.path().join("state.sqlite");
+        let mut store = Store::open(&path).unwrap();
+        let project = store.add_project(root).unwrap();
+        let mut session = store.create_session(project.id, "claude".into()).unwrap();
+        store
+            .begin(&session.id, "large-turn", "edit", None, None, None, None)
+            .unwrap();
+        let mut file = std::fs::File::create(root.join("large.bin")).unwrap();
+        file.set_len(32 * 1024 * 1024).unwrap();
+        let before = Snapshot::capture_stored(root, &store.snapshot_dir)
+            .await
+            .unwrap();
+        assert!(serde_json::to_string(&before).unwrap().len() < 1024);
+        store.save_baseline(&session.id, &before).unwrap();
+        store
+            .save_turn_baseline(&session.id, "large-turn", &before)
+            .unwrap();
+        let baseline_bytes: i64 = store
+            .db
+            .query_row("SELECT octet_length(baseline) FROM turn_changes", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert!(baseline_bytes < 1024);
+        file.seek(SeekFrom::End(-1)).unwrap();
+        file.write_all(b"x").unwrap();
+        file.sync_all().unwrap();
+        let after = Snapshot::capture_stored(root, &store.snapshot_dir)
+            .await
+            .unwrap();
+        let turn = FrozenTurn::freeze("large-turn".into(), before, after, false, false)
+            .await
+            .unwrap();
+        assert!(serde_json::to_string(&turn).unwrap().len() < 2048);
+        store.finish_turn(&session.id, &turn).unwrap();
+        session.status = Status::Completed;
+        store.save(&session).unwrap();
+        let orphan = crate::snapshot_storage::save_file(
+            &store.snapshot_dir,
+            tokio::io::repeat(12).take(12345),
+        )
+        .await
+        .unwrap();
+        let orphan_path = orphan.path().unwrap();
+        std::fs::write(store.snapshot_dir.join("keep.txt"), "not an object").unwrap();
+        drop(store);
+        let store = Store::open(&path).unwrap();
+        assert!(!orphan_path.exists());
+        assert!(store.snapshot_dir.join("keep.txt").exists());
+        let turn = store.turn_changes(&session.id, "large-turn").unwrap();
+        turn.validate_undo(root).unwrap();
+        assert!(turn.patch("large.bin").await.unwrap().0.contains("Binary"));
+        turn.restore(root).unwrap();
+        let mut restored = std::fs::File::open(root.join("large.bin")).unwrap();
+        restored.seek(SeekFrom::End(-1)).unwrap();
+        let mut byte = [1];
+        std::io::Read::read_exact(&mut restored, &mut byte).unwrap();
+        assert_eq!(byte, [0]);
+        assert!(store.pending_turn(&session.id).unwrap().is_none());
+        assert!(store.baseline(&session.id).unwrap().is_some());
+    }
+    #[tokio::test]
+    async fn legacy_large_rows_archive_exactly_and_migrate_only_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.sqlite");
+        let mut store = Store::open(&path).unwrap();
+        let project = store.add_project(dir.path()).unwrap();
+        let session = store.create_session(project.id, "claude".into()).unwrap();
+        store
+            .begin(&session.id, "legacy", "edit", None, None, None, None)
+            .unwrap();
+        let snapshot = Snapshot::unavailable("legacy".into());
+        let baseline = serde_json::to_string(&snapshot).unwrap() + &" ".repeat(1024 * 1024);
+        let frozen = FrozenTurn::freeze("legacy".into(), snapshot.clone(), snapshot, false, false)
+            .await
+            .unwrap();
+        let data = serde_json::to_string(&frozen).unwrap() + &" ".repeat(1024 * 1024);
+        store
+            .db
+            .execute(
+                "INSERT INTO task_baselines(session_id,data) VALUES (?1,?2)",
+                params![session.id, baseline],
+            )
+            .unwrap();
+        store.db.execute("INSERT INTO turn_changes(session_id,request_id,baseline,data) VALUES (?1,'legacy',?2,?3)",params![session.id,baseline,data]).unwrap();
+        drop(store);
+        let store = Store::open(&path).unwrap();
+        assert!(store.pending_turn(&session.id).unwrap().is_none());
+        assert!(
+            store
+                .baseline(&session.id)
+                .unwrap()
+                .unwrap()
+                .unavailable
+                .is_some()
+        );
+        assert!(
+            store
+                .turn_changes(&session.id, "legacy")
+                .unwrap()
+                .changes
+                .summary
+                .unavailable
+                .is_some()
+        );
+        let archive: Vec<(String, String, String)> = store
+            .db
+            .prepare("SELECT source_table,source_column,path FROM snapshot_legacy_archive")
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(archive.len(), 3);
+        for (table, column, name) in archive {
+            let bytes =
+                std::fs::read_to_string(store.snapshot_dir.join("legacy").join(name)).unwrap();
+            assert_eq!(
+                &bytes,
+                if table == "turn_changes" && column == "data" {
+                    &data
+                } else {
+                    &baseline
+                }
+            );
+        }
+        drop(store);
+        let store = Store::open(&path).unwrap();
+        let count: i64 = store
+            .db
+            .query_row("SELECT COUNT(*) FROM snapshot_legacy_archive", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(count, 3);
+    }
+}
+
+#[cfg(test)]
+mod legacy_snapshot_compatibility {
+    use super::*;
+    use crate::task_changes::{FrozenTurn, Snapshot};
+    #[tokio::test]
+    async fn complete_legacy_snapshots_keep_historical_diff_and_undo_after_migration() {
+        let state = tempfile::tempdir().unwrap();
+        let project = tempfile::tempdir().unwrap();
+        let path = state.path().join("state.sqlite");
+        let mut store = Store::open(&path).unwrap();
+        let saved_project = store.add_project(project.path()).unwrap();
+        let mut session = store
+            .create_session(saved_project.id, "claude".into())
+            .unwrap();
+        store
+            .begin(&session.id, "old-format", "edit", None, None, None, None)
+            .unwrap();
+        let old = "before\n".repeat(50_000);
+        let new = "after\n".repeat(50_000);
+        std::fs::write(project.path().join("source.txt"), &old).unwrap();
+        let before = Snapshot::capture(project.path()).await.unwrap();
+        std::fs::write(project.path().join("source.txt"), &new).unwrap();
+        let after = Snapshot::capture(project.path()).await.unwrap();
+        let turn = FrozenTurn::freeze("old-format".into(), before.clone(), after, false, false)
+            .await
+            .unwrap();
+        let original = serde_json::to_string(&turn).unwrap();
+        assert!(original.len() > crate::snapshot_storage::RECORD_LIMIT);
+        store
+            .db
+            .execute(
+                "INSERT INTO task_baselines(session_id,data) VALUES (?1,?2)",
+                params![session.id, serde_json::to_string(&before).unwrap()],
+            )
+            .unwrap();
+        store
+            .db
+            .execute(
+                "INSERT INTO turn_changes(session_id,request_id,data) VALUES (?1,'old-format',?2)",
+                params![session.id, original],
+            )
+            .unwrap();
+        session.status = Status::Completed;
+        store.save(&session).unwrap();
+        drop(store);
+        let store = Store::open(&path).unwrap();
+        let turn = store.turn_changes(&session.id, "old-format").unwrap();
+        assert!(turn.changes.summary.unavailable.is_none());
+        assert!(!turn.changes.summary.truncated);
+        assert_eq!(
+            turn.changes.undo,
+            latte_work_protocol::TurnUndoStatus::Ready
+        );
+        let patch = turn.patch("source.txt").await.unwrap().0;
+        assert!(patch.contains("-before") && patch.contains("+after"));
+        let summary = store
+            .baseline(&session.id)
+            .unwrap()
+            .unwrap()
+            .summary(project.path())
+            .await
+            .unwrap();
+        assert_eq!(summary.entries[0].path, "source.txt");
+        assert!(summary.unavailable.is_none());
+        turn.validate_undo(project.path()).unwrap();
+        turn.restore(project.path()).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(project.path().join("source.txt")).unwrap(),
+            old
+        );
+        let largest: i64 = store
+            .db
+            .query_row(
+                "SELECT MAX(octet_length(data)) FROM turn_changes",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(largest < crate::snapshot_storage::RECORD_LIMIT as i64);
+    }
+    #[test]
+    fn very_large_legacy_blob_is_streamed_to_archive_without_decoding() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.sqlite");
+        let store = Store::open(&path).unwrap();
+        let project = store.add_project(dir.path()).unwrap();
+        let session = store.create_session(project.id, "claude".into()).unwrap();
+        const SIZE: i64 = 96 * 1024 * 1024 + 1;
+        store
+            .db
+            .execute(
+                "INSERT INTO task_baselines(session_id,data) VALUES (?1,zeroblob(?2))",
+                params![session.id, SIZE],
+            )
+            .unwrap();
+        drop(store);
+        let store = Store::open(&path).unwrap();
+        assert!(
+            store
+                .baseline(&session.id)
+                .unwrap()
+                .unwrap()
+                .unavailable
+                .unwrap()
+                .contains("归档")
+        );
+        let name: String = store
+            .db
+            .query_row("SELECT path FROM snapshot_legacy_archive", [], |r| r.get(0))
+            .unwrap();
+        let archive = store.snapshot_dir.join("legacy").join(name);
+        assert_eq!(std::fs::metadata(&archive).unwrap().len(), SIZE as u64);
+        let mut file = std::fs::File::open(archive).unwrap();
+        let mut bytes = [1; 65536];
+        let mut total = 0;
+        loop {
+            let count = std::io::Read::read(&mut file, &mut bytes).unwrap();
+            if count == 0 {
+                break;
+            }
+            assert!(bytes[..count].iter().all(|b| *b == 0));
+            total += count as i64;
+        }
+        assert_eq!(total, SIZE);
+        let size: i64 = store
+            .db
+            .query_row("SELECT octet_length(data) FROM task_baselines", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert!(size < 1024);
     }
 }

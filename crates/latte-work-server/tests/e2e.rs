@@ -4652,6 +4652,8 @@ async fn task_baselines_and_sources_integrate_with_real_process_reconnect_and_bo
     send(&mut client, &id, "task-r1", &text).await;
     wait(&mut client, &id, Status::Completed).await;
     let summary_request = || Request::ChangeSummary {
+        path: None,
+        offset: None,
         project_id: task.project_id.clone(),
         session_id: Some(id.clone()),
     };
@@ -4796,6 +4798,8 @@ async fn ordinary_directory_turn_changes_survive_followup_and_reconnect() {
         let Response::TurnChanges { changes } = ask(
             &mut client,
             Request::TurnChangeSummary {
+                path: None,
+                offset: None,
                 session_id: id.clone(),
                 request_id: request_id.into(),
             },
@@ -4871,6 +4875,8 @@ async fn turn_changes_freeze_each_request_and_undo_rejects_conflicts_then_reconc
     std::fs::write(root.join("task.txt"), "existing dirty\n").unwrap();
     let id = session(&mut client, &root).await;
     let summary = |request_id: &str| Request::TurnChangeSummary {
+        path: None,
+        offset: None,
         session_id: id.clone(),
         request_id: request_id.into(),
     };
@@ -4884,6 +4890,8 @@ async fn turn_changes_freeze_each_request_and_undo_rejects_conflicts_then_reconc
         request_id: request_id.into(),
     };
     let latest = || Request::LastTurnChanges {
+        offset: None,
+        path: None,
         session_id: id.clone(),
     };
     assert!(matches!(
@@ -4996,6 +5004,8 @@ async fn turn_changes_freeze_each_request_and_undo_rejects_conflicts_then_reconc
         ask(
             &mut reconnect,
             Request::LastTurnChanges {
+                offset: None,
+                path: None,
                 session_id: "missing".into()
             }
         )
@@ -5006,6 +5016,8 @@ async fn turn_changes_freeze_each_request_and_undo_rejects_conflicts_then_reconc
         ask(
             &mut reconnect,
             Request::TurnChangeSummary {
+                path: None,
+                offset: None,
                 session_id: "another-session".into(),
                 request_id: "turn-r1".into()
             }
@@ -7538,4 +7550,196 @@ async fn non_git_summary_error_is_typed_without_disabling_project_reads() {
         Response::Error { code, .. } => assert_eq!(code, "request_failed"),
         response => panic!("unexpected: {response:?}"),
     }
+}
+
+#[tokio::test]
+async fn snapshot_pages_preserve_all_files_and_undo_after_reconnect() {
+    let host = Host::start().await;
+    let root = tempfile::tempdir().unwrap();
+    let mut client = host.client().await;
+    let id = session(&mut client, root.path()).await;
+    assert!(matches!(
+        ask(
+            &mut client,
+            Request::OpenAgentSession {
+                session_id: id.clone(),
+                provider: None
+            }
+        )
+        .await,
+        Response::Ok
+    ));
+    assert!(matches!(
+        send(&mut client, &id, "many-files", "task-edit-many").await,
+        Response::Accepted { .. }
+    ));
+    let events = wait(&mut client, &id, Status::Completed).await;
+    let saved = events
+        .iter()
+        .find_map(|e| {
+            if let EventKind::TurnChanges { changes } = &e.event {
+                Some(changes)
+            } else {
+                None
+            }
+        })
+        .unwrap();
+    assert_eq!(saved.summary.total_files, Some(131));
+    assert_eq!(saved.summary.entries.len(), 64);
+    assert!(!saved.summary.truncated);
+    let mut reconnected = host.client().await;
+    let mut offset = None;
+    let mut names = Vec::new();
+    loop {
+        let Response::TurnChanges { changes } = ask(
+            &mut reconnected,
+            Request::TurnChangeSummary {
+                session_id: id.clone(),
+                request_id: "many-files".into(),
+                offset,
+                path: None,
+            },
+        )
+        .await
+        else {
+            panic!()
+        };
+        assert!(changes.summary.entries.len() <= 64);
+        names.extend(changes.summary.entries.iter().map(|e| e.path.clone()));
+        match changes.summary.next_offset {
+            Some(next) => {
+                assert!(next > offset.unwrap_or(0));
+                offset = Some(next)
+            }
+            None => break,
+        }
+    }
+    assert_eq!(names.len(), 131);
+    names.sort();
+    names.dedup();
+    assert_eq!(names.len(), 131);
+    let Response::TurnChanges { changes } = ask(
+        &mut reconnected,
+        Request::TurnChangeSummary {
+            session_id: id.clone(),
+            request_id: "many-files".into(),
+            offset: None,
+            path: Some("file-129.txt".into()),
+        },
+    )
+    .await
+    else {
+        panic!()
+    };
+    assert!(
+        changes
+            .summary
+            .entries
+            .iter()
+            .any(|entry| entry.path == "file-129.txt")
+    );
+    assert!(matches!(
+        ask(
+            &mut reconnected,
+            Request::TurnChangeSummary {
+                session_id: id.clone(),
+                request_id: "many-files".into(),
+                offset: Some(1000),
+                path: None
+            }
+        )
+        .await,
+        Response::Error { .. }
+    ));
+    let Response::Content { text, .. } = ask(
+        &mut reconnected,
+        Request::TurnChangeDiff {
+            session_id: id.clone(),
+            request_id: "many-files".into(),
+            path: "file-129.txt".into(),
+        },
+    )
+    .await
+    else {
+        panic!()
+    };
+    assert!(text.contains("+new 129"));
+    let Response::TurnChanges { changes } = ask(
+        &mut reconnected,
+        Request::UndoTurnChanges {
+            session_id: id.clone(),
+            request_id: "many-files".into(),
+        },
+    )
+    .await
+    else {
+        panic!()
+    };
+    assert_eq!(changes.undo, latte_work_protocol::TurnUndoStatus::Reverted);
+    for n in 0..130 {
+        assert!(!root.path().join(format!("file-{n:03}.txt")).exists());
+    }
+    assert!(!root.path().join("task.txt").exists());
+    let db = rusqlite::Connection::open(host.directory.path().join("state.sqlite")).unwrap();
+    let largest: i64 = db
+        .query_row(
+            "SELECT MAX(octet_length(data)) FROM turn_changes",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert!(largest < 256 * 1024);
+}
+#[tokio::test]
+async fn snapshot_legacy_oversized_events_advance_cursor_and_leave_other_sessions_live() {
+    let host = Host::start().await;
+    let mut client = host.client().await;
+    let root = tempfile::tempdir().unwrap();
+    let other_root = tempfile::tempdir().unwrap();
+    let id = session(&mut client, root.path()).await;
+    let other = session(&mut client, other_root.path()).await;
+    let old = serde_json::json!({"kind":"notice","text":"x".repeat(3*1024*1024)}).to_string();
+    let db = rusqlite::Connection::open(host.directory.path().join("state.sqlite")).unwrap();
+    db.execute(
+        "INSERT INTO events(session_id,at,data) VALUES (?1,1,?2)",
+        rusqlite::params![id, old],
+    )
+    .unwrap();
+    let blocked = db.last_insert_rowid() as f64;
+    drop(db);
+    assert!(matches!(
+        send(&mut client, &id, "after-oversized", "identity").await,
+        Response::Accepted { .. }
+    ));
+    let events = wait(&mut client, &id, Status::Completed).await;
+    assert!(
+        events
+            .iter()
+            .any(|e| e.seq == blocked && matches!(e.event, EventKind::Notice { .. }))
+    );
+    assert!(events.iter().any(|e| matches!(
+        e.event,
+        EventKind::State {
+            status: Status::Completed,
+            ..
+        }
+    )));
+    let cursor = events.last().unwrap().seq;
+    let Response::Events { events, .. } = ask(
+        &mut client,
+        Request::Poll {
+            session_id: id,
+            after: cursor,
+        },
+    )
+    .await
+    else {
+        panic!()
+    };
+    assert!(events.is_empty());
+    assert!(matches!(
+        send(&mut client, &other, "other-session", "identity").await,
+        Response::Accepted { .. }
+    ));
+    wait(&mut client, &other, Status::Completed).await;
 }

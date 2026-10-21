@@ -936,9 +936,12 @@ async fn finish_turn(
     background_pending: bool,
 ) -> Result<()> {
     if let Some((request_id, before)) = db(database, |s| s.pending_turn(id))? {
-        let after = crate::task_changes::Snapshot::capture(std::path::Path::new(path))
-            .await
-            .unwrap_or_else(|e| crate::task_changes::Snapshot::unavailable(e.to_string()));
+        let after = crate::task_changes::Snapshot::capture_stored(
+            std::path::Path::new(path),
+            &db(database, |s| Ok(s.snapshot_dir.clone()))?,
+        )
+        .await
+        .unwrap_or_else(|e| crate::task_changes::Snapshot::unavailable(e.to_string()));
         let turn = crate::task_changes::FrozenTurn::freeze(
             request_id.clone(),
             before,
@@ -1037,9 +1040,12 @@ async fn accept_turn(
     // After durable admission, all failures become explicit terminal events. The
     // accepted request ID still reconciles a lost transport response without replay.
     let result = async {
-        let baseline = crate::task_changes::Snapshot::capture(std::path::Path::new(path))
-            .await
-            .unwrap_or_else(|e| crate::task_changes::Snapshot::unavailable(e.to_string()));
+        let baseline = crate::task_changes::Snapshot::capture_stored(
+            std::path::Path::new(path),
+            &db(database, |s| Ok(s.snapshot_dir.clone()))?,
+        )
+        .await
+        .unwrap_or_else(|e| crate::task_changes::Snapshot::unavailable(e.to_string()));
         db(database, |s| {
             s.save_turn_baseline(&session.id, &turn.request_id, &baseline)
         })?;

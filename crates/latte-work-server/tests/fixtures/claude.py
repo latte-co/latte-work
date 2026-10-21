@@ -99,6 +99,8 @@ for line in sys.stdin:
         if text.startswith('task-edit'):
             emit({'type':'system','subtype':'session_state_changed','state':'busy'})
             with open('task.txt','w') as f:f.write('third line\n' if text.startswith('task-edit-second') else 'agent change\nsecond line\n')
+            if text=='task-edit-many':
+                for index in range(130): pathlib.Path(f'file-{index:03}.txt').write_text(f'new {index}\n')
             emit({'type':'assistant','message':{'content':[{'type':'tool_use','id':'edit-1','name':'Edit','input':{'file_path':'task.txt'}},{'type':'tool_use','id':'connector-1','name':'mcp__fixture_docs__read','input':{}}]}})
             emit({'type':'assistant','parent_tool_use_id':'child-agent','message':{'content':[{'type':'tool_use','id':'child-read','name':'mcp__fixture_docs__search','input':{}}]}})
             emit({'type':'assistant','message':{'content':[{'type':'text','text':'TASK_EDIT_OK'}]}})

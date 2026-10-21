@@ -751,9 +751,49 @@ protocol; the server has no GUI dependency.
 
 Each accepted user turn also saves a request-linked baseline before native dispatch.
 At the main result or confirmed process stop/failure, the server freezes before/after
-bytes and a `turn_changes` event, atomically replacing the pending baseline. Only
-changed bytes are retained (the same per-file/total capture limits apply to both
-snapshots). Turn cards show file counts and per-file/total added and removed lines;
+bytes and a `turn_changes` event, atomically replacing the pending baseline. A frozen
+turn references only changed files. Capture has no fixed file-count,
+per-file or total-byte ceiling; it retains the twelve-second collection deadline,
+path containment and symlink checks. Untracked `.venv`, `venv`, `__pycache__` and
+`dist` directories are excluded, but Git-tracked files there remain covered. The
+server's own state directory is excluded even when nested inside a project. A project
+inside the state directory explicitly fails capture instead of recording an empty
+complete snapshot. Invalid UTF-8 Git paths mark the snapshot partial while preserving
+other valid paths.
+
+File contents stream in 64 KiB chunks to private, SHA-256-addressed immutable objects
+under the database path with its extension replaced by `.snapshots`. Metadata
+manifests and complete change summaries use the same storage. Collection, hashing,
+manifest serialization, diff and restoration run outside the global database mutex;
+SQLite stores only small references and a first summary page. Snapshot records and
+new `turn_changes` events have a 256 KiB serialization guard. Backups and transfers
+must preserve both SQLite (including its normal WAL consistency requirements) and
+this sibling directory. Older servers cannot read object-backed snapshots; their
+small reference records explicitly indicate unavailable data rather than an empty,
+undoable snapshot.
+
+Summary requests accept optional `offset` or a selected `path` anchor (a missing
+anchor returns the first page), returning at most
+64 entries and 64 KiB of serialized entries with `total_files`, `offset` and
+`next_offset` when paged. Paging does not mark capture truncated, change totals or
+reduce the files covered by Undo. Both the card and review workspace replace each
+page rather than accumulating thousands of DOM nodes. Event polling projects legacy
+rows over 512 KiB to a notice with the same sequence number before reading their
+contents; the raw row remains stored and later replies/status events can advance.
+Forward and reverse history use this rule, keeping each response below the frame
+limit even when its first original event was oversized.
+
+Before accepting requests, startup archives legacy snapshot rows over 256 KiB using
+SQLite incremental blob reads into private `legacy/*.json` files. Valid records up
+to a 96 MiB encoded migration budget are converted to object references, preserving
+historical diffs and safe Undo. Larger, malformed or unreadable records become
+explicit unavailable/unknown markers; their exact originals remain archived. The
+archive index, replacement and notice commit together. Startup also clears unfinished
+baselines as unknown (the pre-existing restart policy), then removes only unreferenced
+hash-named objects after a complete successful reference scan; raw legacy archives
+and unknown files are retained. This frees reusable SQLite pages, not the database
+file's physical size; no automatic VACUUM runs. Turn cards show file counts and
+per-file/total added and removed lines;
 selecting a file or View Changes opens a deduplicated, closeable turn tab. Historical
 turn diffs read these stored bytes, not HEAD or the current filesystem. Main results
 with unfinished background children are explicitly labelled and cannot be undone.

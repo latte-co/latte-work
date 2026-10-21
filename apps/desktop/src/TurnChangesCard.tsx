@@ -35,6 +35,36 @@ export function TurnChangesCard({
     saved.summary.baseline_at,
   ]);
   const expanded = expandedFor === scope;
+  const scopeRef = useRef(scope);
+  scopeRef.current = scope;
+  const [page, setPage] = useState<{
+    scope: string;
+    summary: TurnChanges["summary"];
+    history: number[];
+  } | null>(null);
+  const [pageBusy, setPageBusy] = useState<string | null>(null);
+  const [pageError, setPageError] = useState("");
+  const pageTrigger = useRef<HTMLButtonElement>(null);
+  useEffect(() => {
+    const trigger = pageTrigger.current;
+    if (
+      pageBusy !== scope &&
+      trigger?.isConnected &&
+      (document.activeElement === document.body ||
+        document.activeElement === trigger)
+    ) {
+      const target = trigger.disabled
+        ? trigger.parentElement?.querySelector<HTMLButtonElement>(
+            "button:not(:disabled)",
+          )
+        : trigger;
+      target?.focus();
+    }
+  }, [pageBusy, page, scope]);
+  useEffect(() => {
+    setPageError("");
+    setPageBusy(null);
+  }, [scope]);
   useStatusIssues([
     {
       id: `turn-undo:${hostId}:${sessionId}:${saved.request_id}`,
@@ -53,6 +83,64 @@ export function TurnChangesCard({
   }, []);
   useEffect(() => setChanges(saved), [saved]);
   const { summary } = changes;
+  const firstPage =
+    summary.entries.length > 64
+      ? {
+          ...summary,
+          entries: summary.entries.slice(0, 64),
+          total_files: summary.entries.length,
+          offset: 0,
+          next_offset: 64,
+        }
+      : summary;
+  const currentPage = page?.scope === scope ? page.summary : firstPage;
+  const history = page?.scope === scope ? page.history : [];
+  const total = summary.total_files ?? summary.entries.length;
+  const pageOffset = currentPage.offset ?? 0;
+  async function loadPage(offset: number, previous: number[]) {
+    if (pageBusy === scope) return;
+    setPageBusy(scope);
+    setPageError("");
+    try {
+      const loaded =
+        summary.entries.length > 64
+          ? {
+              ...summary,
+              entries: summary.entries.slice(offset, offset + 64),
+              total_files: summary.entries.length,
+              offset,
+              next_offset:
+                offset + 64 < summary.entries.length ? offset + 64 : undefined,
+            }
+          : await (async () => {
+              const response = await request(hostId, {
+                method: "turn_change_summary",
+                session_id: sessionId,
+                request_id: changes.request_id,
+                offset,
+              });
+              if (response.kind !== "turn_changes")
+                throw new Error("Server 不支持文件列表分页，请更新后重试");
+              return response.changes.summary;
+            })();
+      if (mounted.current && scopeRef.current === scope)
+        setPage({ scope, summary: loaded, history: previous });
+    } catch (cause) {
+      if (mounted.current && scopeRef.current === scope)
+        setPageError(message(cause));
+    } finally {
+      if (mounted.current && scopeRef.current === scope) setPageBusy(null);
+    }
+  }
+  useStatusIssues([
+    {
+      id: `turn-files:${hostId}:${sessionId}:${saved.request_id}`,
+      title: "本轮文件列表未能读取",
+      error: pageError,
+      pending: pageBusy === scope,
+      action: { label: "查看变更", run: () => open() },
+    },
+  ]);
   const undoLabel = busy
     ? "撤销中…"
     : changes.undo === "reverted"
@@ -96,7 +184,7 @@ export function TurnChangesCard({
           <strong>
             {summary.unavailable
               ? "本轮变更未能记录"
-              : `已编辑 ${summary.entries.length} 个文件`}
+              : `已编辑 ${total} 个文件`}
           </strong>
           {!summary.unavailable && (
             <span className="change-totals">
@@ -141,8 +229,14 @@ export function TurnChangesCard({
           </div>
         )}
       </header>
-      <div id={filesId}>
-        {summary.entries.slice(0, expanded ? undefined : 3).map((entry) => {
+      <div
+        id={filesId}
+        className={expanded ? "turn-changes-expanded" : undefined}
+      >
+        {(expanded
+          ? currentPage.entries.slice(0, 64)
+          : summary.entries.slice(0, 3)
+        ).map((entry) => {
           const split = entry.path.lastIndexOf("/") + 1;
           return (
             <button
@@ -175,7 +269,32 @@ export function TurnChangesCard({
           );
         })}
       </div>
-      {summary.entries.length > 3 && (
+      {expanded && (currentPage.next_offset != null || pageOffset > 0) && (
+        <div className="turn-changes-pagination" aria-label="文件列表分页">
+          <button
+            disabled={pageBusy === scope || !history.length}
+            onClick={(event) => {
+              pageTrigger.current = event.currentTarget;
+              void loadPage(history.at(-1)!, history.slice(0, -1));
+            }}
+          >
+            上一页
+          </button>
+          <span>
+            {pageOffset + 1}–{pageOffset + currentPage.entries.length} / {total}
+          </span>
+          <button
+            disabled={pageBusy === scope || currentPage.next_offset == null}
+            onClick={(event) => {
+              pageTrigger.current = event.currentTarget;
+              void loadPage(currentPage.next_offset!, [...history, pageOffset]);
+            }}
+          >
+            下一页
+          </button>
+        </div>
+      )}
+      {(total > 3 || firstPage.next_offset != null) && (
         <button
           className="turn-changes-more"
           aria-expanded={expanded}
@@ -184,7 +303,9 @@ export function TurnChangesCard({
         >
           {expanded
             ? "收起文件列表"
-            : `再显示 ${summary.entries.length - 3} 个文件`}
+            : firstPage.next_offset != null
+              ? `展开文件列表（共 ${total} 个）`
+              : `再显示 ${total - 3} 个文件`}
           {expanded ? (
             <ChevronUp size={14} aria-hidden="true" />
           ) : (

@@ -277,3 +277,114 @@ it.each([
     expect(screen.queryByText(/已编辑|本轮变更未能记录/)).toBeNull();
   },
 );
+
+it("pages a twenty-thousand-file turn without mounting its complete list", async () => {
+  const entry = (n: number) => ({
+    path: `src/file-${n}.tsx`,
+    status: "A",
+    added: 1,
+    removed: 0,
+  });
+  const first = {
+    ...changes,
+    summary: {
+      ...changes.summary,
+      entries: Array.from({ length: 64 }, (_, n) => entry(n)),
+      total_files: 20000,
+      offset: 0,
+      next_offset: 64,
+    },
+  };
+  mocks.request.mockResolvedValue({
+    kind: "turn_changes",
+    changes: {
+      ...first,
+      summary: {
+        ...first.summary,
+        entries: Array.from({ length: 64 }, (_, n) => entry(n + 64)),
+        offset: 64,
+        next_offset: 128,
+      },
+    },
+  });
+  render(<TurnChangesCard {...props} changes={first} />);
+  expect(screen.getByText("已编辑 20000 个文件")).toBeTruthy();
+  expect(document.querySelectorAll(".turn-changes-file")).toHaveLength(3);
+  fireEvent.click(
+    screen.getByRole("button", { name: "展开文件列表（共 20000 个）" }),
+  );
+  expect(document.querySelectorAll(".turn-changes-file")).toHaveLength(64);
+  fireEvent.click(screen.getByRole("button", { name: "下一页" }));
+  await screen.findByRole("button", { name: /file-127.tsx/ });
+  expect(document.querySelectorAll(".turn-changes-file")).toHaveLength(64);
+  expect(screen.queryByRole("button", { name: /file-0.tsx/ })).toBeNull();
+  expect(mocks.request).toHaveBeenCalledExactlyOnceWith("local", {
+    method: "turn_change_summary",
+    session_id: "s1",
+    request_id: "r1",
+    offset: 64,
+  });
+  fireEvent.click(screen.getByRole("button", { name: /file-127.tsx/ }));
+  expect(props.open).toHaveBeenLastCalledWith("src/file-127.tsx");
+  mocks.request.mockResolvedValue({ kind: "turn_changes", changes: first });
+  fireEvent.click(screen.getByRole("button", { name: "上一页" }));
+  await screen.findByRole("button", { name: /file-0.tsx/ });
+  expect(document.querySelectorAll(".turn-changes-file")).toHaveLength(64);
+  fireEvent.click(screen.getByRole("button", { name: "收起文件列表" }));
+  expect(document.querySelectorAll(".turn-changes-file")).toHaveLength(3);
+});
+it("bounds legacy list DOM locally and ignores a late page from another session", async () => {
+  const entries = Array.from({ length: 10000 }, (_, n) => ({
+    path: `legacy-${n}.txt`,
+    status: "M",
+    added: 1,
+    removed: 0,
+  }));
+  const local = { ...changes, summary: { ...changes.summary, entries } };
+  const view = render(<TurnChangesCard {...props} changes={local} />);
+  fireEvent.click(
+    screen.getByRole("button", { name: "展开文件列表（共 10000 个）" }),
+  );
+  expect(document.querySelectorAll(".turn-changes-file")).toHaveLength(64);
+  fireEvent.click(screen.getByRole("button", { name: "下一页" }));
+  await screen.findByRole("button", { name: /legacy-127.txt/ });
+  expect(mocks.request).not.toHaveBeenCalled();
+  let finish!: (value: unknown) => void;
+  mocks.request.mockImplementation(
+    () => new Promise((resolve) => (finish = resolve)),
+  );
+  const paged = {
+    ...changes,
+    summary: {
+      ...changes.summary,
+      entries: entries.slice(0, 64),
+      total_files: 10000,
+      offset: 0,
+      next_offset: 64,
+    },
+  };
+  view.rerender(
+    <TurnChangesCard {...props} sessionId="another" changes={paged} />,
+  );
+  fireEvent.click(
+    screen.getByRole("button", { name: "展开文件列表（共 10000 个）" }),
+  );
+  fireEvent.click(screen.getByRole("button", { name: "下一页" }));
+  view.rerender(
+    <TurnChangesCard {...props} sessionId="third" changes={changes} />,
+  );
+  await waitFor(() => expect(screen.getByText("已编辑 1 个文件")).toBeTruthy());
+  finish({
+    kind: "turn_changes",
+    changes: {
+      ...paged,
+      summary: {
+        ...paged.summary,
+        entries: [
+          { path: "STALE_PAGE.txt", status: "A", added: 1, removed: 0 },
+        ],
+      },
+    },
+  });
+  await waitFor(() => expect(screen.queryByText("STALE_PAGE.txt")).toBeNull());
+});

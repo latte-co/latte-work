@@ -518,3 +518,94 @@ it("selects a real commit through the submenu and pins its diff IDs", async () =
     }),
   );
 });
+
+it("opens a later frozen-file page and replaces page DOM instead of accumulating files", async () => {
+  const makeEntry = (n: number) => ({
+    path: `src/file-${n}.txt`,
+    status: "M",
+    added: 1,
+    removed: 1,
+  });
+  mocks.request.mockImplementation(async (_host: string, req: Request) => {
+    if (req.method === "turn_change_summary") {
+      const offset =
+        req.offset ?? Number(req.path?.match(/file-(\d+)/)?.[1] ?? 10000);
+      return {
+        kind: "turn_changes",
+        changes: {
+          request_id: "large",
+          undo: "ready",
+          interrupted: false,
+          background_pending: false,
+          summary: {
+            entries: Array.from({ length: 64 }, (_, n) =>
+              makeEntry(n + offset),
+            ),
+            added: 20000,
+            removed: 20000,
+            binary_files: 0,
+            truncated: false,
+            unavailable: null,
+            baseline_at: 1,
+            total_files: 20000,
+            offset,
+            next_offset: offset + 64,
+          },
+        },
+      };
+    }
+    return {
+      kind: "content",
+      text: "@@ -1 +1 @@\n-old\n+new",
+      truncated: false,
+    };
+  });
+  const view = render(
+    <ChangesView
+      {...props}
+      sessionId="s"
+      requestId="large"
+      initialScope="turn"
+      initialPath="src/file-10000.txt"
+    />,
+  );
+  await screen.findByText("文件 10001–10064 / 20000");
+  expect(mocks.request).toHaveBeenCalledWith("local", {
+    method: "turn_change_summary",
+    session_id: "s",
+    request_id: "large",
+    offset: undefined,
+    path: "src/file-10000.txt",
+  });
+  expect(document.querySelectorAll(".review-file-section")).toHaveLength(64);
+  fireEvent.click(screen.getByRole("button", { name: "下一页" }));
+  await screen.findByText("文件 10065–10128 / 20000");
+  expect(mocks.request).toHaveBeenCalledWith("local", {
+    method: "turn_change_summary",
+    session_id: "s",
+    request_id: "large",
+    offset: 10064,
+    path: undefined,
+  });
+  expect(document.querySelectorAll(".review-file-section")).toHaveLength(64);
+  fireEvent.click(screen.getByRole("button", { name: "上一页" }));
+  await screen.findByText("文件 10001–10064 / 20000");
+  view.rerender(
+    <ChangesView
+      {...props}
+      sessionId="s"
+      requestId="large"
+      initialScope="turn"
+      initialPath="src/file-15000.txt"
+    />,
+  );
+  await screen.findByText("文件 15001–15064 / 20000");
+  expect(mocks.request).toHaveBeenCalledWith("local", {
+    method: "turn_change_summary",
+    session_id: "s",
+    request_id: "large",
+    offset: undefined,
+    path: "src/file-15000.txt",
+  });
+  expect(document.querySelectorAll(".review-file-section")).toHaveLength(64);
+});

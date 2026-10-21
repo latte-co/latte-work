@@ -4907,6 +4907,22 @@ button.task-info-row:not(:disabled):hover,
 .turn-changes-file .change-totals {
   flex-shrink: 0;
 }
+.turn-changes-expanded {
+  max-height: 320px;
+  overflow: auto;
+}
+.turn-changes-pagination {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  padding: var(--space-1) var(--space-3);
+  border-top: 1px solid var(--color-border-subtle);
+  color: var(--color-text-muted);
+}
+.turn-changes-pagination button {
+  min-height: var(--button-height);
+}
 .turn-changes-more {
   width: 100%;
   min-height: var(--button-height);
