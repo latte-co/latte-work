@@ -2,7 +2,7 @@
 import { afterEach, expect, it, vi } from "vitest";
 const mocks = vi.hoisted(() => ({ invoke: vi.fn() }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke: mocks.invoke }));
-import { connect, request } from "./api";
+import { connect, request, ServerRequestError } from "./api";
 import {
   HOST_DISCONNECTED_EVENT,
   HostConnectionError,
@@ -76,6 +76,30 @@ it("ignores a late failure from a transport replaced by reconnect", async () => 
     });
     reject("HOST_CONNECTION_LOST:连接已失效");
     await failure;
+    expect(listener).not.toHaveBeenCalled();
+  } finally {
+    window.removeEventListener(HOST_DISCONNECTED_EVENT, listener);
+  }
+});
+
+it("preserves structured Server error codes without marking the host disconnected", async () => {
+  const listener = vi.fn();
+  window.addEventListener(HOST_DISCONNECTED_EVENT, listener);
+  try {
+    mocks.invoke.mockResolvedValueOnce({
+      kind: "error",
+      code: "not_git_repository",
+      message: "此项目无 Git 分支信息",
+    });
+    const failure = request("metadata-host", {
+      method: "git_info",
+      project_id: "p",
+    });
+    await expect(failure).rejects.toBeInstanceOf(ServerRequestError);
+    await expect(failure).rejects.toMatchObject({
+      code: "not_git_repository",
+      message: "此项目无 Git 分支信息",
+    });
     expect(listener).not.toHaveBeenCalled();
   } finally {
     window.removeEventListener(HOST_DISCONNECTED_EVENT, listener);

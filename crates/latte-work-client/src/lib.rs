@@ -383,7 +383,7 @@ async fn request_with_snapshot(
             permission_mode,
             provider: Some(
                 snapshot
-                    .map(latte_work_protocol::TurnProvider::Snapshot)
+                    .map(|snapshot| latte_work_protocol::TurnProvider::Snapshot(Box::new(snapshot)))
                     .unwrap_or(latte_work_protocol::TurnProvider::Cli),
             ),
         },
@@ -404,7 +404,7 @@ async fn request_with_snapshot(
             permission_mode,
             provider: Some(
                 snapshot
-                    .map(latte_work_protocol::TurnProvider::Snapshot)
+                    .map(|snapshot| latte_work_protocol::TurnProvider::Snapshot(Box::new(snapshot)))
                     .unwrap_or(latte_work_protocol::TurnProvider::Cli),
             ),
         },
@@ -421,7 +421,7 @@ async fn request_with_snapshot(
             revision,
             provider: Some(
                 snapshot
-                    .map(latte_work_protocol::TurnProvider::Snapshot)
+                    .map(|snapshot| latte_work_protocol::TurnProvider::Snapshot(Box::new(snapshot)))
                     .unwrap_or(latte_work_protocol::TurnProvider::Cli),
             ),
         },
@@ -429,7 +429,7 @@ async fn request_with_snapshot(
             session_id,
             provider: Some(
                 snapshot
-                    .map(latte_work_protocol::TurnProvider::Snapshot)
+                    .map(|snapshot| latte_work_protocol::TurnProvider::Snapshot(Box::new(snapshot)))
                     .unwrap_or(latte_work_protocol::TurnProvider::Cli),
             ),
         },
@@ -437,7 +437,7 @@ async fn request_with_snapshot(
             session_id,
             provider: Some(
                 snapshot
-                    .map(latte_work_protocol::TurnProvider::Snapshot)
+                    .map(|snapshot| latte_work_protocol::TurnProvider::Snapshot(Box::new(snapshot)))
                     .unwrap_or(latte_work_protocol::TurnProvider::Cli),
             ),
         },
@@ -454,7 +454,7 @@ async fn request_with_snapshot(
             source,
             provider: Some(
                 snapshot
-                    .map(latte_work_protocol::TurnProvider::Snapshot)
+                    .map(|snapshot| latte_work_protocol::TurnProvider::Snapshot(Box::new(snapshot)))
                     .unwrap_or(latte_work_protocol::TurnProvider::Cli),
             ),
         },

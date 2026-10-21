@@ -701,6 +701,7 @@ async fn provider_catalog_local_binding_and_remote_sync_use_host_protocol() {
     }
     let mut c = local.client().await;
     let draft = ProviderDraft {
+        models_1m: Default::default(),
         id: None,
         name: "Central".into(),
         protocol: ProviderProtocol::AnthropicMessages,
@@ -809,6 +810,7 @@ async fn provider_catalog_local_binding_and_remote_sync_use_host_protocol() {
         ProviderProtocol::OpenaiResponses,
     ] {
         let provider = ProviderDraft {
+            models_1m: Default::default(),
             id: None,
             name: "Other".into(),
             protocol,
@@ -968,6 +970,7 @@ async fn models_select_per_turn_validate_and_persist_without_changing_provider()
         &mut c,
         Request::SaveProvider {
             provider: ProviderDraft {
+                models_1m: Default::default(),
                 id: None,
                 name: "Model catalog".into(),
                 protocol: ProviderProtocol::AnthropicMessages,
@@ -1624,6 +1627,7 @@ async fn native_model_names_are_host_project_scoped_and_do_not_override_provider
         &mut c,
         Request::SaveProvider {
             provider: ProviderDraft {
+                models_1m: Default::default(),
                 id: None,
                 name: "Bound".into(),
                 protocol: ProviderProtocol::AnthropicMessages,
@@ -1654,6 +1658,182 @@ async fn native_model_names_are_host_project_scoped_and_do_not_override_provider
 }
 
 #[tokio::test]
+async fn provider_1m_selection_survives_reopen_and_rejects_removed_capabilities_on_each_host() {
+    use latte_work_protocol::{ProviderSnapshot, TurnProvider};
+    let snapshot: ProviderSnapshot = serde_json::from_value(serde_json::json!({
+        "provider":{
+            "id":"context-provider","name":"Context modes","protocol":"anthropic_messages",
+            "base_url":"https://example.test","model":"gateway/model","models":["small"],
+            "models_1m":["gateway/model"],"auth":"api_key","has_credential":true,"revision":"r1"
+        },
+        "credential":"fixture-private-key"
+    }))
+    .unwrap();
+    let inherited = [
+        ("CLAUDE_CODE_DISABLE_1M_CONTEXT", std::ffi::OsStr::new("1")),
+        (
+            "CLAUDE_CODE_MAX_CONTEXT_TOKENS",
+            std::ffi::OsStr::new("250000"),
+        ),
+    ];
+    let hosts = [
+        Host::start_with_environment(&inherited).await,
+        Host::start_with_environment(&inherited).await,
+    ];
+    for host in &hosts {
+        let root = tempfile::tempdir().unwrap();
+        let mut client = host.client().await;
+        let id = session(&mut client, root.path()).await;
+        let Response::Events { session: saved, .. } = ask(
+            &mut client,
+            Request::Poll {
+                session_id: id.clone(),
+                after: 0.0,
+            },
+        )
+        .await
+        else {
+            panic!()
+        };
+        let Response::Models {
+            models,
+            model_variants: Some(variants),
+            ..
+        } = ask(
+            &mut client,
+            Request::ModelsForProvider {
+                agent: "claude".into(),
+                model: Some("gateway/model[1m]".into()),
+                project_id: Some(saved.project_id),
+                provider: Some(snapshot.provider.clone()),
+            },
+        )
+        .await
+        else {
+            panic!()
+        };
+        assert!(models.contains(&"gateway/model[1m]".into()));
+        assert_eq!(variants["gateway/model"][0].label, "默认");
+        assert_eq!(variants["gateway/model"][0].context_window, Some(200_000.0));
+        let send =
+            |request_id: &str, model: &str, snapshot: ProviderSnapshot| Request::SendQueued {
+                session_id: id.clone(),
+                request_id: request_id.into(),
+                text: "context-mode".into(),
+                model: Some(model.into()),
+                effort: None,
+                permission_mode: None,
+                provider: Some(TurnProvider::Snapshot(Box::new(snapshot))),
+            };
+        assert!(matches!(
+            ask(
+                &mut client,
+                send("standard", "gateway/model", snapshot.clone())
+            )
+            .await,
+            Response::Accepted { duplicate: false }
+        ));
+        let events = wait(&mut client, &id, Status::Completed).await;
+        assert!(events.iter().any(
+            |e| matches!(&e.event, EventKind::Text { text } if text == "fresh:gateway/model:200000:1")
+        ));
+        assert!(matches!(
+            ask(
+                &mut client,
+                send("extended", "gateway/model[1m]", snapshot.clone())
+            )
+            .await,
+            Response::Accepted { duplicate: false }
+        ));
+        let events = wait(&mut client, &id, Status::Completed).await;
+        assert!(events.iter().any(
+            |e| matches!(&e.event, EventKind::Text { text } if text == "resumed:gateway/model[1m]:1000000:0")
+        ));
+        assert!(matches!(
+            ask(
+                &mut client,
+                Request::CloseAgentSession {
+                    session_id: id.clone(),
+                    only_if_idle: Some(true)
+                }
+            )
+            .await,
+            Response::Ok
+        ));
+        assert!(matches!(
+            ask(
+                &mut client,
+                Request::OpenAgentSession {
+                    session_id: id.clone(),
+                    provider: Some(TurnProvider::Snapshot(Box::new(snapshot.clone()))),
+                }
+            )
+            .await,
+            Response::Ok
+        ));
+        let Response::Events {
+            session: saved,
+            events: before,
+            ..
+        } = ask(
+            &mut client,
+            Request::Poll {
+                session_id: id.clone(),
+                after: 0.0,
+            },
+        )
+        .await
+        else {
+            panic!()
+        };
+        assert_eq!(saved.model.as_deref(), Some("gateway/model[1m]"));
+        let mut removed = snapshot.clone();
+        removed.provider.models_1m.clear();
+        removed.provider.revision = "r2".into();
+        assert!(matches!(
+            ask(
+                &mut client,
+                send("unsupported", "gateway/model[1m]", removed.clone())
+            )
+            .await,
+            Response::Error { .. }
+        ));
+        let Response::Events { events: after, .. } = ask(
+            &mut client,
+            Request::Poll {
+                session_id: id.clone(),
+                after: 0.0,
+            },
+        )
+        .await
+        else {
+            panic!()
+        };
+        assert_eq!(
+            after.len(),
+            before.len(),
+            "rejected mode must not replay or admit a prompt"
+        );
+        assert!(
+            matches!(ask(&mut client, Request::MessageQueue { session_id: id.clone() }).await,
+            Response::MessageQueue { entries, .. } if entries.is_empty())
+        );
+        assert!(matches!(
+            ask(&mut client, send("default", "gateway/model", removed)).await,
+            Response::Accepted { duplicate: false }
+        ));
+        let events = wait(&mut client, &id, Status::Completed).await;
+        assert!(events.iter().any(
+            |e| matches!(&e.event, EventKind::Text { text } if text == "resumed:gateway/model:250000:1")
+        ));
+        assert!(
+            !host.directory.path().join("providers.json").exists(),
+            "execution snapshots are not saved on a host"
+        );
+    }
+}
+
+#[tokio::test]
 async fn remote_turns_use_latest_local_provider_without_persisting_snapshots() {
     use latte_work_client::request_with_provider;
     use latte_work_protocol::{ProviderAuth, ProviderDraft, ProviderProtocol, TurnProvider};
@@ -1663,6 +1843,7 @@ async fn remote_turns_use_latest_local_provider_without_persisting_snapshots() {
     let local = Mutex::new(local_host.client().await);
     let remote = Mutex::new(remote_host.client().await);
     let mut draft = ProviderDraft {
+        models_1m: Default::default(),
         id: None,
         name: "Per turn".into(),
         protocol: ProviderProtocol::AnthropicMessages,
@@ -1790,7 +1971,7 @@ async fn remote_turns_use_latest_local_provider_without_persisting_snapshots() {
     ));
     let original = Request::Send {
         permission_mode: Some("plan".into()),
-        provider: Some(TurnProvider::Snapshot(snapshot.clone())),
+        provider: Some(TurnProvider::Snapshot(Box::new(snapshot.clone()))),
         session_id: sid.clone(),
         request_id: "first-turn".into(),
         text: "provider".into(),
@@ -1809,7 +1990,7 @@ async fn remote_turns_use_latest_local_provider_without_persisting_snapshots() {
             .await
             .request(Request::Send {
                 permission_mode: Some("plan".into()),
-                provider: Some(TurnProvider::Snapshot(changed)),
+                provider: Some(TurnProvider::Snapshot(Box::new(changed))),
                 session_id: sid.clone(),
                 request_id: "first-turn".into(),
                 text: "provider".into(),
@@ -1890,6 +2071,7 @@ async fn remote_turns_use_latest_local_provider_without_persisting_snapshots() {
         .await
         .request(Request::SaveProvider {
             provider: ProviderDraft {
+                models_1m: Default::default(),
                 id: None,
                 name: "Legacy remote".into(),
                 protocol: ProviderProtocol::AnthropicMessages,
@@ -2678,6 +2860,53 @@ async fn upgrade_racing_send_either_preserves_task_or_rejects_before_launch() {
 }
 
 #[tokio::test]
+async fn native_skill_load_notice_survives_reconnect_without_exposing_context() {
+    let host = Host::start().await;
+    let mut client = host.client().await;
+    let folder = tempfile::tempdir().unwrap();
+    let id = session(&mut client, folder.path()).await;
+    for (request, mode) in [
+        ("first-skill", "native-catalog"),
+        ("second-skill", "synthetic-context"),
+    ] {
+        send(
+            &mut client,
+            &id,
+            request,
+            &format!("/project:check skill-load {mode}"),
+        )
+        .await;
+        let events = wait(&mut client, &id, Status::Completed).await;
+        let count = events.iter().filter(|event| matches!(&event.event, EventKind::Notice { text } if text == "已加载 Skill：project:check")).count();
+        assert_eq!(count, if request == "first-skill" { 1 } else { 2 });
+        assert!(
+            !serde_json::to_string(&events)
+                .unwrap()
+                .contains("PRIVATE_SKILL_BODY")
+        );
+        assert!(
+            !events.iter().any(
+                |event| matches!(&event.event, EventKind::Tool { name, .. } if name == "Skill")
+            )
+        );
+    }
+    drop(client);
+    let mut client = host.client().await;
+    let Response::Events { events, .. } = ask(
+        &mut client,
+        Request::Poll {
+            session_id: id,
+            after: 0.0,
+        },
+    )
+    .await
+    else {
+        panic!("events response");
+    };
+    assert_eq!(events.iter().filter(|event| matches!(&event.event, EventKind::Notice { text } if text == "已加载 Skill：project:check")).count(), 2);
+}
+
+#[tokio::test]
 async fn agent_commands_discovery_dispatch_resume_and_unsupported_are_native() {
     let host = Host::start().await;
     let mut client = host.client().await;
@@ -3300,6 +3529,7 @@ async fn app_providers_and_native_defaults_only_contact_the_selected_host() {
     let first = Host::start().await;
     let second = Host::start().await;
     let draft = ProviderDraft {
+        models_1m: Default::default(),
         id: None,
         name: "App-only".into(),
         protocol: ProviderProtocol::AnthropicMessages,
@@ -4062,7 +4292,7 @@ async fn opening_old_provider_history_resolves_model_without_replaying_prompt() 
             &mut client,
             Request::OpenAgentSession {
                 session_id: id.clone(),
-                provider: Some(TurnProvider::Snapshot(snapshot))
+                provider: Some(TurnProvider::Snapshot(Box::new(snapshot)))
             }
         )
         .await,
@@ -4422,6 +4652,8 @@ async fn task_baselines_and_sources_integrate_with_real_process_reconnect_and_bo
     send(&mut client, &id, "task-r1", &text).await;
     wait(&mut client, &id, Status::Completed).await;
     let summary_request = || Request::ChangeSummary {
+        path: None,
+        offset: None,
         project_id: task.project_id.clone(),
         session_id: Some(id.clone()),
     };
@@ -4566,6 +4798,8 @@ async fn ordinary_directory_turn_changes_survive_followup_and_reconnect() {
         let Response::TurnChanges { changes } = ask(
             &mut client,
             Request::TurnChangeSummary {
+                path: None,
+                offset: None,
                 session_id: id.clone(),
                 request_id: request_id.into(),
             },
@@ -4641,6 +4875,8 @@ async fn turn_changes_freeze_each_request_and_undo_rejects_conflicts_then_reconc
     std::fs::write(root.join("task.txt"), "existing dirty\n").unwrap();
     let id = session(&mut client, &root).await;
     let summary = |request_id: &str| Request::TurnChangeSummary {
+        path: None,
+        offset: None,
         session_id: id.clone(),
         request_id: request_id.into(),
     };
@@ -4654,6 +4890,8 @@ async fn turn_changes_freeze_each_request_and_undo_rejects_conflicts_then_reconc
         request_id: request_id.into(),
     };
     let latest = || Request::LastTurnChanges {
+        offset: None,
+        path: None,
         session_id: id.clone(),
     };
     assert!(matches!(
@@ -4766,6 +5004,8 @@ async fn turn_changes_freeze_each_request_and_undo_rejects_conflicts_then_reconc
         ask(
             &mut reconnect,
             Request::LastTurnChanges {
+                offset: None,
+                path: None,
                 session_id: "missing".into()
             }
         )
@@ -4776,6 +5016,8 @@ async fn turn_changes_freeze_each_request_and_undo_rejects_conflicts_then_reconc
         ask(
             &mut reconnect,
             Request::TurnChangeSummary {
+                path: None,
+                offset: None,
                 session_id: "another-session".into(),
                 request_id: "turn-r1".into()
             }
@@ -5711,6 +5953,250 @@ async fn queue_until(c: &mut Client, id: &str, count: usize) -> Vec<latte_work_p
     }
 }
 #[tokio::test]
+async fn message_queue_continues_foreground_while_background_work_stays_alive() {
+    let host = Host::start().await;
+    let mut client = host.client().await;
+    let project = tempfile::tempdir().unwrap();
+    let id = session(&mut client, project.path()).await;
+    let queued = |key: &str, model: Option<&str>| Request::SendQueued {
+        session_id: id.clone(),
+        request_id: key.into(),
+        text: "identity".into(),
+        model: model.map(str::to_owned),
+        effort: None,
+        permission_mode: None,
+        provider: Some(latte_work_protocol::TurnProvider::Cli),
+    };
+    send(&mut client, &id, "background-main", "background-held").await;
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !project.path().join("background-main-waiting").exists() {
+        assert!(Instant::now() < deadline);
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let pid = agent_pid(project.path());
+    assert!(matches!(
+        ask(&mut client, queued("queued-before-result", None)).await,
+        Response::MessageQueued { duplicate: false }
+    ));
+    std::fs::write(project.path().join("background-release-main"), "release").unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let background = loop {
+        let events = wait(&mut client, &id, Status::Completed).await;
+        if let Some(identity) = events.iter().rev().find_map(|event| match &event.event {
+            EventKind::Text { text } => serde_json::from_str::<serde_json::Value>(text).ok(),
+            _ => None,
+        }) {
+            assert_eq!(identity["pid"], pid);
+            assert_eq!(identity["turns"], 2);
+            break identity["background_pid"].as_i64().unwrap() as i32;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "queue waited for background completion"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    };
+    assert!(kill(Pid::from_raw(background), None).is_ok());
+    assert!(matches!(
+        ask(&mut client, queued("sent-after-result", None)).await,
+        Response::Accepted { duplicate: false }
+    ));
+    let events = wait(&mut client, &id, Status::Completed).await;
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event.event, EventKind::User { .. }))
+            .count(),
+        3
+    );
+    assert!(matches!(
+        ask(&mut client, queued("sent-after-result", None)).await,
+        Response::Accepted { duplicate: true }
+    ));
+    assert!(
+        matches!(ask(&mut client, queued("changed-model", Some("opus"))).await, Response::Error {message,..} if message.contains("请沿用当前配置发送"))
+    );
+    assert!(
+        matches!(ask(&mut client, Request::MessageQueue {session_id:id.clone()}).await, Response::MessageQueue {entries,..} if entries.is_empty())
+    );
+    assert_eq!(agent_pid(project.path()), pid);
+    assert!(kill(Pid::from_raw(background), None).is_ok());
+    assert!(matches!(
+        ask(
+            &mut client,
+            Request::CloseAgentSession {
+                session_id: id.clone(),
+                only_if_idle: Some(true)
+            }
+        )
+        .await,
+        Response::Error { .. }
+    ));
+    assert!(matches!(
+        ask(
+            &mut client,
+            Request::CloseAgentSession {
+                session_id: id,
+                only_if_idle: Some(false)
+            }
+        )
+        .await,
+        Response::Ok
+    ));
+    assert_gone(background).await;
+    assert_gone(pid).await;
+}
+#[tokio::test]
+async fn message_queue_accepts_next_turn_while_native_subagent_runs() {
+    let host = Host::start().await;
+    let mut client = host.client().await;
+    let project = tempfile::tempdir().unwrap();
+    let id = session(&mut client, project.path()).await;
+    send(&mut client, &id, "spawn-child", "subagents").await;
+    wait(&mut client, &id, Status::Completed).await;
+    let pid = agent_pid(project.path());
+    let response = ask(
+        &mut client,
+        Request::SendQueued {
+            session_id: id.clone(),
+            request_id: "next-with-child".into(),
+            text: "identity".into(),
+            model: None,
+            effort: None,
+            permission_mode: None,
+            provider: Some(latte_work_protocol::TurnProvider::Cli),
+        },
+    )
+    .await;
+    assert!(
+        matches!(response, Response::Accepted { duplicate: false }),
+        "{response:?}"
+    );
+    let events = wait(&mut client, &id, Status::Completed).await;
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event.event, EventKind::User { .. }))
+            .count(),
+        2
+    );
+    assert_eq!(agent_pid(project.path()), pid);
+    assert!(
+        matches!(ask(&mut client,Request::Subagents {session_id:id.clone()}).await,Response::Subagents {tasks,..} if tasks.iter().any(|task|task.status==latte_work_protocol::SubagentStatus::Running))
+    );
+    assert!(matches!(
+        ask(
+            &mut client,
+            Request::CloseAgentSession {
+                session_id: id.clone(),
+                only_if_idle: Some(true)
+            }
+        )
+        .await,
+        Response::Error { .. }
+    ));
+    assert!(matches!(
+        ask(
+            &mut client,
+            Request::CloseAgentSession {
+                session_id: id,
+                only_if_idle: Some(false)
+            }
+        )
+        .await,
+        Response::Ok
+    ));
+}
+#[tokio::test]
+async fn message_queue_pauses_incompatible_config_without_stopping_background_work() {
+    let host = Host::start().await;
+    let mut client = host.client().await;
+    let project = tempfile::tempdir().unwrap();
+    let id = session(&mut client, project.path()).await;
+    send(&mut client, &id, "main", "background-held").await;
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !project.path().join("background-main-waiting").exists() {
+        assert!(Instant::now() < deadline);
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let changed = |key: &str| Request::SendQueued {
+        session_id: id.clone(),
+        request_id: key.into(),
+        text: "identity".into(),
+        model: Some("opus".into()),
+        effort: None,
+        permission_mode: None,
+        provider: Some(latte_work_protocol::TurnProvider::Cli),
+    };
+    assert!(matches!(
+        ask(&mut client, changed("queued-model-change")).await,
+        Response::MessageQueued { duplicate: false }
+    ));
+    std::fs::write(project.path().join("background-release-main"), "release").unwrap();
+    let events = wait(&mut client, &id, Status::Completed).await;
+    let pid = agent_pid(project.path());
+    let background = events
+        .iter()
+        .find_map(|event| match &event.event {
+            EventKind::Text { text } => text
+                .strip_prefix("background:")
+                .and_then(|text| text.parse::<i32>().ok()),
+            _ => None,
+        })
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let response = ask(
+            &mut client,
+            Request::MessageQueue {
+                session_id: id.clone(),
+            },
+        )
+        .await;
+        if let Response::MessageQueue {
+            entries,
+            paused: true,
+            reason: Some(reason),
+        } = response
+            && reason.contains("请沿用当前配置发送")
+        {
+            assert_eq!(entries.len(), 1);
+            assert_eq!(entries[0].request_id, "queued-model-change");
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "incompatible queue did not expose its blocking reason"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(
+        matches!(ask(&mut client,changed("new-model-change")).await,Response::Error {message,..} if message.contains("请沿用当前配置发送"))
+    );
+    let events = wait(&mut client, &id, Status::Completed).await;
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event.event, EventKind::User { .. }))
+            .count(),
+        1
+    );
+    assert_eq!(agent_pid(project.path()), pid);
+    assert!(kill(Pid::from_raw(background), None).is_ok());
+    assert!(matches!(
+        ask(
+            &mut client,
+            Request::CloseAgentSession {
+                session_id: id,
+                only_if_idle: Some(false)
+            }
+        )
+        .await,
+        Response::Ok
+    ));
+    assert_gone(background).await;
+}
+#[tokio::test]
 async fn message_queue_is_durable_fifo_editable_and_not_client_driven() {
     let host = Host::start().await;
     let project = tempfile::tempdir().unwrap();
@@ -6028,6 +6514,7 @@ async fn message_queue_credentials_stay_volatile_and_resume_checks_configuration
     queue_send(&mut c, &id, "secret-head", "queue-slow").await;
     let snapshot = ProviderSnapshot {
         provider: Provider {
+            models_1m: Default::default(),
             id: "queue-api".into(),
             name: "Queue API".into(),
             protocol: ProviderProtocol::AnthropicMessages,
@@ -6045,7 +6532,7 @@ async fn message_queue_credentials_stay_volatile_and_resume_checks_configuration
         session_id: id.clone(),
         request_id: "secret-next".into(),
         text: "provider".into(),
-        provider: Some(TurnProvider::Snapshot(snapshot.clone())),
+        provider: Some(TurnProvider::Snapshot(Box::new(snapshot.clone()))),
         model: None,
         effort: None,
         permission_mode: None,
@@ -6101,7 +6588,7 @@ async fn message_queue_credentials_stay_volatile_and_resume_checks_configuration
             &mut c,
             Request::ResumeMessageQueue {
                 session_id: id.clone(),
-                provider: Some(TurnProvider::Snapshot(rotated))
+                provider: Some(TurnProvider::Snapshot(Box::new(rotated)))
             }
         )
         .await,
@@ -7001,4 +7488,258 @@ async fn message_queue_desktop_provider_bridge_accepts_both_dispatch_responses()
         })
         .collect::<Vec<_>>();
     assert_eq!(ids, ["bridge-head", "bridge-b"]);
+}
+
+#[tokio::test]
+async fn non_git_summary_error_is_typed_without_disabling_project_reads() {
+    use latte_work_protocol::GitReviewScope;
+    let host = Host::start().await;
+    let mut client = host.client().await;
+    let root = tempfile::tempdir().unwrap();
+    std::fs::write(root.path().join("report.md"), "resource\n").unwrap();
+    let Response::Project { project } = ask(
+        &mut client,
+        Request::AddProject {
+            path: root.path().to_string_lossy().into(),
+            name: None,
+        },
+    )
+    .await
+    else {
+        panic!("project response")
+    };
+    for _ in 0..2 {
+        match ask(
+            &mut client,
+            Request::GitReview {
+                project_id: project.id.clone(),
+                scope: GitReviewScope::Branch,
+                base: None,
+            },
+        )
+        .await
+        {
+            Response::Error { code, .. } => assert_eq!(code, "not_git_repository"),
+            response => panic!("unexpected: {response:?}"),
+        }
+        client = host.client().await;
+    }
+    assert!(matches!(
+        ask(
+            &mut client,
+            Request::ReadFile {
+                project_id: project.id.clone(),
+                path: "report.md".into(),
+            }
+        )
+        .await,
+        Response::Content { text, truncated: false } if text == "resource\n"
+    ));
+    // An incomplete .git directory remains an actionable failure.
+    std::fs::create_dir(root.path().join(".git")).unwrap();
+    match ask(
+        &mut client,
+        Request::GitReview {
+            project_id: project.id,
+            scope: GitReviewScope::Branch,
+            base: None,
+        },
+    )
+    .await
+    {
+        Response::Error { code, .. } => assert_eq!(code, "request_failed"),
+        response => panic!("unexpected: {response:?}"),
+    }
+}
+
+#[tokio::test]
+async fn snapshot_pages_preserve_all_files_and_undo_after_reconnect() {
+    let host = Host::start().await;
+    let root = tempfile::tempdir().unwrap();
+    let mut client = host.client().await;
+    let id = session(&mut client, root.path()).await;
+    assert!(matches!(
+        ask(
+            &mut client,
+            Request::OpenAgentSession {
+                session_id: id.clone(),
+                provider: None
+            }
+        )
+        .await,
+        Response::Ok
+    ));
+    assert!(matches!(
+        send(&mut client, &id, "many-files", "task-edit-many").await,
+        Response::Accepted { .. }
+    ));
+    let events = wait(&mut client, &id, Status::Completed).await;
+    let saved = events
+        .iter()
+        .find_map(|e| {
+            if let EventKind::TurnChanges { changes } = &e.event {
+                Some(changes)
+            } else {
+                None
+            }
+        })
+        .unwrap();
+    assert_eq!(saved.summary.total_files, Some(131));
+    assert_eq!(saved.summary.entries.len(), 64);
+    assert!(!saved.summary.truncated);
+    let mut reconnected = host.client().await;
+    let mut offset = None;
+    let mut names = Vec::new();
+    loop {
+        let Response::TurnChanges { changes } = ask(
+            &mut reconnected,
+            Request::TurnChangeSummary {
+                session_id: id.clone(),
+                request_id: "many-files".into(),
+                offset,
+                path: None,
+            },
+        )
+        .await
+        else {
+            panic!()
+        };
+        assert!(changes.summary.entries.len() <= 64);
+        names.extend(changes.summary.entries.iter().map(|e| e.path.clone()));
+        match changes.summary.next_offset {
+            Some(next) => {
+                assert!(next > offset.unwrap_or(0));
+                offset = Some(next)
+            }
+            None => break,
+        }
+    }
+    assert_eq!(names.len(), 131);
+    names.sort();
+    names.dedup();
+    assert_eq!(names.len(), 131);
+    let Response::TurnChanges { changes } = ask(
+        &mut reconnected,
+        Request::TurnChangeSummary {
+            session_id: id.clone(),
+            request_id: "many-files".into(),
+            offset: None,
+            path: Some("file-129.txt".into()),
+        },
+    )
+    .await
+    else {
+        panic!()
+    };
+    assert!(
+        changes
+            .summary
+            .entries
+            .iter()
+            .any(|entry| entry.path == "file-129.txt")
+    );
+    assert!(matches!(
+        ask(
+            &mut reconnected,
+            Request::TurnChangeSummary {
+                session_id: id.clone(),
+                request_id: "many-files".into(),
+                offset: Some(1000),
+                path: None
+            }
+        )
+        .await,
+        Response::Error { .. }
+    ));
+    let Response::Content { text, .. } = ask(
+        &mut reconnected,
+        Request::TurnChangeDiff {
+            session_id: id.clone(),
+            request_id: "many-files".into(),
+            path: "file-129.txt".into(),
+        },
+    )
+    .await
+    else {
+        panic!()
+    };
+    assert!(text.contains("+new 129"));
+    let Response::TurnChanges { changes } = ask(
+        &mut reconnected,
+        Request::UndoTurnChanges {
+            session_id: id.clone(),
+            request_id: "many-files".into(),
+        },
+    )
+    .await
+    else {
+        panic!()
+    };
+    assert_eq!(changes.undo, latte_work_protocol::TurnUndoStatus::Reverted);
+    for n in 0..130 {
+        assert!(!root.path().join(format!("file-{n:03}.txt")).exists());
+    }
+    assert!(!root.path().join("task.txt").exists());
+    let db = rusqlite::Connection::open(host.directory.path().join("state.sqlite")).unwrap();
+    let largest: i64 = db
+        .query_row(
+            "SELECT MAX(octet_length(data)) FROM turn_changes",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert!(largest < 256 * 1024);
+}
+#[tokio::test]
+async fn snapshot_legacy_oversized_events_advance_cursor_and_leave_other_sessions_live() {
+    let host = Host::start().await;
+    let mut client = host.client().await;
+    let root = tempfile::tempdir().unwrap();
+    let other_root = tempfile::tempdir().unwrap();
+    let id = session(&mut client, root.path()).await;
+    let other = session(&mut client, other_root.path()).await;
+    let old = serde_json::json!({"kind":"notice","text":"x".repeat(3*1024*1024)}).to_string();
+    let db = rusqlite::Connection::open(host.directory.path().join("state.sqlite")).unwrap();
+    db.execute(
+        "INSERT INTO events(session_id,at,data) VALUES (?1,1,?2)",
+        rusqlite::params![id, old],
+    )
+    .unwrap();
+    let blocked = db.last_insert_rowid() as f64;
+    drop(db);
+    assert!(matches!(
+        send(&mut client, &id, "after-oversized", "identity").await,
+        Response::Accepted { .. }
+    ));
+    let events = wait(&mut client, &id, Status::Completed).await;
+    assert!(
+        events
+            .iter()
+            .any(|e| e.seq == blocked && matches!(e.event, EventKind::Notice { .. }))
+    );
+    assert!(events.iter().any(|e| matches!(
+        e.event,
+        EventKind::State {
+            status: Status::Completed,
+            ..
+        }
+    )));
+    let cursor = events.last().unwrap().seq;
+    let Response::Events { events, .. } = ask(
+        &mut client,
+        Request::Poll {
+            session_id: id,
+            after: cursor,
+        },
+    )
+    .await
+    else {
+        panic!()
+    };
+    assert!(events.is_empty());
+    assert!(matches!(
+        send(&mut client, &other, "other-session", "identity").await,
+        Response::Accepted { .. }
+    ));
+    wait(&mut client, &other, Status::Completed).await;
 }

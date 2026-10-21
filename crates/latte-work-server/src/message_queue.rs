@@ -3,7 +3,7 @@ use crate::{
     runtime::SendTurn,
     store::{Store, now},
 };
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use latte_work_protocol::{QueuedMessage, Response};
 use rusqlite::{Connection, OptionalExtension, params};
 use std::collections::HashSet;
@@ -256,6 +256,29 @@ impl Store {
         tx.commit()?;
         Ok(())
     }
+    /// Only a definitive native rejection permits returning a handed-off input.
+    pub fn reject_forwarded(&self, id: &str, request_id: &str, reason: &str) -> Result<()> {
+        let tx = self.db.unchecked_transaction()?;
+        let data: Option<String> = tx.query_row("SELECT data FROM message_queue WHERE session_id=?1 AND request_id=?2 AND status='forwarded'", params![id,request_id], |r| r.get(0)).optional()?;
+        let Some(data) = data else {
+            return Ok(());
+        };
+        let mut entry: QueuedMessage = serde_json::from_str(&data)?;
+        entry.revision = entry
+            .revision
+            .checked_add(1)
+            .context("排队消息版本已达上限")?;
+        tx.execute("UPDATE message_queue SET status='pending',data=?3 WHERE session_id=?1 AND request_id=?2 AND status='forwarded'",params![id,request_id,serde_json::to_string(&entry)?])?;
+        let reason = format!("消息未被 Agent 接收，已退回队列：{reason}");
+        tx.execute("INSERT INTO message_queue_state(session_id,paused,reason) VALUES (?1,1,?2) ON CONFLICT(session_id) DO UPDATE SET paused=1,reason=excluded.reason",params![id,reason])?;
+        let notice = latte_work_protocol::EventKind::Notice { text: reason };
+        tx.execute(
+            "INSERT INTO events(session_id,at,data) VALUES (?1,?2,?3)",
+            params![id, now(), serde_json::to_string(&notice)?],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
     /// Retire only native-confirmed inputs, without admitting or writing a new turn.
     pub fn consume_forwarded(&self, id: &str, requests: &[String]) -> Result<()> {
         let tx = self.db.unchecked_transaction()?;
@@ -309,6 +332,44 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn definitive_rejection_restores_exact_content_once_with_a_new_revision() {
+        let root = tempfile::tempdir().unwrap();
+        let store = Store::open(&root.path().join("state.sqlite")).unwrap();
+        let project = store.add_project(root.path()).unwrap();
+        let session = store.create_session(project.id, "traex".into()).unwrap();
+        let entry = QueuedMessage {
+            request_id: "rejected".into(),
+            text: "original with references".into(),
+            model: None,
+            effort: None,
+            permission_mode: None,
+            revision: 0,
+            created_at: 1.0,
+        };
+        let data = serde_json::to_string(&entry).unwrap();
+        store.db.execute("INSERT INTO message_queue(request_id,session_id,admission,data) VALUES ('rejected',?1,?2,?2)",params![session.id,data]).unwrap();
+        store.mark_forwarded(&session.id, "rejected", 0).unwrap();
+        store
+            .reject_forwarded(&session.id, "rejected", "native rejection")
+            .unwrap();
+        store
+            .reject_forwarded(&session.id, "rejected", "duplicate response")
+            .unwrap();
+        let restored = store.queued(&session.id).unwrap().remove(0).0;
+        assert_eq!(restored.text, entry.text);
+        assert_eq!(restored.revision, 1);
+        assert!(store.queue_state(&session.id).unwrap().0);
+        assert!(store.mark_forwarded(&session.id, "rejected", 0).is_err());
+        store.mark_forwarded(&session.id, "rejected", 1).unwrap();
+        store
+            .consume_forwarded(&session.id, &["rejected".into()])
+            .unwrap();
+        store
+            .reject_forwarded(&session.id, "rejected", "late rejection")
+            .unwrap();
+        assert!(store.queued(&session.id).unwrap().is_empty());
+    }
     #[test]
     fn consumed_handoff_retains_references_activity_and_identity_after_restart() {
         let root = tempfile::tempdir().unwrap();

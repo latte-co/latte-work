@@ -319,6 +319,54 @@ it("distinguishes running, waiting and unread, and reflects folder expansion", (
   rerender(<Sidebar state={state([session("completed", false)])} />);
   expect(screen.queryByRole("img", { name: "未读" })).toBeNull();
 });
+it.each(["project", "pinned", "recent"])(
+  "hides read failure badges in %s rows and shows new unread failures",
+  async (list) => {
+    const failed = session("failed", true);
+    if (list === "recent")
+      localStorage.setItem(
+        "latte-work.sidebar-sections.v1",
+        JSON.stringify({ recent: true }),
+      );
+    mocks.request.mockImplementation(async (_, request) =>
+      request.method === "recent_sessions"
+        ? {
+            kind: "recent_sessions",
+            sessions: [{ session: failed, updated_at: 1 }],
+            next: null,
+          }
+        : { kind: "sessions", sessions: [] },
+    );
+    const props = (unread: boolean) => ({
+      ...state([{ ...failed, unread }]),
+      pinned: list === "pinned" ? [{ ...failed, unread, hostId: "local" }] : [],
+    });
+    const view = render(<Sidebar state={props(true)} />);
+    const scope =
+      list === "pinned"
+        ? within(screen.getByRole("region", { name: "置顶会话" }))
+        : list === "recent"
+          ? within(screen.getByRole("region", { name: "最近对话" }))
+          : screen;
+    const row = await scope.findByRole("button", { name: "Task" });
+    expect(within(row).getByRole("img", { name: "执行失败" })).toBeTruthy();
+    view.rerender(<Sidebar state={props(false)} />);
+    await waitFor(() =>
+      expect(within(row).queryByRole("img", { name: "执行失败" })).toBeNull(),
+    );
+    expect(within(row).queryByRole("img", { name: "未读" })).toBeNull();
+    view.rerender(<Sidebar state={props(true)} />);
+    expect(within(row).getByRole("img", { name: "执行失败" })).toBeTruthy();
+  },
+);
+it.each([
+  ["running", "执行中"],
+  ["waiting", "等待确认"],
+  ["unknown", "状态待确认"],
+] as const)("keeps %s status visible even when read", (status, label) => {
+  render(<Sidebar state={state([session(status, false)])} />);
+  expect(screen.getByRole("img", { name: label })).toBeTruthy();
+});
 it("opens recent history across projects and hosts without selecting on startup", async () => {
   localStorage.clear();
   const base = state([]);

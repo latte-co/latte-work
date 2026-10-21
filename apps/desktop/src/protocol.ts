@@ -196,6 +196,12 @@ export type TaskChange = {
 };
 export type ChangeSummary = {
   entries: Array<TaskChange>;
+  /**
+   * Complete captured count; entries are a bounded presentation page.
+   */
+  total_files?: number | null;
+  next_offset?: number | null;
+  offset?: number | null;
   added: number;
   removed: number;
   binary_files: number;
@@ -269,6 +275,10 @@ export type Provider = {
   model: string;
   models: Array<string>;
   model_labels: { [key in string]?: string };
+  /**
+   * Provider-declared base model IDs that support Claude Code's 1M mode.
+   */
+  models_1m?: Array<string>;
   auth: ProviderAuth;
   has_credential: boolean;
   revision: string;
@@ -281,6 +291,7 @@ export type ProviderDraft = {
   model: string;
   models: Array<string>;
   model_labels: { [key in string]?: string };
+  models_1m?: Array<string>;
   auth: ProviderAuth;
   /**
    * None preserves a saved credential; plaintext is write-only over the private host transport.
@@ -503,10 +514,27 @@ export type Request =
       path: string;
       full_context: boolean;
     }
-  | { method: "change_summary"; project_id: string; session_id: string | null }
+  | {
+      method: "change_summary";
+      project_id: string;
+      session_id: string | null;
+      path?: string | null;
+      offset?: number | null;
+    }
   | { method: "undo_turn_changes"; session_id: string; request_id: string }
-  | { method: "turn_change_summary"; session_id: string; request_id: string }
-  | { method: "last_turn_changes"; session_id: string }
+  | {
+      method: "turn_change_summary";
+      session_id: string;
+      request_id: string;
+      path?: string | null;
+      offset?: number | null;
+    }
+  | {
+      method: "last_turn_changes";
+      session_id: string;
+      offset?: number | null;
+      path?: string | null;
+    }
   | {
       method: "turn_change_diff";
       session_id: string;

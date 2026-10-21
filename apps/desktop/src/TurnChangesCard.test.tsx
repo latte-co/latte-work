@@ -34,6 +34,117 @@ const props = {
   canUndo: true,
   open: vi.fn(),
 };
+const manyChanges: TurnChanges = {
+  ...changes,
+  summary: {
+    ...changes.summary,
+    entries: Array.from({ length: 10 }, (_, index) => ({
+      path: `src/nested/file-${index + 1}.tsx`,
+      status: "M",
+      added: index + 1,
+      removed: 1,
+    })),
+    added: 55,
+    removed: 10,
+  },
+};
+it("previews three files and expands all remaining files in place without requests", () => {
+  render(<TurnChangesCard {...props} changes={manyChanges} />);
+  expect(screen.getByText("已编辑 10 个文件")).toBeTruthy();
+  expect(document.querySelectorAll(".turn-changes-file")).toHaveLength(3);
+  const more = screen.getByRole("button", { name: "再显示 7 个文件" });
+  expect(more.getAttribute("aria-expanded")).toBe("false");
+  more.focus();
+  fireEvent.click(more);
+  expect(document.querySelectorAll(".turn-changes-file")).toHaveLength(10);
+  expect(more.getAttribute("aria-expanded")).toBe("true");
+  expect(document.activeElement).toBe(more);
+  expect(
+    document.getElementById(more.getAttribute("aria-controls")!),
+  ).toBeTruthy();
+  expect(props.open).not.toHaveBeenCalled();
+  expect(mocks.request).not.toHaveBeenCalled();
+  fireEvent.click(screen.getByRole("button", { name: /file-10.tsx/ }));
+  expect(props.open).toHaveBeenCalledExactlyOnceWith("src/nested/file-10.tsx");
+  fireEvent.click(screen.getByRole("button", { name: "收起文件列表" }));
+  expect(document.querySelectorAll(".turn-changes-file")).toHaveLength(3);
+  expect(screen.getByRole("button", { name: "再显示 7 个文件" })).toBe(more);
+});
+it("retains expansion on snapshot refresh but does not apply it to a different host, session or turn", () => {
+  const view = render(<TurnChangesCard {...props} changes={manyChanges} />);
+  fireEvent.click(screen.getByRole("button", { name: "再显示 7 个文件" }));
+  view.rerender(
+    <TurnChangesCard
+      {...props}
+      changes={{ ...manyChanges, undo: "reverted" }}
+    />,
+  );
+  expect(document.querySelectorAll(".turn-changes-file")).toHaveLength(10);
+  for (const patch of [
+    { hostId: "remote" },
+    { sessionId: "another" },
+    { changes: { ...manyChanges, request_id: "another" } },
+    {
+      changes: {
+        ...manyChanges,
+        summary: { ...manyChanges.summary, baseline_at: 2000 },
+      },
+    },
+  ]) {
+    view.rerender(
+      <TurnChangesCard {...props} changes={manyChanges} {...patch} />,
+    );
+    expect(document.querySelectorAll(".turn-changes-file")).toHaveLength(3);
+    expect(
+      screen
+        .getByRole("button", { name: "再显示 7 个文件" })
+        .getAttribute("aria-expanded"),
+    ).toBe("false");
+  }
+});
+it.each([
+  { interrupted: true },
+  { background_pending: true },
+  { summary: { ...manyChanges.summary, truncated: true } },
+  { summary: { ...manyChanges.summary, unavailable: "读取失败" } },
+])("omits the footer while preserving unavailable undo (%j)", (patch) => {
+  render(
+    <TurnChangesCard
+      {...props}
+      canUndo={false}
+      changes={{
+        ...manyChanges,
+        ...patch,
+      }}
+    />,
+  );
+  expect(document.querySelectorAll(".turn-changes-file")).toHaveLength(3);
+  expect(document.querySelector(".turn-changes-note")).toBeNull();
+  expect(screen.queryByText(/部分文件超出采集范围|本轮中断/)).toBeNull();
+  if (patch.summary?.unavailable) return;
+  expect(
+    (screen.getByRole("button", { name: "撤销" }) as HTMLButtonElement)
+      .disabled,
+  ).toBe(true);
+});
+it.each([1, 3])("does not show a disclosure for %i files", (count) => {
+  render(
+    <TurnChangesCard
+      {...props}
+      changes={{
+        ...manyChanges,
+        summary: {
+          ...manyChanges.summary,
+          entries: manyChanges.summary.entries.slice(0, count),
+        },
+      }}
+    />,
+  );
+  expect(document.querySelectorAll(".turn-changes-file")).toHaveLength(count);
+  expect(
+    screen.queryByRole("button", { name: /再显示|收起文件列表/ }),
+  ).toBeNull();
+});
 it("shows per-turn counts and opens exact-file diffs without launching an agent", () => {
   render(<TurnChangesCard {...props} />);
   expect(screen.getByText("已编辑 1 个文件")).toBeTruthy();
@@ -166,3 +277,114 @@ it.each([
     expect(screen.queryByText(/已编辑|本轮变更未能记录/)).toBeNull();
   },
 );
+
+it("pages a twenty-thousand-file turn without mounting its complete list", async () => {
+  const entry = (n: number) => ({
+    path: `src/file-${n}.tsx`,
+    status: "A",
+    added: 1,
+    removed: 0,
+  });
+  const first = {
+    ...changes,
+    summary: {
+      ...changes.summary,
+      entries: Array.from({ length: 64 }, (_, n) => entry(n)),
+      total_files: 20000,
+      offset: 0,
+      next_offset: 64,
+    },
+  };
+  mocks.request.mockResolvedValue({
+    kind: "turn_changes",
+    changes: {
+      ...first,
+      summary: {
+        ...first.summary,
+        entries: Array.from({ length: 64 }, (_, n) => entry(n + 64)),
+        offset: 64,
+        next_offset: 128,
+      },
+    },
+  });
+  render(<TurnChangesCard {...props} changes={first} />);
+  expect(screen.getByText("已编辑 20000 个文件")).toBeTruthy();
+  expect(document.querySelectorAll(".turn-changes-file")).toHaveLength(3);
+  fireEvent.click(
+    screen.getByRole("button", { name: "展开文件列表（共 20000 个）" }),
+  );
+  expect(document.querySelectorAll(".turn-changes-file")).toHaveLength(64);
+  fireEvent.click(screen.getByRole("button", { name: "下一页" }));
+  await screen.findByRole("button", { name: /file-127.tsx/ });
+  expect(document.querySelectorAll(".turn-changes-file")).toHaveLength(64);
+  expect(screen.queryByRole("button", { name: /file-0.tsx/ })).toBeNull();
+  expect(mocks.request).toHaveBeenCalledExactlyOnceWith("local", {
+    method: "turn_change_summary",
+    session_id: "s1",
+    request_id: "r1",
+    offset: 64,
+  });
+  fireEvent.click(screen.getByRole("button", { name: /file-127.tsx/ }));
+  expect(props.open).toHaveBeenLastCalledWith("src/file-127.tsx");
+  mocks.request.mockResolvedValue({ kind: "turn_changes", changes: first });
+  fireEvent.click(screen.getByRole("button", { name: "上一页" }));
+  await screen.findByRole("button", { name: /file-0.tsx/ });
+  expect(document.querySelectorAll(".turn-changes-file")).toHaveLength(64);
+  fireEvent.click(screen.getByRole("button", { name: "收起文件列表" }));
+  expect(document.querySelectorAll(".turn-changes-file")).toHaveLength(3);
+});
+it("bounds legacy list DOM locally and ignores a late page from another session", async () => {
+  const entries = Array.from({ length: 10000 }, (_, n) => ({
+    path: `legacy-${n}.txt`,
+    status: "M",
+    added: 1,
+    removed: 0,
+  }));
+  const local = { ...changes, summary: { ...changes.summary, entries } };
+  const view = render(<TurnChangesCard {...props} changes={local} />);
+  fireEvent.click(
+    screen.getByRole("button", { name: "展开文件列表（共 10000 个）" }),
+  );
+  expect(document.querySelectorAll(".turn-changes-file")).toHaveLength(64);
+  fireEvent.click(screen.getByRole("button", { name: "下一页" }));
+  await screen.findByRole("button", { name: /legacy-127.txt/ });
+  expect(mocks.request).not.toHaveBeenCalled();
+  let finish!: (value: unknown) => void;
+  mocks.request.mockImplementation(
+    () => new Promise((resolve) => (finish = resolve)),
+  );
+  const paged = {
+    ...changes,
+    summary: {
+      ...changes.summary,
+      entries: entries.slice(0, 64),
+      total_files: 10000,
+      offset: 0,
+      next_offset: 64,
+    },
+  };
+  view.rerender(
+    <TurnChangesCard {...props} sessionId="another" changes={paged} />,
+  );
+  fireEvent.click(
+    screen.getByRole("button", { name: "展开文件列表（共 10000 个）" }),
+  );
+  fireEvent.click(screen.getByRole("button", { name: "下一页" }));
+  view.rerender(
+    <TurnChangesCard {...props} sessionId="third" changes={changes} />,
+  );
+  await waitFor(() => expect(screen.getByText("已编辑 1 个文件")).toBeTruthy());
+  finish({
+    kind: "turn_changes",
+    changes: {
+      ...paged,
+      summary: {
+        ...paged.summary,
+        entries: [
+          { path: "STALE_PAGE.txt", status: "A", added: 1, removed: 0 },
+        ],
+      },
+    },
+  });
+  await waitFor(() => expect(screen.queryByText("STALE_PAGE.txt")).toBeNull());
+});

@@ -11,6 +11,7 @@ import {
 import { renderWithStatus as render } from "./test/renderWithStatus";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { TaskInfo } from "./TaskInfo";
+import { ServerRequestError } from "./api";
 import { readWorkspace } from "./workspaceState";
 import { LinkHandling } from "./LinkHandling";
 import {
@@ -20,7 +21,11 @@ import {
 } from "./browserHistory";
 import type { Request } from "./protocol";
 const mocks = vi.hoisted(() => ({ request: vi.fn() }));
-vi.mock("./api", () => ({ request: mocks.request, message: String }));
+vi.mock("./api", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./api")>()),
+  request: mocks.request,
+  message: String,
+}));
 const props = {
   workspaceId: "",
   active: true,
@@ -441,3 +446,61 @@ it("updates collapsed group counts without reopening them on incoming records", 
   fireEvent.click(header);
   expect(screen.getByRole("link", { name: "New guide" })).toBeTruthy();
 });
+
+it("keeps non-Git summaries quiet and usable, then refreshes after Git initialization", async () => {
+  const normal = mocks.request.getMockImplementation()!;
+  mocks.request.mockImplementation(async (host, request) => {
+    if (request.method === "git_review")
+      throw new ServerRequestError(
+        "not_git_repository",
+        "此项目无 Git 分支信息",
+      );
+    return normal(host, request);
+  });
+  render(<TaskInfo {...props} />);
+  const branch = await screen.findByRole("button", {
+    name: /分支变更.*此项目无 Git 分支信息/,
+  });
+  expect((branch as HTMLButtonElement).disabled).toBe(true);
+  expect(screen.getByRole("button", { name: "状态提示" })).toBeTruthy();
+  expect(screen.queryByText("+0")).toBeNull();
+  expect(screen.getByRole("link", { name: "Docs" })).toBeTruthy();
+  expect(
+    within(screen.getByRole("region", { name: "调用的 Tools" })).getByText(
+      "3 次",
+    ),
+  ).toBeTruthy();
+  expect(screen.getByRole("button", { name: /Report/ })).toBeTruthy();
+  fireEvent.click(branch);
+  expect(
+    readWorkspace(props.workspaceId).tabs.some((tab) => tab.kind === "diff"),
+  ).toBe(false);
+  mocks.request.mockImplementation(normal);
+  fireEvent.click(screen.getByRole("button", { name: "刷新任务摘要" }));
+  const available = await screen.findByRole("button", {
+    name: /分支变更.*1 个文件/,
+  });
+  expect((available as HTMLButtonElement).disabled).toBe(false);
+  expect(screen.getByText("+8")).toBeTruthy();
+});
+
+it.each(["request_failed", "unsupported"])(
+  "preserves %s errors and allows retry",
+  async (code) => {
+    const normal = mocks.request.getMockImplementation()!;
+    mocks.request.mockImplementation(async (host, request) => {
+      if (request.method === "git_review")
+        throw new ServerRequestError(code, "Git metadata failed");
+      return normal(host, request);
+    });
+    render(<TaskInfo {...props} />);
+    await screen.findByRole("button", { name: /分支变更.*暂不可用/ });
+    fireEvent.click(screen.getByRole("button", { name: /状态提示/ }));
+    expect(screen.getByText("任务摘要变更暂不可用")).toBeTruthy();
+    expect(screen.getByText(/Git metadata failed/)).toBeTruthy();
+    mocks.request.mockImplementation(normal);
+    fireEvent.click(screen.getByRole("button", { name: "重试" }));
+    await screen.findByRole("button", { name: /分支变更.*1 个文件/ });
+    expect(screen.queryByText("任务摘要变更暂不可用")).toBeNull();
+  },
+);

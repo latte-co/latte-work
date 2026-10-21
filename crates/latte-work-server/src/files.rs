@@ -8,6 +8,35 @@ use std::{
 };
 use tokio::{io::AsyncReadExt, process::Command};
 const LIMIT: usize = 512 * 1024;
+#[derive(Debug)]
+pub(crate) struct NotGitRepository;
+impl std::fmt::Display for NotGitRepository {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("此项目无 Git 分支信息")
+    }
+}
+impl std::error::Error for NotGitRepository {}
+
+async fn missing_repository(root: &Path, diagnostic: &[u8]) -> bool {
+    // Recognize only Git's repository-discovery failure, in a fixed locale.
+    // Invalid gitfiles, unsafe ownership and other command errors stay errors.
+    let diagnostic = String::from_utf8_lossy(diagnostic);
+    if !diagnostic.lines().any(|line| {
+        line.starts_with("fatal: not a git repository (or any of the parent directories): .git")
+            || line.starts_with("fatal: not a git repository (or any parent up to mount point ")
+    }) {
+        return false;
+    }
+    // Git can ignore an incomplete .git directory. Preserve that as a real
+    // failure instead of declaring a broken repository an ordinary folder.
+    for ancestor in root.ancestors() {
+        match tokio::fs::symlink_metadata(ancestor.join(".git")).await {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            _ => return false,
+        }
+    }
+    true
+}
 /// Resolve an explicitly chosen host path for a prompt reference only. This does
 /// not grant access, read contents, or relax project browsing/read containment.
 pub async fn reference(root: &Path, path: &str) -> Result<FileEntry> {
@@ -310,9 +339,10 @@ pub(crate) async fn git(root: &Path, args: &[&str]) -> Result<(String, bool)> {
         .args(args)
         .current_dir(root)
         .env("GIT_OPTIONAL_LOCKS", "0")
+        .env("LC_ALL", "C")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
+        .stderr(Stdio::piped())
         .kill_on_drop(true)
         .spawn()?;
     let mut output = child
@@ -321,15 +351,49 @@ pub(crate) async fn git(root: &Path, args: &[&str]) -> Result<(String, bool)> {
         .context("git stdout missing")?
         .take((LIMIT + 1) as u64);
     let mut bytes = Vec::new();
-    tokio::time::timeout(Duration::from_secs(10), output.read_to_end(&mut bytes)).await??;
+    let mut diagnostic = child
+        .stderr
+        .take()
+        .context("git stderr missing")?
+        // Read one byte beyond the 8 KiB cap to detect overflow, even on exit 0.
+        .take(8193);
+    let mut errors = Vec::new();
+    // A full pipe must end the combined read immediately so the child can be
+    // killed; waiting for the other pipe's EOF would deadlock on large output.
+    let read = tokio::time::timeout(Duration::from_secs(10), async {
+        tokio::try_join!(
+            async {
+                output.read_to_end(&mut bytes).await?;
+                anyhow::ensure!(bytes.len() <= LIMIT, "Git 输出达到读取上限");
+                Ok::<_, anyhow::Error>(())
+            },
+            async {
+                diagnostic.read_to_end(&mut errors).await?;
+                anyhow::ensure!(errors.len() <= 8192, "Git 错误信息超出读取上限");
+                Ok::<_, anyhow::Error>(())
+            }
+        )
+    })
+    .await?;
     let truncated = bytes.len() > LIMIT;
-    if truncated {
+    if truncated || errors.len() > 8192 {
         child.kill().await?;
-    } else if !tokio::time::timeout(Duration::from_secs(5), child.wait())
-        .await??
-        .success()
-    {
-        bail!("无法读取 Git 状态，请确认项目是 Git 仓库");
+        if errors.len() > 8192 {
+            bail!("Git 错误信息超出读取上限");
+        }
+    } else {
+        read?;
+        let status = tokio::time::timeout(Duration::from_secs(5), child.wait()).await??;
+        if !status.success() {
+            if status.code() == Some(128)
+                && tokio::time::timeout(Duration::from_secs(3), missing_repository(root, &errors))
+                    .await
+                    .unwrap_or(false)
+            {
+                return Err(NotGitRepository.into());
+            }
+            bail!("无法读取 Git 状态，请确认项目是 Git 仓库");
+        }
     }
     bytes.truncate(LIMIT);
     Ok((String::from_utf8_lossy(&bytes).into_owned(), truncated))
@@ -337,6 +401,124 @@ pub(crate) async fn git(root: &Path, args: &[&str]) -> Result<(String, bool)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn git_output_limits_do_not_wait_for_the_other_pipe_to_close() {
+        let root = tempfile::tempdir().unwrap();
+        // git config does not require a repository. A large value fills stdout
+        // while stderr stays open until the producer is killed.
+        std::fs::write(
+            root.path().join("config"),
+            format!("[large]\nvalue = {}\n", "x".repeat(LIMIT * 4)),
+        )
+        .unwrap();
+        let (text, truncated) = tokio::time::timeout(
+            Duration::from_secs(3),
+            git(root.path(), &["config", "--file", "config", "--list"]),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert!(truncated);
+        assert_eq!(text.len(), LIMIT);
+        // A local, prompt-free Git alias fills stderr instead of stdout.
+        let error = tokio::time::timeout(
+            Duration::from_secs(3),
+            git(
+                root.path(),
+                &["-c", "alias.noisy=!head -c 32768 /dev/zero >&2", "noisy"],
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap_err();
+        assert!(!error.is::<NotGitRepository>());
+        assert_eq!(error.to_string(), "Git 错误信息超出读取上限");
+    }
+    #[tokio::test]
+    async fn git_stderr_cap_accepts_8192_bytes_and_rejects_the_sentinel_and_beyond() {
+        let root = tempfile::tempdir().unwrap();
+        for count in [8192, 8193, 8194] {
+            let alias = format!("alias.noisy=!head -c {count} /dev/zero >&2");
+            let result = tokio::time::timeout(
+                Duration::from_secs(3),
+                git(root.path(), &["-c", &alias, "noisy"]),
+            )
+            .await
+            .unwrap();
+            if count == 8192 {
+                assert_eq!(result.unwrap(), (String::new(), false));
+            } else {
+                assert_eq!(result.unwrap_err().to_string(), "Git 错误信息超出读取上限");
+            }
+        }
+    }
+    #[tokio::test]
+    async fn non_git_discovery_accepts_warning_lines_but_not_other_errors_or_broken_git() {
+        let root = tempfile::tempdir().unwrap();
+        for fatal in [
+            "fatal: not a git repository (or any of the parent directories): .git",
+            "fatal: not a git repository (or any parent up to mount point /)",
+        ] {
+            let diagnostic = format!("warning: fixture warning\nhint: fixture hint\n{fatal}\n");
+            assert!(missing_repository(root.path(), diagnostic.as_bytes()).await);
+        }
+        for diagnostic in [
+            "warning: fatal: not a git repository (or any of the parent directories): .git",
+            "warning: fixture warning\nfatal: detected dubious ownership in repository at /fixture",
+            "hint: fixture hint\nfatal: invalid gitfile format: .git",
+        ] {
+            assert!(!missing_repository(root.path(), diagnostic.as_bytes()).await);
+        }
+        std::fs::create_dir(root.path().join(".git")).unwrap();
+        assert!(
+            !missing_repository(
+                root.path(),
+                b"warning: fixture warning\nfatal: not a git repository (or any of the parent directories): .git\n",
+            )
+            .await
+        );
+    }
+    #[tokio::test]
+    async fn non_git_discovery_is_distinct_from_broken_repository_and_command_errors() {
+        let root = tempfile::tempdir().unwrap();
+        let error = git(root.path(), &["rev-parse", "--show-prefix"])
+            .await
+            .unwrap_err();
+        assert!(error.is::<NotGitRepository>(), "{error:?}");
+        // Incomplete repositories must not fall back to a directory inventory.
+        std::fs::create_dir(root.path().join(".git")).unwrap();
+        let error = git(root.path(), &["rev-parse", "--show-prefix"])
+            .await
+            .unwrap_err();
+        assert!(!error.is::<NotGitRepository>());
+        assert!(
+            crate::task_changes::Snapshot::capture(root.path())
+                .await
+                .is_err()
+        );
+        let sub = root.path().join("sub");
+        std::fs::create_dir(&sub).unwrap();
+        assert!(
+            !git(&sub, &["rev-parse", "--show-prefix"])
+                .await
+                .unwrap_err()
+                .is::<NotGitRepository>()
+        );
+        assert!(
+            !git(root.path(), &["not-a-git-command"])
+                .await
+                .unwrap_err()
+                .is::<NotGitRepository>()
+        );
+        let other = tempfile::tempdir().unwrap();
+        std::fs::write(other.path().join(".git"), "broken gitfile").unwrap();
+        assert!(
+            !git(other.path(), &["rev-parse", "--show-prefix"])
+                .await
+                .unwrap_err()
+                .is::<NotGitRepository>()
+        );
+    }
     #[tokio::test]
     async fn explicit_references_resolve_without_expanding_project_access() {
         let root = tempfile::tempdir().unwrap();

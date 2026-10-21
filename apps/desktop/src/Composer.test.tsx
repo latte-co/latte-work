@@ -124,7 +124,7 @@ afterEach(() => {
   cleanup();
   vi.unstubAllGlobals();
 });
-it("detects only standalone mention and leading slash triggers", () => {
+it("detects only standalone mention and slash triggers", () => {
   expect(composerTrigger("mail@host", 9)).toBeNull();
   expect(composerTrigger("https://host/", 13)).toBeNull();
   expect(composerTrigger("/compact 参数", 11)).toBeNull();
@@ -132,6 +132,52 @@ it("detects only standalone mention and leading slash triggers", () => {
     kind: "files",
     start: 3,
   });
+});
+it.each([
+  ["local", "请检查 /comp", "Enter"],
+  ["remote", "请检查   /comp", "Tab"],
+])(
+  "completes a command after text on %s, preserving spaces without submitting",
+  async (hostId, draft, key) => {
+    render(<Harness hostId={hostId} />);
+    type(draft);
+    await screen.findByRole("option", { name: /compact/ });
+    expect(mocks.request).toHaveBeenCalledWith(hostId, {
+      method: "agent_commands",
+      project_id: "p",
+      agent: "claude",
+    });
+    fireEvent.keyDown(screen.getByRole("textbox"), { key });
+    const completed = draft.replace(/\/comp$/, "/compact ");
+    expect(screen.getByRole("textbox")).toHaveProperty("value", completed);
+    expect(mocks.send).not.toHaveBeenCalled();
+    expect(screen.queryByRole("listbox")).toBeNull();
+    fireEvent.keyDown(screen.getByRole("textbox"), { key: "Enter" });
+    await waitFor(() =>
+      expect(mocks.send).toHaveBeenCalledWith(completed.trim()),
+    );
+  },
+);
+it("completes a command at the caret without replacing surrounding text", async () => {
+  vi.stubGlobal("requestAnimationFrame", (fn: FrameRequestCallback) =>
+    window.setTimeout(() => fn(0), 0),
+  );
+  render(<Harness />);
+  const before = "前文  ";
+  const after = " 后文";
+  type(`${before}/comp${after}`, before.length + "/comp".length);
+  fireEvent.click(await screen.findByRole("option", { name: /compact/ }));
+  expect(screen.getByRole("textbox")).toHaveProperty(
+    "value",
+    `${before}/compact ${after}`,
+  );
+  await waitFor(() =>
+    expect(screen.getByRole("textbox")).toHaveProperty(
+      "selectionStart",
+      before.length + "/compact ".length,
+    ),
+  );
+  expect(mocks.send).not.toHaveBeenCalled();
 });
 it("loads native commands from the selected host and inserts without running; sends exact arguments", async () => {
   render(<Harness />);
@@ -179,12 +225,13 @@ it("adds a file with spaces at the caret, preserves surrounding text and retries
 });
 it("supports plus folder browsing, folder references and removing chips", async () => {
   render(<Harness />);
-  fireEvent.click(screen.getByRole("button", { name: "添加项目引用" }));
+  fireEvent.click(screen.getByRole("button", { name: "添加文件" }));
+  fireEvent.click(screen.getByRole("menuitem", { name: /引用工作区文件/ }));
   fireEvent.click(await screen.findByRole("option", { name: /src/ }));
   fireEvent.click(await screen.findByRole("option", { name: /引用此文件夹/ }));
   expect(screen.getByRole("button", { name: "移除引用 src" })).toBeTruthy();
   fireEvent.click(screen.getByRole("button", { name: "移除引用 src" }));
-  expect(screen.queryByLabelText("已添加项目引用")).toBeNull();
+  expect(screen.queryByLabelText("已添加附件和引用")).toBeNull();
 });
 it("does not submit on IME, empty results or menu selection and closes on Escape", async () => {
   render(<Harness />);
@@ -206,7 +253,7 @@ it("discards late file responses and references when changing project or host", 
   const view = render(<Harness />);
   type("@READ");
   fireEvent.click(await screen.findByRole("option", { name: /README/ }));
-  expect(screen.getByLabelText("已添加项目引用")).toBeTruthy();
+  expect(screen.getByLabelText("已添加附件和引用")).toBeTruthy();
   let finish: (value: unknown) => void = () => {};
   mocks.request.mockImplementationOnce(
     () =>
@@ -223,7 +270,7 @@ it("discards late file responses and references when changing project or host", 
       entries: [{ name: "secret", path: "secret", directory: false }],
     }),
   );
-  expect(screen.queryByLabelText("已添加项目引用")).toBeNull();
+  expect(screen.queryByLabelText("已添加附件和引用")).toBeNull();
   expect(screen.queryByRole("listbox")).toBeNull();
 });
 it("reports command discovery errors and retries against the agent", async () => {
@@ -253,14 +300,15 @@ it("keeps references through first-session creation while sending and clears on 
     toolbar: () => null,
   };
   const view = render(<Composer {...props} />);
-  fireEvent.click(screen.getByRole("button", { name: "添加项目引用" }));
+  fireEvent.click(screen.getByRole("button", { name: "添加文件" }));
+  fireEvent.click(screen.getByRole("menuitem", { name: /引用工作区文件/ }));
   fireEvent.click(await screen.findByRole("option", { name: /README/ }));
   view.rerender(<Composer {...props} sending sessionId="new-session" />);
-  expect(screen.getByLabelText("已添加项目引用")).toBeTruthy();
+  expect(screen.getByLabelText("已添加附件和引用")).toBeTruthy();
   view.rerender(<Composer {...props} sessionId="new-session" />);
-  expect(screen.getByLabelText("已添加项目引用")).toBeTruthy();
+  expect(screen.getByLabelText("已添加附件和引用")).toBeTruthy();
   view.rerender(<Composer {...props} sessionId="another-session" />);
-  expect(screen.queryByLabelText("已添加项目引用")).toBeNull();
+  expect(screen.queryByLabelText("已添加附件和引用")).toBeNull();
 });
 it("searches friendly titles but inserts the original agent command", async () => {
   render(<Harness />);
@@ -289,9 +337,10 @@ it("references a local file or folder chosen outside the project without sending
       : { kind: "files", entries: [] },
   );
   render(<Harness hostId="local" />);
-  fireEvent.click(screen.getByRole("button", { name: "添加项目引用" }));
-  fireEvent.click(screen.getByRole("button", { name: "工作区外引用…" }));
-  fireEvent.click(screen.getByRole("button", { name: "选择文件…" }));
+  fireEvent.click(screen.getByRole("button", { name: "添加文件" }));
+  fireEvent.click(screen.getByRole("menuitem", { name: /引用工作区文件/ }));
+  fireEvent.click(screen.getByRole("button", { name: "引用本机路径…" }));
+  fireEvent.click(screen.getByRole("button", { name: "选择文件并引用…" }));
   await screen.findByRole("button", {
     name: "移除引用 /outside/中文 file.txt",
   });
@@ -301,9 +350,10 @@ it("references a local file or folder chosen outside the project without sending
     project_id: "p",
     path: "/outside/中文 file.txt",
   });
-  fireEvent.click(screen.getByRole("button", { name: "添加项目引用" }));
-  fireEvent.click(screen.getByRole("button", { name: "工作区外引用…" }));
-  fireEvent.click(screen.getByRole("button", { name: "选择文件夹…" }));
+  fireEvent.click(screen.getByRole("button", { name: "添加文件" }));
+  fireEvent.click(screen.getByRole("menuitem", { name: /引用工作区文件/ }));
+  fireEvent.click(screen.getByRole("button", { name: "引用本机路径…" }));
+  fireEvent.click(screen.getByRole("button", { name: "选择文件夹并引用…" }));
   await screen.findByRole("button", { name: "移除引用 /outside/docs" });
   expect(mocks.choose).toHaveBeenCalledWith(true);
   expect(mocks.send).not.toHaveBeenCalled();
@@ -322,8 +372,9 @@ it("resolves remote paths on the selected host and never opens a local chooser",
     entry: { name: "docs", path: "/home/user/docs", directory: true },
   });
   render(<Harness hostId="ssh:devbox" />);
-  fireEvent.click(screen.getByRole("button", { name: "添加项目引用" }));
-  expect(screen.queryByRole("button", { name: "选择文件…" })).toBeNull();
+  fireEvent.click(screen.getByRole("button", { name: "添加文件" }));
+  fireEvent.click(screen.getByRole("menuitem", { name: /引用工作区文件/ }));
+  expect(screen.queryByRole("button", { name: "选择文件并引用…" })).toBeNull();
   fireEvent.click(screen.getByRole("button", { name: "引用远程路径…" }));
   const field = screen.getByRole("textbox", { name: "引用绝对路径" });
   fireEvent.change(field, { target: { value: "/home/user/docs" } });
@@ -344,9 +395,10 @@ it("resolves remote paths on the selected host and never opens a local chooser",
 });
 it("keeps references unchanged on cancellation and rejects invalid or inaccessible paths", async () => {
   render(<Harness hostId="local" />);
-  fireEvent.click(screen.getByRole("button", { name: "添加项目引用" }));
-  fireEvent.click(screen.getByRole("button", { name: "工作区外引用…" }));
-  fireEvent.click(screen.getByRole("button", { name: "选择文件…" }));
+  fireEvent.click(screen.getByRole("button", { name: "添加文件" }));
+  fireEvent.click(screen.getByRole("menuitem", { name: /引用工作区文件/ }));
+  fireEvent.click(screen.getByRole("button", { name: "引用本机路径…" }));
+  fireEvent.click(screen.getByRole("button", { name: "选择文件并引用…" }));
   await waitFor(() =>
     expect(
       (
@@ -356,7 +408,7 @@ it("keeps references unchanged on cancellation and rejects invalid or inaccessib
       ).disabled,
     ).toBe(false),
   );
-  expect(screen.queryByLabelText("已添加项目引用")).toBeNull();
+  expect(screen.queryByLabelText("已添加附件和引用")).toBeNull();
 
   const field = screen.getByRole("textbox", { name: "引用绝对路径" });
   fireEvent.change(field, { target: { value: "../secret" } });
@@ -371,7 +423,7 @@ it("keeps references unchanged on cancellation and rejects invalid or inaccessib
   await waitFor(() =>
     expect(screen.getByRole("alert").textContent).toContain("路径不存在"),
   );
-  expect(screen.queryByLabelText("已添加项目引用")).toBeNull();
+  expect(screen.queryByLabelText("已添加附件和引用")).toBeNull();
 });
 it("discards a late native selection after switching hosts", async () => {
   let finish: (value: string) => void = () => {};
@@ -382,16 +434,17 @@ it("discards a late native selection after switching hosts", async () => {
       }),
   );
   const view = render(<Harness hostId="local" />);
-  fireEvent.click(screen.getByRole("button", { name: "添加项目引用" }));
-  fireEvent.click(screen.getByRole("button", { name: "工作区外引用…" }));
-  fireEvent.click(screen.getByRole("button", { name: "选择文件…" }));
+  fireEvent.click(screen.getByRole("button", { name: "添加文件" }));
+  fireEvent.click(screen.getByRole("menuitem", { name: /引用工作区文件/ }));
+  fireEvent.click(screen.getByRole("button", { name: "引用本机路径…" }));
+  fireEvent.click(screen.getByRole("button", { name: "选择文件并引用…" }));
   view.rerender(<Harness hostId="remote" />);
   await act(async () => finish("/private/local-file"));
   expect(mocks.request).not.toHaveBeenCalledWith(
     expect.anything(),
     expect.objectContaining({ method: "resolve_reference" }),
   );
-  expect(screen.queryByLabelText("已添加项目引用")).toBeNull();
+  expect(screen.queryByLabelText("已添加附件和引用")).toBeNull();
 });
 
 function pasteData(text = "", files: File[] = []) {
@@ -416,7 +469,7 @@ it("pastes short text at the selection and stages long text as a file without fi
     attachmentKind: "text",
   });
   pasteData("x".repeat(8001));
-  await screen.findByRole("button", { name: "移除引用 /cache/text.txt" });
+  await screen.findByRole("button", { name: "移除附件 /cache/text.txt" });
   expect(input.value).toBe("prefix 新文本 suffix");
   expect(pasteMocks.store.mock.calls[0][0]).toBeInstanceOf(File);
   expect(pasteMocks.store.mock.calls[0][4]).toBe("text");
@@ -435,7 +488,7 @@ it("recognizes image/video/file pastes and keeps native file URLs ahead of clipb
     new File(["thumbnail"], "preview.png", { type: "image/png" }),
   ]);
   await screen.findByRole("button", {
-    name: "移除引用 /remote/cache/movie.mov",
+    name: "移除附件 /remote/cache/movie.mov",
   });
   expect(pasteMocks.store).not.toHaveBeenCalled();
   expect(pasteMocks.importFile).toHaveBeenCalledWith(
@@ -454,12 +507,12 @@ it("recognizes image/video/file pastes and keeps native file URLs ahead of clipb
     new File(["pdf"], "doc.pdf", { type: "application/pdf" }),
   ]);
   await screen.findByRole("button", {
-    name: "移除引用 /remote/cache/image.png",
+    name: "移除附件 /remote/cache/image.png",
   });
-  await screen.findByRole("button", { name: "移除引用 /remote/cache/doc.pdf" });
+  await screen.findByRole("button", { name: "移除附件 /remote/cache/doc.pdf" });
   expect(screen.getByText("图片 · image.png")).toBeTruthy();
-  expect(screen.getByText("视频 · movie.mov")).toBeTruthy();
-  expect(screen.getByText("文件 · doc.pdf")).toBeTruthy();
+  expect(screen.getByText("movie.mov")).toBeTruthy();
+  expect(screen.getByText("doc.pdf")).toBeTruthy();
 });
 it("blocks send while pasting and discards failed batches and late results after host changes", async () => {
   const view = render(<Harness hostId="local" />);
@@ -482,7 +535,7 @@ it("blocks send while pasting and discards failed batches and late results after
       directory: false,
     }),
   );
-  expect(screen.queryByLabelText("已添加项目引用")).toBeNull();
+  expect(screen.queryByLabelText("已添加附件和引用")).toBeNull();
   pasteMocks.store
     .mockResolvedValueOnce({
       name: "first.png",
@@ -492,7 +545,7 @@ it("blocks send while pasting and discards failed batches and late results after
     .mockRejectedValueOnce(new Error("上传失败"));
   pasteData("", [new File(["1"], "first.png"), new File(["2"], "second.png")]);
   await screen.findByText(/上传失败/);
-  expect(screen.queryByLabelText("已添加项目引用")).toBeNull();
+  expect(screen.queryByLabelText("已添加附件和引用")).toBeNull();
   expect(
     (screen.getByRole("textbox", { name: "任务输入" }) as HTMLTextAreaElement)
       .value,
@@ -871,6 +924,175 @@ it("opens an attached image without sending or removing the draft and restores i
       .value,
   ).toBe("这张图呢");
   expect(
-    screen.getByRole("button", { name: "移除引用 /remote/image.png" }),
+    screen.getByRole("button", { name: "移除附件 /remote/image.png" }),
   ).toBeTruthy();
+});
+
+function chooseFiles(files: File[]) {
+  fireEvent.click(screen.getByRole("button", { name: "添加文件" }));
+  fireEvent.click(screen.getByRole("menuitem", { name: /添加本机文件/ }));
+  fireEvent.change(screen.getByLabelText("选择本机附件"), {
+    target: { files },
+  });
+}
+function dropData(files: File[], directory = false) {
+  return {
+    types: ["Files"],
+    files,
+    items: directory
+      ? [{ webkitGetAsEntry: () => ({ isDirectory: true }) }]
+      : [],
+    dropEffect: "copy",
+  };
+}
+it.each(["local", "ssh:devbox"])(
+  "adds multiple local files to %s as attachments without workspace resolution or sending",
+  async (hostId) => {
+    pasteMocks.store.mockImplementation(async (file: File, host: string) => ({
+      name: file.name,
+      path: `/${host}/cache/${file.name}`,
+      directory: false,
+      attachmentKind: "file",
+    }));
+    render(<Harness hostId={hostId} />);
+    type("draft");
+    chooseFiles([new File(["a"], "a.txt"), new File(["b"], "b.pdf")]);
+    await screen.findByText("b.pdf");
+    expect(screen.getAllByText("附件")).toHaveLength(2);
+    expect(pasteMocks.store).toHaveBeenCalledTimes(2);
+    expect(
+      pasteMocks.store.mock.calls.every((call) => call[1] === hostId),
+    ).toBe(true);
+    expect(pasteMocks.paths).not.toHaveBeenCalled();
+    expect(mocks.choose).not.toHaveBeenCalled();
+    expect(mocks.request).not.toHaveBeenCalled();
+    expect(mocks.send).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByText("发送"));
+    await waitFor(() => expect(mocks.send).toHaveBeenCalledOnce());
+    expect(
+      referenceMessage(mocks.send.mock.calls[0][0]).references.map(
+        (item) => item.path,
+      ),
+    ).toEqual([`/${hostId}/cache/a.txt`, `/${hostId}/cache/b.pdf`]);
+  },
+);
+it.each(["local", "ssh:devbox"])(
+  "drops local files into %s and blocks sending until the batch finishes",
+  async (hostId) => {
+    let finish!: (value: unknown) => void;
+    pasteMocks.store.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          finish = resolve;
+        }),
+    );
+    render(<Harness hostId={hostId} />);
+    type("keep draft");
+    const composer = screen.getByRole("textbox").closest(".composer")!;
+    const dataTransfer = dropData([new File(["a"], "a.txt")]);
+    fireEvent.dragEnter(composer, { dataTransfer });
+    expect(screen.getByText("松开以添加附件")).toBeTruthy();
+    fireEvent.drop(composer, { dataTransfer });
+    expect(screen.queryByText("松开以添加附件")).toBeNull();
+    expect((screen.getByText("发送") as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.keyDown(screen.getByRole("textbox"), { key: "Enter" });
+    expect(mocks.send).not.toHaveBeenCalled();
+    await act(async () =>
+      finish({
+        name: "a.txt",
+        path: "/destination/a.txt",
+        directory: false,
+        attachmentKind: "file",
+      }),
+    );
+    await screen.findByText("a.txt");
+    expect((screen.getByText("发送") as HTMLButtonElement).disabled).toBe(
+      false,
+    );
+    expect(mocks.request).not.toHaveBeenCalled();
+    expect(mocks.send).not.toHaveBeenCalled();
+  },
+);
+it("keeps failed file batches retryable and preserves the draft", async () => {
+  pasteMocks.store
+    .mockRejectedValueOnce(new Error("上传失败"))
+    .mockResolvedValueOnce({
+      name: "a.txt",
+      path: "/cache/a.txt",
+      directory: false,
+      attachmentKind: "file",
+    });
+  render(<Harness />);
+  type("keep draft");
+  chooseFiles([new File(["a"], "a.txt")]);
+  await screen.findByText(/上传失败/);
+  expect((screen.getByRole("textbox") as HTMLTextAreaElement).value).toBe(
+    "keep draft",
+  );
+  expect((screen.getByText("发送") as HTMLButtonElement).disabled).toBe(true);
+  fireEvent.click(screen.getByRole("button", { name: "重试添加附件" }));
+  await screen.findByText("a.txt");
+  expect(pasteMocks.store).toHaveBeenCalledTimes(2);
+  expect(screen.queryByText("重试添加附件")).toBeNull();
+  expect(mocks.send).not.toHaveBeenCalled();
+});
+it("discards a file selection and in-flight upload after switching conversations", async () => {
+  const view = render(<Harness hostId="local" />);
+  fireEvent.click(screen.getByRole("button", { name: "添加文件" }));
+  fireEvent.click(screen.getByRole("menuitem", { name: /添加本机文件/ }));
+  view.rerender(<Harness hostId="remote" />);
+  fireEvent.change(screen.getByLabelText("选择本机附件"), {
+    target: { files: [new File(["a"], "old.txt")] },
+  });
+  expect(pasteMocks.store).not.toHaveBeenCalled();
+  let finish!: (value: unknown) => void;
+  pasteMocks.store.mockImplementation(
+    () =>
+      new Promise((resolve) => {
+        finish = resolve;
+      }),
+  );
+  chooseFiles([new File(["a"], "a.txt")]);
+  expect(pasteMocks.store).toHaveBeenCalledOnce();
+  view.rerender(<Harness hostId="local" projectId="new" />);
+  await act(async () =>
+    finish({
+      name: "a.txt",
+      path: "/old/a.txt",
+      directory: false,
+      attachmentKind: "file",
+    }),
+  );
+  expect(screen.queryByLabelText("已添加附件和引用")).toBeNull();
+  expect(screen.queryByText("重试添加附件")).toBeNull();
+});
+it("rejects folders, oversized files and excessive batches before upload; ignores text drags", async () => {
+  render(<Harness />);
+  const composer = screen.getByRole("textbox").closest(".composer")!;
+  fireEvent.drop(composer, { dataTransfer: dropData([], true) });
+  await screen.findByText(/暂不支持上传文件夹/);
+  fireEvent.dragEnter(composer, { dataTransfer: { types: ["text/plain"] } });
+  expect(screen.queryByText("松开以添加附件")).toBeNull();
+  const large = new File(["a"], "large.bin");
+  Object.defineProperty(large, "size", { value: 64 * 1024 * 1024 + 1 });
+  chooseFiles([large]);
+  await screen.findByText(/64 MiB/);
+  fireEvent.click(screen.getByRole("button", { name: "移除未添加附件" }));
+  chooseFiles(
+    Array.from({ length: 21 }, (_, i) => new File(["a"], `${i}.txt`)),
+  );
+  await screen.findByText(/最多添加 20/);
+  expect(pasteMocks.store).not.toHaveBeenCalled();
+});
+it("supports keyboard navigation and Escape focus recovery in the add menu", () => {
+  render(<Harness />);
+  fireEvent.click(screen.getByRole("button", { name: "添加文件" }));
+  const first = screen.getByRole("menuitem", { name: /添加本机文件/ });
+  const second = screen.getByRole("menuitem", { name: /引用工作区文件/ });
+  expect(document.activeElement).toBe(first);
+  fireEvent.keyDown(first, { key: "ArrowDown" });
+  expect(document.activeElement).toBe(second);
+  fireEvent.keyDown(second, { key: "Escape" });
+  expect(screen.queryByRole("menu")).toBeNull();
+  expect(document.activeElement).toBe(screen.getByRole("textbox"));
 });

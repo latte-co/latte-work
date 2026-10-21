@@ -13,8 +13,14 @@ export function composerTrigger(
   cursor: number,
 ): ComposerTrigger | null {
   const prefix = text.slice(0, cursor);
-  if (/^\/[^\s/]*$/.test(prefix))
-    return { kind: "commands", start: 0, end: cursor, query: prefix.slice(1) };
+  const command = /(?:^|\s)\/([^\s/]*)$/.exec(prefix);
+  if (command)
+    return {
+      kind: "commands",
+      start: cursor - command[1].length - 1,
+      end: cursor,
+      query: command[1],
+    };
   const match = /(?:^|\s)@([^\n@]*)$/.exec(prefix);
   if (!match) return null;
   return {

@@ -71,6 +71,17 @@ for line in sys.stdin:
         metadata({'type':'user','message':{'content':text},'sessionId':native_id})
         if name: metadata({'type':'custom-title','customTitle':name,'sessionId':native_id})
         emit({'type':'system','subtype':'init','session_id':native_id})
+        if text.startswith('/project:check skill-load'):
+            catalog_only=text.endswith('native-catalog')
+            if catalog_only: emit({'type':'system','subtype':'init','session_id':native_id,'skills':['project:check']})
+            echo={'type':'user','isReplay':True,'message':{'content':'<command-message>project:check</command-message>\n<command-name>/project:check</command-name>\n<command-args>skill-load</command-args>'}}
+            context={'type':'user','isSynthetic':True,'message':{'content':[{'type':'text','text':'Base directory for this skill: /tmp/fixture-skill\n\nPRIVATE_SKILL_BODY'}]}}
+            for _ in range(2):
+                emit(echo)
+                if not catalog_only: emit(context)
+            emit({'type':'assistant','message':{'content':[{'type':'text','text':'SKILL_LOADED'}]}})
+            emit({'type':'result','subtype':'success','is_error':False})
+            continue
         if text=='native-generated-title':
             metadata({'type':'ai-title','aiTitle':'Generated native title','sessionId':native_id})
             emit({'type':'assistant','message':{'content':[{'type':'text','text':'TITLE_OK'}]}})
@@ -88,6 +99,8 @@ for line in sys.stdin:
         if text.startswith('task-edit'):
             emit({'type':'system','subtype':'session_state_changed','state':'busy'})
             with open('task.txt','w') as f:f.write('third line\n' if text.startswith('task-edit-second') else 'agent change\nsecond line\n')
+            if text=='task-edit-many':
+                for index in range(130): pathlib.Path(f'file-{index:03}.txt').write_text(f'new {index}\n')
             emit({'type':'assistant','message':{'content':[{'type':'tool_use','id':'edit-1','name':'Edit','input':{'file_path':'task.txt'}},{'type':'tool_use','id':'connector-1','name':'mcp__fixture_docs__read','input':{}}]}})
             emit({'type':'assistant','parent_tool_use_id':'child-agent','message':{'content':[{'type':'tool_use','id':'child-read','name':'mcp__fixture_docs__search','input':{}}]}})
             emit({'type':'assistant','message':{'content':[{'type':'text','text':'TASK_EDIT_OK'}]}})
@@ -231,10 +244,16 @@ for line in sys.stdin:
         elif text=='identity':
             emit({'type':'assistant','message':{'content':[{'type':'text','text':json.dumps({'pid':os.getpid(),'turns':turns,'background_pid':background.pid if background else None})}]}})
             emit({'type':'result','subtype':'success','is_error':False})
-        elif text in ('background','background-report'):
-            background=subprocess.Popen(['sleep','120' if text=='background' else '0.5'])
+        elif text in ('background','background-report','background-held'):
+            background=subprocess.Popen(['sleep','120' if text in ('background','background-held') else '0.5'])
             emit({'type':'system','subtype':'task_started','task_id':'bg-task','task_type':'local_agent'})
             emit({'type':'assistant','message':{'content':[{'type':'text','text':f'background:{background.pid}'}]}})
+            if text=='background-held':
+                pathlib.Path('background-main-waiting').touch()
+                deadline=time.monotonic()+10
+                while not pathlib.Path('background-release-main').exists():
+                    assert time.monotonic()<deadline, 'fixture main release timed out'
+                    time.sleep(.01)
             emit({'type':'result','subtype':'success','is_error':False})
             if text=='background-report':
                 def report():
@@ -271,6 +290,15 @@ for line in sys.stdin:
                         with open(path) as f:native.update(json.load(f))
                 effort=native.get('effortLevel','native-default')
             emit({'type':'assistant','message':{'content':[{'type':'text','text':('resumed:' if resumed else 'fresh:')+effort}]}})
+            emit({'type':'result','subtype':'success','is_error':False})
+        elif text=='context-mode':
+            model=next(a.split('=',1)[1] for a in sys.argv if a.startswith('--model='))
+            with open(sys.argv[sys.argv.index('--settings')+1]) as f:settings=json.load(f)
+            for key in ['CLAUDE_CODE_DISABLE_1M_CONTEXT','CLAUDE_CODE_MAX_CONTEXT_TOKENS']:
+                if key in settings['env']: assert os.environ.get(key)==settings['env'][key]
+            context=os.environ.get('CLAUDE_CODE_MAX_CONTEXT_TOKENS','unset')
+            disabled=os.environ.get('CLAUDE_CODE_DISABLE_1M_CONTEXT','unset')
+            emit({'type':'assistant','message':{'content':[{'type':'text','text':('resumed:' if resumed else 'fresh:')+model+':'+context+':'+disabled}]}})
             emit({'type':'result','subtype':'success','is_error':False})
         elif text=='model':
             model=next((a.split('=',1)[1] for a in sys.argv if a.startswith('--model=')), 'cli-config')

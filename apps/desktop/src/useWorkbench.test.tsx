@@ -1343,3 +1343,55 @@ it("creates the selected native Agent and keeps the saved session Agent fixed", 
   act(() => result.current.selectAgent("claude"));
   expect(result.current.agent?.id).toBe("traex");
 });
+
+it("persists pinned ordering through native refresh, disconnect/reconnect and remount without sending a request to reorder", async () => {
+  const rows = [
+    { ...session(), id: "pin-a", title: "A", pinned_at: 2 },
+    { ...session(), id: "pin-b", title: "B", pinned_at: 1 },
+  ];
+  const base = mocks.request.getMockImplementation()!;
+  mocks.request.mockImplementation((host, r) =>
+    r.method === "pinned_sessions"
+      ? Promise.resolve({ kind: "sessions", sessions: rows })
+      : base(host, r),
+  );
+  const hook = renderHook(useWorkbench);
+  await act(async () => {});
+  expect(hook.result.current.pinned.map((s) => s.id)).toEqual([
+    "pin-a",
+    "pin-b",
+  ]);
+  mocks.request.mockClear();
+  act(() =>
+    hook.result.current.movePinnedSession(
+      JSON.stringify(["local", "pin-b"]),
+      JSON.stringify(["local", "pin-a"]),
+      false,
+    ),
+  );
+  expect(hook.result.current.pinned.map((s) => s.id)).toEqual([
+    "pin-b",
+    "pin-a",
+  ]);
+  expect(mocks.request).not.toHaveBeenCalled();
+  rows.reverse();
+  await act(async () => vi.advanceTimersByTimeAsync(5000));
+  expect(hook.result.current.pinned.map((s) => s.id)).toEqual([
+    "pin-b",
+    "pin-a",
+  ]);
+  await act(async () =>
+    hook.result.current.refreshHost(hook.result.current.host),
+  );
+  expect(hook.result.current.pinned.map((s) => s.id)).toEqual([
+    "pin-b",
+    "pin-a",
+  ]);
+  hook.unmount();
+  const restored = renderHook(useWorkbench);
+  await act(async () => {});
+  expect(restored.result.current.pinned.map((s) => s.id)).toEqual([
+    "pin-b",
+    "pin-a",
+  ]);
+});

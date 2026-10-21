@@ -1,17 +1,97 @@
-//! Bounded, durable pre-request worktree baselines. Read-only inspection never
+//! Durable pre-request worktree baselines with deadline-bound capture. Read-only inspection never
 //! changes the user's index, refs or files. Shared-directory attribution is temporal.
-use crate::{files, store::now};
+use crate::{
+    files,
+    snapshot_storage::{self, Contents, Object},
+    store::now,
+};
 use anyhow::{Context, Result, bail};
 use latte_work_protocol::{ChangeSummary, TaskChange};
 use serde::{Deserialize, Serialize};
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
-use std::{collections::BTreeMap, path::Path, process::Stdio, time::Duration};
-use tokio::{io::AsyncReadExt, process::Command};
-const FILE_LIMIT: usize = 512 * 1024;
-const TOTAL_LIMIT: usize = 8 * 1024 * 1024;
-const COUNT_LIMIT: usize = 1000;
-// Bound directory entries as well as files, including empty directory trees.
-const INVENTORY_LIMIT: usize = 5000;
+use std::{
+    collections::BTreeMap,
+    path::{Path, PathBuf},
+    process::Stdio,
+    time::Duration,
+};
+use tokio::{
+    io::{AsyncRead, AsyncReadExt},
+    process::Command,
+};
+// Only the wire preview is capped; captured files and statistics are complete.
+const DIFF_PREVIEW_LIMIT: usize = 512 * 1024;
+
+async fn read_chunks(mut input: impl AsyncRead + Unpin) -> Result<Vec<u8>> {
+    let mut bytes = Vec::new();
+    let mut chunk = vec![0; 64 * 1024];
+    loop {
+        let count = input.read(&mut chunk).await?;
+        if count == 0 {
+            return Ok(bytes);
+        }
+        bytes.try_reserve(count).context("无法分配文件快照内存")?;
+        bytes.extend_from_slice(&chunk[..count]);
+        tokio::task::yield_now().await;
+    }
+}
+
+async fn git_paths(root: &Path, excluded: Option<&Path>) -> Result<Vec<u8>> {
+    let mut command = Command::new("git");
+    command.args([
+        "--literal-pathspecs",
+        "-c",
+        "core.fsmonitor=false",
+        "ls-files",
+        "--full-name",
+        "--cached",
+        "--others",
+        "--exclude-standard",
+        "-z",
+        "--exclude=.venv/",
+        "--exclude=venv/",
+        "--exclude=__pycache__/",
+        "--exclude=dist/",
+    ]);
+    if let Some(relative) = excluded
+        .and_then(|path| path.strip_prefix(root).ok())
+        .filter(|path| !path.as_os_str().is_empty())
+    {
+        let mut pattern = String::from("--exclude=/");
+        for c in relative.to_string_lossy().chars() {
+            if matches!(c, '*' | '?' | '[' | ']' | '\\') {
+                pattern.push('\\');
+            }
+            pattern.push(c);
+        }
+        pattern.push('/');
+        command.arg(pattern);
+    }
+    let mut child = command
+        .args(["--", "."])
+        .current_dir(root)
+        .env("GIT_OPTIONAL_LOCKS", "0")
+        .env("LC_ALL", "C")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()?;
+    let stdout = child.stdout.take().context("git stdout missing")?;
+    let mut stderr = child
+        .stderr
+        .take()
+        .context("git stderr missing")?
+        .take(8193);
+    let (paths, ()) = tokio::try_join!(read_chunks(stdout), async {
+        let mut errors = Vec::new();
+        stderr.read_to_end(&mut errors).await?;
+        anyhow::ensure!(errors.len() <= 8192, "Git 错误信息超出读取上限");
+        Ok::<_, anyhow::Error>(())
+    })?;
+    anyhow::ensure!(child.wait().await?.success(), "无法枚举项目文件");
+    Ok(paths)
+}
 fn no_symlink_ancestors(root: &Path, relative: &Path) -> Result<()> {
     let mut path = root.to_path_buf();
     if path.symlink_metadata()?.file_type().is_symlink() {
@@ -72,63 +152,80 @@ async fn inventory_entry_type(
         .await,
     )
 }
+fn decode_git_paths(
+    bytes: &[u8],
+    prefix: &str,
+    root: &Path,
+    excluded: Option<&Path>,
+) -> (Vec<String>, bool) {
+    let mut paths = Vec::new();
+    let mut partial = false;
+    for raw in bytes.split(|b| *b == 0).filter(|raw| !raw.is_empty()) {
+        match std::str::from_utf8(raw) {
+            Ok(path) => {
+                if let Some(path) = path.strip_prefix(prefix)
+                    && !excluded.is_some_and(|excluded| root.join(path).starts_with(excluded))
+                {
+                    paths.push(path.to_owned());
+                }
+            }
+            Err(_) => partial = true,
+        }
+    }
+    (paths, partial)
+}
+#[cfg(test)]
 async fn inventory(root: &Path) -> Result<(Vec<String>, bool)> {
+    inventory_with(root, None).await
+}
+async fn inventory_with(root: &Path, excluded: Option<&Path>) -> Result<(Vec<String>, bool)> {
+    let canonical = root.canonicalize()?;
     let (inside, truncated) = match files::git(root, &["rev-parse", "--is-inside-work-tree"]).await
     {
         Ok(result) => result,
-        Err(error) if error.to_string() == "无法读取 Git 状态，请确认项目是 Git 仓库" => {
-            (String::new(), false)
-        }
+        Err(error) if error.is::<files::NotGitRepository>() => (String::new(), false),
         Err(error) => return Err(error),
     };
     if inside.trim() == "true" && !truncated {
         let (prefix, a) = files::git(root, &["rev-parse", "--show-prefix"]).await?;
-        let (paths, b) = files::git(
-            root,
-            &[
-                "ls-files",
-                "--full-name",
-                "--cached",
-                "--others",
-                "--exclude-standard",
-                "-z",
-                "--",
-                ".",
-            ],
-        )
-        .await?;
-        return Ok((
-            paths
-                .split('\0')
-                .filter(|path| !path.is_empty())
-                .filter_map(|path| path.strip_prefix(prefix.trim_end_matches('\n')))
-                .map(str::to_owned)
-                .collect(),
-            a || b,
-        ));
+        let paths = git_paths(&canonical, excluded).await?;
+        let (paths, partial) =
+            decode_git_paths(&paths, prefix.trim_end_matches('\n'), &canonical, excluded);
+        return Ok((paths, a || partial));
     }
     let mut directories = vec![root.to_path_buf()];
     let mut paths = Vec::new();
-    let mut visited = 0;
     let mut truncated = false;
-    'walk: while let Some(directory) = directories.pop() {
+    while let Some(directory) = directories.pop() {
+        if let Some(path) = if_present(directory.canonicalize().map_err(Into::into))? {
+            if excluded.is_some_and(|excluded| path.starts_with(excluded)) {
+                continue;
+            }
+        } else {
+            continue;
+        }
         let Some(mut entries) = inventory_directory(root, &directory).await? else {
             continue;
         };
         while let Some(entry) =
             if_present(entries.next_entry().await.map_err(Into::into))?.flatten()
         {
-            visited += 1;
-            if visited > INVENTORY_LIMIT || paths.len() >= COUNT_LIMIT {
-                truncated = true;
-                break 'walk;
-            }
             let name = entry.file_name();
             let Some(name) = name.to_str() else {
                 truncated = true;
                 continue;
             };
-            if matches!(name, ".git" | "node_modules" | "target" | ".DS_Store") {
+            if matches!(
+                name,
+                ".git"
+                    | "node_modules"
+                    | "target"
+                    | ".DS_Store"
+                    | ".venv"
+                    | "venv"
+                    | "__pycache__"
+                    | "dist"
+            ) {
                 continue;
             }
             let Some(kind) = inventory_entry_type(root, &entry).await? else {
@@ -161,7 +258,11 @@ pub struct Snapshot {
     pub at: f64,
     #[serde(default)]
     root_identity: Option<(u64, u64)>,
-    files: BTreeMap<String, Option<Vec<u8>>>,
+    files: BTreeMap<String, Option<Contents>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    manifest: Option<Object>,
+    #[serde(skip)]
+    storage: Option<PathBuf>,
     #[serde(default)]
     modes: BTreeMap<String, u32>,
     pub truncated: bool,
@@ -173,32 +274,106 @@ impl Snapshot {
             at: now(),
             root_identity: None,
             files: BTreeMap::new(),
+            manifest: None,
+            storage: None,
             modes: BTreeMap::new(),
             truncated: false,
             unavailable: Some(message),
         }
     }
+    pub fn migrate_legacy(mut self, storage: &Path) -> Result<Self> {
+        self.attach(storage);
+        if self.manifest.is_some() {
+            self.materialized()?;
+            return Ok(self);
+        }
+        for contents in self.files.values_mut().flatten() {
+            if let Contents::Legacy(bytes) = contents {
+                *contents = Contents::Object(snapshot_storage::save_bytes(storage, bytes)?);
+            }
+        }
+        self.persist()
+    }
+    pub fn referenced_objects(&self, keys: &mut std::collections::HashSet<String>) -> Result<()> {
+        if let Some(manifest) = &self.manifest {
+            keys.insert(manifest.key().to_owned());
+        }
+        for contents in self.materialized()?.files.values().flatten() {
+            if let Some(object) = contents.object() {
+                keys.insert(object.key().to_owned());
+            }
+        }
+        Ok(())
+    }
+    pub fn attach(&mut self, storage: &Path) {
+        self.storage = Some(storage.to_owned());
+        if let Some(object) = &mut self.manifest {
+            object.attach(storage)
+        }
+        for contents in self.files.values_mut().flatten() {
+            contents.attach(storage)
+        }
+    }
+    fn materialized(&self) -> Result<Self> {
+        let Some(manifest) = &self.manifest else {
+            return Ok(self.clone());
+        };
+        let mut result: Self = manifest.read()?;
+        if let Some(storage) = &self.storage {
+            result.attach(storage)
+        }
+        result.manifest = None;
+        Ok(result)
+    }
+    fn persist(mut self) -> Result<Self> {
+        if self.manifest.is_some() {
+            return Ok(self);
+        }
+        if let Some(storage) = &self.storage {
+            let object = snapshot_storage::save_json(storage, &self)?;
+            self.files.clear();
+            self.modes.clear();
+            self.manifest = Some(object);
+            // Older daemons ignore the new object reference. Leave an explicit
+            // unavailable marker and no root identity so they cannot infer an
+            // empty baseline or admit an undo after a binary downgrade.
+            self.unavailable = Some("快照使用独立存储，请使用新版 Server 读取。".into());
+            self.root_identity = None;
+        }
+        Ok(self)
+    }
+    pub async fn capture_stored(root: &Path, storage: &Path) -> Result<Self> {
+        Self::capture_with(root, Some(storage)).await
+    }
+    #[cfg(test)]
     pub async fn capture(root: &Path) -> Result<Self> {
+        Self::capture_with(root, None).await
+    }
+    async fn capture_with(root: &Path, storage: Option<&Path>) -> Result<Self> {
         tokio::time::timeout(Duration::from_secs(12), async {
             // Git keeps its tracked/ignored-file semantics. Ordinary directories
-            // use a bounded, symlink-free inventory with the same byte limits.
-            let (paths, inventory_truncated) = inventory(root).await?;
+            // use a symlink-free inventory. Both retain every readable file.
+            let excluded = storage.and_then(Path::parent);
+            anyhow::ensure!(
+                !excluded.is_some_and(|state| root
+                    .canonicalize()
+                    .is_ok_and(|root| root.starts_with(state))),
+                "项目目录位于 Server 状态目录内，无法安全采集文件快照"
+            );
+            let (paths, inventory_truncated) = inventory_with(root, excluded).await?;
             let root_metadata = std::fs::metadata(root)?;
             let mut snapshot = Self {
                 at: now(),
                 root_identity: Some((root_metadata.dev(), root_metadata.ino())),
                 files: BTreeMap::new(),
+                manifest: None,
+                storage: storage.map(Path::to_owned),
                 modes: BTreeMap::new(),
                 truncated: inventory_truncated,
                 unavailable: None,
             };
-            let mut total = 0;
             for path in &paths {
                 let path = path.as_str();
-                if snapshot.files.len() >= COUNT_LIMIT {
-                    snapshot.truncated = true;
-                    break;
-                }
                 if snapshot.files.contains_key(path) {
                     continue;
                 }
@@ -223,25 +398,17 @@ impl Snapshot {
                     snapshot.truncated = true;
                     continue;
                 }
-                let mut bytes = Vec::new();
                 let Some(file) =
                     if_present(tokio::fs::File::open(target).await.map_err(Into::into))?
                 else {
                     snapshot.files.insert(path.into(), None);
                     continue;
                 };
-                file.take((FILE_LIMIT + 1) as u64)
-                    .read_to_end(&mut bytes)
-                    .await?;
-                total += bytes.len();
-                if total > TOTAL_LIMIT {
-                    snapshot.truncated = true;
-                    break;
-                }
-                if bytes.len() > FILE_LIMIT {
-                    snapshot.truncated = true;
-                    continue;
-                }
+                let bytes = if let Some(storage) = storage {
+                    Contents::Object(snapshot_storage::save_file(storage, file).await?)
+                } else {
+                    Contents::Legacy(read_chunks(file).await?)
+                };
                 snapshot.modes.insert(path.into(), metadata.mode());
                 snapshot.files.insert(path.into(), Some(bytes));
             }
@@ -249,19 +416,35 @@ impl Snapshot {
             if snapshot.root_identity != Some((root_metadata.dev(), root_metadata.ino())) {
                 bail!("项目目录在采集时已改变，请核对工作区");
             }
-            Ok(snapshot)
+            tokio::task::spawn_blocking(move || snapshot.persist())
+                .await
+                .context("保存快照对象失败")?
         })
         .await
         .context("读取任务变更基线超时")?
     }
     pub async fn summary(&self, root: &Path) -> Result<ChangeSummary> {
-        if self.unavailable.is_some() {
+        if self.manifest.is_none() && self.unavailable.is_some() {
             return Ok(self.empty_summary());
         }
-        let current = Self::capture(root).await?;
+        let current = Self::capture_with(root, self.storage.as_deref()).await?;
         self.compare(&current).await
     }
     pub async fn compare(&self, current: &Self) -> Result<ChangeSummary> {
+        let before = self.clone();
+        let after = current.clone();
+        tokio::task::spawn_blocking(move || {
+            tokio::runtime::Handle::current().block_on(async move {
+                before
+                    .materialized()?
+                    .compare_loaded(&after.materialized()?)
+                    .await
+            })
+        })
+        .await
+        .context("比较快照失败")?
+    }
+    async fn compare_loaded(&self, current: &Self) -> Result<ChangeSummary> {
         if self.root_identity.is_some()
             && current.root_identity.is_some()
             && self.root_identity != current.root_identity
@@ -305,10 +488,10 @@ impl Snapshot {
             }
             let index = result.entries.len();
             if let Some(bytes) = old {
-                std::fs::write(before.join(index.to_string()), bytes)?;
+                bytes.write_to(&before.join(index.to_string()))?;
             }
             if let Some(bytes) = new {
-                std::fs::write(after.join(index.to_string()), bytes)?;
+                bytes.write_to(&after.join(index.to_string()))?;
             }
             result.entries.push(TaskChange {
                 path,
@@ -370,6 +553,9 @@ impl Snapshot {
     }
     fn empty_summary(&self) -> ChangeSummary {
         ChangeSummary {
+            total_files: None,
+            next_offset: None,
+            offset: None,
             entries: vec![],
             added: 0,
             removed: 0,
@@ -380,28 +566,45 @@ impl Snapshot {
         }
     }
     pub async fn patch(&self, root: &Path, path: &str) -> Result<(String, bool)> {
-        let current = Self::capture(root).await?;
+        let current = Self::capture_with(root, self.storage.as_deref()).await?;
         self.patch_between(&current, path).await
     }
     pub async fn patch_between(&self, current: &Self, path: &str) -> Result<(String, bool)> {
+        let before = self.clone();
+        let after = current.clone();
+        let path = path.to_owned();
+        tokio::task::spawn_blocking(move || {
+            tokio::runtime::Handle::current().block_on(async move {
+                before
+                    .materialized()?
+                    .patch_loaded(&after.materialized()?, &path)
+                    .await
+            })
+        })
+        .await
+        .context("读取快照差异失败")?
+    }
+    async fn patch_loaded(&self, current: &Self, path: &str) -> Result<(String, bool)> {
         validate_path(path)?;
-        let summary = self.compare(current).await?;
-        if let Some(error) = summary.unavailable {
+        if let Some(error) = self.unavailable.as_ref().or(current.unavailable.as_ref()) {
             bail!("{error}");
         }
-        if !summary.entries.iter().any(|entry| entry.path == path) {
+        let old = self.files.get(path).and_then(Option::as_ref);
+        let new = current.files.get(path).and_then(Option::as_ref);
+        if old == new
+            || (old.is_some() && !current.files.contains_key(path) && current.truncated)
+            || (new.is_some() && !self.files.contains_key(path) && self.truncated)
+        {
             bail!("文件不属于本轮已记录的变更");
         }
         let temp = tempfile::tempdir()?;
         let before = temp.path().join("before");
         let after = temp.path().join("after");
-        let old = self.files.get(path).and_then(Option::as_ref);
-        let new = current.files.get(path).and_then(Option::as_ref);
         if let Some(bytes) = old {
-            std::fs::write(&before, bytes)?;
+            bytes.write_to(&before)?;
         }
         if let Some(bytes) = new {
-            std::fs::write(&after, bytes)?;
+            bytes.write_to(&after)?;
         }
         let old_path = if old.is_some() {
             before.as_path()
@@ -434,44 +637,228 @@ fn validate_path(path: &str) -> Result<()> {
     Ok(())
 }
 /// Retain only changed bytes after completion; historical previews never read live files.
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct FrozenTurn {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    full_summary: Option<SummaryData>,
     pub changes: latte_work_protocol::TurnChanges,
     before: Snapshot,
     after: Snapshot,
 }
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+enum SummaryData {
+    Object(Object),
+    Inline(Box<ChangeSummary>),
+}
+impl SummaryData {
+    fn read(&self) -> Result<ChangeSummary> {
+        match self {
+            Self::Object(o) => o.read(),
+            Self::Inline(s) => Ok((**s).clone()),
+        }
+    }
+}
+/// Presentation pages are independent of complete capture and undo state.
+pub fn summary_page(summary: &ChangeSummary, offset: u32) -> Result<ChangeSummary> {
+    let offset = offset as usize;
+    anyhow::ensure!(offset <= summary.entries.len(), "文件列表游标无效");
+    let mut result = ChangeSummary {
+        entries: Vec::new(),
+        total_files: None,
+        next_offset: None,
+        offset: None,
+        added: summary.added,
+        removed: summary.removed,
+        binary_files: summary.binary_files,
+        truncated: summary.truncated,
+        baseline_at: summary.baseline_at,
+        unavailable: summary.unavailable.clone(),
+    };
+    let mut bytes = 0;
+    for entry in summary.entries.iter().skip(offset).take(64) {
+        let size = serde_json::to_vec(entry)?.len();
+        anyhow::ensure!(size <= 64 * 1024, "文件路径超出展示范围");
+        if bytes + size > 64 * 1024 {
+            break;
+        }
+        result.entries.push(entry.clone());
+        bytes += size;
+    }
+    let end = offset + result.entries.len();
+    if offset > 0 || end < summary.entries.len() {
+        result.total_files = Some(u32::try_from(summary.entries.len())?);
+        result.offset = Some(offset as u32);
+        result.next_offset = if end < summary.entries.len() {
+            Some(u32::try_from(end)?)
+        } else {
+            None
+        };
+    }
+    Ok(result)
+}
 impl FrozenTurn {
     pub async fn freeze(
+        request_id: String,
+        before: Snapshot,
+        after: Snapshot,
+        interrupted: bool,
+        background_pending: bool,
+    ) -> Result<Self> {
+        tokio::task::spawn_blocking(move || {
+            tokio::runtime::Handle::current().block_on(Self::freeze_inner(
+                request_id,
+                before,
+                after,
+                interrupted,
+                background_pending,
+            ))
+        })
+        .await
+        .context("保存本轮快照失败")?
+    }
+    async fn freeze_inner(
         request_id: String,
         mut before: Snapshot,
         mut after: Snapshot,
         interrupted: bool,
         background_pending: bool,
     ) -> Result<Self> {
-        let summary = before.compare(&after).await?;
-        before
-            .files
-            .retain(|path, _| summary.entries.iter().any(|e| &e.path == path));
-        after
-            .files
-            .retain(|path, _| summary.entries.iter().any(|e| &e.path == path));
+        before = before.materialized()?;
+        after = after.materialized()?;
+        let summary = before.compare_loaded(&after).await?;
+        let paths: std::collections::HashSet<_> =
+            summary.entries.iter().map(|e| e.path.as_str()).collect();
+        before.files.retain(|path, _| paths.contains(path.as_str()));
+        after.files.retain(|path, _| paths.contains(path.as_str()));
         before
             .modes
             .retain(|path, _| before.files.contains_key(path));
         after.modes.retain(|path, _| after.files.contains_key(path));
+        let page = summary_page(&summary, 0)?;
+        let full_summary = if page.next_offset.is_some() {
+            Some(if let Some(storage) = &before.storage {
+                SummaryData::Object(snapshot_storage::save_json(storage, &summary)?)
+            } else {
+                SummaryData::Inline(Box::new(summary))
+            })
+        } else {
+            None
+        };
         Ok(Self {
+            full_summary,
             changes: latte_work_protocol::TurnChanges {
                 request_id,
-                summary,
+                summary: page,
                 interrupted,
                 background_pending,
                 undo: latte_work_protocol::TurnUndoStatus::Ready,
             },
-            before,
-            after,
+            before: before.persist()?,
+            after: after.persist()?,
+        })
+    }
+    pub async fn page_for_async(
+        &self,
+        offset: Option<u32>,
+        path: Option<&str>,
+    ) -> Result<ChangeSummary> {
+        let turn = self.clone();
+        let path = path.map(str::to_owned);
+        tokio::task::spawn_blocking(move || turn.page_for(offset, path.as_deref()))
+            .await
+            .context("读取文件分页失败")?
+    }
+    pub async fn check_undo(self, root: PathBuf, restore: bool) -> Result<Self> {
+        tokio::task::spawn_blocking(move || {
+            if restore {
+                self.restore(&root)?;
+            } else {
+                self.validate_undo(&root)?;
+            }
+            Ok(self)
+        })
+        .await
+        .context("核对撤销快照失败")?
+    }
+    pub fn page_for(&self, offset: Option<u32>, path: Option<&str>) -> Result<ChangeSummary> {
+        let full = if let Some(summary) = &self.full_summary {
+            summary.read()?
+        } else {
+            self.changes.summary.clone()
+        };
+        let offset = if let Some(offset) = offset {
+            offset
+        } else if let Some(path) = path {
+            let index = full
+                .entries
+                .iter()
+                .position(|entry| entry.path == path)
+                .unwrap_or(0);
+            let start = (index / 64) * 64;
+            let first = summary_page(&full, u32::try_from(start)?)?;
+            u32::try_from(if first.entries.iter().any(|entry| entry.path == path) {
+                start
+            } else {
+                index
+            })?
+        } else {
+            0
+        };
+        summary_page(&full, offset)
+    }
+    pub fn migrate_legacy(mut self, storage: &Path) -> Result<Self> {
+        self.attach(storage);
+        self.before = self.before.migrate_legacy(storage)?;
+        self.after = self.after.migrate_legacy(storage)?;
+        let full = if let Some(summary) = &self.full_summary {
+            summary.read()?
+        } else {
+            self.changes.summary.clone()
+        };
+        self.changes.summary = summary_page(&full, 0)?;
+        self.full_summary = if self.changes.summary.next_offset.is_some() {
+            Some(SummaryData::Object(snapshot_storage::save_json(
+                storage, &full,
+            )?))
+        } else {
+            None
+        };
+        Ok(self)
+    }
+    pub fn referenced_objects(&self, keys: &mut std::collections::HashSet<String>) -> Result<()> {
+        self.before.referenced_objects(keys)?;
+        self.after.referenced_objects(keys)?;
+        if let Some(SummaryData::Object(object)) = &self.full_summary {
+            keys.insert(object.key().to_owned());
+        }
+        Ok(())
+    }
+    pub fn attach(&mut self, storage: &Path) {
+        if let Some(SummaryData::Object(o)) = &mut self.full_summary {
+            o.attach(storage)
+        }
+        self.before.attach(storage);
+        self.after.attach(storage);
+    }
+    fn materialized(&self) -> Result<Self> {
+        Ok(Self {
+            full_summary: self.full_summary.clone(),
+            changes: {
+                let mut changes = self.changes.clone();
+                if let Some(full) = &self.full_summary {
+                    changes.summary = full.read()?;
+                }
+                changes
+            },
+            before: self.before.materialized()?,
+            after: self.after.materialized()?,
         })
     }
     pub fn validate_undo(&self, root: &Path) -> Result<()> {
+        self.materialized()?.validate_undo_loaded(root)
+    }
+    fn validate_undo_loaded(&self, root: &Path) -> Result<()> {
         if self.changes.undo != latte_work_protocol::TurnUndoStatus::Ready
             || self.changes.summary.truncated
             || self.changes.summary.unavailable.is_some()
@@ -503,7 +890,6 @@ impl FrozenTurn {
         Ok(())
     }
     fn verify_current(&self, root: &Path, path: &str) -> Result<()> {
-        use std::io::Read;
         let metadata = std::fs::metadata(root)?;
         if self.before.root_identity != Some((metadata.dev(), metadata.ino()))
             || root.symlink_metadata()?.file_type().is_symlink()
@@ -535,12 +921,8 @@ impl FrozenTurn {
         let expected = self.after.files.get(path).and_then(Option::as_ref);
         match (target.symlink_metadata(), expected) {
             (Err(e), None) if e.kind() == std::io::ErrorKind::NotFound => {}
-            (Ok(meta), Some(bytes)) if meta.is_file() && meta.len() <= FILE_LIMIT as u64 => {
-                let mut current = Vec::new();
-                std::fs::File::open(&target)?
-                    .take((FILE_LIMIT + 1) as u64)
-                    .read_to_end(&mut current)?;
-                if &current != bytes
+            (Ok(meta), Some(bytes)) if meta.is_file() && meta.len() == bytes.len() as u64 => {
+                if !bytes.matches(&target)?
                     || self
                         .after
                         .modes
@@ -555,7 +937,9 @@ impl FrozenTurn {
         Ok(())
     }
     pub fn restore(&self, root: &Path) -> Result<()> {
-        use std::io::Write;
+        self.materialized()?.restore_loaded(root)
+    }
+    fn restore_loaded(&self, root: &Path) -> Result<()> {
         // Called only after durable Unknown intent, with host admission paused and
         // overlapping idle native processes closed. External edits are checked again.
         for entry in &self.changes.summary.entries {
@@ -569,7 +953,7 @@ impl FrozenTurn {
                     .context("缺少原文件权限，无法撤销")?;
                 let mut temporary =
                     tempfile::NamedTempFile::new_in(target.parent().context("文件目录缺失")?)?;
-                temporary.write_all(bytes)?;
+                bytes.write_to_file(temporary.as_file_mut())?;
                 temporary
                     .as_file()
                     .set_permissions(std::fs::Permissions::from_mode(*mode & 0o777))?;
@@ -593,17 +977,35 @@ impl FrozenTurn {
         Ok(())
     }
     pub async fn patch(&self, path: &str) -> Result<(String, bool)> {
+        let turn = self.clone();
+        let path = path.to_owned();
+        tokio::task::spawn_blocking(move || {
+            tokio::runtime::Handle::current().block_on(turn.patch_inner(&path))
+        })
+        .await
+        .context("读取本轮差异失败")?
+    }
+    async fn patch_inner(&self, path: &str) -> Result<(String, bool)> {
         // The summary was computed before compaction. Retained bytes are sufficient
         // to compare exactly these paths; original partial flags remain on the summary.
         validate_path(path)?;
-        if !self.changes.summary.entries.iter().any(|e| e.path == path) {
+        if !self
+            .full_summary
+            .as_ref()
+            .map(SummaryData::read)
+            .transpose()?
+            .unwrap_or_else(|| self.changes.summary.clone())
+            .entries
+            .iter()
+            .any(|e| e.path == path)
+        {
             bail!("文件不属于本轮已记录的变更");
         }
-        let mut before = self.before.clone();
-        let mut after = self.after.clone();
+        let mut before = self.before.materialized()?;
+        let mut after = self.after.materialized()?;
         before.truncated = false;
         after.truncated = false;
-        before.patch_between(&after, path).await
+        before.patch_loaded(&after, path).await
     }
 }
 async fn no_index(before: &Path, after: &Path, stats: bool) -> Result<(String, bool)> {
@@ -630,18 +1032,21 @@ async fn no_index(before: &Path, after: &Path, stats: bool) -> Result<(String, b
         .stderr(Stdio::null())
         .kill_on_drop(true)
         .spawn()?;
-    let mut bytes = Vec::new();
-    tokio::time::timeout(
-        Duration::from_secs(10),
-        child
-            .stdout
-            .take()
-            .context("git stdout missing")?
-            .take((FILE_LIMIT + 1) as u64)
-            .read_to_end(&mut bytes),
-    )
+    let stdout = child.stdout.take().context("git stdout missing")?;
+    let mut bytes = tokio::time::timeout(Duration::from_secs(10), async {
+        if stats {
+            read_chunks(stdout).await
+        } else {
+            let mut bytes = Vec::new();
+            stdout
+                .take((DIFF_PREVIEW_LIMIT + 1) as u64)
+                .read_to_end(&mut bytes)
+                .await?;
+            Ok(bytes)
+        }
+    })
     .await??;
-    let truncated = bytes.len() > FILE_LIMIT;
+    let truncated = !stats && bytes.len() > DIFF_PREVIEW_LIMIT;
     if truncated {
         child.kill().await?;
     } else {
@@ -650,12 +1055,17 @@ async fn no_index(before: &Path, after: &Path, stats: bool) -> Result<(String, b
             bail!("无法比较任务文件");
         }
     }
-    bytes.truncate(FILE_LIMIT);
+    if truncated {
+        bytes.truncate(DIFF_PREVIEW_LIMIT);
+    }
     Ok((String::from_utf8_lossy(&bytes).into(), truncated))
 }
 pub async fn workspace_summary(root: &Path) -> Result<ChangeSummary> {
     let (entries, truncated) = files::changes(root).await?;
     let mut result = ChangeSummary {
+        total_files: None,
+        next_offset: None,
+        offset: None,
         entries: vec![],
         added: 0,
         removed: 0,
@@ -788,6 +1198,149 @@ mod tests {
         );
     }
     #[tokio::test]
+    async fn runtime_state_is_excluded_and_old_daemons_see_explicit_unknown_metadata() {
+        for git_project in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            if git_project {
+                repository(dir.path());
+            }
+            std::fs::write(dir.path().join("source.txt"), "source").unwrap();
+            let state = dir.path().join(".state");
+            std::fs::create_dir(&state).unwrap();
+            let storage = snapshot_storage::prepare(&state.join("objects")).unwrap();
+            std::fs::File::create(state.join("state.sqlite"))
+                .unwrap()
+                .set_len(16 * 1024 * 1024)
+                .unwrap();
+            let snapshot = Snapshot::capture_stored(dir.path(), &storage)
+                .await
+                .unwrap();
+            let loaded = snapshot.materialized().unwrap();
+            assert!(loaded.unavailable.is_none());
+            assert!(loaded.files.contains_key("source.txt"));
+            assert!(loaded.files.keys().all(|path| !path.starts_with(".state/")));
+            assert_eq!(loaded.files.len(), if git_project { 4 } else { 1 });
+            let metadata: serde_json::Value =
+                serde_json::from_str(&serde_json::to_string(&snapshot).unwrap()).unwrap();
+            assert!(metadata["root_identity"].is_null());
+            assert!(metadata["unavailable"].as_str().unwrap().contains("新版"));
+            assert_eq!(metadata["files"].as_object().unwrap().len(), 0);
+            assert!(Snapshot::capture_stored(&state, &storage).await.is_err());
+        }
+    }
+    #[test]
+    fn twenty_thousand_files_are_complete_on_disk_and_bounded_on_every_wire_page() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = snapshot_storage::prepare(dir.path()).unwrap();
+        let full = ChangeSummary {
+            entries: (0..20_000)
+                .map(|n| TaskChange {
+                    path: format!("src/{n:05}-{}.txt", "a".repeat(180)),
+                    status: "A".into(),
+                    added: Some(1),
+                    removed: Some(0),
+                })
+                .collect(),
+            total_files: None,
+            next_offset: None,
+            offset: None,
+            added: 20_000,
+            removed: 0,
+            binary_files: 0,
+            truncated: false,
+            baseline_at: Some(1.0),
+            unavailable: None,
+        };
+        assert!(serde_json::to_vec(&full).unwrap().len() > latte_work_protocol::MAX_FRAME);
+        let object = snapshot_storage::save_json(&root, &full).unwrap();
+        let turn = FrozenTurn {
+            full_summary: Some(SummaryData::Object(object)),
+            changes: latte_work_protocol::TurnChanges {
+                request_id: "many".into(),
+                summary: summary_page(&full, 0).unwrap(),
+                interrupted: false,
+                background_pending: false,
+                undo: latte_work_protocol::TurnUndoStatus::Ready,
+            },
+            before: Snapshot::unavailable("fixture".into()),
+            after: Snapshot::unavailable("fixture".into()),
+        };
+        let data = snapshot_storage::small_json(&turn).unwrap();
+        assert!(data.len() < snapshot_storage::RECORD_LIMIT);
+        let mut turn: FrozenTurn = serde_json::from_str(&data).unwrap();
+        turn.attach(&root);
+        assert_eq!(turn.changes.summary.total_files, Some(20_000));
+        assert!(!turn.changes.summary.truncated);
+        let mut offset = 0;
+        let mut count = 0;
+        loop {
+            let page = summary_page(&full, offset).unwrap();
+            assert!(page.entries.len() <= 64);
+            assert!(serde_json::to_vec(&page).unwrap().len() < 128 * 1024);
+            assert_eq!(page.entries[0].path, full.entries[count].path);
+            count += page.entries.len();
+            match page.next_offset {
+                Some(next) => {
+                    assert!(next > offset);
+                    offset = next;
+                }
+                None => break,
+            }
+        }
+        assert_eq!(count, full.entries.len());
+        let last = turn
+            .page_for(None, Some(&full.entries.last().unwrap().path))
+            .unwrap();
+        assert_eq!(last.entries.len(), 32);
+        assert_eq!(last.offset, Some(19_968));
+        assert_eq!(
+            last.entries.last().unwrap().path,
+            full.entries.last().unwrap().path
+        );
+        assert!(last.next_offset.is_none());
+        assert_eq!(
+            turn.page_for(Some(64), None).unwrap().entries[0].path,
+            full.entries[64].path
+        );
+        assert!(turn.page_for(Some(20_001), None).is_err());
+        assert_eq!(
+            turn.page_for(None, Some("no-longer-changed.txt"))
+                .unwrap()
+                .offset,
+            Some(0)
+        );
+    }
+    #[test]
+    fn invalid_utf8_git_paths_are_partial_without_discarding_valid_paths() {
+        let (paths, partial) = decode_git_paths(
+            b"sub/good.txt\0sub/bad-\xff\0sub/other.txt\0",
+            "sub/",
+            Path::new("/fixture"),
+            None,
+        );
+        assert_eq!(paths, ["good.txt", "other.txt"]);
+        assert!(partial);
+    }
+    #[tokio::test]
+    async fn generated_untracked_files_stay_excluded_without_losing_tracked_files() {
+        let dir = tempfile::tempdir().unwrap();
+        repository(dir.path());
+        std::fs::create_dir(dir.path().join(".venv")).unwrap();
+        std::fs::write(dir.path().join(".venv/untracked.py"), "generated").unwrap();
+        std::fs::write(dir.path().join(".venv/tracked.py"), "tracked").unwrap();
+        git(dir.path(), &["add", ".venv/tracked.py"]);
+        let before = Snapshot::capture(dir.path()).await.unwrap();
+        assert!(!before.truncated);
+        assert!(before.unavailable.is_none());
+        assert!(before.files.contains_key(".venv/tracked.py"));
+        assert!(!before.files.contains_key(".venv/untracked.py"));
+        std::fs::write(dir.path().join("dirty.txt"), "actual change\n").unwrap();
+        let summary = before.summary(dir.path()).await.unwrap();
+        assert!(summary.unavailable.is_none());
+        assert_eq!(summary.entries.len(), 1);
+        assert_eq!(summary.entries[0].path, "dirty.txt");
+    }
+    #[tokio::test]
     async fn ordinary_directory_freezes_real_edits_additions_and_deletions() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
@@ -827,34 +1380,92 @@ mod tests {
         assert!(!root.join("new.txt").exists());
     }
     #[tokio::test]
-    async fn ordinary_inventory_is_bounded_and_does_not_follow_symlinks() {
+    async fn ordinary_inventory_keeps_large_files_without_following_symlinks() {
         let dir = tempfile::tempdir().unwrap();
         let external = tempfile::tempdir().unwrap();
         std::fs::write(external.path().join("private.txt"), "private").unwrap();
         std::os::unix::fs::symlink(external.path(), dir.path().join("outside")).unwrap();
         std::fs::create_dir(dir.path().join("node_modules")).unwrap();
         std::fs::write(dir.path().join("node_modules/skip.txt"), "skip").unwrap();
-        std::fs::write(dir.path().join("large.txt"), vec![0; FILE_LIMIT + 1]).unwrap();
+        std::fs::write(dir.path().join("large.txt"), vec![0; 512 * 1024 + 1]).unwrap();
         let before = Snapshot::capture(dir.path()).await.unwrap();
-        assert!(before.truncated);
-        assert!(before.files.is_empty());
-        std::fs::remove_file(dir.path().join("large.txt")).unwrap();
-        assert!(before.summary(dir.path()).await.unwrap().entries.is_empty());
-        for n in 0..=COUNT_LIMIT {
-            std::fs::write(dir.path().join(format!("file-{n}.txt")), "bounded").unwrap();
-        }
-        let (paths, truncated) = inventory(dir.path()).await.unwrap();
-        assert!(truncated && paths.len() == COUNT_LIMIT);
-        assert!(paths.windows(2).all(|pair| pair[0] < pair[1]));
-        let snapshot = Snapshot::capture(dir.path()).await.unwrap();
-        assert!(snapshot.truncated);
-        assert!(snapshot.files.len() <= COUNT_LIMIT);
-        assert!(
-            snapshot
-                .files
-                .keys()
-                .all(|p| !p.contains("private") && !p.contains("skip"))
+        assert!(before.truncated, "symlink is still excluded");
+        assert_eq!(before.files.len(), 1);
+        assert_eq!(
+            before.files["large.txt"].as_ref().unwrap().len(),
+            512 * 1024 + 1
         );
+        assert!(before.summary(dir.path()).await.unwrap().entries.is_empty());
+    }
+    #[tokio::test]
+    async fn snapshots_exceed_previous_file_count_total_bytes_and_inventory_limits() {
+        let dir = tempfile::tempdir().unwrap();
+        for n in 0..1001 {
+            std::fs::write(dir.path().join(format!("file-{n}.txt")), "before\n").unwrap();
+        }
+        for n in 0..5001 {
+            std::fs::create_dir(dir.path().join(format!("dir-{n}"))).unwrap();
+        }
+        let large = "before\n".repeat(180_000);
+        for n in 0..8 {
+            std::fs::write(dir.path().join(format!("large-{n}.txt")), &large).unwrap();
+        }
+        let before = Snapshot::capture(dir.path()).await.unwrap();
+        assert!(!before.truncated);
+        assert_eq!(before.files.len(), 1009);
+        std::fs::write(dir.path().join("file-1000.txt"), "after\n").unwrap();
+        std::fs::write(dir.path().join("large-7.txt"), format!("{large}after\n")).unwrap();
+        let after = Snapshot::capture(dir.path()).await.unwrap();
+        let turn = FrozenTurn::freeze("large".into(), before, after, false, false)
+            .await
+            .unwrap();
+        assert!(!turn.changes.summary.truncated);
+        assert_eq!(turn.changes.summary.entries.len(), 2);
+        assert_eq!(
+            (turn.changes.summary.added, turn.changes.summary.removed),
+            (2, 1)
+        );
+        let turn: FrozenTurn =
+            serde_json::from_str(&serde_json::to_string(&turn).unwrap()).unwrap();
+        assert!(
+            turn.patch("large-7.txt")
+                .await
+                .unwrap()
+                .0
+                .contains("+after")
+        );
+        turn.validate_undo(dir.path()).unwrap();
+        // Compare same-sized changed contents in chunks, even above the old cap.
+        let expected = std::fs::read(dir.path().join("large-7.txt")).unwrap();
+        let mut changed = expected.clone();
+        changed[0] = b'X';
+        std::fs::write(dir.path().join("large-7.txt"), changed).unwrap();
+        assert!(turn.validate_undo(dir.path()).is_err());
+        std::fs::write(dir.path().join("large-7.txt"), expected).unwrap();
+        turn.restore(dir.path()).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("large-7.txt")).unwrap(),
+            large
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("file-1000.txt")).unwrap(),
+            "before\n"
+        );
+    }
+    #[tokio::test]
+    async fn git_inventory_does_not_truncate_the_file_list_at_the_preview_byte_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        repository(dir.path());
+        for n in 0..2300 {
+            std::fs::write(
+                dir.path().join(format!("{n:04}-{}.txt", "a".repeat(230))),
+                "content",
+            )
+            .unwrap();
+        }
+        let snapshot = Snapshot::capture(dir.path()).await.unwrap();
+        assert!(!snapshot.truncated);
+        assert_eq!(snapshot.files.len(), 2303);
     }
     #[tokio::test]
     async fn ordinary_inventory_skips_entries_and_queued_directories_deleted_after_enumeration() {
@@ -947,7 +1558,7 @@ mod tests {
         assert_eq!((result.added, result.removed), (1, 1));
     }
     #[tokio::test]
-    async fn bounded_snapshots_never_report_an_oversized_file_as_deleted_and_respect_subprojects() {
+    async fn snapshots_include_large_edits_and_respect_subprojects() {
         let dir = tempfile::tempdir().unwrap();
         repository(dir.path());
         let sub = dir.path().join("sub");
@@ -956,9 +1567,11 @@ mod tests {
         let baseline = Snapshot::capture(&sub).await.unwrap();
         std::fs::write(dir.path().join("dirty.txt"), "outside\n").unwrap();
         assert!(baseline.summary(&sub).await.unwrap().entries.is_empty());
-        std::fs::write(sub.join("a.txt"), vec![b'a'; FILE_LIMIT + 1]).unwrap();
+        std::fs::write(sub.join("a.txt"), vec![b'a'; 512 * 1024 + 1]).unwrap();
         let result = baseline.summary(&sub).await.unwrap();
-        assert!(result.truncated && result.entries.is_empty());
+        assert!(!result.truncated);
+        assert_eq!(result.entries.len(), 1);
+        assert_eq!(result.entries[0].status, "M");
         assert!(
             Snapshot::capture(Path::new("/missing-fixture-root"))
                 .await

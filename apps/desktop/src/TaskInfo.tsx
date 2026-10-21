@@ -21,7 +21,7 @@ import {
   Wrench,
   ChevronRight,
 } from "lucide-react";
-import { request } from "./api";
+import { request, ServerRequestError } from "./api";
 import type { Event, GitReview, Project } from "./protocol";
 import { TaskLinkRow } from "./TaskLinkRow";
 import { useBrowserHistory } from "./browserHistory";
@@ -177,15 +177,24 @@ export function TaskInfo({
     )
     .at(-1)?.seq;
   const readChanges = useCallback(async () => {
-    const response = await request(hostId, {
-      method: "git_review",
-      project_id: project!.id,
-      scope: "branch",
-      base: null,
-    });
-    if (response.kind !== "git_review")
-      throw new Error("无法读取变更，请检查 Server 版本");
-    return response.review;
+    try {
+      const response = await request(hostId, {
+        method: "git_review",
+        project_id: project!.id,
+        scope: "branch",
+        base: null,
+      });
+      if (response.kind !== "git_review")
+        throw new Error("无法读取变更，请检查 Server 版本");
+      return response.review;
+    } catch (error) {
+      if (
+        error instanceof ServerRequestError &&
+        error.code === "not_git_repository"
+      )
+        return null;
+      throw error;
+    }
   }, [hostId, project?.id]);
   const readSources = useCallback(async () => {
     if (!sessionId) return undefined;
@@ -200,7 +209,7 @@ export function TaskInfo({
   const enabled = active && connected && !!project;
   // Branch diffs are read on opening, explicit refresh and settlement. Tool
   // activity during a turn never spawns a Git status/diff per streamed update.
-  const changes = usePollingSnapshot<GitReview | undefined>(
+  const changes = usePollingSnapshot<GitReview | null | undefined>(
     scope,
     enabled,
     readChanges,
@@ -273,7 +282,7 @@ export function TaskInfo({
       >
         <button
           className="task-info-row"
-          disabled={!project}
+          disabled={!project || review === null}
           onClick={() => openWorkspaceResource(workspaceId, "diff")}
         >
           <span>分支变更</span>
@@ -282,11 +291,13 @@ export function TaskInfo({
               ? "状态待确认"
               : current.changesError
                 ? "暂不可用"
-                : !review
-                  ? project
-                    ? "读取中…"
-                    : "请先选择项目"
-                  : `${review.entries.length} 个文件`}
+                : review === null
+                  ? "此项目无 Git 分支信息"
+                  : !review
+                    ? project
+                      ? "读取中…"
+                      : "请先选择项目"
+                    : `${review.entries.length} 个文件`}
           </span>
         </button>
         {review && (

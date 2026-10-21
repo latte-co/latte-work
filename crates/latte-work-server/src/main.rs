@@ -8,6 +8,8 @@ mod message_queue;
 mod providers;
 mod questions;
 mod runtime;
+mod snapshot_migration;
+mod snapshot_storage;
 mod sources;
 mod store;
 mod task_changes;
@@ -311,7 +313,12 @@ async fn connection(stream: UnixStream, service: Service) -> Result<()> {
                 Ok(request) if ready => match dispatch(&service, request).await {
                     Ok(response) => response,
                     Err(error) => Response::Error {
-                        code: "request_failed".into(),
+                        code: if error.is::<files::NotGitRepository>() {
+                            "not_git_repository"
+                        } else {
+                            "request_failed"
+                        }
+                        .into(),
                         message: error.to_string(),
                     },
                 },
@@ -1267,6 +1274,8 @@ async fn dispatch(s: &Service, request: Request) -> Result<Response> {
         Request::ChangeSummary {
             project_id,
             session_id,
+            offset,
+            path,
         } => {
             let p = db(&s.database, |d| d.project(&project_id))?;
             let summary = if let Some(id) = session_id {
@@ -1283,7 +1292,16 @@ async fn dispatch(s: &Service, request: Request) -> Result<Response> {
             } else {
                 task_changes::workspace_summary(Path::new(&p.path)).await?
             };
-            Response::ChangeSummary { summary }
+            Response::ChangeSummary {
+                summary: task_changes::summary_page(
+                    &summary,
+                    offset.unwrap_or_else(|| {
+                        path.as_ref()
+                            .and_then(|path| summary.entries.iter().position(|e| &e.path == path))
+                            .unwrap_or(0) as u32
+                    }),
+                )?,
+            }
         }
         Request::UndoTurnChanges {
             session_id,
@@ -1316,7 +1334,7 @@ async fn dispatch(s: &Service, request: Request) -> Result<Response> {
             let session = db(&s.database, |d| d.session(&session_id))?;
             let project = db(&s.database, |d| d.project(&session.project_id))?;
             let root = Path::new(&project.path);
-            turn.validate_undo(root)?;
+            turn = turn.check_undo(root.to_owned(), false).await?;
             // Close only idle runtimes in overlapping directories before restoration.
             let running_ids: Vec<_> = s
                 .runs
@@ -1333,10 +1351,12 @@ async fn dispatch(s: &Service, request: Request) -> Result<Response> {
                     runtime::close(&s.database, &s.runs, &session.id, true).await?;
                 }
             }
-            turn.validate_undo(root)?;
+            turn = turn.check_undo(root.to_owned(), false).await?;
             turn.changes.undo = TurnUndoStatus::Unknown;
             db(&s.database, |d| d.update_turn(&session_id, &turn))?;
-            turn.restore(root)
+            turn = turn
+                .check_undo(root.to_owned(), true)
+                .await
                 .context("撤销未能全部完成，状态待核对；请检查工作区，系统不会自动重试")?;
             turn.changes.undo = TurnUndoStatus::Reverted;
             db(&s.database, |d| d.update_turn(&session_id, &turn))?;
@@ -1344,17 +1364,28 @@ async fn dispatch(s: &Service, request: Request) -> Result<Response> {
                 changes: turn.changes,
             }
         }
-        Request::LastTurnChanges { session_id } => {
+        Request::LastTurnChanges {
+            session_id,
+            offset,
+            path,
+        } => {
             let turn = db(&s.database, |d| d.last_turn_changes(&session_id))?;
-            Response::LastTurnChanges {
-                changes: turn.map(|turn| turn.changes),
-            }
+            let changes = if let Some(mut turn) = turn {
+                turn.changes.summary = turn.page_for_async(offset, path.as_deref()).await?;
+                Some(turn.changes)
+            } else {
+                None
+            };
+            Response::LastTurnChanges { changes }
         }
         Request::TurnChangeSummary {
             session_id,
             request_id,
+            offset,
+            path,
         } => {
-            let turn = db(&s.database, |d| d.turn_changes(&session_id, &request_id))?;
+            let mut turn = db(&s.database, |d| d.turn_changes(&session_id, &request_id))?;
+            turn.changes.summary = turn.page_for_async(offset, path.as_deref()).await?;
             Response::TurnChanges {
                 changes: turn.changes,
             }

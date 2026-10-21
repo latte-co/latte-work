@@ -71,6 +71,20 @@ finish and terminals close. Restarting only the desktop leaves them running.
 Wire protocol changes: edit latte-work-protocol then run `make types` and
 `make fmt`. Desktop presentation must not import or reproduce Claude wire types.
 
+Provider metadata optionally declares `models_1m` for existing base model IDs.
+Missing/empty declarations preserve old catalogs and serialized request fingerprints.
+The Claude adapter's model catalog translates declared capabilities into Default/1M
+variants with explicit 200K/1M windows, using an unchanged model ID or that ID with `[1m]`.
+For these modes, private settings and the child environment explicitly set
+`CLAUDE_CODE_DISABLE_1M_CONTEXT` and `CLAUDE_CODE_MAX_CONTEXT_TOKENS`, so inherited
+settings cannot silently override the selected window. Undeclared models keep native behavior.
+Existing model selection,
+queue identity and per-turn local/SSH Provider snapshots carry the selection.
+The Host validates the current declaration before admitting a generated ID.
+Traex ignores this Claude-specific declaration and keeps its native backend modes.
+Configuration management stays offline; execution hosts need the updated Server
+to offer generated modes. No protocol version bump or automatic task replay is added.
+
 Archiving an idle task first closes any retained native session, reaps its owned
 process group, pauses pending messages and ends background subagents. Only a
 confirmed close allows the archive flag to be saved; failures keep it unarchived.
@@ -152,6 +166,19 @@ The existing send request ID, persistence, resume, cancellation and approval flo
 shared by native commands. Terminal-only commands absent from the native SDK catalog
 are not synthesized. Agent command effects and configuration scope remain native;
 Latte's explicit model/effort selections continue to apply on each launched turn.
+Claude slash Skills are confirmed by the native `init.skills` catalog plus a CLI
+command-expansion replay (`isReplay`), checked against the discovered command
+catalog. CLI variants that expose synthetic user context (`isSynthetic`, or legacy
+`isMeta`) also support a command echo followed by the Skill base-directory header
+and body. The adapter persists one `notice` (`已加载 Skill：<name>`) per Skill per turn.
+It never exposes the body or directory, invents a `Skill` tool call, or reports a
+load from a submitted slash string alone. Child, idle and discovery frames do not
+claim a parent load. Native context replay within the turn is deduplicated; a later
+explicit invocation can report a new load. The UI keeps these notices visible
+outside a completed turn's collapsed process. This uses the existing protocol;
+the execution host Server must be updated to produce the notice. Old history is
+not backfilled and old Servers continue without the extra load indicator.
+
 App-owned `/agents` (and listing aliases), `/model` and `/effort` are resolved before
 native command discovery or turn admission. The latter two open the existing model
 selector or effort submenu; they never change native configuration via a CLI command.
@@ -166,7 +193,7 @@ model/effort commands if a caller bypasses composer navigation.
 The `@` picker reuses the server's bounded, canonical project-file listing for local
 and SSH hosts. It attaches relative path references for the Agent to read, not file
 uploads or clipboard screenshots. A remote server must be updated for command discovery.
-The `+` menu also accepts explicitly chosen files/folders outside the project:
+The workspace-reference browser also accepts explicitly chosen files/folders outside the project:
 native pickers are local-only, while manual absolute paths are resolved by the
 selected execution host through `resolve_reference`. This bounded metadata-only
 request returns a canonical absolute reference (or a project-relative path when
@@ -212,6 +239,23 @@ Permission changes do not edit native settings or expand sandbox/network policie
 The Hello capability `permission_settings` prevents a new client from sending
 an override to an older server that would silently ignore the field. Remote hosts
 must update their server; local and SSH transports share the same implementation.
+
+## Local file attachments
+
+The composer `+` menu separates local file attachments from execution-host workspace
+references (`@` remains a direct reference shortcut). A multiple-file HTML input uses
+Wry's native file panel on macOS; its File objects and HTML5 file drops share the
+bounded clipboard byte-staging and SSH upload pipeline. The main window disables
+Tauri drag interception so WebKit can deliver File objects, rather than exposing
+arbitrary local paths through a new IPC command. File drops outside the composer
+are prevented from navigating the app. Directory drops fail explicitly; workspace
+directories remain path references. No server protocol or permission change is needed.
+
+Selection/drop batches attach atomically, never send a prompt, and retain the draft
+on failure. Failed files may be retried or removed before sending. Pending panels,
+uploads and failures are invalidated on host/project/session or composer-state changes.
+Focused checks: Composer.test.tsx, Conversation.test.tsx and pasteAttachments.test.ts;
+native smoke should separately verify the system file panel and Finder file drops.
 
 ## Clipboard attachments
 
@@ -573,8 +617,13 @@ replaced records reset it. Unfinished streamed text is parsed on settlement, not
 on each token, and Markdown fences are stripped in a linear line scan. TodoWrite
 replaces its own snapshot while retaining TaskCreate records. Branch reviews are
 read on opening, settlement and explicit refresh, independent of streamed tool
-activity; the lightweight source inventory refreshes at most once every two seconds
-while running, with one read in flight. Authentication prompts suspend these reads.
+activity. Confirmed non-Git directories return `not_git_repository` through the
+existing error envelope; Task Summary shows a disabled branch row without a status
+alert or invented zero totals. Resources, tools and non-Git turn snapshots remain
+available. Other Git failures stay actionable, including incomplete `.git` markers.
+The desktop retains Server error codes; older remote Servers must update to provide
+this distinction. The lightweight source inventory refreshes at most once every
+two seconds while running, with one read in flight. Authentication prompts suspend these reads.
 The single hover/focus background on each workspace tab includes its close control.
 Project names and history-scope paragraphs are not repeated in the inspector;
 the footer offers explicit earlier-history reads, with scope in its tooltip.
@@ -660,12 +709,13 @@ SDK lifecycle reference: [native task types](https://github.com/anthropics/claud
 Before the first accepted agent request spawns, the server stores a durable file
 baseline in the task database. The request is persisted first. Git-visible files
 (including tracked and untracked dirty files) are read without changing the index,
-refs or user files. Non-Git projects use a bounded recursive file inventory, skipping
+refs or user files. Non-Git projects use a recursive file inventory, skipping
 `.git`, `node_modules`, `target` and `.DS_Store` and refusing symlink traversal.
-This inventory visits at most 5,000 entries; edits, creations and deletions use the
-same saved before/after bytes and do not require Git repository metadata. Baselines are limited to 1,000 files, 512 KiB per file, 8 MiB
-total and 12 seconds. Unknown, oversized and symlink entries are explicitly partial;
-old tasks without a baseline never retroactively infer one. Task totals/diffs compare
+Snapshots have no fixed file-count, directory-entry, per-file or total-byte caps.
+File reads use 64 KiB asynchronous chunks and fallible allocation; the 12-second
+capture deadline and path containment checks remain. Git file enumeration and
+change statistics do not share the display preview byte cap. Unknown and symlink
+entries remain partial; old tasks without a baseline never retroactively infer one. Task totals/diffs compare
 this baseline with the current worktree, regardless of staging or later commits.
 This is temporal attribution: other writers in a shared directory can appear in
 these net changes. The UI provides separate task and workspace views.
@@ -701,9 +751,49 @@ protocol; the server has no GUI dependency.
 
 Each accepted user turn also saves a request-linked baseline before native dispatch.
 At the main result or confirmed process stop/failure, the server freezes before/after
-bytes and a `turn_changes` event, atomically replacing the pending baseline. Only
-changed bytes are retained (the same per-file/total capture limits apply to both
-snapshots). Turn cards show file counts and per-file/total added and removed lines;
+bytes and a `turn_changes` event, atomically replacing the pending baseline. A frozen
+turn references only changed files. Capture has no fixed file-count,
+per-file or total-byte ceiling; it retains the twelve-second collection deadline,
+path containment and symlink checks. Untracked `.venv`, `venv`, `__pycache__` and
+`dist` directories are excluded, but Git-tracked files there remain covered. The
+server's own state directory is excluded even when nested inside a project. A project
+inside the state directory explicitly fails capture instead of recording an empty
+complete snapshot. Invalid UTF-8 Git paths mark the snapshot partial while preserving
+other valid paths.
+
+File contents stream in 64 KiB chunks to private, SHA-256-addressed immutable objects
+under the database path with its extension replaced by `.snapshots`. Metadata
+manifests and complete change summaries use the same storage. Collection, hashing,
+manifest serialization, diff and restoration run outside the global database mutex;
+SQLite stores only small references and a first summary page. Snapshot records and
+new `turn_changes` events have a 256 KiB serialization guard. Backups and transfers
+must preserve both SQLite (including its normal WAL consistency requirements) and
+this sibling directory. Older servers cannot read object-backed snapshots; their
+small reference records explicitly indicate unavailable data rather than an empty,
+undoable snapshot.
+
+Summary requests accept optional `offset` or a selected `path` anchor (a missing
+anchor returns the first page), returning at most
+64 entries and 64 KiB of serialized entries with `total_files`, `offset` and
+`next_offset` when paged. Paging does not mark capture truncated, change totals or
+reduce the files covered by Undo. Both the card and review workspace replace each
+page rather than accumulating thousands of DOM nodes. Event polling projects legacy
+rows over 512 KiB to a notice with the same sequence number before reading their
+contents; the raw row remains stored and later replies/status events can advance.
+Forward and reverse history use this rule, keeping each response below the frame
+limit even when its first original event was oversized.
+
+Before accepting requests, startup archives legacy snapshot rows over 256 KiB using
+SQLite incremental blob reads into private `legacy/*.json` files. Valid records up
+to a 96 MiB encoded migration budget are converted to object references, preserving
+historical diffs and safe Undo. Larger, malformed or unreadable records become
+explicit unavailable/unknown markers; their exact originals remain archived. The
+archive index, replacement and notice commit together. Startup also clears unfinished
+baselines as unknown (the pre-existing restart policy), then removes only unreferenced
+hash-named objects after a complete successful reference scan; raw legacy archives
+and unknown files are retained. This frees reusable SQLite pages, not the database
+file's physical size; no automatic VACUUM runs. Turn cards show file counts and
+per-file/total added and removed lines;
 selecting a file or View Changes opens a deduplicated, closeable turn tab. Historical
 turn diffs read these stored bytes, not HEAD or the current filesystem. Main results
 with unfinished background children are explicitly labelled and cannot be undone.
@@ -897,6 +987,14 @@ message and optional skip, never an empty approval. Focused final-binary check:
 `send_queued` is an explicit additive alternative to `send`; an idle session starts
 immediately, a busy session saves the prompt in the host's SQLite FIFO. The desktop
 uses this API and the same native provider injection for local and SSH hosts.
+Foreground readiness is separate from safe process reconfiguration. Once the main
+turn completes, same-config messages start immediately and existing FIFO messages
+can drain while native children/background tasks stay alive in the same process.
+Pending approvals, interrupts and unconfirmed inputs still block new foreground
+turns. A model/Provider/permission/effort change that requires replacing a busy
+background process fails explicitly instead of silently queueing new input or
+terminating background work. A previously queued incompatible configuration pauses
+the queue with its reason; user resumption remains explicit.
 `message_queued` acknowledges durable admission, not execution; the user event and
 request record are written only when the actor starts that turn. Starting a queued
 turn and retiring its pending row share a transaction. Original admission identities
@@ -929,8 +1027,11 @@ smoke evidence is separate from real-model behavior.
 
 The queued-row send arrow uses `dispatch_queued_message` with `interrupt: false`.
 While a native turn is running, the server writes the selected prompt to that same
-Claude stream immediately; it never sends an interrupt or waits for the host queue
-head. A persisted `queued_message_sent` receipt carries the original text and request
+Claude stream immediately, or uses Traex `turn/steer` with the active native
+`expectedTurnId`; it never sends an interrupt or waits for the host queue head.
+The row shows a pending indicator during its request and a local delivery/error
+result, including startup/configuration failures, without replaying the action.
+A persisted `queued_message_sent` receipt carries the original text and request
 ID, distinct from the `user` execution-start event. The desktop immediately displays
 it with the shared user-message bubble, original send time, copy and attachment controls.
 For legacy histories with a later execution event, it correlates by session/request
@@ -947,6 +1048,16 @@ replay and block host-held messages until native confirmation or explicit stop/c
 Outstanding native inputs
 share the 16-message/512-KiB admission budget. Streamed handoffs cannot provide a
 safe independent filesystem boundary, so overlapping turn snapshots cannot be undone.
+
+Traex steering stays inside the current native turn while waiting for a model,
+thinking, replying or awaiting approval. Its RPC acknowledgement must match the
+expected turn; processing is retired only after that same turn completes
+successfully (including completion before the RPC acknowledgement). Interrupt,
+failure or transport loss retain uncertainty rather than infer execution. An
+explicit native RPC rejection returns just that input to the host queue with a
+new revision and pauses automatic drain; the current task and approval remain
+intact. A missing native turn ID fails clearly and retains the queued message.
+The wire protocol is unchanged; execution hosts need the updated Server.
 
 Active native turns retain their 24-hour execution limit. Each handed-off input has
 an independent 24-hour confirmation deadline measured from its delivery, including
@@ -991,6 +1102,15 @@ mouse movement beyond the threshold starts a drag; accessibility clicks and
 ordinary hover must not become a drag or suppress project expansion. No Server
 mutation or Agent request is used to save this display order.
 
+Pinned conversations share the pointer/keyboard reorder implementation with projects.
+Their independent App preference (`latte-work.pinned-order.v1`) uses host/session
+identity, retaining absent entries and appending newly discovered pins after an
+explicit order exists. Live timestamps, status and title refreshes do not override
+this order. Reordering never sends a host request, opens a conversation or changes
+project/recent ordering. Unpinning a dragged source or collapsing its section
+cancels the gesture. Focused checks: SidebarReorder.test.tsx, pinnedOrder.test.ts
+and the pinned-order persistence case in useWorkbench.test.tsx.
+
 Queue dispatch failures are checked after each activation, before considering the
 next item; auto-drain reads the current session status. A delayed immediate-send
 confirmation pauses the queue without classifying the native process as failed or
@@ -1021,6 +1141,11 @@ structured user questions, and live title changes. Approval responses use
 server requests return explicit unsupported errors. EOF or a successful process
 exit cannot complete a turn. Native thread/turn identities fence unrelated or
 stale notifications; hidden reasoning text is not stored.
+Traex native stdout allows a bounded 16 MiB per frame because `thread/resume`
+returns persisted turns in one response. Restored turns are control metadata,
+not new public events or replayed prompts. Other Agent streams retain the 1 MiB
+limit; public protocol and metadata-probe limits are unchanged. Oversized native
+frames fail explicitly with the configured limit while preserving session history.
 Completion-only assistant items share the bounded per-turn text deduplication set.
 A completion that precedes both forms of start evidence is buffered (at most 32
 turn IDs) and applied only after the start response/notification confirms its ID.
@@ -1062,8 +1187,9 @@ capability evidence. CLI-backed sessions resolve the current native provider thr
 so removing a binding cannot retain the preceding App provider from a rollout.
 See `docs/providers.md` and `scripts/smoke-traex-providers.py` for native protocol checks.
 
-Native slash-command discovery, offline native title edits, child transcript reads
-and running-turn message insertion are not implemented and fail explicitly.
+Native slash-command discovery, offline native title edits and child transcript
+reads are not implemented and fail explicitly. Running-turn input uses native
+`turn/steer`; an unsupported/rejected request never falls back to interrupting.
 Ordinary durable FIFO queueing and explicit stop-and-send use the shared runtime.
 Native child activity fences reconfiguration; it is not inferred to be finished
 when the main turn completes. No dependencies or send-request fields are added.

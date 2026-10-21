@@ -61,8 +61,18 @@ export function ChangesView({
     scope,
     gitMode ? null : sessionId,
     scope === "turn" ? requestId : null,
+    scope === "lastTurn" ? lastTurnVersion : null,
+    gitMode ? null : initialPath,
     scope === "branch" ? base : scope === "commit" ? commit?.oid : null,
   ]);
+  const [filePage, setFilePage] = useState<{
+    context: string;
+    offset: number;
+    history: number[];
+  }>();
+  const pageOffset =
+    filePage?.context === context ? filePage.offset : undefined;
+  const pageHistory = filePage?.context === context ? filePage.history : [];
   const [snapshot, setSnapshot] = useState<Snapshot>();
   const review = snapshot?.context === context ? snapshot.review : undefined;
   const turn = review ? snapshot?.turn : undefined;
@@ -70,6 +80,23 @@ export function ChangesView({
   const [selected, select] = useState(initialPath ?? "");
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
+  const pagingFocus = useRef<HTMLButtonElement>(null);
+  useEffect(() => {
+    const trigger = pagingFocus.current;
+    if (
+      !loading &&
+      trigger?.isConnected &&
+      (document.activeElement === document.body ||
+        document.activeElement === trigger)
+    ) {
+      const target = trigger.disabled
+        ? trigger.parentElement?.querySelector<HTMLButtonElement>(
+            "button:not(:disabled)",
+          )
+        : trigger;
+      target?.focus();
+    }
+  }, [loading, snapshot]);
   const [revision, refresh] = useState(0);
   const issueId = useId();
   useStatusIssues([
@@ -142,7 +169,9 @@ export function ChangesView({
     let disposed = false;
     setLoading(true);
     setError("");
-    setSnapshot(undefined);
+    setSnapshot((previous) =>
+      previous?.context === context ? previous : undefined,
+    );
     setMore(false);
     if (!gitMode && !sessionId) {
       setLoading(false);
@@ -155,18 +184,24 @@ export function ChangesView({
         ? {
             method: "last_turn_changes",
             session_id: sessionId!,
+            offset: pageOffset,
+            path: pageOffset === undefined ? initialPath : undefined,
           }
         : scope === "turn"
           ? {
               method: "turn_change_summary",
               session_id: sessionId!,
               request_id: requestId!,
+              offset: pageOffset,
+              path: pageOffset === undefined ? initialPath : undefined,
             }
           : scope === "task"
             ? {
                 method: "change_summary",
                 project_id: project.id,
                 session_id: sessionId!,
+                offset: pageOffset,
+                path: pageOffset === undefined ? initialPath : undefined,
               }
             : {
                 method: "git_review",
@@ -265,6 +300,8 @@ export function ChangesView({
     commit,
     context,
     gitMode,
+    pageOffset,
+    initialPath,
   ]);
   const loadDiff = useCallback(
     async (path: string) => {
@@ -367,7 +404,10 @@ export function ChangesView({
             : "此范围没有变更"
       }
       loadDiff={loadDiff}
-      refresh={() => refresh((v) => v + 1)}
+      refresh={() => {
+        setFilePage(undefined);
+        refresh((v) => v + 1);
+      }}
       additionalActions={
         <button
           ref={moreTrigger}
@@ -395,6 +435,50 @@ export function ChangesView({
       }
       notices={
         <>
+          {summary &&
+            ((summary.offset ?? 0) > 0 || summary.next_offset != null) && (
+              <div
+                className="turn-changes-pagination"
+                aria-label="变更文件分页"
+              >
+                <button
+                  disabled={
+                    loading ||
+                    !active ||
+                    ((summary.offset ?? 0) === 0 && !pageHistory.length)
+                  }
+                  onClick={(event) => {
+                    pagingFocus.current = event.currentTarget;
+                    setFilePage({
+                      context,
+                      offset: pageHistory.at(-1) ?? 0,
+                      history: pageHistory.slice(0, -1),
+                    });
+                  }}
+                >
+                  {pageHistory.length ? "上一页" : "返回第一页"}
+                </button>
+                <span>
+                  文件 {(summary.offset ?? 0) + 1}–
+                  {(summary.offset ?? 0) + summary.entries.length} /{" "}
+                  {summary.total_files ?? summary.entries.length}
+                </span>
+                <button
+                  disabled={loading || !active || summary.next_offset == null}
+                  onClick={(event) => {
+                    pagingFocus.current = event.currentTarget;
+                    setFilePage({
+                      context,
+                      offset: summary.next_offset!,
+                      history: [...pageHistory, summary.offset ?? 0],
+                    });
+                  }}
+                >
+                  下一页
+                </button>
+              </div>
+            )}
+
           {turn &&
             (turn.undo === "reverted" ||
               turn.undo === "unknown" ||

@@ -237,6 +237,13 @@ impl ProviderStore {
             .collect();
         draft.models.sort();
         draft.models.dedup();
+        draft.models_1m = draft
+            .models_1m
+            .into_iter()
+            .map(|m| m.trim().to_owned())
+            .collect();
+        draft.models_1m.sort();
+        draft.models_1m.dedup();
         let existing = match &draft.id {
             Some(id) => Some(
                 self.config
@@ -259,6 +266,7 @@ impl ProviderStore {
             .or_else(|| existing.map(|r| r.credential.clone()))
             .context("请填写 Provider 凭据")?;
         let metadata = Provider {
+            models_1m: draft.models_1m,
             id: draft.id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
             name: draft.name,
             protocol: draft.protocol,
@@ -400,13 +408,20 @@ impl ProviderStore {
                     models.push(model);
                 }
             }
+            let mut labels = p.model_labels;
+            let variants = crate::agents::provider_model_variants(
+                agent,
+                &mut models,
+                &mut labels,
+                &p.models_1m,
+            );
             Ok(Response::Models {
                 models,
                 provider: Some(p.name),
                 default_model: Some(p.model),
                 effort_levels,
-                model_labels: p.model_labels,
-                model_variants: None,
+                model_labels: labels,
+                model_variants: (!variants.is_empty()).then_some(variants),
             })
         } else {
             Ok(Response::Models {
@@ -578,6 +593,97 @@ mod tests {
     use super::*;
     use latte_work_protocol::{ProviderAuth, ProviderProtocol};
     #[test]
+    fn provider_1m_modes_are_claude_only_and_removal_rejects_the_old_selection() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ProviderStore::open(dir.path()).unwrap();
+        let mut provider: Provider = serde_json::from_value(serde_json::json!({
+            "id":"p","name":"Context","protocol":"anthropic_messages","base_url":"https://example.test",
+            "model":"gateway/model","models":["other","gateway/model[1m]"],
+            "models_1m":["gateway/model"],"model_labels":{"gateway/model":"Friendly"},
+            "auth":"none","has_credential":false
+        })).unwrap();
+        let Response::Models {
+            models,
+            model_variants: Some(variants),
+            default_model,
+            ..
+        } = ProviderStore::models_for_provider("claude", None, Some(provider.clone())).unwrap()
+        else {
+            panic!()
+        };
+        assert_eq!(
+            models.iter().filter(|m| *m == "gateway/model[1m]").count(),
+            1
+        );
+        assert_eq!(default_model.as_deref(), Some("gateway/model"));
+        assert!(!variants.contains_key("other"));
+        assert_eq!(variants["gateway/model"][0].label, "默认");
+        assert_eq!(variants["gateway/model"][0].context_window, Some(200_000.0));
+        assert_eq!(variants["gateway/model"][1].model, "gateway/model[1m]");
+        assert_eq!(
+            variants["gateway/model"][1].context_window,
+            Some(1_000_000.0)
+        );
+        provider.models = vec!["other".into()];
+        let snapshot = |metadata| {
+            Some(TurnProvider::Snapshot(Box::new(ProviderSnapshot {
+                provider: metadata,
+                credential: String::new(),
+            })))
+        };
+        assert_eq!(
+            store
+                .turn_config(
+                    "claude",
+                    Some("gateway/model[1m]"),
+                    snapshot(provider.clone())
+                )
+                .unwrap()
+                .model
+                .as_deref(),
+            Some("gateway/model[1m]")
+        );
+        let Response::Models {
+            models,
+            model_variants,
+            ..
+        } = ProviderStore::models_for_provider("traex", None, Some(provider.clone())).unwrap()
+        else {
+            panic!()
+        };
+        assert_eq!(models, ["gateway/model", "other"]);
+        assert!(model_variants.is_none());
+        assert!(
+            store
+                .turn_config(
+                    "traex",
+                    Some("gateway/model[1m]"),
+                    snapshot(provider.clone())
+                )
+                .is_err()
+        );
+        let enabled = turn_fingerprint(snapshot(provider.clone()).as_ref()).unwrap();
+        provider.models_1m.clear();
+        assert_ne!(
+            enabled,
+            turn_fingerprint(snapshot(provider.clone()).as_ref()).unwrap()
+        );
+        assert!(
+            store
+                .turn_config(
+                    "claude",
+                    Some("gateway/model[1m]"),
+                    snapshot(provider.clone())
+                )
+                .is_err()
+        );
+        assert!(
+            store
+                .turn_config("claude", Some("gateway/model"), snapshot(provider))
+                .is_ok()
+        );
+    }
+    #[test]
     fn display_names_do_not_change_model_ids_in_no_auth_catalog() {
         let provider: Provider = serde_json::from_value(serde_json::json!({
             "id":"p", "name":"Local", "base_url":"http://localhost:8000", "protocol":"anthropic_messages",
@@ -623,13 +729,19 @@ mod tests {
             .open_config(
                 "claude",
                 Some("opus"),
-                snapshot.clone().map(TurnProvider::Snapshot),
+                snapshot
+                    .clone()
+                    .map(|snapshot| TurnProvider::Snapshot(Box::new(snapshot))),
             )
             .unwrap();
         assert_eq!(open.model.as_deref(), Some("first"));
         assert!(
             store
-                .turn_config("claude", Some("opus"), snapshot.map(TurnProvider::Snapshot))
+                .turn_config(
+                    "claude",
+                    Some("opus"),
+                    snapshot.map(|snapshot| TurnProvider::Snapshot(Box::new(snapshot)))
+                )
                 .is_err()
         );
         assert_eq!(
@@ -643,6 +755,7 @@ mod tests {
     }
     fn draft(protocol: ProviderProtocol) -> ProviderDraft {
         ProviderDraft {
+            models_1m: Default::default(),
             id: None,
             name: "Team".into(),
             protocol,
@@ -737,7 +850,7 @@ mod tests {
             .turn_config(
                 "claude",
                 Some("temporary"),
-                Some(TurnProvider::Snapshot(changed.clone())),
+                Some(TurnProvider::Snapshot(Box::new(changed.clone()))),
             )
             .unwrap();
         assert_eq!(config.provider.unwrap().metadata.model, "temporary");
@@ -746,30 +859,38 @@ mod tests {
                 .turn_config(
                     "claude",
                     Some("outside-list"),
-                    Some(TurnProvider::Snapshot(changed.clone()))
+                    Some(TurnProvider::Snapshot(Box::new(changed.clone())))
                 )
                 .is_err()
         );
         changed.provider.protocol = ProviderProtocol::OpenaiChat;
         assert!(
             store
-                .turn_config("claude", None, Some(TurnProvider::Snapshot(changed)))
+                .turn_config(
+                    "claude",
+                    None,
+                    Some(TurnProvider::Snapshot(Box::new(changed)))
+                )
                 .is_err()
         );
         let mut empty_key = original.clone();
         empty_key.credential.clear();
         assert!(
             store
-                .turn_config("claude", None, Some(TurnProvider::Snapshot(empty_key)))
+                .turn_config(
+                    "claude",
+                    None,
+                    Some(TurnProvider::Snapshot(Box::new(empty_key)))
+                )
                 .is_err()
         );
         let fingerprint =
-            turn_fingerprint(Some(&TurnProvider::Snapshot(original.clone()))).unwrap();
+            turn_fingerprint(Some(&TurnProvider::Snapshot(Box::new(original.clone())))).unwrap();
         let mut rotated = original;
         rotated.credential = "rotated-same-revision".into();
         assert_ne!(
             fingerprint,
-            turn_fingerprint(Some(&TurnProvider::Snapshot(rotated))).unwrap()
+            turn_fingerprint(Some(&TurnProvider::Snapshot(Box::new(rotated)))).unwrap()
         );
         assert_eq!(
             std::fs::read(dir.path().join("providers.json")).unwrap(),

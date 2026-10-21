@@ -300,6 +300,9 @@ pub struct Provider {
     pub models: Vec<String>,
     #[serde(default)]
     pub model_labels: std::collections::BTreeMap<String, String>,
+    /// Provider-declared base model IDs that support Claude Code's 1M mode.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub models_1m: Vec<String>,
     pub auth: ProviderAuth,
     pub has_credential: bool,
     #[serde(default)]
@@ -335,7 +338,7 @@ impl std::fmt::Debug for ProviderSnapshot {
 #[serde(tag = "kind", content = "snapshot", rename_all = "snake_case")]
 pub enum TurnProvider {
     Cli,
-    Snapshot(ProviderSnapshot),
+    Snapshot(Box<ProviderSnapshot>),
 }
 #[derive(Clone, Serialize, Deserialize, TS)]
 pub struct ProviderDraft {
@@ -348,6 +351,8 @@ pub struct ProviderDraft {
     pub models: Vec<String>,
     #[serde(default)]
     pub model_labels: std::collections::BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub models_1m: Vec<String>,
     pub auth: ProviderAuth,
     /// None preserves a saved credential; plaintext is write-only over the private host transport.
     pub credential: Option<String>,
@@ -712,6 +717,10 @@ pub enum Request {
     ChangeSummary {
         project_id: String,
         session_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        path: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        offset: Option<u32>,
     },
     UndoTurnChanges {
         session_id: String,
@@ -720,9 +729,17 @@ pub enum Request {
     TurnChangeSummary {
         session_id: String,
         request_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        path: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        offset: Option<u32>,
     },
     LastTurnChanges {
         session_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        offset: Option<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        path: Option<String>,
     },
     TurnChangeDiff {
         session_id: String,
@@ -845,6 +862,13 @@ pub struct TaskChange {
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 pub struct ChangeSummary {
     pub entries: Vec<TaskChange>,
+    /// Complete captured count; entries are a bounded presentation page.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub total_files: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_offset: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub offset: Option<u32>,
     pub added: u32,
     pub removed: u32,
     pub binary_files: u32,

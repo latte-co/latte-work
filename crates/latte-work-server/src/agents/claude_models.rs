@@ -9,6 +9,41 @@ use std::{
 const MAX_SETTINGS: u64 = 1024 * 1024;
 const FAMILIES: &[&str] = &["SONNET", "OPUS", "HAIKU", "FABLE"];
 
+pub fn provider_variants(
+    models: &mut Vec<String>,
+    labels: &mut BTreeMap<String, String>,
+    models_1m: &[String],
+) -> BTreeMap<String, Vec<latte_work_protocol::ModelVariant>> {
+    use latte_work_protocol::ModelVariant;
+    let mut variants = BTreeMap::new();
+    for model in models_1m {
+        let extended = format!("{model}[1m]");
+        if !models.contains(&extended) {
+            models.push(extended.clone());
+        }
+        let name = labels.get(model).unwrap_or(model).clone();
+        labels
+            .entry(extended.clone())
+            .or_insert_with(|| format!("{name} / 1M"));
+        variants.insert(
+            model.clone(),
+            vec![
+                ModelVariant {
+                    model: model.clone(),
+                    label: "默认".into(),
+                    context_window: Some(200_000.0),
+                },
+                ModelVariant {
+                    model: extended,
+                    label: "1M".into(),
+                    context_window: Some(1_000_000.0),
+                },
+            ],
+        );
+    }
+    variants
+}
+
 pub fn labels(project: Option<&Path>) -> BTreeMap<String, String> {
     let directory = std::env::var_os("CLAUDE_CONFIG_DIR")
         .map(PathBuf::from)

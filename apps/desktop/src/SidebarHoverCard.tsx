@@ -140,7 +140,9 @@ export function SessionHoverCard({
   taskStatus,
   agentState,
   children,
+  disabled,
 }: {
+  disabled?: boolean;
   title: string;
   project: string;
   host: string;
@@ -156,6 +158,7 @@ export function SessionHoverCard({
         : agentSessionLabels[agentState];
   return (
     <HoverCard
+      disabled={disabled}
       content={
         <>
           <div className="sidebar-hover-title">{title}</div>

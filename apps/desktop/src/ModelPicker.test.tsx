@@ -13,6 +13,83 @@ afterEach(() => {
   cleanup();
   vi.clearAllMocks();
 });
+it("groups a declared Provider 1M mode as 默认 / 1M, restores it, and drops it when support is removed", async () => {
+  const onChange = vi.fn();
+  const ready = vi.fn();
+  const catalog = {
+    kind: "models",
+    models: ["custom", "small", "custom[1m]"],
+    provider: "Team",
+    default_model: "custom",
+    effort_levels: [],
+    model_labels: { custom: "Custom model" },
+    model_variants: {
+      custom: [
+        { model: "custom", label: "默认", context_window: 200000 },
+        { model: "custom[1m]", label: "1M", context_window: 1000000 },
+      ],
+    },
+  };
+  mocks.request.mockResolvedValue(catalog);
+  const props = {
+    hostId: "devbox",
+    agent: "claude",
+    connected: true,
+    settingsOpen: false,
+    value: "custom[1m]",
+    onChange,
+    effort: null,
+    onEffortChange: vi.fn(),
+    disabled: false,
+    onReadyChange: ready,
+  };
+  const view = render(<ModelPicker {...props} />);
+  await act(async () => {});
+  const selected = mocks.selector.mock.calls.at(-1)![0] as {
+    value: string;
+    options: {
+      value: string;
+      variants?: { value: string; label: string; contextWindow?: number }[];
+    }[];
+    onChange: (value: string) => void;
+  };
+  expect(selected.value).toBe("custom[1m]");
+  expect(selected.options.map((option) => option.value)).toEqual([
+    "custom",
+    "small",
+  ]);
+  expect(selected.options[0].variants).toEqual([
+    expect.objectContaining({
+      value: "custom",
+      label: "默认",
+      contextWindow: 200000,
+      description: "200K context",
+    }),
+    expect.objectContaining({
+      value: "custom[1m]",
+      label: "1M",
+      contextWindow: 1000000,
+    }),
+  ]);
+  selected.onChange("custom[1m]");
+  expect(onChange).toHaveBeenCalledWith("custom[1m]");
+  expect(ready).toHaveBeenLastCalledWith(
+    expect.objectContaining({ ready: true }),
+  );
+  onChange.mockClear();
+  view.rerender(<ModelPicker {...props} settingsOpen />);
+  mocks.request.mockResolvedValue({
+    ...catalog,
+    models: ["custom", "small"],
+    model_variants: undefined,
+  });
+  view.rerender(<ModelPicker {...props} />);
+  await act(async () => {});
+  expect(onChange).toHaveBeenCalledWith("custom");
+  expect(ready).toHaveBeenLastCalledWith(
+    expect.objectContaining({ ready: false }),
+  );
+});
 it("presents Traex native names and sends the unchanged native ID when selected", async () => {
   mocks.request.mockResolvedValue({
     kind: "models",
@@ -231,12 +308,19 @@ it("groups native backend modes and keeps the persisted Max value ready", async 
         expect.objectContaining({ value: "" }),
         expect.objectContaining({
           value: "gpt",
+          contextWindow: 475000,
           variants: [
-            { value: "gpt", label: "Standard", description: "475K context" },
+            {
+              value: "gpt",
+              label: "Standard",
+              description: "475K context",
+              contextWindow: 475000,
+            },
             {
               value: "backend-large",
               label: "Max",
               description: "800K context",
+              contextWindow: 800000,
             },
           ],
         }),

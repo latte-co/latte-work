@@ -20,14 +20,30 @@ const projects = [
   { id: "c", hostId: "local", name: "Gamma", path: "/c" },
 ];
 const move = vi.fn();
+const openSession = vi.fn();
+const pins = projects.map((p, i) => ({
+  hostId: p.hostId,
+  id: p.id,
+  project_id: p.id,
+  title: p.name,
+  pinned_at: i + 1,
+  archived: false,
+  unread: false,
+  status: "completed",
+  agent: "claude",
+  created_at: 1,
+}));
 function Harness({
   visible = true,
   items = projects,
+  pinned = [],
 }: {
   visible?: boolean;
   items?: typeof projects;
+  pinned?: typeof pins;
 }) {
   const [order, setOrder] = useState<string[]>([]);
+  const [pinOrder, setPinOrder] = useState<string[]>([]);
   return (
     <Sidebar
       state={
@@ -42,7 +58,18 @@ function Harness({
           projectId: "",
           sessions: [],
           sessionId: "",
-          pinned: [],
+          pinned: orderProjects(pinned, pinOrder),
+          openSession,
+          movePinnedSession: (
+            source: string,
+            target: string,
+            after: boolean,
+          ) => {
+            move(source, target, after);
+            setPinOrder((old) =>
+              moveProjectOrder(old, pinned, source, target, after),
+            );
+          },
           hostErrors: {},
           sidebarOpen: visible,
           moveProject: (source: string, target: string, after: boolean) => {
@@ -64,6 +91,7 @@ beforeEach(() => {
   );
   vi.stubGlobal("PointerEvent", MouseEvent);
   move.mockReset();
+  openSession.mockReset();
 });
 afterEach(() => {
   cleanup();
@@ -238,4 +266,111 @@ it("leaves touch gestures available for scrolling instead of starting a project 
   fireEvent.pointerUp(window, { clientX: 80, clientY: 105 });
   expect(move).not.toHaveBeenCalled();
   expect(screen.queryByTestId("project-drag-preview")).toBeNull();
+});
+
+function pinBounds() {
+  const list = document.getElementById("sidebar-pinned")!;
+  const rect = (top: number, height: number) =>
+    ({
+      left: 0,
+      right: 240,
+      top,
+      bottom: top + height,
+      width: 240,
+      height,
+    }) as DOMRect;
+  vi.spyOn(list, "getBoundingClientRect").mockReturnValue(rect(50, 90));
+  vi.spyOn(
+    list.closest(".sidebar-navigation")!,
+    "getBoundingClientRect",
+  ).mockReturnValue(rect(0, 400));
+  list
+    .querySelectorAll<HTMLElement>(".session-item")
+    .forEach((row, i) =>
+      vi
+        .spyOn(row, "getBoundingClientRect")
+        .mockReturnValue(rect(50 + i * 30, 30)),
+    );
+}
+function pinDrag() {
+  const row = document.querySelector<HTMLButtonElement>(
+    '.pinned-session[aria-label="Gamma"]',
+  )!;
+  fireEvent.pointerDown(row, { button: 0, clientX: 80, clientY: 125 });
+  fireEvent.pointerMove(window, { buttons: 1, clientX: 80, clientY: 52 });
+  return row;
+}
+it("reorders mixed-host pinned sessions with a preview without opening a conversation or changing project order", () => {
+  render(<Harness pinned={pins} />);
+  pinBounds();
+  const row = pinDrag();
+  expect(document.querySelector(".project-drag-preview")?.textContent).toBe(
+    "Gamma",
+  );
+  expect(
+    document.querySelector(".project-drop-indicator")?.getAttribute("style"),
+  ).toContain("top: 50px");
+  fireEvent.pointerUp(window, { clientX: 80, clientY: 52 });
+  fireEvent.click(row);
+  expect(move).toHaveBeenCalledWith(key(pins[2]), key(pins[0]), false);
+  expect(
+    [...document.querySelectorAll(".pinned-session")].map((row) =>
+      row.getAttribute("aria-label"),
+    ),
+  ).toEqual(["Gamma", "Alpha", "Beta"]);
+  expect(
+    [...document.querySelectorAll(".project-name")].map(
+      (row) => row.textContent,
+    ),
+  ).toEqual(["Alpha", "Beta", "Gamma"]);
+  expect(openSession).not.toHaveBeenCalled();
+});
+it.each(["escape", "outside", "blur", "cancel"])(
+  "cancels pinned dragging on %s",
+  (reason) => {
+    render(<Harness pinned={pins} />);
+    pinBounds();
+    pinDrag();
+    if (reason === "escape") fireEvent.keyDown(window, { key: "Escape" });
+    if (reason === "outside")
+      fireEvent.pointerUp(window, { clientX: 80, clientY: 250 });
+    if (reason === "blur") fireEvent.blur(window);
+    if (reason === "cancel") fireEvent.pointerCancel(window);
+    expect(move).not.toHaveBeenCalled();
+    expect(openSession).not.toHaveBeenCalled();
+    expect(document.querySelector(".project-drag-preview")).toBeNull();
+  },
+);
+it("keeps a pinned click as open and supports Option-arrow sorting with focus retained", async () => {
+  render(<Harness pinned={pins} />);
+  const row = document.querySelector<HTMLButtonElement>(
+    '.pinned-session[aria-label="Beta"]',
+  )!;
+  fireEvent.pointerDown(row, { button: 0, clientX: 80, clientY: 85 });
+  fireEvent.pointerUp(window, { clientX: 80, clientY: 85 });
+  fireEvent.click(row);
+  expect(openSession).toHaveBeenCalledWith(pins[1]);
+  openSession.mockClear();
+  row.focus();
+  fireEvent.keyDown(row, { key: "ArrowUp", altKey: true });
+  await act(async () => {});
+  expect(move).toHaveBeenCalledWith(key(pins[1]), key(pins[0]), false);
+  expect(document.activeElement).toBe(row);
+  expect(openSession).not.toHaveBeenCalled();
+});
+it("cancels a pinned drag after unpinning or hiding its section and ignores a removed drop target", () => {
+  const view = render(<Harness pinned={pins} />);
+  pinBounds();
+  pinDrag();
+  view.rerender(<Harness pinned={pins.slice(0, 2)} />);
+  expect(document.querySelector(".project-drag-preview")).toBeNull();
+  view.rerender(<Harness pinned={pins} />);
+  pinDrag();
+  fireEvent.click(screen.getByRole("button", { name: "置顶" }));
+  expect(document.querySelector(".project-drag-preview")).toBeNull();
+  fireEvent.click(screen.getByRole("button", { name: "置顶" }));
+  pinDrag();
+  view.rerender(<Harness pinned={pins.filter((pin) => pin.id !== "a")} />);
+  fireEvent.pointerUp(window, { clientX: 80, clientY: 52 });
+  expect(move).not.toHaveBeenCalled();
 });

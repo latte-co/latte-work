@@ -17,10 +17,22 @@ use std::{
 
 pub const MODEL_ALIASES: &[&str] = &["sonnet", "opus", "haiku", "fable"];
 
+#[cfg(test)]
+#[test]
+fn context_suffix_does_not_change_effort_capabilities() {
+    for model in ["haiku", "sonnet", "claude-opus-4-6", "gateway/model"] {
+        assert_eq!(
+            effort_levels(Some(model)),
+            effort_levels(Some(&format!("{model}[1m]")))
+        );
+    }
+}
+
 /// Claude CLI/model capability policy, independent of other agent adapters.
 pub fn effort_levels(model: Option<&str>) -> &'static [latte_work_protocol::Effort] {
     use latte_work_protocol::Effort::{High, Low, Max, Medium, Xhigh};
     let model = model.unwrap_or_default().to_ascii_lowercase();
+    let model = model.strip_suffix("[1m]").unwrap_or(&model);
     // CLI aliases can be mapped by a host or gateway. Full known model IDs allow
     // tighter choices; unknown custom IDs are delegated to the CLI/provider.
     if model == "haiku" || model.contains("claude-haiku-") {
@@ -235,6 +247,10 @@ pub struct Claude {
     live_steps: f64,
     phase: Phase,
     commands: HashSet<String>,
+    skills: HashSet<String>,
+    requested_skill_commands: HashSet<String>,
+    pending_skill_command: Option<String>,
+    skill_loads: HashSet<String>,
     tasks: HashSet<String>,
     agent_tasks: HashMap<String, Option<String>>,
     foreground_agents: HashSet<String>,
@@ -367,10 +383,13 @@ impl AgentAdapter for Claude {
     fn knows_subagent(&self, native_id: &str) -> bool {
         self.agent_tasks.contains_key(native_id)
     }
-    fn can_reconfigure(&self) -> bool {
+    fn can_start_turn(&self) -> bool {
         matches!(self.phase, Phase::BetweenTurns)
             && self.queued_inputs.is_empty()
             && self.renaming.is_none()
+    }
+    fn can_reconfigure(&self) -> bool {
+        self.can_start_turn()
             && self.tasks.is_empty()
             && self.foreground_agents.is_empty()
             && (self.session_state.as_deref() == Some("idle")
@@ -446,6 +465,15 @@ impl AgentAdapter for Claude {
             });
             if metadata.protocol != latte_work_protocol::ProviderProtocol::AnthropicMessages {
                 bail!("Claude Code 只支持 Anthropic Messages Provider");
+            }
+            let base = model.strip_suffix("[1m]").unwrap_or(model);
+            if metadata.models_1m.iter().any(|id| id == base) {
+                let extended = base != model;
+                // Native 1M models also need an explicit hold for the 200K mode.
+                // Override both inherited env and settings for this child only.
+                env["CLAUDE_CODE_DISABLE_1M_CONTEXT"] = json!(if extended { "0" } else { "1" });
+                env["CLAUDE_CODE_MAX_CONTEXT_TOKENS"] =
+                    json!(if extended { "1000000" } else { "200000" });
             }
             let (key, credential) = match metadata.auth {
                 latte_work_protocol::ProviderAuth::Bearer => {
@@ -544,12 +572,14 @@ impl AgentAdapter for Claude {
                 message["uuid"] = json!(uuid);
                 let action = write_action(message)?;
                 self.queued_inputs.insert(uuid, request_id.into());
+                self.remember_skill_command(prompt);
                 Ok(vec![action])
             }
             Input::Start { prompt } => {
                 if matches!(self.phase, Phase::BetweenTurns) {
                     self.check_command(prompt)?;
                     self.reset_turn();
+                    self.remember_skill_command(prompt);
                     self.phase = Phase::Running;
                     return Ok(vec![write_action(self.prompt(prompt))?]);
                 }
@@ -557,6 +587,7 @@ impl AgentAdapter for Claude {
                     bail!("Claude 本轮已经启动");
                 }
                 self.phase = Phase::Initializing(prompt.to_owned());
+                self.remember_skill_command(prompt);
                 Ok(vec![write_action(self.initialize())?])
             }
             Input::Message(line) => {
@@ -672,11 +703,81 @@ fn parse_questions(input: &Value) -> Result<Vec<latte_work_protocol::UserQuestio
         .collect()
 }
 impl Claude {
+    fn remember_skill_command(&mut self, prompt: &str) {
+        if self.requested_skill_commands.len() < 64
+            && let Some(name) = prompt
+                .trim_start()
+                .strip_prefix('/')
+                .and_then(|s| s.split_whitespace().next())
+            && !name.is_empty()
+            && name.len() <= 256
+        {
+            self.requested_skill_commands.insert(name.into());
+        }
+    }
+    /// Native Skill catalog + CLI expansion replay, or synthetic Skill context.
+    /// A user's slash string or a generic command echo alone is not proof.
+    fn skill_load(&mut self, message: &Value) -> Option<EventKind> {
+        if !matches!(self.phase, Phase::Running) {
+            return None;
+        }
+        let content = &message["message"]["content"];
+        let text = content.as_str().or_else(|| {
+            content.as_array()?.iter().find_map(|block| {
+                (block["type"] == "text")
+                    .then(|| block["text"].as_str())
+                    .flatten()
+            })
+        })?;
+        if text.starts_with("<command-message>") {
+            self.pending_skill_command = text
+                .split_once("<command-name>/")
+                .and_then(|(_, rest)| rest.split_once("</command-name>"))
+                .map(|(name, _)| name)
+                .filter(|name| {
+                    self.commands.contains(*name) && self.requested_skill_commands.contains(*name)
+                })
+                .map(str::to_owned);
+            if message["isReplay"] == true
+                && let Some(name) = self.pending_skill_command.clone()
+                && self.skills.contains(&name)
+            {
+                self.pending_skill_command = None;
+                return self.record_skill_load(name);
+            }
+            return None;
+        }
+        if message["isSynthetic"] != true && message["isMeta"] != true {
+            self.pending_skill_command = None;
+            return None;
+        }
+        let (header, body) = text.split_once("\n\n")?;
+        let directory = header.strip_prefix("Base directory for this skill: ")?;
+        if directory.len() > 4096
+            || !std::path::Path::new(directory).is_absolute()
+            || body.trim().is_empty()
+        {
+            return None;
+        }
+        let name = self.pending_skill_command.take()?;
+        self.record_skill_load(name)
+    }
+    fn record_skill_load(&mut self, name: String) -> Option<EventKind> {
+        if self.skill_loads.len() >= 64 || !self.skill_loads.insert(name.clone()) {
+            return None;
+        }
+        Some(EventKind::Notice {
+            text: format!("已加载 Skill：{name}"),
+        })
+    }
     fn reset_turn(&mut self) {
         if !self.has_background_work() && self.streamed_children.is_empty() {
             self.child_stream_overflow = false;
         }
         self.streamed = false;
+        self.pending_skill_command = None;
+        self.requested_skill_commands.clear();
+        self.skill_loads.clear();
         self.emitted_text = false;
         self.progress = None;
         self.stream_model = None;
@@ -944,6 +1045,15 @@ impl Claude {
                 }
             }
             "system" if m["subtype"] == "init" && m["parent_tool_use_id"].is_null() => {
+                self.skills = m["skills"]
+                    .as_array()
+                    .filter(|skills| skills.len() <= 2000)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(Value::as_str)
+                    .filter(|name| self.commands.contains(*name))
+                    .map(str::to_owned)
+                    .collect();
                 if let Some(id) = m["session_id"].as_str() {
                     self.native_session_id = Some(id.into());
                     output.push(Action::NativeSession(id.into()));
@@ -1227,6 +1337,9 @@ impl Claude {
                 self.streamed = false;
             }
             "user" => {
+                if let Some(event) = self.skill_load(&m) {
+                    output.push(Action::Event(event));
+                }
                 if let Some(blocks) = m["message"]["content"].as_array() {
                     for block in blocks {
                         if block["type"] == "tool_result" && m["parent_tool_use_id"].is_null() {
@@ -1859,6 +1972,10 @@ mod tests {
         );
         assert_eq!(agent.queued_inputs.len(), 1);
         assert!(
+            !agent.can_start_turn(),
+            "unconfirmed handoffs block new turns"
+        );
+        assert!(
             !agent.can_reconfigure(),
             "unconfirmed input blocks replacement"
         );
@@ -1963,12 +2080,20 @@ mod tests {
         };
         assert!(!adapter.can_reconfigure());
         assert!(!adapter.has_background_work());
+        assert!(adapter.can_start_turn());
         adapter.tasks.insert("child".into());
         assert!(adapter.has_background_work());
+        assert!(adapter.can_start_turn());
         adapter.decode(json!({"type":"system","subtype":"task_notification","task_id":"child","status":"completed"})).unwrap();
         assert!(!adapter.has_background_work());
         adapter.foreground_agents.insert("foreground".into());
         assert!(adapter.has_background_work());
+        assert!(adapter.can_start_turn());
+        adapter
+            .advance(Input::Start { prompt: "followup" })
+            .unwrap();
+        assert!(adapter.has_background_work());
+        assert!(!adapter.can_start_turn());
     }
     #[test]
     fn child_and_idle_results_never_fail_or_finish_the_parent() {
@@ -2813,6 +2938,119 @@ mod tests {
     }
 
     #[test]
+    fn native_skill_load_uses_init_catalog_and_cli_expansion_replay() {
+        let mut adapter = Claude {
+            phase: Phase::Running,
+            commands: HashSet::from(["writer".into(), "compact".into()]),
+            ..Default::default()
+        };
+        message(
+            &mut adapter,
+            json!({"type":"system","subtype":"init","skills":["writer","unknown"]}),
+        )
+        .unwrap();
+        assert_eq!(adapter.skills, HashSet::from(["writer".into()]));
+        let mut echo = json!({"type":"user","message":{"content":"<command-message>writer</command-message>\n<command-name>/writer</command-name>"}});
+        // Text entered by a user, even with XML markers, is not a CLI replay.
+        assert!(message(&mut adapter, echo.clone()).unwrap().is_empty());
+        echo["isReplay"] = json!(true);
+        // Even a replayed quote must match an actual submitted slash command.
+        assert!(message(&mut adapter, echo.clone()).unwrap().is_empty());
+        adapter.remember_skill_command("/writer polish");
+        assert!(
+            matches!(&message(&mut adapter, echo.clone()).unwrap()[..], [Action::Event(EventKind::Notice { text })] if text == "已加载 Skill：writer")
+        );
+        assert!(message(&mut adapter, echo).unwrap().is_empty());
+        // Built-ins do not become Skills just because they are valid commands.
+        assert!(message(&mut adapter, json!({"type":"user","isReplay":true,"message":{"content":"<command-message>compact</command-message>\n<command-name>/compact</command-name>"}})).unwrap().is_empty());
+    }
+
+    #[test]
+    fn native_skill_load_requires_command_echo_and_synthetic_context() {
+        let mut adapter = Claude {
+            phase: Phase::Running,
+            commands: HashSet::from(["tech-article-writer".into()]),
+            requested_skill_commands: HashSet::from(["tech-article-writer".into()]),
+            ..Default::default()
+        };
+        let echo = json!({"type":"user","isReplay":true,"message":{"content":"<command-message>tech-article-writer</command-message>\n<command-name>/tech-article-writer</command-name>\n<command-args>去 AI 味</command-args>"}});
+        let context = json!({"type":"user","isSynthetic":true,"message":{"content":[{"type":"text","text":"Base directory for this skill: /home/user/.claude/skills/tech-article-writer\n\nPRIVATE_SKILL_BODY"}]}});
+        assert!(message(&mut adapter, context.clone()).unwrap().is_empty());
+        assert!(
+            message(
+                &mut adapter,
+                json!({"type":"user","message":{"content":"/tech-article-writer 去 AI 味"}})
+            )
+            .unwrap()
+            .is_empty()
+        );
+        assert!(message(&mut adapter, echo.clone()).unwrap().is_empty());
+        let mut quoted = context.clone();
+        quoted["isSynthetic"] = json!(false);
+        assert!(message(&mut adapter, quoted).unwrap().is_empty());
+        assert!(message(&mut adapter, echo.clone()).unwrap().is_empty());
+        let loaded = message(&mut adapter, context.clone()).unwrap();
+        assert!(
+            matches!(&loaded[..], [Action::Event(EventKind::Notice { text })] if text == "已加载 Skill：tech-article-writer")
+        );
+        // Replayed native context must not duplicate the load within a turn.
+        message(&mut adapter, echo.clone()).unwrap();
+        assert!(message(&mut adapter, context.clone()).unwrap().is_empty());
+        message(&mut adapter, json!({"type":"result","is_error":false})).unwrap();
+        // Old replay records while idle do not belong to a new turn.
+        assert!(message(&mut adapter, echo.clone()).unwrap().is_empty());
+        assert!(message(&mut adapter, context.clone()).unwrap().is_empty());
+        adapter
+            .advance(Input::Start {
+                prompt: "/tech-article-writer 再检查",
+            })
+            .unwrap();
+        assert!(message(&mut adapter, context.clone()).unwrap().is_empty());
+        message(&mut adapter, echo).unwrap();
+        assert!(
+            matches!(&message(&mut adapter, context).unwrap()[..], [Action::Event(EventKind::Notice { text })] if text == "已加载 Skill：tech-article-writer")
+        );
+    }
+
+    #[test]
+    fn native_skill_load_ignores_children_unknown_commands_and_incomplete_metadata() {
+        let mut adapter = Claude {
+            phase: Phase::Running,
+            commands: HashSet::from(["plugin:writer".into()]),
+            requested_skill_commands: HashSet::from(["plugin:writer".into()]),
+            ..Default::default()
+        };
+        let echo = json!({"type":"user","message":{"content":[{"type":"text","text":"<command-message>plugin:writer</command-message>\n<command-name>/plugin:writer</command-name>"}]}});
+        for text in [
+            "Base directory for this skill: relative/path\n\nbody",
+            "Base directory for this skill: /tmp/skill",
+            "Base directory for this skill: /tmp/skill\n\n   ",
+        ] {
+            message(&mut adapter, echo.clone()).unwrap();
+            assert!(
+                message(
+                    &mut adapter,
+                    json!({"type":"user","isMeta":true,"message":{"content":text}})
+                )
+                .unwrap()
+                .is_empty()
+            );
+        }
+        let context = json!({"type":"user","isMeta":true,"message":{"content":"Base directory for this skill: /tmp/skill\n\nbody"}});
+        message(&mut adapter, json!({"type":"user","message":{"content":"<command-message>missing</command-message>\n<command-name>/missing</command-name>"}})).unwrap();
+        assert!(message(&mut adapter, context.clone()).unwrap().is_empty());
+        let mut child = context.clone();
+        child["parent_tool_use_id"] = json!("child-tool");
+        message(&mut adapter, echo).unwrap();
+        assert!(message(&mut adapter, child).unwrap().is_empty());
+        assert!(
+            matches!(&message(&mut adapter, context).unwrap()[..], [Action::Event(EventKind::Notice { text })] if text == "已加载 Skill：plugin:writer")
+        );
+        adapter.phase = Phase::Discovering;
+        assert!(adapter.skill_load(&json!({"isMeta":true,"message":{"content":"Base directory for this skill: /tmp/skill\n\nbody"}})).is_none());
+    }
+
+    #[test]
     fn effort_choices_follow_claude_model_capabilities() {
         use latte_work_protocol::Effort::{High, Low, Max, Medium, Xhigh};
         for model in ["haiku", "claude-haiku-4-5", "claude-sonnet-4-5"] {
@@ -2860,6 +3098,7 @@ mod tests {
         );
         config.provider = Some(ResolvedProvider {
             metadata: Provider {
+                models_1m: Default::default(),
                 id: "one".into(),
                 name: "Team".into(),
                 protocol: ProviderProtocol::AnthropicMessages,
@@ -2921,6 +3160,59 @@ mod tests {
         assert!(!args.iter().any(|a| a.contains("only-in-private-settings")));
         drop(prepared);
         assert!(!path.exists());
+    }
+    #[test]
+    fn declared_context_modes_set_matching_private_settings_and_child_environment() {
+        use crate::providers::ResolvedProvider;
+        let directory = tempfile::tempdir().unwrap();
+        for base in ["gateway/model", "claude-opus-4-8"] {
+            for (model, disabled, tokens) in [
+                (None, Some("1"), Some("200000")),
+                (Some(base.to_owned()), Some("1"), Some("200000")),
+                (Some(format!("{base}[1m]")), Some("0"), Some("1000000")),
+                (Some("small".into()), None, None),
+            ] {
+                let config = LaunchConfig {
+                    traex_model: None,
+                    settings_dir: directory.path().into(),
+                    model,
+                    effort: None,
+                    permission_mode: None,
+                    provider: Some(ResolvedProvider {
+                        metadata: serde_json::from_value(json!({
+                            "id":"p","name":"Context modes","protocol":"anthropic_messages",
+                            "base_url":"https://example.test","model":base,"models":["small"],
+                            "models_1m":[base],"auth":"none","has_credential":false
+                        }))
+                        .unwrap(),
+                        credential: String::new(),
+                    }),
+                };
+                let prepared = Claude::default()
+                    .command("claude", "/tmp", None, &config)
+                    .unwrap();
+                let settings: Value = serde_json::from_slice(
+                    &std::fs::read(prepared._settings.as_ref().unwrap().path()).unwrap(),
+                )
+                .unwrap();
+                for (key, expected) in [
+                    ("CLAUDE_CODE_DISABLE_1M_CONTEXT", disabled),
+                    ("CLAUDE_CODE_MAX_CONTEXT_TOKENS", tokens),
+                ] {
+                    assert_eq!(settings["env"][key].as_str(), expected);
+                    if let Some(expected) = expected {
+                        let value = prepared
+                            .command
+                            .as_std()
+                            .get_envs()
+                            .find(|(name, _)| *name == key)
+                            .and_then(|(_, value)| value)
+                            .and_then(|value| value.to_str());
+                        assert_eq!(value, Some(expected));
+                    }
+                }
+            }
+        }
     }
     fn message(adapter: &mut dyn AgentAdapter, value: Value) -> Result<Vec<Action>> {
         adapter.advance(Input::Message(&value.to_string()))

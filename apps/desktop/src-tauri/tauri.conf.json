@@ -13,6 +13,7 @@
     "windows": [
       {
         "title": "Latte Work",
+        "dragDropEnabled": false,
         "width": 1440,
         "height": 940,
         "minWidth": 960,

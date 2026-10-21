@@ -2,6 +2,7 @@ use super::*;
 use latte_work_protocol::{ProviderAuth, ProviderProtocol};
 fn draft(name: &str) -> ProviderDraft {
     ProviderDraft {
+        models_1m: Default::default(),
         id: None,
         name: name.into(),
         protocol: ProviderProtocol::AnthropicMessages,
@@ -18,6 +19,64 @@ fn save(store: &mut ProviderStore, draft: ProviderDraft) -> String {
         panic!()
     };
     providers.last().unwrap().id.clone()
+}
+#[test]
+fn per_model_1m_capabilities_survive_restart_and_remote_snapshots_without_enabling_by_default() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut store = ProviderStore::open(directory.path(), None).unwrap();
+    let mut value = draft("Context modes");
+    value.models = vec!["other".into()];
+    let id = save(&mut store, value.clone());
+    store.bind("devbox", "claude", Some(id.clone())).unwrap();
+    let old = store
+        .snapshot_for_host("devbox", "claude")
+        .unwrap()
+        .unwrap();
+    assert!(old.provider.models_1m.is_empty());
+    assert!(
+        !serde_json::to_string(&old.provider)
+            .unwrap()
+            .contains("models_1m")
+    );
+    value.id = Some(id.clone());
+    value.credential = None;
+    value.models_1m = vec!["first".into()];
+    store.save(value.clone()).unwrap();
+    drop(store);
+    let mut store = ProviderStore::open(directory.path(), None).unwrap();
+    let snapshot = store
+        .snapshot_for_host("devbox", "claude")
+        .unwrap()
+        .unwrap();
+    assert_eq!(snapshot.provider.models_1m, ["first"]);
+    assert_eq!(snapshot.provider.models, ["other"]);
+    assert_eq!(snapshot.provider.model, "first");
+    assert_eq!(snapshot.credential, old.credential);
+    assert_ne!(snapshot.provider.revision, old.provider.revision);
+    let before = std::fs::read(directory.path().join("providers.json")).unwrap();
+    for invalid in [vec!["missing".into()], vec!["first[1m]".into()]] {
+        value.models_1m = invalid;
+        assert!(store.save(value.clone()).is_err());
+        assert_eq!(
+            before,
+            std::fs::read(directory.path().join("providers.json")).unwrap()
+        );
+    }
+    value.models_1m = vec!["first".into()];
+    value.protocol = ProviderProtocol::OpenaiChat;
+    assert!(store.save(value.clone()).is_err());
+    value.protocol = ProviderProtocol::AnthropicMessages;
+    value.models_1m.clear();
+    store.save(value).unwrap();
+    assert!(
+        store
+            .snapshot_for_host("devbox", "claude")
+            .unwrap()
+            .unwrap()
+            .provider
+            .models_1m
+            .is_empty()
+    );
 }
 #[test]
 fn offline_catalog_and_host_choices_survive_restart_without_credentials_in_responses() {

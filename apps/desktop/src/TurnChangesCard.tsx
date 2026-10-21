@@ -1,6 +1,12 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import { request, message } from "./api";
-import { SquarePlus, Undo2 } from "lucide-react";
+import {
+  ChevronDown,
+  ChevronUp,
+  FileDiff,
+  SquarePlus,
+  Undo2,
+} from "lucide-react";
 import type { TurnChanges } from "./protocol";
 import { useStatusIssues } from "./statusNotices";
 
@@ -20,6 +26,45 @@ export function TurnChangesCard({
   const [changes, setChanges] = useState(saved);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const [expandedFor, setExpandedFor] = useState<string | null>(null);
+  const filesId = useId();
+  const scope = JSON.stringify([
+    hostId,
+    sessionId,
+    saved.request_id,
+    saved.summary.baseline_at,
+  ]);
+  const expanded = expandedFor === scope;
+  const scopeRef = useRef(scope);
+  scopeRef.current = scope;
+  const [page, setPage] = useState<{
+    scope: string;
+    summary: TurnChanges["summary"];
+    history: number[];
+  } | null>(null);
+  const [pageBusy, setPageBusy] = useState<string | null>(null);
+  const [pageError, setPageError] = useState("");
+  const pageTrigger = useRef<HTMLButtonElement>(null);
+  useEffect(() => {
+    const trigger = pageTrigger.current;
+    if (
+      pageBusy !== scope &&
+      trigger?.isConnected &&
+      (document.activeElement === document.body ||
+        document.activeElement === trigger)
+    ) {
+      const target = trigger.disabled
+        ? trigger.parentElement?.querySelector<HTMLButtonElement>(
+            "button:not(:disabled)",
+          )
+        : trigger;
+      target?.focus();
+    }
+  }, [pageBusy, page, scope]);
+  useEffect(() => {
+    setPageError("");
+    setPageBusy(null);
+  }, [scope]);
   useStatusIssues([
     {
       id: `turn-undo:${hostId}:${sessionId}:${saved.request_id}`,
@@ -38,6 +83,71 @@ export function TurnChangesCard({
   }, []);
   useEffect(() => setChanges(saved), [saved]);
   const { summary } = changes;
+  const firstPage =
+    summary.entries.length > 64
+      ? {
+          ...summary,
+          entries: summary.entries.slice(0, 64),
+          total_files: summary.entries.length,
+          offset: 0,
+          next_offset: 64,
+        }
+      : summary;
+  const currentPage = page?.scope === scope ? page.summary : firstPage;
+  const history = page?.scope === scope ? page.history : [];
+  const total = summary.total_files ?? summary.entries.length;
+  const pageOffset = currentPage.offset ?? 0;
+  async function loadPage(offset: number, previous: number[]) {
+    if (pageBusy === scope) return;
+    setPageBusy(scope);
+    setPageError("");
+    try {
+      const loaded =
+        summary.entries.length > 64
+          ? {
+              ...summary,
+              entries: summary.entries.slice(offset, offset + 64),
+              total_files: summary.entries.length,
+              offset,
+              next_offset:
+                offset + 64 < summary.entries.length ? offset + 64 : undefined,
+            }
+          : await (async () => {
+              const response = await request(hostId, {
+                method: "turn_change_summary",
+                session_id: sessionId,
+                request_id: changes.request_id,
+                offset,
+              });
+              if (response.kind !== "turn_changes")
+                throw new Error("Server 不支持文件列表分页，请更新后重试");
+              return response.changes.summary;
+            })();
+      if (mounted.current && scopeRef.current === scope)
+        setPage({ scope, summary: loaded, history: previous });
+    } catch (cause) {
+      if (mounted.current && scopeRef.current === scope)
+        setPageError(message(cause));
+    } finally {
+      if (mounted.current && scopeRef.current === scope) setPageBusy(null);
+    }
+  }
+  useStatusIssues([
+    {
+      id: `turn-files:${hostId}:${sessionId}:${saved.request_id}`,
+      title: "本轮文件列表未能读取",
+      error: pageError,
+      pending: pageBusy === scope,
+      action: { label: "查看变更", run: () => open() },
+    },
+  ]);
+  const undoLabel = busy
+    ? "撤销中…"
+    : changes.undo === "reverted"
+      ? "已撤销"
+      : changes.undo === "unknown"
+        ? "状态待核对"
+        : "撤销";
   const undoable =
     canUndo &&
     changes.undo === "ready" &&
@@ -68,13 +178,13 @@ export function TurnChangesCard({
     <section className="turn-changes-card" aria-label="本轮文件变更">
       <header>
         <span className="turn-changes-icon">
-          <SquarePlus size={22} aria-hidden="true" />
+          <SquarePlus size={16} aria-hidden="true" />
         </span>
         <div className="turn-changes-heading">
           <strong>
             {summary.unavailable
               ? "本轮变更未能记录"
-              : `已编辑 ${summary.entries.length} 个文件`}
+              : `已编辑 ${total} 个文件`}
           </strong>
           {!summary.unavailable && (
             <span className="change-totals">
@@ -84,79 +194,124 @@ export function TurnChangesCard({
           )}
         </div>
         {!summary.unavailable && (
-          <button
-            className="turn-changes-undo"
-            disabled={!undoable || busy}
-            title={
-              undoable
-                ? "撤销此轮文件修改；文件已发生后续变化时不会覆盖"
-                : changes.undo === "reverted"
-                  ? "本轮文件修改已撤销"
-                  : changes.undo === "unknown"
-                    ? "撤销未能确认，请核对工作区"
-                    : "仅可在本轮结束后撤销最近一轮的完整快照"
-            }
-            onClick={() => void undo()}
-          >
-            {busy ? (
-              "撤销中…"
-            ) : changes.undo === "reverted" ? (
-              "已撤销"
-            ) : changes.undo === "unknown" ? (
-              "状态待核对"
-            ) : (
-              <>
-                撤销 <Undo2 size={14} aria-hidden="true" />
-              </>
-            )}
-          </button>
-        )}
-        {!summary.unavailable && (
-          <button className="secondary small" onClick={() => open()}>
-            查看变更
-          </button>
+          <div className="turn-changes-actions">
+            <button
+              className="turn-changes-undo"
+              aria-label={undoLabel}
+              disabled={!undoable || busy}
+              title={
+                undoable
+                  ? "撤销此轮文件修改；文件已发生后续变化时不会覆盖"
+                  : changes.undo === "reverted"
+                    ? "本轮文件修改已撤销"
+                    : changes.undo === "unknown"
+                      ? "撤销未能确认，请核对工作区"
+                      : "仅可在本轮结束后撤销最近一轮的完整快照"
+              }
+              onClick={() => void undo()}
+            >
+              <span className="turn-changes-action-label">{undoLabel}</span>
+              <Undo2 size={14} aria-hidden="true" />
+            </button>
+            <button
+              className="secondary small"
+              aria-label="查看变更"
+              title="查看变更"
+              onClick={() => open()}
+            >
+              <span className="turn-changes-action-label">查看变更</span>
+              <FileDiff
+                size={14}
+                className="turn-changes-view-icon"
+                aria-hidden="true"
+              />
+            </button>
+          </div>
         )}
       </header>
-      {summary.entries.slice(0, 8).map((entry) => (
-        <button
-          className="turn-changes-file"
-          key={entry.path}
-          onClick={() => open(entry.path)}
-          title={entry.path}
-        >
-          <span>{entry.path}</span>
-          <span className="change-totals">
-            {entry.added === null ? (
-              "二进制"
-            ) : (
-              <>
-                <b>+{entry.added}</b>
-                <em>-{entry.removed}</em>
-              </>
-            )}
+      <div
+        id={filesId}
+        className={expanded ? "turn-changes-expanded" : undefined}
+      >
+        {(expanded
+          ? currentPage.entries.slice(0, 64)
+          : summary.entries.slice(0, 3)
+        ).map((entry) => {
+          const split = entry.path.lastIndexOf("/") + 1;
+          return (
+            <button
+              className="turn-changes-file"
+              key={entry.path}
+              onClick={() => open(entry.path)}
+              title={entry.path}
+            >
+              <span className="turn-changes-path">
+                {split > 0 && (
+                  <span className="turn-changes-directory">
+                    {entry.path.slice(0, split)}
+                  </span>
+                )}
+                <span className="turn-changes-name">
+                  {entry.path.slice(split)}
+                </span>
+              </span>
+              <span className="change-totals">
+                {entry.added === null ? (
+                  "二进制"
+                ) : (
+                  <>
+                    <b>+{entry.added}</b>
+                    <em>-{entry.removed}</em>
+                  </>
+                )}
+              </span>
+            </button>
+          );
+        })}
+      </div>
+      {expanded && (currentPage.next_offset != null || pageOffset > 0) && (
+        <div className="turn-changes-pagination" aria-label="文件列表分页">
+          <button
+            disabled={pageBusy === scope || !history.length}
+            onClick={(event) => {
+              pageTrigger.current = event.currentTarget;
+              void loadPage(history.at(-1)!, history.slice(0, -1));
+            }}
+          >
+            上一页
+          </button>
+          <span>
+            {pageOffset + 1}–{pageOffset + currentPage.entries.length} / {total}
           </span>
-        </button>
-      ))}
-      {summary.entries.length > 8 && (
-        <button className="turn-changes-more" onClick={() => open()}>
-          查看其余 {summary.entries.length - 8} 个文件
-        </button>
+          <button
+            disabled={pageBusy === scope || currentPage.next_offset == null}
+            onClick={(event) => {
+              pageTrigger.current = event.currentTarget;
+              void loadPage(currentPage.next_offset!, [...history, pageOffset]);
+            }}
+          >
+            下一页
+          </button>
+        </div>
       )}
-      {(summary.unavailable ||
-        summary.truncated ||
-        changes.interrupted ||
-        changes.background_pending) && (
-        <p className="turn-changes-note">
-          {summary.unavailable ||
-            [
-              changes.interrupted && "本轮中断，保留已记录的修改",
-              changes.background_pending &&
-                "采集快照时后台任务尚未结束，此处保留当时的修改",
-              summary.truncated && "部分文件超出采集范围",
-            ]
-              .filter(Boolean)
-              .join(" · ")}
-        </p>
+      {(total > 3 || firstPage.next_offset != null) && (
+        <button
+          className="turn-changes-more"
+          aria-expanded={expanded}
+          aria-controls={filesId}
+          onClick={() => setExpandedFor(expanded ? null : scope)}
+        >
+          {expanded
+            ? "收起文件列表"
+            : firstPage.next_offset != null
+              ? `展开文件列表（共 ${total} 个）`
+              : `再显示 ${total - 3} 个文件`}
+          {expanded ? (
+            <ChevronUp size={14} aria-hidden="true" />
+          ) : (
+            <ChevronDown size={14} aria-hidden="true" />
+          )}
+        </button>
       )}
     </section>
   );

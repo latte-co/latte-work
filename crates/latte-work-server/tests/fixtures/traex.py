@@ -63,7 +63,12 @@ for line in sys.stdin:
                 continue
         with pathlib.Path('traex-opens').open('a') as record:
             record.write(json.dumps({'pid': os.getpid(), 'method': method, 'params': params, 'provider_config': launch}) + '\n')
-        reply(value, {'thread': {'id': thread}})
+        saved = {'id': thread}
+        history_size = pathlib.Path('traex-resume-bytes')
+        if method == 'thread/resume' and history_size.exists():
+            size = int(history_size.read_text())
+            saved['turns'] = [{'id': 'past-turn', 'items': [{'type': 'agentMessage', 'text': 'HISTORY_ONLY_MARKER' + 'h' * size}]}]
+        reply(value, {'thread': saved})
     elif method == 'thread/name/set':
         notify('thread/name/updated', {'threadName': params['name']})
         reply(value, {})
@@ -89,8 +94,9 @@ for line in sys.stdin:
                 emit({'id': 73, 'method': 'item/commandExecution/requestApproval', 'params': {'threadId': thread, 'turnId': turn, 'itemId': 'bash', 'command': 'echo approved', 'cwd': os.getcwd()}})
             else:
                 emit({'id': 'ask', 'method': 'item/tool/requestUserInput', 'params': {'threadId': thread, 'turnId': turn, 'itemId': 'ask-tool', 'questions': [{'id': 'q', 'header': 'Pick', 'question': 'Choose one', 'options': [{'label': 'A', 'description': 'first'}, {'label': 'B', 'description': 'second'}]}]}})
-        elif prompt in ('wait', 'wait-interrupt-race'):
+        elif prompt in ('wait', 'wait-interrupt-race', 'wait-think', 'wait-reply'):
             text('WAITING')
+            if prompt == 'wait-think': notify('item/reasoning/textDelta', {'itemId':'think','delta':'private reasoning'})
         elif prompt == 'complete-only':
             for _ in range(2):
                 notify('item/completed', {'item': {'id': 'msg-' + turn, 'type': 'agentMessage', 'text': 'ONCE'}})
@@ -105,7 +111,20 @@ for line in sys.stdin:
             notify('item/completed', {'item': {'id': 'bash', 'type': 'commandExecution', 'command': 'echo fixture', 'cwd': os.getcwd(), 'status': 'completed', 'exitCode': 0, 'aggregatedOutput': 'fixture'}})
             text('TRAE:' + prompt)
             complete()
+    elif method == 'turn/steer':
+        assert params['threadId'] == thread and params['expectedTurnId'] == turn
+        extra=params['input'][0]['text']
+        with pathlib.Path('traex-steers').open('a') as record:
+            record.write(json.dumps({'prompt':extra,'params':params,'pid':os.getpid()})+'\n')
+        if extra == 'reject-steer':
+            emit({'id':value['id'],'error':{'code':-32602,'message':'current turn cannot accept steering'}})
+        else:
+            reply(value,{'turnId':turn})
+            if extra != 'hold-steer':
+                text('STEER:'+extra)
+                complete()
     elif method == 'turn/interrupt':
+        pathlib.Path('traex-interrupted').write_text('interrupt')
         assert params['turnId'] == turn
         if prompt == 'wait-interrupt-race':
             complete()

@@ -1,6 +1,32 @@
 use super::*;
 use latte_work_protocol::{Effort, TurnProvider};
 
+async fn pending_entry(
+    client: &mut Client,
+    id: &str,
+    request: &str,
+    revision: u32,
+) -> latte_work_protocol::QueuedMessage {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        if let Response::MessageQueue { entries, .. } = ask(
+            client,
+            Request::MessageQueue {
+                session_id: id.into(),
+            },
+        )
+        .await
+            && let Some(entry) = entries
+                .into_iter()
+                .find(|e| e.request_id == request && e.revision == revision)
+        {
+            return entry;
+        }
+        assert!(Instant::now() < deadline, "pending queue entry");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
 async fn session(client: &mut Client, root: &Path) -> String {
     let Response::Project { project } = ask(
         client,
@@ -342,7 +368,7 @@ async fn traex_discovery_open_stream_reconnect_resume_and_queue_use_the_selected
     ));
     until(&mut client, &id, Status::Running).await;
     assert!(matches!(
-        send(&mut client, &id, "queued", "after-stop").await,
+        send(&mut client, &id, "queued", "reject-steer").await,
         Response::MessageQueued { .. } | Response::Accepted { duplicate: false }
     ));
     let Response::MessageQueue { entries, .. } = ask(
@@ -368,8 +394,32 @@ async fn traex_discovery_open_stream_reconnect_resume_and_queue_use_the_selected
             }
         )
         .await,
-        Response::Error { .. }
+        Response::MessageQueue { .. }
     ));
+    let restored = pending_entry(&mut client, &id, "queued", 1).await;
+    assert_eq!(restored.text, "reject-steer");
+    // Check rejection before Cancel can independently pause the queue.
+    let Response::MessageQueue { paused, reason, .. } = ask(
+        &mut client,
+        Request::MessageQueue {
+            session_id: id.clone(),
+        },
+    )
+    .await
+    else {
+        panic!("queue after native rejection")
+    };
+    assert!(paused);
+    assert_eq!(
+        reason.as_deref(),
+        Some(
+            "消息未被 Agent 接收，已退回队列：Traex 未接收消息：current turn cannot accept steering"
+        )
+    );
+    assert!(
+        !root.path().join("traex-interrupted").exists(),
+        "rejecting one input must not stop the active turn"
+    );
     assert!(matches!(
         ask(
             &mut client,
@@ -408,6 +458,126 @@ async fn traex_discovery_open_stream_reconnect_resume_and_queue_use_the_selected
     ));
     until(&mut client, &id, Status::Completed).await;
 }
+#[tokio::test]
+async fn traex_queue_steers_waiting_thinking_replying_and_approval_without_interrupt() {
+    let host = Host::start().await;
+    let mut client = host.client().await;
+    for (index, phase) in ["wait", "wait-think", "wait-reply", "approval"]
+        .into_iter()
+        .enumerate()
+    {
+        let root = tempfile::tempdir().unwrap();
+        let id = session(&mut client, root.path()).await;
+        send(&mut client, &id, &format!("head-{index}"), phase).await;
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let approvals = loop {
+            let Response::Events { events, .. } = ask(
+                &mut client,
+                Request::Poll {
+                    session_id: id.clone(),
+                    after: 0.0,
+                },
+            )
+            .await
+            else {
+                panic!("events");
+            };
+            if events.iter().any(|e| {
+                matches!(&e.event,EventKind::Text{text} if text=="WAITING")
+                    || matches!(e.event, EventKind::Approval { .. })
+            }) {
+                break events;
+            }
+            assert!(Instant::now() < deadline, "native turn ready");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        };
+        let queued = format!("extra-{index}");
+        send(
+            &mut client,
+            &id,
+            &queued,
+            if phase == "approval" {
+                "hold-steer"
+            } else {
+                "extra message"
+            },
+        )
+        .await;
+        let entry = pending_entry(&mut client, &id, &queued, 0).await;
+        assert!(matches!(
+            ask(
+                &mut client,
+                Request::DispatchQueuedMessage {
+                    session_id: id.clone(),
+                    request_id: queued.clone(),
+                    revision: entry.revision,
+                    interrupt: false,
+                    provider: Some(TurnProvider::Cli)
+                }
+            )
+            .await,
+            Response::MessageQueue { .. }
+        ));
+        if phase == "approval" {
+            let request_id = approvals
+                .iter()
+                .find_map(|e| match &e.event {
+                    EventKind::Approval { request_id, .. } => Some(request_id.clone()),
+                    _ => None,
+                })
+                .unwrap();
+            assert!(matches!(
+                ask(
+                    &mut client,
+                    Request::Approve {
+                        session_id: id.clone(),
+                        request_id,
+                        allow: true
+                    }
+                )
+                .await,
+                Response::Ok
+            ));
+        }
+        let (_, events) = until(&mut client, &id, Status::Completed).await;
+        assert_eq!(events.iter().filter(|e|matches!(&e.event,EventKind::QueuedMessageSent{request_id,..} if request_id==&queued)).count(),1);
+        assert_eq!(
+            events
+                .iter()
+                .filter(|e| matches!(e.event, EventKind::User { .. }))
+                .count(),
+            1,
+            "steering stays in the same native turn"
+        );
+        assert!(!root.path().join("traex-interrupted").exists());
+        let original: serde_json::Value = serde_json::from_str(
+            std::fs::read_to_string(root.path().join("traex-inputs"))
+                .unwrap()
+                .lines()
+                .next()
+                .unwrap(),
+        )
+        .unwrap();
+        let steers = std::fs::read_to_string(root.path().join("traex-steers")).unwrap();
+        assert_eq!(steers.lines().count(), 1);
+        let steer: serde_json::Value =
+            serde_json::from_str(steers.lines().next().unwrap()).unwrap();
+        assert_eq!(original["pid"], steer["pid"]);
+        let database =
+            rusqlite::Connection::open(host.directory.path().join("state.sqlite")).unwrap();
+        assert_eq!(
+            database
+                .query_row(
+                    "SELECT status FROM message_queue WHERE request_id=?1",
+                    [&queued],
+                    |row| row.get::<_, String>(0)
+                )
+                .unwrap(),
+            "dispatched"
+        );
+    }
+}
+
 #[tokio::test]
 async fn traex_approvals_questions_eof_and_failed_turns_keep_native_evidence() {
     let host = Host::start().await;
@@ -683,10 +853,10 @@ async fn traex_provider_snapshots_drive_catalog_resume_redaction_and_cli_restora
         assert_eq!(provider.as_deref(), Some("Fixture"));
         assert!(effort_levels.is_empty());
         assert_eq!(model_labels["provider-model"], "Friendly");
-        let snapshot = TurnProvider::Snapshot(ProviderSnapshot {
+        let snapshot = TurnProvider::Snapshot(Box::new(ProviderSnapshot {
             provider: metadata,
             credential: "traex-provider-test-secret".into(),
-        });
+        }));
         let request = format!("provider-{index}");
         let send = |effort, provider| Request::SendQueued {
             session_id: id.clone(),
@@ -753,6 +923,93 @@ async fn traex_provider_snapshots_drive_catalog_resume_redaction_and_cli_restora
     assert!(!records.contains("traex-provider-test-secret"));
 }
 
+#[tokio::test]
+async fn traex_model_change_resumes_large_history_after_stop_without_replaying_it() {
+    let host = Host::start().await;
+    let root = tempfile::tempdir().unwrap();
+    let mut client = host.client().await;
+    let id = session(&mut client, root.path()).await;
+    send(&mut client, &id, "waiting", "wait").await;
+    until(&mut client, &id, Status::Running).await;
+    assert!(matches!(
+        ask(
+            &mut client,
+            Request::Cancel {
+                session_id: id.clone()
+            }
+        )
+        .await,
+        Response::Ok
+    ));
+    let (stopped, _) = until(&mut client, &id, Status::Stopped).await;
+    std::fs::write(
+        root.path().join("traex-resume-bytes"),
+        (3 * 1024 * 1024).to_string(),
+    )
+    .unwrap();
+    let response = ask(
+        &mut client,
+        Request::SendQueued {
+            session_id: id.clone(),
+            request_id: "new-model".into(),
+            text: "new-model".into(),
+            model: Some("gpt-test".into()),
+            effort: Some(Effort::High),
+            permission_mode: Some("default".into()),
+            provider: Some(TurnProvider::Cli),
+        },
+    )
+    .await;
+    assert!(!matches!(response, Response::Error { .. }), "{response:?}");
+    ask(
+        &mut client,
+        Request::ResumeMessageQueue {
+            session_id: id.clone(),
+            provider: Some(TurnProvider::Cli),
+        },
+    )
+    .await;
+    let (completed, events) = until(&mut client, &id, Status::Completed).await;
+    assert_eq!(completed.native_id, stopped.native_id);
+    assert_eq!(completed.model.as_deref(), Some("gpt-test"));
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(&event.event,EventKind::Text {text} if text=="TRAE:new-model"))
+    );
+    assert!(
+        !serde_json::to_string(&events)
+            .unwrap()
+            .contains("HISTORY_ONLY_MARKER")
+    );
+    let inputs = std::fs::read_to_string(root.path().join("traex-inputs")).unwrap();
+    let inputs: Vec<serde_json::Value> = inputs
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(inputs.len(), 2);
+    assert_ne!(inputs[0]["pid"], inputs[1]["pid"]);
+    assert_eq!(inputs[1]["prompt"], "new-model");
+    assert_eq!(inputs[1]["params"]["model"], "gpt-test");
+
+    // Keep an explicit bound: over-limit recovery fails without starting the new prompt.
+    std::fs::write(
+        root.path().join("traex-resume-bytes"),
+        (16 * 1024 * 1024 + 1).to_string(),
+    )
+    .unwrap();
+    send(&mut client, &id, "oversized", "must-not-replay").await;
+    let (failed, events) = until(&mut client, &id, Status::Failed).await;
+    assert_eq!(failed.native_id, completed.native_id);
+    assert!(events.iter().any(|event| matches!(&event.event, EventKind::State { status:Status::Failed,message:Some(message)} if message.contains("16 MiB") && message.contains("会话历史已保留"))));
+    assert_eq!(
+        std::fs::read_to_string(root.path().join("traex-inputs"))
+            .unwrap()
+            .lines()
+            .count(),
+        2
+    );
+}
 #[tokio::test]
 async fn traex_model_variants_are_native_and_survive_close_resume_and_queue() {
     let host = Host::start().await;

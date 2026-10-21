@@ -5,6 +5,11 @@ import type { Event } from "./protocol";
 import { activityTranscript, type ActivityItem } from "./activity";
 import { queuedInputReceipts } from "./transcript";
 
+const isSkillLoadNotice = (item: ActivityItem) =>
+  item.type === "event" &&
+  item.value.kind === "notice" &&
+  /^已加载 Skill：\S+$/.test(item.value.text);
+
 /** Fold confirmed outcomes only; stopped turns retain their prose and approvals. */
 export function turnTranscript(events: Event[]) {
   const receipts = queuedInputReceipts(events);
@@ -62,6 +67,7 @@ export function turnTranscript(events: Event[]) {
         .slice(finalIndex + 1)
         .some(
           (item) =>
+            item.type === "user" ||
             item.type === "tool" ||
             item.type === "tools" ||
             (item.type === "event" && !!item.approvalTool),
@@ -72,9 +78,29 @@ export function turnTranscript(events: Event[]) {
           (item.value.kind === "approval" || item.value.kind === "question") &&
           !item.resolved,
       );
-    // Keep overlapping handoffs in chronological order, outside any disclosure,
-    // while preserving the completed response's ordinary final-answer actions.
-    const foldProcess = hasFinal && !items.some((item) => item.type === "user");
+    // Split at visible handoffs rather than disabling folding for the whole turn.
+    // Pair tools before splitting so results stay with their original invocation.
+    const segments: { process: boolean; items: ActivityItem[] }[] = [];
+    function append(item: ActivityItem, process: boolean) {
+      const last = segments.at(-1);
+      if (last?.process === process) last.items.push(item);
+      else segments.push({ process, items: [item] });
+    }
+    if (stopped) {
+      for (const item of items.filter(isTool)) append(item, true);
+      for (const item of items.filter((item) => !isTool(item)))
+        append(item, false);
+    } else {
+      items.forEach((item, index) =>
+        append(
+          item,
+          hasFinal &&
+            index < finalIndex &&
+            item.type !== "user" &&
+            !isSkillLoadNotice(item),
+        ),
+      );
+    }
     return {
       key: `${events[0].session_id}:${events[0].seq}`,
       outcomeKey: end?.seq,
@@ -84,16 +110,14 @@ export function turnTranscript(events: Event[]) {
       finalAt: hasFinal ? end?.at : undefined,
       stopped,
       elapsed,
-      process: stopped
-        ? items.filter(isTool)
-        : foldProcess
-          ? items.slice(0, finalIndex)
-          : [],
-      visible: stopped
-        ? items.filter((item) => !isTool(item))
-        : foldProcess
-          ? items.slice(finalIndex)
-          : items,
+      segments,
+      processCount: segments.filter((part) => part.process).length,
+      process: segments
+        .filter((part) => part.process)
+        .flatMap((part) => part.items),
+      visible: segments
+        .filter((part) => !part.process)
+        .flatMap((part) => part.items),
     };
   });
 }
@@ -120,34 +144,41 @@ export function TurnTranscript({
       data-turn-key={turn.user ? turn.key : undefined}
     >
       {turn.user && !turn.user.hidden && children(turn.user)}
-      {turn.process.length > 0 && (
-        <ProcessDisclosure key={turn.outcomeKey}>
-          <summary
-            title={turn.stopped ? "已执行的文件改动不会撤销。" : undefined}
-          >
-            <span>{turn.elapsed}</span>
-            <ChevronRight size={14} aria-hidden="true" />
-          </summary>
-          {() => (
-            <div className="turn-process-content">
-              {turn.process.map(children)}
-            </div>
-          )}
-        </ProcessDisclosure>
-      )}
       {turn.stopped && turn.process.length === 0 && (
         <div className="turn-stop-summary" title="已执行的文件改动不会撤销。">
           {turn.elapsed}
         </div>
       )}
-      {turn.visible.map((item) => (
-        <Fragment key={item.key}>
-          {children(item)}
-          {item.key === turn.finalKey && item.type === "assistant" && (
-            <ReplyActions text={item.text} at={turn.finalAt} />
-          )}
-        </Fragment>
-      ))}
+      {turn.segments.map((segment) =>
+        segment.process ? (
+          <ProcessDisclosure key={`${turn.outcomeKey}:${segment.items[0].key}`}>
+            <summary
+              title={turn.stopped ? "已执行的文件改动不会撤销。" : undefined}
+            >
+              <span>{turn.processCount > 1 ? "执行过程" : turn.elapsed}</span>
+              <ChevronRight size={14} aria-hidden="true" />
+            </summary>
+            {() => (
+              <div className="turn-process-content">
+                {segment.items.map((item) => (
+                  <Fragment key={item.key}>{children(item)}</Fragment>
+                ))}
+              </div>
+            )}
+          </ProcessDisclosure>
+        ) : (
+          <Fragment key={segment.items[0].key}>
+            {segment.items.map((item) => (
+              <Fragment key={item.key}>
+                {children(item)}
+                {item.key === turn.finalKey && item.type === "assistant" && (
+                  <ReplyActions text={item.text} at={turn.finalAt} />
+                )}
+              </Fragment>
+            ))}
+          </Fragment>
+        ),
+      )}
     </div>
   ));
 }

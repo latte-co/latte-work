@@ -160,6 +160,19 @@ pub fn model_labels(
     }
 }
 
+/// Provider capabilities remain Agent-specific; Claude suffixes never reach Traex.
+pub fn provider_model_variants(
+    agent: &str,
+    models: &mut Vec<String>,
+    labels: &mut std::collections::BTreeMap<String, String>,
+    models_1m: &[String],
+) -> std::collections::BTreeMap<String, Vec<latte_work_protocol::ModelVariant>> {
+    match agent {
+        "claude" => claude_models::provider_variants(models, labels, models_1m),
+        _ => std::collections::BTreeMap::new(),
+    }
+}
+
 /// Inspect known native skill locations. This never starts an Agent or grants file access.
 pub async fn skill_info(
     agent: &str,

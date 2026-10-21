@@ -60,6 +60,13 @@ import {
 } from "./projectOrder";
 
 import {
+  orderPinnedSessions,
+  readPinnedOrder,
+  writePinnedOrder,
+  movePinnedOrder,
+} from "./pinnedOrder";
+
+import {
   pinnedSessions,
   readPinnedCache,
   type HostedSession,
@@ -233,7 +240,17 @@ export function useWorkbench() {
     projectId: string;
     id: string;
   } | null>(null);
-  const pinned = pinnedSessions(pinCache, projects, hostId, sessions);
+  const [pinnedOrder, setPinnedOrder] = useState(readPinnedOrder);
+  useEffect(() => writePinnedOrder(pinnedOrder), [pinnedOrder]);
+  const pinned = orderPinnedSessions(
+    pinnedSessions(pinCache, projects, hostId, sessions),
+    pinnedOrder,
+  );
+  function movePinnedSession(source: string, target: string, after: boolean) {
+    setPinnedOrder((old) =>
+      movePinnedOrder(old, pinned, source, target, after),
+    );
+  }
   const pinnedHosts = JSON.stringify(
     hosts
       .filter(
@@ -1409,6 +1426,7 @@ export function useWorkbench() {
     projectId,
     sessions,
     pinned,
+    movePinnedSession,
     openSession,
     sessionAction,
     sessionId,

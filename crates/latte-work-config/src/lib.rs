@@ -313,6 +313,13 @@ impl ProviderStore {
             .collect();
         draft.models.sort();
         draft.models.dedup();
+        draft.models_1m = draft
+            .models_1m
+            .into_iter()
+            .map(|m| m.trim().to_owned())
+            .collect();
+        draft.models_1m.sort();
+        draft.models_1m.dedup();
         let existing = match &draft.id {
             Some(id) => Some(
                 self.config
@@ -346,6 +353,7 @@ impl ProviderStore {
                 .context("请填写 Provider 凭据")?
         };
         let metadata = Provider {
+            models_1m: draft.models_1m,
             id: draft.id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
             name: draft.name,
             protocol: draft.protocol,
