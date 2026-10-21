@@ -192,22 +192,6 @@ export function TurnChangesCard({
           )}
         </button>
       )}
-      {(summary.unavailable ||
-        summary.truncated ||
-        changes.interrupted ||
-        changes.background_pending) && (
-        <p className="turn-changes-note">
-          {summary.unavailable ||
-            [
-              changes.interrupted && "本轮中断，保留已记录的修改",
-              changes.background_pending &&
-                "采集快照时后台任务尚未结束，此处保留当时的修改",
-              summary.truncated && "部分文件超出采集范围",
-            ]
-              .filter(Boolean)
-              .join(" · ")}
-        </p>
-      )}
     </section>
   );
 }

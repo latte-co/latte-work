@@ -102,20 +102,26 @@ it("retains expansion on snapshot refresh but does not apply it to a different h
     ).toBe("false");
   }
 });
-it("keeps collection warnings visible in the compact preview", () => {
+it.each([
+  { interrupted: true },
+  { background_pending: true },
+  { summary: { ...manyChanges.summary, truncated: true } },
+  { summary: { ...manyChanges.summary, unavailable: "读取失败" } },
+])("omits the footer while preserving unavailable undo (%j)", (patch) => {
   render(
     <TurnChangesCard
       {...props}
+      canUndo={false}
       changes={{
         ...manyChanges,
-        interrupted: true,
-        summary: { ...manyChanges.summary, truncated: true },
+        ...patch,
       }}
     />,
   );
   expect(document.querySelectorAll(".turn-changes-file")).toHaveLength(3);
-  expect(screen.getByText(/部分文件超出采集范围/)).toBeTruthy();
-  expect(screen.getByText(/本轮中断/)).toBeTruthy();
+  expect(document.querySelector(".turn-changes-note")).toBeNull();
+  expect(screen.queryByText(/部分文件超出采集范围|本轮中断/)).toBeNull();
+  if (patch.summary?.unavailable) return;
   expect(
     (screen.getByRole("button", { name: "撤销" }) as HTMLButtonElement)
       .disabled,

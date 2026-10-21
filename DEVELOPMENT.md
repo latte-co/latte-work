@@ -709,12 +709,13 @@ SDK lifecycle reference: [native task types](https://github.com/anthropics/claud
 Before the first accepted agent request spawns, the server stores a durable file
 baseline in the task database. The request is persisted first. Git-visible files
 (including tracked and untracked dirty files) are read without changing the index,
-refs or user files. Non-Git projects use a bounded recursive file inventory, skipping
+refs or user files. Non-Git projects use a recursive file inventory, skipping
 `.git`, `node_modules`, `target` and `.DS_Store` and refusing symlink traversal.
-This inventory visits at most 5,000 entries; edits, creations and deletions use the
-same saved before/after bytes and do not require Git repository metadata. Baselines are limited to 1,000 files, 512 KiB per file, 8 MiB
-total and 12 seconds. Unknown, oversized and symlink entries are explicitly partial;
-old tasks without a baseline never retroactively infer one. Task totals/diffs compare
+Snapshots have no fixed file-count, directory-entry, per-file or total-byte caps.
+File reads use 64 KiB asynchronous chunks and fallible allocation; the 12-second
+capture deadline and path containment checks remain. Git file enumeration and
+change statistics do not share the display preview byte cap. Unknown and symlink
+entries remain partial; old tasks without a baseline never retroactively infer one. Task totals/diffs compare
 this baseline with the current worktree, regardless of staging or later commits.
 This is temporal attribution: other writers in a shared directory can appear in
 these net changes. The UI provides separate task and workspace views.

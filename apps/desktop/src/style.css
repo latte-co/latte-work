@@ -4916,11 +4916,7 @@ button.task-info-row:not(:disabled):hover,
   background: var(--surface);
   text-align: left;
 }
-.turn-changes-note {
-  margin: var(--space-2) var(--space-3);
-  font-size: var(--text-sm);
-  color: var(--color-text-muted);
-}
+
 .turn-changes-undo {
   background: transparent;
   border-color: transparent;
