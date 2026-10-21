@@ -269,6 +269,10 @@ export type Provider = {
   model: string;
   models: Array<string>;
   model_labels: { [key in string]?: string };
+  /**
+   * Provider-declared base model IDs that support Claude Code's 1M mode.
+   */
+  models_1m?: Array<string>;
   auth: ProviderAuth;
   has_credential: boolean;
   revision: string;
@@ -281,6 +285,7 @@ export type ProviderDraft = {
   model: string;
   models: Array<string>;
   model_labels: { [key in string]?: string };
+  models_1m?: Array<string>;
   auth: ProviderAuth;
   /**
    * None preserves a saved credential; plaintext is write-only over the private host transport.

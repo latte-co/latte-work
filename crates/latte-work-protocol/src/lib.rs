@@ -300,6 +300,9 @@ pub struct Provider {
     pub models: Vec<String>,
     #[serde(default)]
     pub model_labels: std::collections::BTreeMap<String, String>,
+    /// Provider-declared base model IDs that support Claude Code's 1M mode.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub models_1m: Vec<String>,
     pub auth: ProviderAuth,
     pub has_credential: bool,
     #[serde(default)]
@@ -335,7 +338,7 @@ impl std::fmt::Debug for ProviderSnapshot {
 #[serde(tag = "kind", content = "snapshot", rename_all = "snake_case")]
 pub enum TurnProvider {
     Cli,
-    Snapshot(ProviderSnapshot),
+    Snapshot(Box<ProviderSnapshot>),
 }
 #[derive(Clone, Serialize, Deserialize, TS)]
 pub struct ProviderDraft {
@@ -348,6 +351,8 @@ pub struct ProviderDraft {
     pub models: Vec<String>,
     #[serde(default)]
     pub model_labels: std::collections::BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub models_1m: Vec<String>,
     pub auth: ProviderAuth,
     /// None preserves a saved credential; plaintext is write-only over the private host transport.
     pub credential: Option<String>,

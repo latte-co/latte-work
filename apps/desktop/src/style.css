@@ -3783,6 +3783,32 @@ button[aria-checked="true"] .model-option-check {
 .model-effort-menu {
   width: 140px;
 }
+.model-details-tooltip {
+  position: fixed;
+  z-index: 1001;
+  width: max-content;
+  max-width: min(360px, calc(100vw - 16px));
+  max-height: calc(100dvh - 16px);
+  overflow: hidden;
+  padding: var(--space-3);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-control);
+  background: var(--color-elevated);
+  box-shadow: var(--shadow-popover);
+  color: var(--color-text);
+  font-size: var(--text-md);
+  line-height: var(--leading-ui);
+  overflow-wrap: anywhere;
+  pointer-events: none;
+}
+.model-details-name {
+  font-weight: 500;
+}
+.model-details-id,
+.model-details-context {
+  margin-top: var(--space-1);
+  color: var(--color-text-muted);
+}
 .model-picker .select-trigger {
   width: auto;
   max-width: 100%;
@@ -4016,6 +4042,27 @@ button[aria-checked="true"] .model-option-check {
 }
 .provider-model-table input {
   margin: 0;
+}
+.provider-model-context {
+  width: 100px;
+}
+.provider-form .provider-model-context label {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin: 0;
+  padding: 0 var(--space-2);
+  white-space: nowrap;
+  color: var(--color-text-secondary);
+}
+.provider-model-context input[type="checkbox"] {
+  appearance: auto;
+  width: 16px;
+  height: 16px;
+  min-height: 0;
+  padding: 0;
+  border-radius: 3px;
+  accent-color: var(--color-primary);
 }
 .provider-entry .danger {
   color: var(--color-danger);
@@ -4767,54 +4814,92 @@ button.task-info-row:not(:disabled):hover,
 
 /* Frozen per-turn file changes stay alongside the final reply. */
 .turn-changes-card {
-  margin: var(--space-4) 0;
+  margin: var(--space-3) 0;
   border: 1px solid var(--color-border);
   border-radius: var(--radius-panel);
   overflow: hidden;
-  background: var(--surface);
+  background: var(--bg);
+  font-size: var(--text-md);
+  line-height: var(--leading-ui);
+}
+.turn-changes-card button {
+  appearance: none;
 }
 .turn-changes-card > header {
   display: flex;
   align-items: center;
-  gap: var(--space-3);
-  padding: var(--space-4);
+  gap: var(--space-2);
+  padding: var(--space-1) var(--space-3);
   border-bottom: 1px solid var(--color-border);
+  background: var(--surface);
 }
 .turn-changes-icon {
   display: grid;
   place-items: center;
-  width: 42px;
-  height: 42px;
+  width: 16px;
+  height: 16px;
   flex-shrink: 0;
-  border-radius: var(--radius-control);
-  background: var(--bg);
   color: var(--color-text-muted);
 }
 .turn-changes-heading {
   flex: 1;
   min-width: 0;
   display: flex;
-  flex-direction: column;
-  gap: var(--space-1);
+  align-items: center;
+  gap: var(--space-2);
+}
+.turn-changes-heading strong {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--text-md);
+  font-weight: 500;
+}
+.turn-changes-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex-shrink: 0;
+}
+.turn-changes-actions > button {
+  min-height: var(--button-height);
+  padding: var(--space-1) var(--space-2);
+}
+.turn-changes-view-icon {
+  display: none;
 }
 .turn-changes-file {
   width: 100%;
+  min-height: var(--button-height);
   display: flex;
   align-items: center;
   gap: var(--space-3);
-  padding: var(--space-3) var(--space-4);
+  padding: var(--space-2) var(--space-3);
   background: transparent;
   border: 0;
   border-radius: 0;
   text-align: left;
   color: var(--color-text-muted);
 }
-.turn-changes-file > span:first-child {
+.turn-changes-path {
+  display: flex;
   flex: 1;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+.turn-changes-directory {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.turn-changes-name {
+  flex-shrink: 0;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--color-text);
 }
 .turn-changes-file:hover {
   background: var(--color-hover);
@@ -4823,10 +4908,16 @@ button.task-info-row:not(:disabled):hover,
   flex-shrink: 0;
 }
 .turn-changes-more {
-  margin: var(--space-2) var(--space-4);
+  width: 100%;
+  min-height: var(--button-height);
+  padding: var(--space-2) var(--space-3);
+  border-top: 1px solid var(--color-border-subtle);
+  border-radius: 0;
+  background: var(--surface);
+  text-align: left;
 }
 .turn-changes-note {
-  margin: var(--space-3) var(--space-4);
+  margin: var(--space-2) var(--space-3);
   font-size: var(--text-sm);
   color: var(--color-text-muted);
 }
@@ -4839,13 +4930,19 @@ button.task-info-row:not(:disabled):hover,
   flex-shrink: 0;
 }
 @container conversation (max-width: 400px) {
-  .turn-changes-card > header {
-    flex-wrap: wrap;
+  .turn-changes-actions {
+    gap: var(--space-1);
+  }
+  .turn-changes-action-label {
+    display: none;
+  }
+  .turn-changes-view-icon {
+    display: block;
   }
 }
 .turn-changes-heading .change-totals {
   margin-left: 0;
-  align-self: flex-start;
+  flex-shrink: 0;
 }
 
 /* Git review keeps navigation beside the patch in the same workspace tab. */
@@ -5701,6 +5798,13 @@ button.task-info-row:not(:disabled):hover,
   outline-offset: -2px;
 }
 .composer-drop-hint {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  display: grid;
+  place-items: center;
+  border-radius: inherit;
+  background: var(--color-composer);
   padding: var(--space-2);
   color: var(--color-text-secondary);
   text-align: center;

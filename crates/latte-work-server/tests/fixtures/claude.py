@@ -289,6 +289,15 @@ for line in sys.stdin:
                 effort=native.get('effortLevel','native-default')
             emit({'type':'assistant','message':{'content':[{'type':'text','text':('resumed:' if resumed else 'fresh:')+effort}]}})
             emit({'type':'result','subtype':'success','is_error':False})
+        elif text=='context-mode':
+            model=next(a.split('=',1)[1] for a in sys.argv if a.startswith('--model='))
+            with open(sys.argv[sys.argv.index('--settings')+1]) as f:settings=json.load(f)
+            for key in ['CLAUDE_CODE_DISABLE_1M_CONTEXT','CLAUDE_CODE_MAX_CONTEXT_TOKENS']:
+                if key in settings['env']: assert os.environ.get(key)==settings['env'][key]
+            context=os.environ.get('CLAUDE_CODE_MAX_CONTEXT_TOKENS','unset')
+            disabled=os.environ.get('CLAUDE_CODE_DISABLE_1M_CONTEXT','unset')
+            emit({'type':'assistant','message':{'content':[{'type':'text','text':('resumed:' if resumed else 'fresh:')+model+':'+context+':'+disabled}]}})
+            emit({'type':'result','subtype':'success','is_error':False})
         elif text=='model':
             model=next((a.split('=',1)[1] for a in sys.argv if a.startswith('--model=')), 'cli-config')
             emit({'type':'assistant','message':{'content':[{'type':'text','text':('resumed:' if resumed else 'fresh:')+model}]}})

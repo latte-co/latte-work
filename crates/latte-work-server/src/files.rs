@@ -21,10 +21,10 @@ async fn missing_repository(root: &Path, diagnostic: &[u8]) -> bool {
     // Recognize only Git's repository-discovery failure, in a fixed locale.
     // Invalid gitfiles, unsafe ownership and other command errors stay errors.
     let diagnostic = String::from_utf8_lossy(diagnostic);
-    if !diagnostic
-        .starts_with("fatal: not a git repository (or any of the parent directories): .git")
-        && !diagnostic.starts_with("fatal: not a git repository (or any parent up to mount point ")
-    {
+    if !diagnostic.lines().any(|line| {
+        line.starts_with("fatal: not a git repository (or any of the parent directories): .git")
+            || line.starts_with("fatal: not a git repository (or any parent up to mount point ")
+    }) {
         return false;
     }
     // Git can ignore an incomplete .git directory. Preserve that as a real
@@ -355,6 +355,7 @@ pub(crate) async fn git(root: &Path, args: &[&str]) -> Result<(String, bool)> {
         .stderr
         .take()
         .context("git stderr missing")?
+        // Read one byte beyond the 8 KiB cap to detect overflow, even on exit 0.
         .take(8193);
     let mut errors = Vec::new();
     // A full pipe must end the combined read immediately so the child can be
@@ -432,6 +433,50 @@ mod tests {
         .unwrap_err();
         assert!(!error.is::<NotGitRepository>());
         assert_eq!(error.to_string(), "Git 错误信息超出读取上限");
+    }
+    #[tokio::test]
+    async fn git_stderr_cap_accepts_8192_bytes_and_rejects_the_sentinel_and_beyond() {
+        let root = tempfile::tempdir().unwrap();
+        for count in [8192, 8193, 8194] {
+            let alias = format!("alias.noisy=!head -c {count} /dev/zero >&2");
+            let result = tokio::time::timeout(
+                Duration::from_secs(3),
+                git(root.path(), &["-c", &alias, "noisy"]),
+            )
+            .await
+            .unwrap();
+            if count == 8192 {
+                assert_eq!(result.unwrap(), (String::new(), false));
+            } else {
+                assert_eq!(result.unwrap_err().to_string(), "Git 错误信息超出读取上限");
+            }
+        }
+    }
+    #[tokio::test]
+    async fn non_git_discovery_accepts_warning_lines_but_not_other_errors_or_broken_git() {
+        let root = tempfile::tempdir().unwrap();
+        for fatal in [
+            "fatal: not a git repository (or any of the parent directories): .git",
+            "fatal: not a git repository (or any parent up to mount point /)",
+        ] {
+            let diagnostic = format!("warning: fixture warning\nhint: fixture hint\n{fatal}\n");
+            assert!(missing_repository(root.path(), diagnostic.as_bytes()).await);
+        }
+        for diagnostic in [
+            "warning: fatal: not a git repository (or any of the parent directories): .git",
+            "warning: fixture warning\nfatal: detected dubious ownership in repository at /fixture",
+            "hint: fixture hint\nfatal: invalid gitfile format: .git",
+        ] {
+            assert!(!missing_repository(root.path(), diagnostic.as_bytes()).await);
+        }
+        std::fs::create_dir(root.path().join(".git")).unwrap();
+        assert!(
+            !missing_repository(
+                root.path(),
+                b"warning: fixture warning\nfatal: not a git repository (or any of the parent directories): .git\n",
+            )
+            .await
+        );
     }
     #[tokio::test]
     async fn non_git_discovery_is_distinct_from_broken_repository_and_command_errors() {

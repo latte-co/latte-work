@@ -27,6 +27,7 @@ const empty = (): ProviderDraft => ({
   model: "",
   models: [],
   model_labels: {},
+  models_1m: [],
   auth: "none",
   credential: null,
 });
@@ -136,6 +137,7 @@ export function ProviderSettings({
       model: p.model,
       models: Array.from(new Set([p.model, ...p.models])),
       model_labels: p.model_labels ?? {},
+      models_1m: p.models_1m ?? [],
       auth: p.auth,
       credential: null,
     };
@@ -253,6 +255,17 @@ export function ProviderSettings({
                       model: models.includes(draft.model)
                         ? draft.model
                         : models[0],
+                      models_1m: Array.from(
+                        new Set(
+                          (draft.models_1m ?? [])
+                            .map((id) => id.trim())
+                            .filter(
+                              (id) =>
+                                models.includes(id) &&
+                                !id.toLowerCase().endsWith("[1m]"),
+                            ),
+                        ),
+                      ),
                       model_labels: Object.fromEntries(
                         Object.entries(draft.model_labels ?? {}).filter(
                           ([id, label]) => models.includes(id) && label?.trim(),
@@ -290,6 +303,8 @@ export function ProviderSettings({
                       setDraft({
                         ...draft,
                         protocol: value as ProviderProtocol,
+                        models_1m:
+                          value === "anthropic_messages" ? draft.models_1m : [],
                         auth:
                           draft.auth === "none"
                             ? "none"
@@ -378,6 +393,9 @@ export function ProviderSettings({
                       <tr>
                         <th>模型 ID</th>
                         <th>显示名称</th>
+                        {draft.protocol === "anthropic_messages" && (
+                          <th>Claude Code</th>
+                        )}
                         <th>操作</th>
                       </tr>
                     </thead>
@@ -393,6 +411,10 @@ export function ProviderSettings({
                               onChange={(e) =>
                                 setDraft({
                                   ...draft,
+                                  models_1m: (draft.models_1m ?? []).map(
+                                    (id) =>
+                                      id === model ? e.target.value : id,
+                                  ),
                                   model_labels: {
                                     ...draft.model_labels,
                                     [e.target.value]:
@@ -422,6 +444,35 @@ export function ProviderSettings({
                               }
                             />
                           </td>
+                          {draft.protocol === "anthropic_messages" && (
+                            <td className="provider-model-context">
+                              <label>
+                                <input
+                                  type="checkbox"
+                                  aria-label={`模型 ${index + 1} 支持 1M 上下文`}
+                                  checked={
+                                    model.toLowerCase().endsWith("[1m]") ||
+                                    (draft.models_1m ?? []).includes(model)
+                                  }
+                                  disabled={
+                                    !model.trim() ||
+                                    model.toLowerCase().endsWith("[1m]")
+                                  }
+                                  onChange={(e) =>
+                                    setDraft({
+                                      ...draft,
+                                      models_1m: e.target.checked
+                                        ? [...(draft.models_1m ?? []), model]
+                                        : (draft.models_1m ?? []).filter(
+                                            (id) => id !== model,
+                                          ),
+                                    })
+                                  }
+                                />
+                                <span>支持 1M</span>
+                              </label>
+                            </td>
+                          )}
                           <td>
                             <button
                               type="button"
@@ -433,6 +484,14 @@ export function ProviderSettings({
                                   models: draft.models.filter(
                                     (_, i) => i !== index,
                                   ),
+                                  models_1m: (draft.models_1m ?? []).filter(
+                                    (id) =>
+                                      id !== model ||
+                                      draft.models.some(
+                                        (value, i) =>
+                                          i !== index && value === id,
+                                      ),
+                                  ),
                                 })
                               }
                             >
@@ -443,6 +502,12 @@ export function ProviderSettings({
                       ))}
                     </tbody>
                   </table>
+                  {draft.protocol === "anthropic_messages" && (
+                    <p className="form-note">
+                      勾选声明模型支持 1M；使用 Claude Code 时，可在模型菜单选择
+                      1M 上下文。请以模型服务的实际能力为准。
+                    </p>
+                  )}
                   <button
                     type="button"
                     className="secondary"

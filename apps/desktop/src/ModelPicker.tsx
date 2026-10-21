@@ -148,9 +148,13 @@ export function ModelPicker({
     )
     .map((option) => ({
       ...option,
+      contextWindow: catalog?.model_variants?.[option.value]?.find(
+        (variant) => variant.model === option.value,
+      )?.context_window,
       variants: catalog?.model_variants?.[option.value]?.map((variant) => ({
         value: variant.model,
         label: variant.label,
+        contextWindow: variant.context_window,
         description: variant.context_window
           ? `${new Intl.NumberFormat("en", { notation: "compact" }).format(variant.context_window)} context`
           : undefined,
@@ -165,6 +169,7 @@ export function ModelPicker({
     groupedOptions.push({
       value,
       label: `${value} (unavailable)`,
+      contextWindow: undefined,
       variants: undefined,
     });
   return (

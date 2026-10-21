@@ -21,6 +21,17 @@ export interface ModelSelectorHandle {
   openMenu: (target: "model" | "effort") => boolean;
 }
 
+export type ModelOption = SelectOption & {
+  contextWindow?: number | null;
+  variants?: ModelOption[];
+};
+
+function contextLabel(value: number | null | undefined) {
+  return value && Number.isFinite(value) && value > 0
+    ? `${new Intl.NumberFormat("en").format(value)} tokens`
+    : "未提供";
+}
+
 /** A model menu with an Agent-owned reasoning submenu. */
 export function ModelSelector({
   value,
@@ -33,7 +44,7 @@ export function ModelSelector({
   ref,
 }: {
   value: string;
-  options: (SelectOption & { variants?: SelectOption[] })[];
+  options: ModelOption[];
   onChange: (value: string) => void;
   effort: Effort | null;
   levels: Effort[];
@@ -50,11 +61,65 @@ export function ModelSelector({
     },
   }));
   const [open, setOpen] = useState(false);
+  const [hint, setHint] = useState<{
+    option: ModelOption;
+    label: string;
+    anchor: HTMLButtonElement;
+  } | null>(null);
+  const hintTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const hintCard = useRef<HTMLDivElement>(null);
+  const [hintPosition, setHintPosition] = useState({ left: 0, top: 0 });
+  function hideHint() {
+    if (hintTimer.current !== null) clearTimeout(hintTimer.current);
+    hintTimer.current = null;
+    setHint(null);
+  }
+  function showHint(
+    anchor: HTMLButtonElement,
+    option: ModelOption,
+    label = option.label,
+  ) {
+    hideHint();
+    hintTimer.current = setTimeout(() => {
+      hintTimer.current = null;
+      if (anchor.isConnected) setHint({ anchor, option, label });
+    }, 350);
+  }
+  useEffect(() => {
+    if (!open || disabled) hideHint();
+  }, [open, disabled]);
+  useEffect(
+    () => () => {
+      if (hintTimer.current !== null) clearTimeout(hintTimer.current);
+    },
+    [],
+  );
+  useLayoutEffect(() => {
+    if (!hint || !hintCard.current) return;
+    const row = hint.anchor.getBoundingClientRect();
+    const card = hintCard.current.getBoundingClientRect();
+    const right = row.right + 8;
+    setHintPosition({
+      left: Math.max(
+        8,
+        Math.min(
+          right + card.width <= window.innerWidth - 8
+            ? right
+            : row.left - card.width - 8,
+          window.innerWidth - card.width - 8,
+        ),
+      ),
+      top: Math.max(8, Math.min(row.top, window.innerHeight - card.height - 8)),
+    });
+  }, [hint]);
   const [submenuTarget, setSubmenuTarget] = useState<string | null>(null);
   const reasoning = submenuTarget === "effort";
-  const variantOptions = options.find(
+  const variantParent = options.find(
     (o) => `model:${o.value}` === submenuTarget,
-  )?.variants;
+  );
+  const variantOptions = variantParent?.variants;
+  const variantLabel = (variant: ModelOption) =>
+    variantParent ? `${variantParent.label} / ${variant.label}` : variant.label;
   const submenuOpen = reasoning || !!variantOptions?.length;
   const focusSubmenu = useRef(false);
   const anchor = () =>
@@ -96,6 +161,7 @@ export function ModelSelector({
       .find((o) => o.value === value)?.label ?? value;
   const effortValue = effort && levels.includes(effort) ? effort : "跟随 Agent";
   function close(restoreFocus = true) {
+    hideHint();
     setOpen(false);
     showSubmenu(null);
     if (restoreFocus) trigger.current?.focus();
@@ -203,6 +269,7 @@ export function ModelSelector({
         ].includes(e.key)
       )
         return;
+      hideHint();
       e.stopImmediatePropagation();
       if (e.key === "Tab") {
         close(false);
@@ -212,6 +279,7 @@ export function ModelSelector({
       if (e.key === "Escape" || e.key === "ArrowLeft") {
         if (submenuOpen) {
           anchor()?.focus();
+          hideHint();
           showSubmenu(null);
         } else if (e.key === "Escape") close();
         return;
@@ -252,10 +320,12 @@ export function ModelSelector({
     document.addEventListener("pointerdown", outside);
     window.addEventListener("keydown", key, true);
     window.addEventListener("resize", resize);
+    window.addEventListener("blur", hideHint);
     return () => {
       document.removeEventListener("pointerdown", outside);
       window.removeEventListener("keydown", key, true);
       window.removeEventListener("resize", resize);
+      window.removeEventListener("blur", hideHint);
     };
   }, [open, submenuTarget, levels.length, options]);
   return (
@@ -294,6 +364,7 @@ export function ModelSelector({
               aria-label="Model"
               className="select-popover compact model-menu"
               style={position}
+              onScrollCapture={hideHint}
             >
               <div className="select-menu-title" role="presentation">
                 Model
@@ -323,21 +394,22 @@ export function ModelSelector({
                       o.value === value ||
                       !!o.variants?.some((v) => v.value === value)
                     }
-                    title={
-                      o.description
-                        ? `${o.label} · ${o.description}`
-                        : o.value && o.value !== o.label
-                          ? `${o.label} · ${o.value}`
-                          : o.label
+                    aria-describedby={
+                      hint?.option === o ? `${id}-details` : undefined
                     }
                     tabIndex={-1}
+                    onFocus={(e) => showHint(e.currentTarget, o)}
+                    onBlur={hideHint}
+                    onMouseLeave={hideHint}
                     onMouseEnter={(e) => {
                       showSubmenu(
                         o.variants?.length ? `model:${o.value}` : null,
                       );
                       e.currentTarget.focus();
+                      showHint(e.currentTarget, o);
                     }}
                     onClick={() => {
+                      hideHint();
                       if (o.variants?.length)
                         showSubmenu(`model:${o.value}`, true);
                       else {
@@ -401,6 +473,7 @@ export function ModelSelector({
                 aria-label={reasoning ? "Reasoning effort" : "Model mode"}
                 className="select-popover compact model-effort-menu"
                 style={{ ...subPosition, width: reasoning ? 140 : 220 }}
+                onScrollCapture={hideHint}
               >
                 {variantOptions?.map((variant) => (
                   <button
@@ -412,10 +485,18 @@ export function ModelSelector({
                     aria-label={[variant.label, variant.description]
                       .filter(Boolean)
                       .join(" ")}
-                    title={[variant.label, variant.description]
-                      .filter(Boolean)
-                      .join(" · ")}
-                    onMouseEnter={(e) => e.currentTarget.focus()}
+                    aria-describedby={
+                      hint?.option === variant ? `${id}-details` : undefined
+                    }
+                    onFocus={(e) =>
+                      showHint(e.currentTarget, variant, variantLabel(variant))
+                    }
+                    onBlur={hideHint}
+                    onMouseLeave={hideHint}
+                    onMouseEnter={(e) => {
+                      e.currentTarget.focus();
+                      showHint(e.currentTarget, variant, variantLabel(variant));
+                    }}
                     onClick={() => {
                       onChange(variant.value);
                       close();
@@ -458,6 +539,32 @@ export function ModelSelector({
                       />
                     </button>
                   ))}
+              </div>
+            )}
+            {hint && (
+              <div
+                ref={hintCard}
+                id={`${id}-details`}
+                role="tooltip"
+                className="model-details-tooltip"
+                style={hintPosition}
+              >
+                <div className="model-details-name">{hint.label}</div>
+                {hint.option.value && hint.option.value !== hint.label && (
+                  <div className="model-details-id">{hint.option.value}</div>
+                )}
+                {hint.option.variants?.length ? (
+                  hint.option.variants.map((variant) => (
+                    <div key={variant.value} className="model-details-context">
+                      {variant.label} 上下文：
+                      {contextLabel(variant.contextWindow)}
+                    </div>
+                  ))
+                ) : (
+                  <div className="model-details-context">
+                    上下文：{contextLabel(hint.option.contextWindow)}
+                  </div>
+                )}
               </div>
             )}
           </>,

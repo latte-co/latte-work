@@ -34,6 +34,111 @@ const props = {
   canUndo: true,
   open: vi.fn(),
 };
+const manyChanges: TurnChanges = {
+  ...changes,
+  summary: {
+    ...changes.summary,
+    entries: Array.from({ length: 10 }, (_, index) => ({
+      path: `src/nested/file-${index + 1}.tsx`,
+      status: "M",
+      added: index + 1,
+      removed: 1,
+    })),
+    added: 55,
+    removed: 10,
+  },
+};
+it("previews three files and expands all remaining files in place without requests", () => {
+  render(<TurnChangesCard {...props} changes={manyChanges} />);
+  expect(screen.getByText("已编辑 10 个文件")).toBeTruthy();
+  expect(document.querySelectorAll(".turn-changes-file")).toHaveLength(3);
+  const more = screen.getByRole("button", { name: "再显示 7 个文件" });
+  expect(more.getAttribute("aria-expanded")).toBe("false");
+  more.focus();
+  fireEvent.click(more);
+  expect(document.querySelectorAll(".turn-changes-file")).toHaveLength(10);
+  expect(more.getAttribute("aria-expanded")).toBe("true");
+  expect(document.activeElement).toBe(more);
+  expect(
+    document.getElementById(more.getAttribute("aria-controls")!),
+  ).toBeTruthy();
+  expect(props.open).not.toHaveBeenCalled();
+  expect(mocks.request).not.toHaveBeenCalled();
+  fireEvent.click(screen.getByRole("button", { name: /file-10.tsx/ }));
+  expect(props.open).toHaveBeenCalledExactlyOnceWith("src/nested/file-10.tsx");
+  fireEvent.click(screen.getByRole("button", { name: "收起文件列表" }));
+  expect(document.querySelectorAll(".turn-changes-file")).toHaveLength(3);
+  expect(screen.getByRole("button", { name: "再显示 7 个文件" })).toBe(more);
+});
+it("retains expansion on snapshot refresh but does not apply it to a different host, session or turn", () => {
+  const view = render(<TurnChangesCard {...props} changes={manyChanges} />);
+  fireEvent.click(screen.getByRole("button", { name: "再显示 7 个文件" }));
+  view.rerender(
+    <TurnChangesCard
+      {...props}
+      changes={{ ...manyChanges, undo: "reverted" }}
+    />,
+  );
+  expect(document.querySelectorAll(".turn-changes-file")).toHaveLength(10);
+  for (const patch of [
+    { hostId: "remote" },
+    { sessionId: "another" },
+    { changes: { ...manyChanges, request_id: "another" } },
+    {
+      changes: {
+        ...manyChanges,
+        summary: { ...manyChanges.summary, baseline_at: 2000 },
+      },
+    },
+  ]) {
+    view.rerender(
+      <TurnChangesCard {...props} changes={manyChanges} {...patch} />,
+    );
+    expect(document.querySelectorAll(".turn-changes-file")).toHaveLength(3);
+    expect(
+      screen
+        .getByRole("button", { name: "再显示 7 个文件" })
+        .getAttribute("aria-expanded"),
+    ).toBe("false");
+  }
+});
+it("keeps collection warnings visible in the compact preview", () => {
+  render(
+    <TurnChangesCard
+      {...props}
+      changes={{
+        ...manyChanges,
+        interrupted: true,
+        summary: { ...manyChanges.summary, truncated: true },
+      }}
+    />,
+  );
+  expect(document.querySelectorAll(".turn-changes-file")).toHaveLength(3);
+  expect(screen.getByText(/部分文件超出采集范围/)).toBeTruthy();
+  expect(screen.getByText(/本轮中断/)).toBeTruthy();
+  expect(
+    (screen.getByRole("button", { name: "撤销" }) as HTMLButtonElement)
+      .disabled,
+  ).toBe(true);
+});
+it.each([1, 3])("does not show a disclosure for %i files", (count) => {
+  render(
+    <TurnChangesCard
+      {...props}
+      changes={{
+        ...manyChanges,
+        summary: {
+          ...manyChanges.summary,
+          entries: manyChanges.summary.entries.slice(0, count),
+        },
+      }}
+    />,
+  );
+  expect(document.querySelectorAll(".turn-changes-file")).toHaveLength(count);
+  expect(
+    screen.queryByRole("button", { name: /再显示|收起文件列表/ }),
+  ).toBeNull();
+});
 it("shows per-turn counts and opens exact-file diffs without launching an agent", () => {
   render(<TurnChangesCard {...props} />);
   expect(screen.getByText("已编辑 1 个文件")).toBeTruthy();

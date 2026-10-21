@@ -1,6 +1,12 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import { request, message } from "./api";
-import { SquarePlus, Undo2 } from "lucide-react";
+import {
+  ChevronDown,
+  ChevronUp,
+  FileDiff,
+  SquarePlus,
+  Undo2,
+} from "lucide-react";
 import type { TurnChanges } from "./protocol";
 import { useStatusIssues } from "./statusNotices";
 
@@ -20,6 +26,15 @@ export function TurnChangesCard({
   const [changes, setChanges] = useState(saved);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const [expandedFor, setExpandedFor] = useState<string | null>(null);
+  const filesId = useId();
+  const scope = JSON.stringify([
+    hostId,
+    sessionId,
+    saved.request_id,
+    saved.summary.baseline_at,
+  ]);
+  const expanded = expandedFor === scope;
   useStatusIssues([
     {
       id: `turn-undo:${hostId}:${sessionId}:${saved.request_id}`,
@@ -38,6 +53,13 @@ export function TurnChangesCard({
   }, []);
   useEffect(() => setChanges(saved), [saved]);
   const { summary } = changes;
+  const undoLabel = busy
+    ? "撤销中…"
+    : changes.undo === "reverted"
+      ? "已撤销"
+      : changes.undo === "unknown"
+        ? "状态待核对"
+        : "撤销";
   const undoable =
     canUndo &&
     changes.undo === "ready" &&
@@ -68,7 +90,7 @@ export function TurnChangesCard({
     <section className="turn-changes-card" aria-label="本轮文件变更">
       <header>
         <span className="turn-changes-icon">
-          <SquarePlus size={22} aria-hidden="true" />
+          <SquarePlus size={16} aria-hidden="true" />
         </span>
         <div className="turn-changes-heading">
           <strong>
@@ -84,62 +106,90 @@ export function TurnChangesCard({
           )}
         </div>
         {!summary.unavailable && (
-          <button
-            className="turn-changes-undo"
-            disabled={!undoable || busy}
-            title={
-              undoable
-                ? "撤销此轮文件修改；文件已发生后续变化时不会覆盖"
-                : changes.undo === "reverted"
-                  ? "本轮文件修改已撤销"
-                  : changes.undo === "unknown"
-                    ? "撤销未能确认，请核对工作区"
-                    : "仅可在本轮结束后撤销最近一轮的完整快照"
-            }
-            onClick={() => void undo()}
-          >
-            {busy ? (
-              "撤销中…"
-            ) : changes.undo === "reverted" ? (
-              "已撤销"
-            ) : changes.undo === "unknown" ? (
-              "状态待核对"
-            ) : (
-              <>
-                撤销 <Undo2 size={14} aria-hidden="true" />
-              </>
-            )}
-          </button>
-        )}
-        {!summary.unavailable && (
-          <button className="secondary small" onClick={() => open()}>
-            查看变更
-          </button>
+          <div className="turn-changes-actions">
+            <button
+              className="turn-changes-undo"
+              aria-label={undoLabel}
+              disabled={!undoable || busy}
+              title={
+                undoable
+                  ? "撤销此轮文件修改；文件已发生后续变化时不会覆盖"
+                  : changes.undo === "reverted"
+                    ? "本轮文件修改已撤销"
+                    : changes.undo === "unknown"
+                      ? "撤销未能确认，请核对工作区"
+                      : "仅可在本轮结束后撤销最近一轮的完整快照"
+              }
+              onClick={() => void undo()}
+            >
+              <span className="turn-changes-action-label">{undoLabel}</span>
+              <Undo2 size={14} aria-hidden="true" />
+            </button>
+            <button
+              className="secondary small"
+              aria-label="查看变更"
+              title="查看变更"
+              onClick={() => open()}
+            >
+              <span className="turn-changes-action-label">查看变更</span>
+              <FileDiff
+                size={14}
+                className="turn-changes-view-icon"
+                aria-hidden="true"
+              />
+            </button>
+          </div>
         )}
       </header>
-      {summary.entries.slice(0, 8).map((entry) => (
+      <div id={filesId}>
+        {summary.entries.slice(0, expanded ? undefined : 3).map((entry) => {
+          const split = entry.path.lastIndexOf("/") + 1;
+          return (
+            <button
+              className="turn-changes-file"
+              key={entry.path}
+              onClick={() => open(entry.path)}
+              title={entry.path}
+            >
+              <span className="turn-changes-path">
+                {split > 0 && (
+                  <span className="turn-changes-directory">
+                    {entry.path.slice(0, split)}
+                  </span>
+                )}
+                <span className="turn-changes-name">
+                  {entry.path.slice(split)}
+                </span>
+              </span>
+              <span className="change-totals">
+                {entry.added === null ? (
+                  "二进制"
+                ) : (
+                  <>
+                    <b>+{entry.added}</b>
+                    <em>-{entry.removed}</em>
+                  </>
+                )}
+              </span>
+            </button>
+          );
+        })}
+      </div>
+      {summary.entries.length > 3 && (
         <button
-          className="turn-changes-file"
-          key={entry.path}
-          onClick={() => open(entry.path)}
-          title={entry.path}
+          className="turn-changes-more"
+          aria-expanded={expanded}
+          aria-controls={filesId}
+          onClick={() => setExpandedFor(expanded ? null : scope)}
         >
-          <span>{entry.path}</span>
-          <span className="change-totals">
-            {entry.added === null ? (
-              "二进制"
-            ) : (
-              <>
-                <b>+{entry.added}</b>
-                <em>-{entry.removed}</em>
-              </>
-            )}
-          </span>
-        </button>
-      ))}
-      {summary.entries.length > 8 && (
-        <button className="turn-changes-more" onClick={() => open()}>
-          查看其余 {summary.entries.length - 8} 个文件
+          {expanded
+            ? "收起文件列表"
+            : `再显示 ${summary.entries.length - 3} 个文件`}
+          {expanded ? (
+            <ChevronUp size={14} aria-hidden="true" />
+          ) : (
+            <ChevronDown size={14} aria-hidden="true" />
+          )}
         </button>
       )}
       {(summary.unavailable ||

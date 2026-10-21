@@ -16,6 +16,123 @@ afterEach(() => {
   cleanup();
   vi.clearAllMocks();
 });
+it("stores per-model 1M support through rename, deletion and reopening without altering IDs or credentials", async () => {
+  let provider = {
+    id: "p",
+    name: "Context modes",
+    protocol: "anthropic_messages",
+    base_url: "https://example.test",
+    model: "large",
+    models: ["large", "small"],
+    model_labels: {},
+    models_1m: ["large"],
+    auth: "api_key",
+    has_credential: true,
+    revision: "r1",
+  };
+  invoke.mockImplementation(async (_command, { request }) => {
+    if (request.method === "save_provider")
+      provider = { ...provider, ...request.provider, credential: undefined };
+    return { kind: "providers", providers: [provider], bindings: [] };
+  });
+  render(<ProviderSettings active onBusy={() => {}} />);
+  fireEvent.click(await screen.findByRole("button", { name: "编辑" }));
+  expect(
+    (
+      screen.getByRole("checkbox", {
+        name: "模型 1 支持 1M 上下文",
+      }) as HTMLInputElement
+    ).checked,
+  ).toBe(true);
+  expect(
+    (
+      screen.getByRole("checkbox", {
+        name: "模型 2 支持 1M 上下文",
+      }) as HTMLInputElement
+    ).checked,
+  ).toBe(false);
+  fireEvent.change(screen.getByLabelText("模型 ID 1"), {
+    target: { value: "renamed" },
+  });
+  fireEvent.click(
+    screen.getByRole("checkbox", { name: "模型 2 支持 1M 上下文" }),
+  );
+  fireEvent.click(screen.getByRole("button", { name: "删除模型 2" }));
+  fireEvent.click(screen.getByRole("button", { name: "保存 Provider" }));
+  await screen.findByText("Provider 已保存；下次发送时生效。");
+  expect(invoke).toHaveBeenCalledWith("provider_request", {
+    request: {
+      method: "save_provider",
+      provider: expect.objectContaining({
+        model: "renamed",
+        models: ["renamed"],
+        models_1m: ["renamed"],
+        credential: null,
+      }),
+    },
+  });
+  fireEvent.click(screen.getByRole("button", { name: "编辑" }));
+  expect(
+    (
+      screen.getByRole("checkbox", {
+        name: "模型 1 支持 1M 上下文",
+      }) as HTMLInputElement
+    ).checked,
+  ).toBe(true);
+  fireEvent.click(
+    screen.getByRole("checkbox", { name: "模型 1 支持 1M 上下文" }),
+  );
+  fireEvent.click(screen.getByRole("button", { name: "保存 Provider" }));
+  await screen.findByText("Provider 已保存；下次发送时生效。");
+  expect(invoke).toHaveBeenLastCalledWith("provider_request", {
+    request: {
+      method: "save_provider",
+      provider: expect.objectContaining({ models_1m: [], credential: null }),
+    },
+  });
+});
+it("keeps explicit 1m IDs intact and clears Claude-specific support when changing protocols", async () => {
+  invoke.mockResolvedValue({ kind: "providers", providers: [], bindings: [] });
+  render(<ProviderSettings active onBusy={() => {}} />);
+  fireEvent.click(await screen.findByRole("button", { name: "添加 Provider" }));
+  fireEvent.change(screen.getByLabelText("名称"), {
+    target: { value: "Context modes" },
+  });
+  fireEvent.change(screen.getByLabelText("Base URL"), {
+    target: { value: "https://example.test" },
+  });
+  fireEvent.click(screen.getByRole("button", { name: "添加模型" }));
+  fireEvent.change(screen.getByLabelText("模型 ID 1"), {
+    target: { value: "custom[1M]" },
+  });
+  const check = screen.getByRole("checkbox", {
+    name: "模型 1 支持 1M 上下文",
+  }) as HTMLInputElement;
+  expect(check.checked).toBe(true);
+  expect(check.disabled).toBe(true);
+  fireEvent.change(screen.getByLabelText("模型 ID 1"), {
+    target: { value: "custom" },
+  });
+  fireEvent.click(check);
+  fireEvent.click(screen.getByRole("combobox", { name: "接口协议" }));
+  fireEvent.click(
+    screen.getByRole("option", { name: "OpenAI Chat Completions" }),
+  );
+  expect(screen.queryByRole("checkbox")).toBeNull();
+  fireEvent.click(screen.getByRole("button", { name: "保存 Provider" }));
+  await waitFor(() =>
+    expect(invoke).toHaveBeenCalledWith("provider_request", {
+      request: {
+        method: "save_provider",
+        provider: expect.objectContaining({
+          model: "custom",
+          models_1m: [],
+          protocol: "openai_chat",
+        }),
+      },
+    }),
+  );
+});
 it("manages App Providers while every Server is unavailable", async () => {
   invoke.mockImplementation(async (command, { request }) => {
     if (command !== "provider_request") throw new Error("Server unavailable");

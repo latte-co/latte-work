@@ -71,6 +71,20 @@ finish and terminals close. Restarting only the desktop leaves them running.
 Wire protocol changes: edit latte-work-protocol then run `make types` and
 `make fmt`. Desktop presentation must not import or reproduce Claude wire types.
 
+Provider metadata optionally declares `models_1m` for existing base model IDs.
+Missing/empty declarations preserve old catalogs and serialized request fingerprints.
+The Claude adapter's model catalog translates declared capabilities into Default/1M
+variants with explicit 200K/1M windows, using an unchanged model ID or that ID with `[1m]`.
+For these modes, private settings and the child environment explicitly set
+`CLAUDE_CODE_DISABLE_1M_CONTEXT` and `CLAUDE_CODE_MAX_CONTEXT_TOKENS`, so inherited
+settings cannot silently override the selected window. Undeclared models keep native behavior.
+Existing model selection,
+queue identity and per-turn local/SSH Provider snapshots carry the selection.
+The Host validates the current declaration before admitting a generated ID.
+Traex ignores this Claude-specific declaration and keeps its native backend modes.
+Configuration management stays offline; execution hosts need the updated Server
+to offer generated modes. No protocol version bump or automatic task replay is added.
+
 Archiving an idle task first closes any retained native session, reaps its owned
 process group, pauses pending messages and ends background subagents. Only a
 confirmed close allows the archive flag to be saved; failures keep it unarchived.

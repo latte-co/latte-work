@@ -462,7 +462,7 @@ export function Sidebar({
               >
                 <title>等待确认</title>
               </CirclePause>
-            ) : s.status === "failed" ? (
+            ) : s.status === "failed" && s.unread ? (
               <CircleAlert
                 size={14}
                 className="failure"

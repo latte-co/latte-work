@@ -1,5 +1,5 @@
 use anyhow::{Result, bail};
-use latte_work_protocol::{Provider, ProviderAuth};
+use latte_work_protocol::{Provider, ProviderAuth, ProviderProtocol};
 
 pub fn validate_provider(provider: &Provider, credential: &str) -> Result<()> {
     if provider.id.is_empty()
@@ -46,6 +46,19 @@ pub fn validate_provider(provider: &Provider, credential: &str) -> Result<()> {
         })
     {
         bail!("模型显示名称最多 80 个字符，映射数量最多 257 个");
+    }
+    let mut seen = std::collections::HashSet::new();
+    if provider.models_1m.len() > 257
+        || (!provider.models_1m.is_empty()
+            && provider.protocol != ProviderProtocol::AnthropicMessages)
+        || provider.models_1m.iter().any(|model| {
+            model.len() > 252
+                || model.to_ascii_lowercase().ends_with("[1m]")
+                || (model != &provider.model && !provider.models.contains(model))
+                || !seen.insert(model)
+        })
+    {
+        bail!("1M 支持须关联 Anthropic 接口中已有的模型，且模型 ID 加后缀后不超过 256 字节");
     }
     if provider.auth == ProviderAuth::None {
         if !credential.is_empty() {

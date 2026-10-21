@@ -701,6 +701,7 @@ async fn provider_catalog_local_binding_and_remote_sync_use_host_protocol() {
     }
     let mut c = local.client().await;
     let draft = ProviderDraft {
+        models_1m: Default::default(),
         id: None,
         name: "Central".into(),
         protocol: ProviderProtocol::AnthropicMessages,
@@ -809,6 +810,7 @@ async fn provider_catalog_local_binding_and_remote_sync_use_host_protocol() {
         ProviderProtocol::OpenaiResponses,
     ] {
         let provider = ProviderDraft {
+            models_1m: Default::default(),
             id: None,
             name: "Other".into(),
             protocol,
@@ -968,6 +970,7 @@ async fn models_select_per_turn_validate_and_persist_without_changing_provider()
         &mut c,
         Request::SaveProvider {
             provider: ProviderDraft {
+                models_1m: Default::default(),
                 id: None,
                 name: "Model catalog".into(),
                 protocol: ProviderProtocol::AnthropicMessages,
@@ -1624,6 +1627,7 @@ async fn native_model_names_are_host_project_scoped_and_do_not_override_provider
         &mut c,
         Request::SaveProvider {
             provider: ProviderDraft {
+                models_1m: Default::default(),
                 id: None,
                 name: "Bound".into(),
                 protocol: ProviderProtocol::AnthropicMessages,
@@ -1654,6 +1658,182 @@ async fn native_model_names_are_host_project_scoped_and_do_not_override_provider
 }
 
 #[tokio::test]
+async fn provider_1m_selection_survives_reopen_and_rejects_removed_capabilities_on_each_host() {
+    use latte_work_protocol::{ProviderSnapshot, TurnProvider};
+    let snapshot: ProviderSnapshot = serde_json::from_value(serde_json::json!({
+        "provider":{
+            "id":"context-provider","name":"Context modes","protocol":"anthropic_messages",
+            "base_url":"https://example.test","model":"gateway/model","models":["small"],
+            "models_1m":["gateway/model"],"auth":"api_key","has_credential":true,"revision":"r1"
+        },
+        "credential":"fixture-private-key"
+    }))
+    .unwrap();
+    let inherited = [
+        ("CLAUDE_CODE_DISABLE_1M_CONTEXT", std::ffi::OsStr::new("1")),
+        (
+            "CLAUDE_CODE_MAX_CONTEXT_TOKENS",
+            std::ffi::OsStr::new("250000"),
+        ),
+    ];
+    let hosts = [
+        Host::start_with_environment(&inherited).await,
+        Host::start_with_environment(&inherited).await,
+    ];
+    for host in &hosts {
+        let root = tempfile::tempdir().unwrap();
+        let mut client = host.client().await;
+        let id = session(&mut client, root.path()).await;
+        let Response::Events { session: saved, .. } = ask(
+            &mut client,
+            Request::Poll {
+                session_id: id.clone(),
+                after: 0.0,
+            },
+        )
+        .await
+        else {
+            panic!()
+        };
+        let Response::Models {
+            models,
+            model_variants: Some(variants),
+            ..
+        } = ask(
+            &mut client,
+            Request::ModelsForProvider {
+                agent: "claude".into(),
+                model: Some("gateway/model[1m]".into()),
+                project_id: Some(saved.project_id),
+                provider: Some(snapshot.provider.clone()),
+            },
+        )
+        .await
+        else {
+            panic!()
+        };
+        assert!(models.contains(&"gateway/model[1m]".into()));
+        assert_eq!(variants["gateway/model"][0].label, "默认");
+        assert_eq!(variants["gateway/model"][0].context_window, Some(200_000.0));
+        let send =
+            |request_id: &str, model: &str, snapshot: ProviderSnapshot| Request::SendQueued {
+                session_id: id.clone(),
+                request_id: request_id.into(),
+                text: "context-mode".into(),
+                model: Some(model.into()),
+                effort: None,
+                permission_mode: None,
+                provider: Some(TurnProvider::Snapshot(Box::new(snapshot))),
+            };
+        assert!(matches!(
+            ask(
+                &mut client,
+                send("standard", "gateway/model", snapshot.clone())
+            )
+            .await,
+            Response::Accepted { duplicate: false }
+        ));
+        let events = wait(&mut client, &id, Status::Completed).await;
+        assert!(events.iter().any(
+            |e| matches!(&e.event, EventKind::Text { text } if text == "fresh:gateway/model:200000:1")
+        ));
+        assert!(matches!(
+            ask(
+                &mut client,
+                send("extended", "gateway/model[1m]", snapshot.clone())
+            )
+            .await,
+            Response::Accepted { duplicate: false }
+        ));
+        let events = wait(&mut client, &id, Status::Completed).await;
+        assert!(events.iter().any(
+            |e| matches!(&e.event, EventKind::Text { text } if text == "resumed:gateway/model[1m]:1000000:0")
+        ));
+        assert!(matches!(
+            ask(
+                &mut client,
+                Request::CloseAgentSession {
+                    session_id: id.clone(),
+                    only_if_idle: Some(true)
+                }
+            )
+            .await,
+            Response::Ok
+        ));
+        assert!(matches!(
+            ask(
+                &mut client,
+                Request::OpenAgentSession {
+                    session_id: id.clone(),
+                    provider: Some(TurnProvider::Snapshot(Box::new(snapshot.clone()))),
+                }
+            )
+            .await,
+            Response::Ok
+        ));
+        let Response::Events {
+            session: saved,
+            events: before,
+            ..
+        } = ask(
+            &mut client,
+            Request::Poll {
+                session_id: id.clone(),
+                after: 0.0,
+            },
+        )
+        .await
+        else {
+            panic!()
+        };
+        assert_eq!(saved.model.as_deref(), Some("gateway/model[1m]"));
+        let mut removed = snapshot.clone();
+        removed.provider.models_1m.clear();
+        removed.provider.revision = "r2".into();
+        assert!(matches!(
+            ask(
+                &mut client,
+                send("unsupported", "gateway/model[1m]", removed.clone())
+            )
+            .await,
+            Response::Error { .. }
+        ));
+        let Response::Events { events: after, .. } = ask(
+            &mut client,
+            Request::Poll {
+                session_id: id.clone(),
+                after: 0.0,
+            },
+        )
+        .await
+        else {
+            panic!()
+        };
+        assert_eq!(
+            after.len(),
+            before.len(),
+            "rejected mode must not replay or admit a prompt"
+        );
+        assert!(
+            matches!(ask(&mut client, Request::MessageQueue { session_id: id.clone() }).await,
+            Response::MessageQueue { entries, .. } if entries.is_empty())
+        );
+        assert!(matches!(
+            ask(&mut client, send("default", "gateway/model", removed)).await,
+            Response::Accepted { duplicate: false }
+        ));
+        let events = wait(&mut client, &id, Status::Completed).await;
+        assert!(events.iter().any(
+            |e| matches!(&e.event, EventKind::Text { text } if text == "resumed:gateway/model:250000:1")
+        ));
+        assert!(
+            !host.directory.path().join("providers.json").exists(),
+            "execution snapshots are not saved on a host"
+        );
+    }
+}
+
+#[tokio::test]
 async fn remote_turns_use_latest_local_provider_without_persisting_snapshots() {
     use latte_work_client::request_with_provider;
     use latte_work_protocol::{ProviderAuth, ProviderDraft, ProviderProtocol, TurnProvider};
@@ -1663,6 +1843,7 @@ async fn remote_turns_use_latest_local_provider_without_persisting_snapshots() {
     let local = Mutex::new(local_host.client().await);
     let remote = Mutex::new(remote_host.client().await);
     let mut draft = ProviderDraft {
+        models_1m: Default::default(),
         id: None,
         name: "Per turn".into(),
         protocol: ProviderProtocol::AnthropicMessages,
@@ -1790,7 +1971,7 @@ async fn remote_turns_use_latest_local_provider_without_persisting_snapshots() {
     ));
     let original = Request::Send {
         permission_mode: Some("plan".into()),
-        provider: Some(TurnProvider::Snapshot(snapshot.clone())),
+        provider: Some(TurnProvider::Snapshot(Box::new(snapshot.clone()))),
         session_id: sid.clone(),
         request_id: "first-turn".into(),
         text: "provider".into(),
@@ -1809,7 +1990,7 @@ async fn remote_turns_use_latest_local_provider_without_persisting_snapshots() {
             .await
             .request(Request::Send {
                 permission_mode: Some("plan".into()),
-                provider: Some(TurnProvider::Snapshot(changed)),
+                provider: Some(TurnProvider::Snapshot(Box::new(changed))),
                 session_id: sid.clone(),
                 request_id: "first-turn".into(),
                 text: "provider".into(),
@@ -1890,6 +2071,7 @@ async fn remote_turns_use_latest_local_provider_without_persisting_snapshots() {
         .await
         .request(Request::SaveProvider {
             provider: ProviderDraft {
+                models_1m: Default::default(),
                 id: None,
                 name: "Legacy remote".into(),
                 protocol: ProviderProtocol::AnthropicMessages,
@@ -3347,6 +3529,7 @@ async fn app_providers_and_native_defaults_only_contact_the_selected_host() {
     let first = Host::start().await;
     let second = Host::start().await;
     let draft = ProviderDraft {
+        models_1m: Default::default(),
         id: None,
         name: "App-only".into(),
         protocol: ProviderProtocol::AnthropicMessages,
@@ -4109,7 +4292,7 @@ async fn opening_old_provider_history_resolves_model_without_replaying_prompt() 
             &mut client,
             Request::OpenAgentSession {
                 session_id: id.clone(),
-                provider: Some(TurnProvider::Snapshot(snapshot))
+                provider: Some(TurnProvider::Snapshot(Box::new(snapshot)))
             }
         )
         .await,
@@ -6319,6 +6502,7 @@ async fn message_queue_credentials_stay_volatile_and_resume_checks_configuration
     queue_send(&mut c, &id, "secret-head", "queue-slow").await;
     let snapshot = ProviderSnapshot {
         provider: Provider {
+            models_1m: Default::default(),
             id: "queue-api".into(),
             name: "Queue API".into(),
             protocol: ProviderProtocol::AnthropicMessages,
@@ -6336,7 +6520,7 @@ async fn message_queue_credentials_stay_volatile_and_resume_checks_configuration
         session_id: id.clone(),
         request_id: "secret-next".into(),
         text: "provider".into(),
-        provider: Some(TurnProvider::Snapshot(snapshot.clone())),
+        provider: Some(TurnProvider::Snapshot(Box::new(snapshot.clone()))),
         model: None,
         effort: None,
         permission_mode: None,
@@ -6392,7 +6576,7 @@ async fn message_queue_credentials_stay_volatile_and_resume_checks_configuration
             &mut c,
             Request::ResumeMessageQueue {
                 session_id: id.clone(),
-                provider: Some(TurnProvider::Snapshot(rotated))
+                provider: Some(TurnProvider::Snapshot(Box::new(rotated)))
             }
         )
         .await,

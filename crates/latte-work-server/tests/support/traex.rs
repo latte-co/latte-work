@@ -396,7 +396,26 @@ async fn traex_discovery_open_stream_reconnect_resume_and_queue_use_the_selected
         .await,
         Response::MessageQueue { .. }
     ));
-    pending_entry(&mut client, &id, "queued", 1).await;
+    let restored = pending_entry(&mut client, &id, "queued", 1).await;
+    assert_eq!(restored.text, "reject-steer");
+    // Check rejection before Cancel can independently pause the queue.
+    let Response::MessageQueue { paused, reason, .. } = ask(
+        &mut client,
+        Request::MessageQueue {
+            session_id: id.clone(),
+        },
+    )
+    .await
+    else {
+        panic!("queue after native rejection")
+    };
+    assert!(paused);
+    assert_eq!(
+        reason.as_deref(),
+        Some(
+            "消息未被 Agent 接收，已退回队列：Traex 未接收消息：current turn cannot accept steering"
+        )
+    );
     assert!(
         !root.path().join("traex-interrupted").exists(),
         "rejecting one input must not stop the active turn"
@@ -834,10 +853,10 @@ async fn traex_provider_snapshots_drive_catalog_resume_redaction_and_cli_restora
         assert_eq!(provider.as_deref(), Some("Fixture"));
         assert!(effort_levels.is_empty());
         assert_eq!(model_labels["provider-model"], "Friendly");
-        let snapshot = TurnProvider::Snapshot(ProviderSnapshot {
+        let snapshot = TurnProvider::Snapshot(Box::new(ProviderSnapshot {
             provider: metadata,
             credential: "traex-provider-test-secret".into(),
-        });
+        }));
         let request = format!("provider-{index}");
         let send = |effort, provider| Request::SendQueued {
             session_id: id.clone(),

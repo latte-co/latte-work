@@ -74,7 +74,9 @@ Provider 定义及凭据仍完整迁移。无旧配置时创建空 App 配置，
 遗留该临时文件。Traex 的凭据只注入专用子进程环境变量，不进入命令行参数、原生
 JSON-RPC 或 rollout；原生配置文件保持不变。
 
-此改动复用已有的 `ModelsForProvider` / `TurnProvider` 协议，不新增 wire 字段。
+每轮配置复用 `ModelsForProvider` / `TurnProvider` 协议。Provider 的可选 `models_1m`
+字段列出用户声明支持 Claude Code 1M 模式的基础模型 ID；旧配置缺省为空，空列表不序列化，
+保持既有请求配置摘要不变。
 目标 Server 需支持显式 CLI / Snapshot；旧版接口仍供独立 Server 客户端使用，App 不再调用。
 升级 Server 前仍需等任务结束并关闭终端；App 配置管理无需升级或启动 Server。
 
@@ -93,7 +95,7 @@ python3 scripts/smoke-providers.py --binary target/debug/latte-work-server --cla
 
 ## 会话模型选择
 
-在 Provider 中填写默认模型 ID，以及可选模型 ID（每行一个，最多 64 个）。默认模型自动包含在列表中。
+在 Provider 中填写模型 ID 和可选显示名称（最多 256 个模型），默认模型自动包含在列表中。
 输入框底部的模型菜单读取 App 为该项目主机、Agent 选择的 Provider，不混用其他 Provider 的模型。
 关闭设置后重新读取最新列表；发送时仍由远端根据本轮快照校验。
 
@@ -105,6 +107,18 @@ python3 scripts/smoke-providers.py --binary target/debug/latte-work-server --cla
 未关联 Provider 时提供 Claude 的模型别名，实际可用性仍由 CLI 和账号决定。启动传参依据
 [Claude Code 官方模型配置文档](https://code.claude.com/docs/en/model-config)，通过 `--model` 选择，
 不修改用户的 CLI 设置文件。
+
+Anthropic Messages Provider 的每个模型后提供「支持 1M」勾选框，仅声明模型服务的实际能力，
+不改变 Provider 默认模型或其他会话。关联 Claude Code 后，勾选的模型提供「默认 / 1M」
+二级选项：默认保留配置的 ID，并明确将 Claude Code 窗口设为 200K；
+1M 选择值为原 ID 加 `[1m]`，窗口设为 1M。Server 在本轮私有 settings 和子进程环境中同时设置
+`CLAUDE_CODE_DISABLE_1M_CONTEXT` 与 `CLAUDE_CODE_MAX_CONTEXT_TOKENS`，
+避免原生默认 1M 或继承的环境设置与菜单选择冲突；未声明的模型沿用既有配置。
+已显式配置带 `[1m]`（大小写均可）的 ID 保持原样，不重复追加后缀。
+目标 Server 校验当前 Provider 的声明后才接受生成的 1M ID；取消声明后，旧 1M 选择不能继续
+发送或从队列重放。模式沿用既有模型持久化、恢复、请求去重与逐轮 SSH 快照，不写 Agent 原生设置。
+Traex 忽略这项 Claude 声明，不合成后缀，仍使用其原生 Standard / Max 模式。
+此功能需要更新执行主机 Server；旧 Server 不展示生成的选项，并拒绝不在旧列表中的生成 ID。
 
 ## 思考强度
 

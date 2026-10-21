@@ -17,10 +17,22 @@ use std::{
 
 pub const MODEL_ALIASES: &[&str] = &["sonnet", "opus", "haiku", "fable"];
 
+#[cfg(test)]
+#[test]
+fn context_suffix_does_not_change_effort_capabilities() {
+    for model in ["haiku", "sonnet", "claude-opus-4-6", "gateway/model"] {
+        assert_eq!(
+            effort_levels(Some(model)),
+            effort_levels(Some(&format!("{model}[1m]")))
+        );
+    }
+}
+
 /// Claude CLI/model capability policy, independent of other agent adapters.
 pub fn effort_levels(model: Option<&str>) -> &'static [latte_work_protocol::Effort] {
     use latte_work_protocol::Effort::{High, Low, Max, Medium, Xhigh};
     let model = model.unwrap_or_default().to_ascii_lowercase();
+    let model = model.strip_suffix("[1m]").unwrap_or(&model);
     // CLI aliases can be mapped by a host or gateway. Full known model IDs allow
     // tighter choices; unknown custom IDs are delegated to the CLI/provider.
     if model == "haiku" || model.contains("claude-haiku-") {
@@ -453,6 +465,15 @@ impl AgentAdapter for Claude {
             });
             if metadata.protocol != latte_work_protocol::ProviderProtocol::AnthropicMessages {
                 bail!("Claude Code 只支持 Anthropic Messages Provider");
+            }
+            let base = model.strip_suffix("[1m]").unwrap_or(model);
+            if metadata.models_1m.iter().any(|id| id == base) {
+                let extended = base != model;
+                // Native 1M models also need an explicit hold for the 200K mode.
+                // Override both inherited env and settings for this child only.
+                env["CLAUDE_CODE_DISABLE_1M_CONTEXT"] = json!(if extended { "0" } else { "1" });
+                env["CLAUDE_CODE_MAX_CONTEXT_TOKENS"] =
+                    json!(if extended { "1000000" } else { "200000" });
             }
             let (key, credential) = match metadata.auth {
                 latte_work_protocol::ProviderAuth::Bearer => {
@@ -3077,6 +3098,7 @@ mod tests {
         );
         config.provider = Some(ResolvedProvider {
             metadata: Provider {
+                models_1m: Default::default(),
                 id: "one".into(),
                 name: "Team".into(),
                 protocol: ProviderProtocol::AnthropicMessages,
@@ -3138,6 +3160,59 @@ mod tests {
         assert!(!args.iter().any(|a| a.contains("only-in-private-settings")));
         drop(prepared);
         assert!(!path.exists());
+    }
+    #[test]
+    fn declared_context_modes_set_matching_private_settings_and_child_environment() {
+        use crate::providers::ResolvedProvider;
+        let directory = tempfile::tempdir().unwrap();
+        for base in ["gateway/model", "claude-opus-4-8"] {
+            for (model, disabled, tokens) in [
+                (None, Some("1"), Some("200000")),
+                (Some(base.to_owned()), Some("1"), Some("200000")),
+                (Some(format!("{base}[1m]")), Some("0"), Some("1000000")),
+                (Some("small".into()), None, None),
+            ] {
+                let config = LaunchConfig {
+                    traex_model: None,
+                    settings_dir: directory.path().into(),
+                    model,
+                    effort: None,
+                    permission_mode: None,
+                    provider: Some(ResolvedProvider {
+                        metadata: serde_json::from_value(json!({
+                            "id":"p","name":"Context modes","protocol":"anthropic_messages",
+                            "base_url":"https://example.test","model":base,"models":["small"],
+                            "models_1m":[base],"auth":"none","has_credential":false
+                        }))
+                        .unwrap(),
+                        credential: String::new(),
+                    }),
+                };
+                let prepared = Claude::default()
+                    .command("claude", "/tmp", None, &config)
+                    .unwrap();
+                let settings: Value = serde_json::from_slice(
+                    &std::fs::read(prepared._settings.as_ref().unwrap().path()).unwrap(),
+                )
+                .unwrap();
+                for (key, expected) in [
+                    ("CLAUDE_CODE_DISABLE_1M_CONTEXT", disabled),
+                    ("CLAUDE_CODE_MAX_CONTEXT_TOKENS", tokens),
+                ] {
+                    assert_eq!(settings["env"][key].as_str(), expected);
+                    if let Some(expected) = expected {
+                        let value = prepared
+                            .command
+                            .as_std()
+                            .get_envs()
+                            .find(|(name, _)| *name == key)
+                            .and_then(|(_, value)| value)
+                            .and_then(|value| value.to_str());
+                        assert_eq!(value, Some(expected));
+                    }
+                }
+            }
+        }
     }
     fn message(adapter: &mut dyn AgentAdapter, value: Value) -> Result<Vec<Action>> {
         adapter.advance(Input::Message(&value.to_string()))
