@@ -103,6 +103,41 @@ async fn until(
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
 }
+async fn until_text(client: &mut Client, id: &str, text: &str) -> Vec<latte_work_protocol::Event> {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let Response::Events {
+            session, events, ..
+        } = ask(
+            client,
+            Request::Poll {
+                session_id: id.into(),
+                after: 0.0,
+            },
+        )
+        .await
+        else {
+            panic!("poll")
+        };
+        if events
+            .iter()
+            .any(|e| matches!(&e.event, EventKind::Text { text: seen } if seen == text))
+        {
+            return events;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "expected text {text:?}, got {:?}: {events:?}",
+            session.status
+        );
+        assert!(
+            session.status.active(),
+            "the session ended before text {text:?} arrived: {:?}",
+            session.status
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
 #[tokio::test]
 async fn traex_backgrounded_commands_keep_native_process_and_confirm_only_explicit_exits() {
     for failed in [false, true] {
@@ -265,6 +300,106 @@ async fn traex_background_work_alive_at_turn_start_keeps_the_next_turn_undo_fenc
         "written by background command\n",
         "undoing the later turn must not revert background work"
     );
+}
+#[tokio::test]
+async fn traex_background_late_writes_survive_abnormal_turn_endings() {
+    for eof in [false, true] {
+        let host = Host::start().await;
+        let root = tempfile::tempdir().unwrap();
+        let project = root.path().canonicalize().unwrap();
+        assert!(
+            Command::new("git")
+                .current_dir(&project)
+                .args(["init", "-q"])
+                .status()
+                .unwrap()
+                .success()
+        );
+        std::fs::write(project.join(".gitignore"), "fixture-agent-pid\n").unwrap();
+        let mut client = host.client().await;
+        let id = session(&mut client, &project).await;
+        // Turn 1 backgrounds a command and ends while the work is still alive.
+        send(&mut client, &id, "background", "background").await;
+        until(&mut client, &id, Status::Completed).await;
+        // Turn 2 starts while that work is alive; the background command then
+        // writes a file and exits during this turn, and the turn itself ends
+        // abnormally (agent EOF or a forced session cancel).
+        send(
+            &mut client,
+            &id,
+            "turn-2",
+            if eof {
+                "background-write-eof"
+            } else {
+                "background-write-hold"
+            },
+        )
+        .await;
+        if eof {
+            let (_, events) = until(&mut client, &id, Status::Failed).await;
+            assert!(
+                events.iter().any(
+                    |e| matches!(&e.event, EventKind::Text { text } if text == "BACKGROUND_LATE")
+                ),
+                "the late write must land before the abnormal ending"
+            );
+        } else {
+            // Let the background write land first: the forced close kills the
+            // native process, so waiting afterwards would race its final
+            // output. A forced close (only_if_idle unset) must reach the
+            // runtime even while the turn is still active; a plain cancel
+            // would only interrupt through the normal interrupt path.
+            until_text(&mut client, &id, "BACKGROUND_LATE").await;
+            assert!(matches!(
+                ask(
+                    &mut client,
+                    Request::CloseAgentSession {
+                        session_id: id.clone(),
+                        only_if_idle: None,
+                    }
+                )
+                .await,
+                Response::Ok
+            ));
+            until(&mut client, &id, Status::Stopped).await;
+        }
+        let Response::TurnChanges { changes } = ask(
+            &mut client,
+            Request::TurnChangeSummary {
+                path: None,
+                offset: None,
+                session_id: id.clone(),
+                request_id: "turn-2".into(),
+            },
+        )
+        .await
+        else {
+            panic!("turn changes must survive an abnormal ending")
+        };
+        assert!(
+            changes.background_pending,
+            "a turn that started with live background work must stay undo-fenced across abnormal endings"
+        );
+        assert!(
+            matches!(
+                ask(
+                    &mut client,
+                    Request::UndoTurnChanges {
+                        session_id: id.clone(),
+                        request_id: "turn-2".into(),
+                    }
+                )
+                .await,
+                Response::Error { .. }
+            ),
+            "undoing the aborted turn must be rejected"
+        );
+        assert_eq!(
+            std::fs::read_to_string(project.join("background-late.txt")).unwrap(),
+            "written by background command\n",
+            "undoing the aborted turn must not revert background work"
+        );
+    }
 }
 #[tokio::test]
 async fn traex_backgrounded_commands_stay_unconfirmed_after_stop_or_eof() {

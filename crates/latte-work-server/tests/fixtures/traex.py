@@ -116,6 +116,14 @@ for line in sys.stdin:
             text('BACKGROUND_WAITING')
             if prompt == 'background':
                 complete()
+        elif prompt in ('background-write-hold', 'background-write-eof'):
+            pathlib.Path('background-late.txt').write_text('written by background command\n')
+            notify('item/completed', {'item': {'id': 'background-poll', 'type': 'commandExecution',
+                    'command': '', 'cwd': os.getcwd(), 'source': 'unifiedExecInteraction', 'status': 'completed',
+                    'processId': '47462', 'exitCode': 0, 'aggregatedOutput': 'final regression output'}})
+            text('BACKGROUND_LATE')
+            if prompt == 'background-write-eof':
+                sys.exit(0)
         elif prompt == 'background-write':
             pathlib.Path('background-late.txt').write_text('written by background command\n')
             notify('item/completed', {'item': {'id': 'background-poll', 'type': 'commandExecution',

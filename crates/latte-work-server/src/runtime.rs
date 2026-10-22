@@ -1101,6 +1101,9 @@ async fn accept_turn(
     }
     .await;
     if let Err(error) = result {
+        let background_pending = process
+            .as_ref()
+            .is_some_and(|p| p.turn_active && p.background_at_start);
         let message = if let Some(p) = process.as_mut() {
             let message = p.config.redact(&error.to_string());
             p.close().await;
@@ -1109,7 +1112,7 @@ async fn accept_turn(
             config.redact(&error.to_string())
         };
         *process = None;
-        finish_turn(database, &session.id, path, true, false).await?;
+        finish_turn(database, &session.id, path, true, background_pending).await?;
         db(database, |s| {
             s.end_subagents(&session.id, latte_work_protocol::SubagentStatus::Unknown)?;
             s.state(&session.id, Status::Failed, Some(message))
@@ -1255,11 +1258,12 @@ async fn actor(
                 Some(Control::Interrupt { reply }) => async {
                     if let Some(pending) = immediate.take() { let _ = pending.reply.send(Err("发送已取消，消息保留在队列".into())); }
                     if !forwarded.is_empty() {
+                        let background_pending=process.as_ref().is_some_and(|p|p.turn_active&&p.background_at_start);
                         if let Some(p)=process.as_mut(){p.close().await;}
                         process=None;
                         forwarded.clear();
                         db(&database,|d|{d.uncertain_forwarded(&session.id)?;d.end_subagents(&session.id,latte_work_protocol::SubagentStatus::Unknown)?;d.pause_queue(&session.id,Some("当前执行已停止，队列已暂停"))})?;
-                        finish_turn(&database,&session.id,&path,true,false).await?;
+                        finish_turn(&database,&session.id,&path,true,background_pending).await?;
                         db(&database,|d|d.state(&session.id,Status::Stopped,Some("已停止；已发送消息的处理状态请核对 Agent 记录".into())))?;
                         let _=reply.send(Ok(()));
                         Ok(())
@@ -1372,11 +1376,12 @@ async fn actor(
                         Ok((turn,restore_reason)) => {
                             immediate=Some(Immediate {turn,restore_reason,reply,deadline:tokio::time::Instant::now()+Duration::from_secs(8)});
                             if interrupt && !forwarded.is_empty() {
+                                let background_pending=process.as_ref().is_some_and(|p|p.turn_active&&p.background_at_start);
                                 if let Some(p)=process.as_mut() {p.close().await;}
                                 process=None;
                                 forwarded.clear();
                                 db(&database,|d|{d.uncertain_forwarded(&session.id)?;d.end_subagents(&session.id,latte_work_protocol::SubagentStatus::Unknown)})?;
-                                finish_turn(&database,&session.id,&path,true,false).await?;
+                                finish_turn(&database,&session.id,&path,true,background_pending).await?;
                                 db(&database,|d|d.state(&session.id,Status::Stopped,Some("已停止当前任务".into())))?;
                                 Ok(())
                             } else if let Some(p)=process.as_mut().filter(|p|p.turn_active && interrupt) {
@@ -1425,11 +1430,16 @@ async fn actor(
                     if let Some(pending) = immediate.take() {
                         let _ = pending.reply.send(Err("发送已取消，消息保留在队列".into()));
                     }
+                    let background_pending = process
+                        .as_ref()
+                        .is_some_and(|p| p.turn_active && p.background_at_start);
                     if let Some(p) = process.as_mut() {
                         p.close().await;
                     }
                     process = None;
-                    if let Err(error) = finish_turn(&database, &session.id, &path, true, false).await {
+                    if let Err(error) =
+                        finish_turn(&database, &session.id, &path, true, background_pending).await
+                    {
                         eprintln!("cannot freeze stopped turn: {error}");
                     }
                     // Preserve completed history when merely closing an idle runtime.
@@ -1564,6 +1574,9 @@ async fn actor(
                 .as_ref()
                 .filter(|p| p.state.ready)
                 .map(|p| p.config.clone());
+            let background_pending = process
+                .as_ref()
+                .is_some_and(|p| p.turn_active && p.background_at_start);
             let message = if let Some(p) = process.as_mut() {
                 let text = p.config.redact(&error.to_string());
                 if let Some(reply) = p.stop_reply.take() {
@@ -1575,7 +1588,9 @@ async fn actor(
                 error.to_string()
             };
             process = None;
-            if let Err(error) = finish_turn(&database, &session.id, &path, true, false).await {
+            if let Err(error) =
+                finish_turn(&database, &session.id, &path, true, background_pending).await
+            {
                 eprintln!("cannot freeze failed turn: {error}");
             }
             if let Err(e) = db(&database, |s| {
