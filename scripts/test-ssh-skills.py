@@ -21,7 +21,9 @@ def main():
     sshd = shutil.which('sshd') or '/usr/sbin/sshd'
     if not ssh or not keygen or not Path(sshd).is_file():
         raise RuntimeError('OpenSSH client and server are required')
-    with tempfile.TemporaryDirectory(prefix='latte-ssh-') as temporary:
+    # StrictModes checks every ancestor of authorized_keys; a shared /tmp is
+    # rejected on Linux even though this invocation's child directory is private.
+    with tempfile.TemporaryDirectory(prefix='latte-ssh-', dir=Path.home()) as temporary:
         root = Path(temporary)
         for name in ('host', 'identity', 'wrong-host'):
             subprocess.run([keygen, '-q', '-t', 'ed25519', '-N', '', '-f', str(root / name)], check=True, timeout=10)
