@@ -8,12 +8,12 @@ const inertOwners = new Map<
   { count: number; previous: boolean }
 >();
 const canFocus = (item: HTMLElement) =>
-  item.tabIndex >= 0 &&
   !item.matches(":disabled") &&
   !item.closest("[hidden], [inert]") &&
   getComputedStyle(item).display !== "none" &&
   getComputedStyle(item).visibility !== "hidden" &&
   (!item.closest("details:not([open])") || item.tagName === "SUMMARY");
+const tabbable = (item: HTMLElement) => item.tabIndex >= 0 && canFocus(item);
 const focusable =
   "button, input, textarea, select, a[href], summary, [tabindex]";
 /** Native modal behavior shared by every dialog. Nested dialogs suspend their parent. */
@@ -50,7 +50,7 @@ export function Modal(props: ComponentProps<"section">) {
     }
     const candidates = () =>
       Array.from(element.querySelectorAll<HTMLElement>(focusable)).filter(
-        canFocus,
+        tabbable,
       );
     if (!element.contains(document.activeElement))
       (candidates()[0] ?? element).focus();
@@ -112,9 +112,9 @@ export function Modal(props: ComponentProps<"section">) {
               continue;
             const candidate = Array.from(
               region.querySelectorAll<HTMLElement>(focusable),
-            ).find(canFocus);
-            if (candidate) {
-              candidate.focus();
+            ).find(tabbable);
+            if (candidate || region === parent) {
+              (candidate ?? region).focus();
               return;
             }
           }

@@ -189,3 +189,70 @@ it("restores focus to the nearest available control when the trigger is removed"
   await Promise.resolve();
   expect(document.activeElement).toBe(screen.getByText("列表刷新"));
 });
+
+it("restores a programmatically focused trigger outside the Tab sequence", () => {
+  function NegativeTabTrigger() {
+    const [open, setOpen] = useState(false);
+    return (
+      <main>
+        <button
+          tabIndex={-1}
+          onClick={(event) => {
+            event.currentTarget.focus();
+            setOpen(true);
+          }}
+        >
+          面板操作
+        </button>
+        {open && (
+          <Modal aria-label="操作">
+            <button onClick={() => setOpen(false)}>返回面板</button>
+          </Modal>
+        )}
+      </main>
+    );
+  }
+  render(<NegativeTabTrigger />);
+  fireEvent.click(screen.getByText("面板操作"));
+  fireEvent.click(screen.getByText("返回面板"));
+  expect(document.activeElement).toBe(screen.getByText("面板操作"));
+});
+it("falls back to the parent dialog itself when its last control disappears", async () => {
+  function EmptyParent() {
+    const [inner, setInner] = useState(false);
+    const [removed, setRemoved] = useState(false);
+    return (
+      <Modal aria-label="父弹窗">
+        {!removed && (
+          <button
+            onClick={(event) => {
+              event.currentTarget.focus();
+              setInner(true);
+            }}
+          >
+            子弹窗
+          </button>
+        )}
+        {inner && (
+          <Modal aria-label="子弹窗">
+            <button
+              onClick={() => {
+                setRemoved(true);
+                setInner(false);
+              }}
+            >
+              完成
+            </button>
+          </Modal>
+        )}
+      </Modal>
+    );
+  }
+  render(<EmptyParent />);
+  fireEvent.click(screen.getByText("子弹窗"));
+  fireEvent.click(screen.getByText("完成"));
+  await Promise.resolve();
+  expect(document.activeElement).toBe(
+    screen.getByRole("dialog", { name: "父弹窗" }),
+  );
+});
