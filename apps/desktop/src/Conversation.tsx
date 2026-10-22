@@ -929,13 +929,6 @@ export function Conversation({
                   !!active || sending || !projectName || !!session?.archived
                 }
               />
-              {!!active && hasContent && !localNavigation && (
-                <ComposerAction
-                  active
-                  disabled={!connected || stopping}
-                  onClick={stop}
-                />
-              )}
               <ComposerAction
                 active={!!active && !hasContent && !localNavigation}
                 label={
