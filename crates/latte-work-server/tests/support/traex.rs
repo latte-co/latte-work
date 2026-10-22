@@ -193,6 +193,80 @@ async fn traex_backgrounded_commands_keep_native_process_and_confirm_only_explic
     }
 }
 #[tokio::test]
+async fn traex_background_work_alive_at_turn_start_keeps_the_next_turn_undo_fenced() {
+    let host = Host::start().await;
+    let root = tempfile::tempdir().unwrap();
+    let project = root.path().canonicalize().unwrap();
+    assert!(
+        Command::new("git")
+            .current_dir(&project)
+            .args(["init", "-q"])
+            .status()
+            .unwrap()
+            .success()
+    );
+    std::fs::write(project.join(".gitignore"), "fixture-agent-pid\n").unwrap();
+    let mut client = host.client().await;
+    let id = session(&mut client, &project).await;
+    // Turn 1 backgrounds a command and ends while the work is still alive.
+    send(&mut client, &id, "background", "background").await;
+    until(&mut client, &id, Status::Completed).await;
+    // Turn 2 starts while that work is alive; the background command then
+    // writes a file and exits during this turn, so the adapter's tracking
+    // clears before the turn ends.
+    send(&mut client, &id, "turn-2", "background-write").await;
+    let (_, events) = until(&mut client, &id, Status::Completed).await;
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(&e.event, EventKind::Text { text } if text == "BACKGROUND_WROTE"))
+    );
+    let Response::TurnChanges { changes } = ask(
+        &mut client,
+        Request::TurnChangeSummary {
+            path: None,
+            offset: None,
+            session_id: id.clone(),
+            request_id: "turn-2".into(),
+        },
+    )
+    .await
+    else {
+        panic!("turn changes")
+    };
+    assert!(
+        changes.background_pending,
+        "a turn that started with live background work must stay undo-fenced"
+    );
+    assert!(
+        changes
+            .summary
+            .entries
+            .iter()
+            .any(|e| e.path == "background-late.txt"),
+        "the late background write belongs to this turn's diff"
+    );
+    assert!(
+        matches!(
+            ask(
+                &mut client,
+                Request::UndoTurnChanges {
+                    session_id: id.clone(),
+                    request_id: "turn-2".into(),
+                }
+            )
+            .await,
+            Response::Error { .. }
+        ),
+        "undo must stay fenced even after the background work finished"
+    );
+    assert_eq!(
+        std::fs::read_to_string(project.join("background-late.txt")).unwrap(),
+        "written by background command\n",
+        "undoing the later turn must not revert background work"
+    );
+}
+#[tokio::test]
 async fn traex_backgrounded_commands_stay_unconfirmed_after_stop_or_eof() {
     for eof in [false, true] {
         let host = Host::start().await;

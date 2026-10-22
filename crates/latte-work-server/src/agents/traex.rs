@@ -688,7 +688,10 @@ impl AgentAdapter for Traex {
         self.phase == Phase::Ready && !self.has_background_work() && self.pending.is_empty()
     }
     fn can_start_turn(&self) -> bool {
-        self.phase == Phase::Ready && self.children.is_empty() && self.pending.is_empty()
+        // Live children must not fence the next turn: their terminal snapshots
+        // are only observed inside a turn, so blocking here would deadlock the
+        // session. Reconfiguration stays fenced by `can_reconfigure`.
+        self.phase == Phase::Ready && self.pending.is_empty()
     }
     fn has_background_work(&self) -> bool {
         !self.children.is_empty() || !self.background_commands.is_empty()
@@ -1264,10 +1267,67 @@ mod tests {
         );
         assert!(agent.has_background_work());
         assert!(!agent.can_reconfigure());
-        assert!(!agent.can_start_turn());
+        // Children fence reconfiguration only; a later turn must still start
+        // through the real message entry so their snapshots can be observed.
+        assert!(agent.can_start_turn());
         agent.item(&json!({"id":"wait","type":"collabAgentToolCall","tool":"wait","receiverThreadIds":["child"],"agentsStates":{"child":{"status":"completed"}},"status":"completed"}),true).unwrap();
         assert!(!agent.has_background_work());
         assert!(agent.can_reconfigure());
+    }
+    #[test]
+    fn live_children_release_through_a_real_follow_up_turn_entry() {
+        let mut agent = opened();
+        // Turn 1 runs through the real start entry and leaves a child alive.
+        agent
+            .advance(Input::Start {
+                prompt: "spawn a child",
+            })
+            .unwrap();
+        message(
+            &mut agent,
+            json!({"id":"latte-4","result":{"turn":{"id":"turn"}}}),
+        );
+        message(
+            &mut agent,
+            json!({"method":"turn/started","params":{"threadId":"t","turn":{"id":"turn"}}}),
+        );
+        message(
+            &mut agent,
+            json!({"method":"item/completed","params":{"threadId":"t","turnId":"turn","item":{"id":"spawn","type":"collabAgentToolCall","tool":"spawnAgent","receiverThreadIds":["child"],"agentsStates":{},"status":"completed"}}}),
+        );
+        message(
+            &mut agent,
+            json!({"method":"turn/completed","params":{"threadId":"t","turn":{"id":"turn","status":"completed"}}}),
+        );
+        assert!(agent.has_background_work());
+        assert!(!agent.can_reconfigure());
+        // The next turn must be able to reuse the process: only inside a turn
+        // can the adapter observe the child's terminal snapshot.
+        assert!(agent.can_start_turn());
+        agent
+            .advance(Input::Start {
+                prompt: "wait for the child",
+            })
+            .unwrap();
+        message(
+            &mut agent,
+            json!({"id":"latte-5","result":{"turn":{"id":"next"}}}),
+        );
+        message(
+            &mut agent,
+            json!({"method":"turn/started","params":{"threadId":"t","turn":{"id":"next"}}}),
+        );
+        message(
+            &mut agent,
+            json!({"method":"item/completed","params":{"threadId":"t","turnId":"next","item":{"id":"wait","type":"collabAgentToolCall","tool":"wait","receiverThreadIds":["child"],"agentsStates":{"child":{"status":"completed"}},"status":"completed"}}}),
+        );
+        assert!(!agent.has_background_work());
+        message(
+            &mut agent,
+            json!({"method":"turn/completed","params":{"threadId":"t","turn":{"id":"next","status":"completed"}}}),
+        );
+        assert!(agent.can_reconfigure());
+        assert!(agent.can_start_turn());
     }
     fn command_item(id: &str, status: &str, process: Value, exit: Value) -> Value {
         json!({"id":id,"type":"commandExecution","command":"python -m unittest discover","cwd":"/tmp","status":status,"processId":process,"exitCode":exit,"aggregatedOutput":"regression output"})

@@ -750,6 +750,10 @@ struct Process {
     config: LaunchConfig,
     path: String,
     turn_active: bool,
+    /// Background work already alive when this turn started. Its writes may
+    /// land inside this turn's diff window even after it completes, so the
+    /// undo fence must survive until the turn is frozen.
+    background_at_start: bool,
     stopping: bool,
     interrupt_sent: bool,
     interrupt_ack_pending: bool,
@@ -826,6 +830,7 @@ impl Process {
             config,
             path: path.into(),
             turn_active: false,
+            background_at_start: false,
             stopping: false,
             interrupt_sent: false,
             interrupt_ack_pending: false,
@@ -857,6 +862,7 @@ impl Process {
         let became_ready = actions.iter().any(|a| matches!(a, Action::Ready));
         if actions.iter().any(|a| matches!(a, Action::TurnStarted)) {
             self.turn_active = true;
+            self.background_at_start = self.adapter.has_background_work();
             self.turn_deadline = tokio::time::Instant::now() + TURN_LIMIT;
         }
         if actions.iter().any(|a| matches!(a, Action::Interrupted))
@@ -887,7 +893,7 @@ impl Process {
                 id,
                 &self.path,
                 status != Status::Completed,
-                self.adapter.has_background_work(),
+                self.background_at_start || self.adapter.has_background_work(),
             )
             .await?;
             db(database, |s| s.state(id, status, message))?;
@@ -1071,6 +1077,7 @@ async fn accept_turn(
         }
         let p = process.as_mut().context("Agent process missing")?;
         p.turn_active = true;
+        p.background_at_start = p.adapter.has_background_work();
         p.turn_deadline = tokio::time::Instant::now() + TURN_LIMIT;
         let notice = if let Some(provider) = &p.config.provider {
             Some(format!(

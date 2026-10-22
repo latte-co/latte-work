@@ -116,6 +116,13 @@ for line in sys.stdin:
             text('BACKGROUND_WAITING')
             if prompt == 'background':
                 complete()
+        elif prompt == 'background-write':
+            pathlib.Path('background-late.txt').write_text('written by background command\n')
+            notify('item/completed', {'item': {'id': 'background-poll', 'type': 'commandExecution',
+                    'command': '', 'cwd': os.getcwd(), 'source': 'unifiedExecInteraction', 'status': 'completed',
+                    'processId': '47462', 'exitCode': 0, 'aggregatedOutput': 'final regression output'}})
+            text('BACKGROUND_WROTE')
+            complete()
         elif prompt in ('background-poll-success', 'background-poll-failure'):
             code = 0 if prompt.endswith('success') else 1
             notify('item/completed', {'item': {'id': 'background-poll', 'type': 'commandExecution',
