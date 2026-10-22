@@ -1203,3 +1203,57 @@ turns and close/resume verification; this uses the CLI account's model service.
 `--model <native-id>` checks explicit selection, and `--live-tools` verifies a
 real file write in the disposable project.
 Native UI and actual SSH execution remain separate acceptance evidence.
+
+## Skill management
+
+The main sidebar’s Skills entry below New task reads the selected local/SSH host without starting an Agent.
+`skills`, `skill_detail`, `set_skill_state` and `install_skill` are additive host
+requests; older remote Servers report unsupported requests and must be updated.
+The desktop keeps host/project identities separate and discards late responses.
+Try now opens a draft for the chosen project, appending a skill reference while
+preserving existing draft text. It does not submit a prompt or open an Agent.
+
+Platform skills ship in `skills/` and are embedded in the standalone Server.
+The initial `latte-work-context` skill explains host paths and attached references.
+Enabled platform content is passed only to Work's Claude child through
+`--append-system-prompt`, and to Traex thread start/resume through the native
+`developerInstructions` field, appended to the native configured developer instructions. Both fields were checked against installed CLI
+help/schema. No native configuration or global skill directory is written.
+Host preferences are atomically saved in the private state directory's `skills.json`.
+Changes apply to new Agent sessions; running processes and native conversation
+history may retain previously loaded instructions. No session is stopped or replayed.
+
+System roots include the shell-resolved `CLAUDE_CONFIG_DIR/skills` (otherwise
+`~/.claude/skills`), `~/.agents/skills`, `~/.codex/skills` and its `.system` subfolder,
+`~/.trae/skills`, and `~/.traex/skills`. Project roots are the corresponding
+`.claude`, `.agents`, `.codex`, `.trae`, `.traex` skill directories directly under
+the registered project. Installed plugin caches and ancestor projects are outside
+this inventory. Showing a skill does not assert that every Agent supports that root;
+native discovery and eligibility remain Agent-specific.
+
+Native enable/disable moves the complete top-level directory or symlink between
+`skills` and its sibling `skills.latte-work-disabled`; uninstall moves it to the
+sibling `skills.latte-work-uninstalled`, retaining a recoverable copy. Codex `.system`
+archives live outside `skills`, in `.codex/skills-system.latte-work-*`.
+The UI confirms the host/path and effect on other Agent launches using that root.
+The server never recursively deletes native skills, follows the top-level skill
+link for mutation, or overwrites a conflicting destination. Relative links that
+would break after moving are rejected. Reinstall restores the archived directory;
+external removal or conflicting state copies require explicit reconciliation.
+State updates compare the displayed prior state; stale actions cannot restore a
+newly uninstalled skill. Identical acknowledged target states reconcile safely.
+
+Add imports a complete directory already on the chosen host into system or project
+`.agents/skills`, preserving resources and source files. Imports are staged, reject
+nested symlinks/special files, and allow 512 entries, 16 MiB total and eight directory
+levels. No download, shell expansion, package manager or skill body is executed.
+Inventory reads at most 512 entries per directory, returns at most 512 skills and
+half a wire frame of metadata, bounds SKILL.md to 64 KiB and scanning to three
+seconds between filesystem operations. The worker admission is bounded; requests
+have a 15-second response deadline. A timeout is unconfirmed, never auto-replayed;
+refresh reconciles the actual installation state.
+
+Focused checks: `skills::` and `platform_skills_` server unit tests,
+`skill_management_is_host_local_reversible_and_prompt_free` final-binary test,
+and `SkillsSettings.test.tsx`. CLI fixtures, browser layout, native UI and actual
+SSH execution are separate evidence scopes.

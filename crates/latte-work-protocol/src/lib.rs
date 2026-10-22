@@ -372,6 +372,31 @@ pub struct SkillInfo {
     pub description: String,
     pub directory: String,
 }
+/// Host-local skill installations. Platform skills are scoped to Work launches.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+pub enum SkillScope {
+    Platform,
+    System,
+    Project,
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+pub enum SkillState {
+    Enabled,
+    Disabled,
+    Uninstalled,
+}
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+pub struct ManagedSkill {
+    pub id: String,
+    pub name: String,
+    pub description: String,
+    pub scope: SkillScope,
+    pub state: SkillState,
+    pub directory: Option<String>,
+    pub origin: String,
+}
 /// A command reported by the selected native Agent in the project context.
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 pub struct QueuedMessage {
@@ -750,6 +775,24 @@ pub enum Request {
         session_id: String,
         path: String,
     },
+    Skills {
+        project_id: Option<String>,
+    },
+    SkillDetail {
+        project_id: Option<String>,
+        id: String,
+    },
+    SetSkillState {
+        project_id: Option<String>,
+        id: String,
+        state: SkillState,
+        expected_state: SkillState,
+    },
+    InstallSkill {
+        project_id: Option<String>,
+        scope: SkillScope,
+        path: String,
+    },
     SkillInfo {
         session_id: String,
         name: String,
@@ -926,6 +969,15 @@ pub enum Response {
     },
     ChangeSummary {
         summary: ChangeSummary,
+    },
+    Skills {
+        skills: Vec<ManagedSkill>,
+        warnings: Vec<String>,
+        truncated: bool,
+    },
+    SkillDetail {
+        skill: ManagedSkill,
+        markdown: String,
     },
     SkillInfo {
         skill: Option<SkillInfo>,

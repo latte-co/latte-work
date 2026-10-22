@@ -42,6 +42,8 @@ pub struct Traex {
     early_completions: HashMap<String, Value>,
     title: Option<String>,
     pending_prompt: Option<String>,
+    platform_instructions: String,
+    native_developer_instructions: Option<String>,
     config: Option<LaunchConfig>,
     model_provider: Option<String>,
     counter: u64,
@@ -168,6 +170,18 @@ impl Traex {
     fn open_thread(&mut self) -> Result<Vec<Action>> {
         let config = self.config.as_ref().context("Traex 启动配置缺失")?;
         let mut params = json!({"cwd":self.cwd,"model":config.traex_model.as_ref().map(|m| &m.model).or(config.model.as_ref()),"modelProvider":self.model_provider});
+        if !self.platform_instructions.is_empty() {
+            params["developerInstructions"] = json!(
+                [
+                    self.native_developer_instructions.as_deref().unwrap_or(""),
+                    self.platform_instructions.as_str()
+                ]
+                .into_iter()
+                .filter(|s| !s.is_empty())
+                .collect::<Vec<_>>()
+                .join("\n\n")
+            );
+        }
         if let Some(selection) = &config.traex_model {
             params["config"] = json!({"model_backend_variant":selection.backend_variant});
         }
@@ -259,7 +273,9 @@ impl Traex {
                 }
                 self.phase = Phase::Opening;
                 let mut actions = vec![write(json!({"method":"initialized"}))?];
-                if self.config.as_ref().is_some_and(|c| c.provider.is_some()) {
+                if self.config.as_ref().is_some_and(|c| c.provider.is_some())
+                    && self.platform_instructions.is_empty()
+                {
                     actions.extend(self.open_thread()?);
                 } else {
                     actions.push(
@@ -271,13 +287,18 @@ impl Traex {
             "config/read" => {
                 // Resolve the current CLI provider explicitly on resume rather than
                 // retaining the previous turn's App-owned provider from the rollout.
-                self.model_provider = Some(
-                    result["config"]["model_provider"]
-                        .as_str()
-                        .filter(|id| !id.is_empty())
-                        .context("Traex 未返回原生 Provider")?
-                        .to_owned(),
-                );
+                self.native_developer_instructions = result["config"]["developer_instructions"]
+                    .as_str()
+                    .map(str::to_owned);
+                if self.config.as_ref().is_some_and(|c| c.provider.is_none()) {
+                    self.model_provider = Some(
+                        result["config"]["model_provider"]
+                            .as_str()
+                            .filter(|id| !id.is_empty())
+                            .context("Traex 未返回原生 Provider")?
+                            .to_owned(),
+                    );
+                }
                 if let Some(config) = &mut self.config
                     && config.model.is_none()
                 {
@@ -634,6 +655,7 @@ impl AgentAdapter for Traex {
         ) {
             bail!("Traex 不支持所选权限模式");
         }
+        self.platform_instructions = crate::skills::platform_instructions(&config.settings_dir)?;
         self.cwd = cwd.into();
         self.resume = resume.map(str::to_owned);
         let mut resolved = config.clone();
@@ -848,6 +870,55 @@ mod tests {
             json!({"id":"latte-4","result":{"turn":{"id":"turn"}}}),
         );
         agent
+    }
+    #[test]
+    fn platform_skills_are_thread_local_and_follow_host_preferences_on_start_and_resume() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = config();
+        config.settings_dir = dir.path().into();
+        for enabled in [true, false] {
+            std::fs::write(dir.path().join("skills.json"), json!({"platform":{"platform:latte-work-context":if enabled { "enabled" } else { "uninstalled" }}}).to_string()).unwrap();
+            for resume in [None, Some("native-thread")] {
+                let mut agent = Traex::default();
+                agent.command("traex", "/tmp", resume, &config).unwrap();
+                let frames = encoded(&agent.open_thread().unwrap());
+                assert_eq!(
+                    frames[0]["method"],
+                    if resume.is_some() {
+                        "thread/resume"
+                    } else {
+                        "thread/start"
+                    }
+                );
+                assert_eq!(
+                    frames[0]["params"]["developerInstructions"]
+                        .as_str()
+                        .unwrap_or_default()
+                        .contains("Latte Work platform skill"),
+                    enabled
+                );
+                assert!(frames[0]["params"].get("input").is_none());
+            }
+        }
+    }
+    #[test]
+    fn platform_skills_append_native_developer_instructions_without_replacing_them() {
+        let mut agent = Traex::default();
+        agent.command("traex", "/tmp", None, &config()).unwrap();
+        agent.advance(Input::Open).unwrap();
+        let init = encoded(&message(&mut agent, json!({"id":"latte-1","result":{}})));
+        assert_eq!(init.last().unwrap()["method"], "config/read");
+        let actions = message(
+            &mut agent,
+            json!({"id":"latte-2","result":{"config":{"model_provider":"native","developer_instructions":"KEEP_USER_INSTRUCTIONS"}}}),
+        );
+        let frames = encoded(&actions);
+        assert!(
+            frames[0]["params"]["developerInstructions"]
+                .as_str()
+                .unwrap()
+                .starts_with("KEEP_USER_INSTRUCTIONS\n\nLatte Work")
+        );
     }
     #[test]
     fn open_is_prompt_free_and_resume_is_identity_bound() {

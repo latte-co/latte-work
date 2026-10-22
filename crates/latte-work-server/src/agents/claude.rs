@@ -410,6 +410,11 @@ impl AgentAdapter for Claude {
                 .or_else(|| config.provider.as_ref().map(|p| p.metadata.model.clone())),
         );
         let mut command = crate::agent_environment::command(binary);
+        let instructions = crate::skills::platform_instructions(&config.settings_dir)?;
+        if !instructions.is_empty() {
+            command.arg("--append-system-prompt").arg(instructions);
+        }
+
         if let Some(title) = &self.initial_title {
             command.arg(format!("--name={title}"));
         }
@@ -3067,6 +3072,36 @@ mod tests {
     }
 
     use super::*;
+    #[test]
+    fn platform_skills_are_only_child_arguments_and_respect_host_preferences() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = LaunchConfig {
+            settings_dir: dir.path().into(),
+            traex_model: None,
+            provider: None,
+            model: None,
+            effort: None,
+            permission_mode: None,
+        };
+        for enabled in [true, false] {
+            std::fs::write(dir.path().join("skills.json"), serde_json::json!({"platform":{"platform:latte-work-context":if enabled { "enabled" } else { "disabled" }}}).to_string()).unwrap();
+            let command = Claude::default()
+                .command("claude", "/tmp", None, &config)
+                .unwrap();
+            let args: Vec<_> = command
+                .command
+                .as_std()
+                .get_args()
+                .map(|s| s.to_string_lossy().into_owned())
+                .collect();
+            assert_eq!(args.iter().any(|s| s == "--append-system-prompt"), enabled);
+            assert_eq!(
+                args.iter().any(|s| s.contains("Latte Work platform skill")),
+                enabled
+            );
+            assert!(!args.iter().any(|s| s == "--add-dir"));
+        }
+    }
     #[test]
     fn provider_settings_are_private_ephemeral_and_default_is_unchanged() {
         use crate::providers::ResolvedProvider;

@@ -7743,3 +7743,186 @@ async fn snapshot_legacy_oversized_events_advance_cursor_and_leave_other_session
     ));
     wait(&mut client, &other, Status::Completed).await;
 }
+
+#[tokio::test]
+async fn skill_management_is_host_local_reversible_and_prompt_free() {
+    use latte_work_protocol::{SkillScope, SkillState};
+    let home = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let config = home.path().join(".claude");
+    let host = Host::start_with_environment(&[
+        ("HOME", home.path().as_os_str()),
+        ("CLAUDE_CONFIG_DIR", config.as_os_str()),
+    ])
+    .await;
+    let mut client = host.client().await;
+    let system = home.path().join(".agents/skills/shared");
+    let project_skill = root.path().join(".claude/skills/shared");
+    for path in [&system, &project_skill] {
+        std::fs::create_dir_all(path).unwrap();
+        std::fs::write(path.join("SKILL.md"), "---\nname: Shared\ndescription: Host-local installed skill\n---\n!`touch SHOULD_NOT_EXECUTE`\n").unwrap();
+        std::fs::write(path.join("resource.txt"), "keep").unwrap();
+    }
+    let Response::Project { project } = ask(
+        &mut client,
+        Request::AddProject {
+            path: root.path().to_string_lossy().into(),
+            name: None,
+        },
+    )
+    .await
+    else {
+        panic!("project")
+    };
+    let project_id = Some(project.id.clone());
+    let Response::Skills {
+        skills,
+        warnings,
+        truncated,
+    } = ask(
+        &mut client,
+        Request::Skills {
+            project_id: project_id.clone(),
+        },
+    )
+    .await
+    else {
+        panic!("catalog")
+    };
+    assert!(warnings.is_empty());
+    assert!(!truncated);
+    assert_eq!(skills.len(), 3);
+    let system_id = skills
+        .iter()
+        .find(|s| s.scope == SkillScope::System)
+        .unwrap()
+        .id
+        .clone();
+    let project_id_skill = skills
+        .iter()
+        .find(|s| s.scope == SkillScope::Project)
+        .unwrap()
+        .id
+        .clone();
+    assert_ne!(system_id, project_id_skill);
+    let mut expected_state = SkillState::Enabled;
+    for state in [
+        SkillState::Disabled,
+        SkillState::Uninstalled,
+        SkillState::Enabled,
+    ] {
+        let Response::Skills { skills, .. } = ask(
+            &mut client,
+            Request::SetSkillState {
+                project_id: project_id.clone(),
+                id: project_id_skill.clone(),
+                state,
+                expected_state,
+            },
+        )
+        .await
+        else {
+            panic!("state")
+        };
+        assert_eq!(
+            skills
+                .iter()
+                .find(|s| s.id == project_id_skill)
+                .unwrap()
+                .state,
+            state
+        );
+        expected_state = state;
+        assert!(system.join("SKILL.md").exists());
+        let Response::SkillDetail { skill, markdown } = ask(
+            &mut client,
+            Request::SkillDetail {
+                project_id: project_id.clone(),
+                id: project_id_skill.clone(),
+            },
+        )
+        .await
+        else {
+            panic!("detail")
+        };
+        assert!(markdown.contains("SHOULD_NOT_EXECUTE"));
+        assert_eq!(
+            std::fs::read_to_string(Path::new(&skill.directory.unwrap()).join("resource.txt"))
+                .unwrap(),
+            "keep"
+        );
+    }
+    assert!(matches!(
+        ask(
+            &mut client,
+            Request::SetSkillState {
+                project_id: None,
+                id: project_id_skill,
+                state: SkillState::Disabled,
+                expected_state: SkillState::Enabled,
+            }
+        )
+        .await,
+        Response::Error { .. }
+    ));
+    let builtin = skills
+        .iter()
+        .find(|s| s.scope == SkillScope::Platform)
+        .unwrap();
+    ask(
+        &mut client,
+        Request::SetSkillState {
+            project_id: None,
+            id: builtin.id.clone(),
+            state: SkillState::Disabled,
+            expected_state: SkillState::Enabled,
+        },
+    )
+    .await;
+    let mut reconnect = host.client().await;
+    let Response::Skills { skills, .. } =
+        ask(&mut reconnect, Request::Skills { project_id: None }).await
+    else {
+        panic!("reconnect")
+    };
+    assert_eq!(
+        skills
+            .iter()
+            .find(|s| s.scope == SkillScope::Platform)
+            .unwrap()
+            .state,
+        SkillState::Disabled
+    );
+    assert!(home.path().join(".agents/skills/shared/SKILL.md").exists());
+    assert!(
+        !home
+            .path()
+            .join(".agents/skills/latte-work-context")
+            .exists()
+    );
+    assert!(!config.join("skills/latte-work-context").exists());
+    assert!(!root.path().join("SHOULD_NOT_EXECUTE").exists());
+    assert!(
+        matches!(ask(&mut client, Request::Sessions { project_id: project.id }).await, Response::Sessions { sessions } if sessions.is_empty())
+    );
+    // A second server with the same HOME does not inherit Work's state-dir preference.
+    let other = Host::start_with_environment(&[
+        ("HOME", home.path().as_os_str()),
+        ("CLAUDE_CONFIG_DIR", config.as_os_str()),
+    ])
+    .await;
+    let mut other_client = other.client().await;
+    let Response::Skills { skills, .. } =
+        ask(&mut other_client, Request::Skills { project_id: None }).await
+    else {
+        panic!("other host")
+    };
+    assert_eq!(
+        skills
+            .iter()
+            .find(|s| s.scope == SkillScope::Platform)
+            .unwrap()
+            .state,
+        SkillState::Enabled
+    );
+}

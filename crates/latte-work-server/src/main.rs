@@ -8,6 +8,7 @@ mod message_queue;
 mod providers;
 mod questions;
 mod runtime;
+mod skills;
 mod snapshot_migration;
 mod snapshot_storage;
 mod sources;
@@ -38,6 +39,7 @@ use tokio_util::codec::{FramedRead, LinesCodec};
 #[derive(Clone)]
 struct Service {
     attachments: Arc<Mutex<attachments::Attachments>>,
+    skills: Arc<Mutex<skills::Skills>>,
     lifecycle: Arc<upgrade::Lifecycle>,
     terminals: terminal::SharedTerminals,
     database: Database,
@@ -210,6 +212,7 @@ async fn serve(dir: &Path) -> Result<()> {
         }
     }
     let service = Service {
+        skills: Arc::new(Mutex::new(skills::Skills::new(dir)?)),
         attachments: Arc::new(Mutex::new(attachments::Attachments::new(dir)?)),
         lifecycle: Arc::new(upgrade::Lifecycle::new()?),
         terminals: Arc::new(Mutex::new(terminal::Terminals::default())),
@@ -1259,6 +1262,69 @@ async fn dispatch(s: &Service, request: Request) -> Result<Response> {
                 }
             }
             Response::Ok
+        }
+        action @ (Request::Skills { .. }
+        | Request::SkillDetail { .. }
+        | Request::SetSkillState { .. }
+        | Request::InstallSkill { .. }) => {
+            let project_id = match &action {
+                Request::Skills { project_id }
+                | Request::SkillDetail { project_id, .. }
+                | Request::SetSkillState { project_id, .. }
+                | Request::InstallSkill { project_id, .. } => project_id.as_deref(),
+                _ => unreachable!(),
+            };
+            let project = project_id
+                .map(|id| db(&s.database, |d| d.project(id)))
+                .transpose()?
+                .map(|p| PathBuf::from(p.path));
+            let manager = s.skills.clone();
+            // Serialize skill work on a bounded blocking lane without blocking async transport.
+            let permit = s
+                .command_probes
+                .clone()
+                .try_acquire_owned()
+                .context("Skill 正在读取，请稍后重试")?;
+            let work = tokio::task::spawn_blocking(move || -> Result<Response> {
+                let _permit = permit;
+                let manager = manager
+                    .lock()
+                    .map_err(|_| anyhow::anyhow!("Skill lock poisoned"))?;
+                match action {
+                    Request::SkillDetail { id, .. } => {
+                        let (skill, markdown) = manager.detail(project.as_deref(), &id)?;
+                        Ok(Response::SkillDetail { skill, markdown })
+                    }
+                    action => {
+                        match action {
+                            Request::SetSkillState {
+                                id,
+                                state,
+                                expected_state,
+                                ..
+                            } => manager.set_state_checked(
+                                project.as_deref(),
+                                &id,
+                                expected_state,
+                                state,
+                            )?,
+                            Request::InstallSkill { scope, path, .. } => {
+                                manager.install(project.as_deref(), scope, Path::new(&path))?
+                            }
+                            _ => {}
+                        }
+                        let catalog = manager.list(project.as_deref())?;
+                        Ok(Response::Skills {
+                            skills: catalog.skills,
+                            warnings: catalog.warnings,
+                            truncated: catalog.truncated,
+                        })
+                    }
+                }
+            });
+            tokio::time::timeout(Duration::from_secs(15), work)
+                .await
+                .context("Skill 操作响应超时，结果待核对；请刷新列表，勿重复操作")???
         }
         Request::SkillInfo { session_id, name } => {
             let session = db(&s.database, |d| d.session(&session_id))?;

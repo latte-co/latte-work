@@ -1395,3 +1395,29 @@ it("persists pinned ordering through native refresh, disconnect/reconnect and re
     "pin-a",
   ]);
 });
+
+it("keeps the selected conversation unread while Skills is visible and returns on task navigation", async () => {
+  const hook = renderHook(useWorkbench);
+  await act(async () => {});
+  await act(async () =>
+    hook.result.current.openSession({ ...session(), hostId: "local" }),
+  );
+  const original = hook.result.current.sessionId;
+  focused = true;
+  mocks.request.mockClear();
+  act(() => hook.result.current.setModal("skills"));
+  await act(async () => vi.advanceTimersByTimeAsync(1500));
+  expect(hook.result.current.sessionId).toBe(original);
+  expect(
+    mocks.request.mock.calls.filter(
+      ([, request]) => request.method === "mark_session_unread",
+    ),
+  ).toHaveLength(0);
+  act(() => hook.result.current.openSession({ ...session(), hostId: "local" }));
+  expect(hook.result.current.modal).toBeNull();
+  expect(hook.result.current.sessionId).toBe(original);
+  act(() => hook.result.current.setModal("skills"));
+  await act(async () => hook.result.current.createSession());
+  expect(hook.result.current.modal).toBeNull();
+  expect(hook.result.current.sessionId).toBe("");
+});

@@ -26,7 +26,11 @@ pub fn lane(request: &Request) -> Lane {
         | Request::Approve { .. }
         | Request::AnswerQuestion { .. }
         | Request::Cancel { .. } => Lane::Control,
-        Request::SkillInfo { .. }
+        Request::Skills { .. }
+        | Request::SkillDetail { .. }
+        | Request::SetSkillState { .. }
+        | Request::InstallSkill { .. }
+        | Request::SkillInfo { .. }
         | Request::AgentCommands { .. }
         | Request::AgentPermissions { .. }
         | Request::Models { .. }

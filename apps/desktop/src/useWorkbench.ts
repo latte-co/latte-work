@@ -318,10 +318,14 @@ export function useWorkbench() {
     Record<string, AgentSessionTransition>
   >({});
   const openedEvidence = useRef(new Map<string, number>());
-  const [modal, setModal] = useState<"project" | "settings" | null>(null);
+  const [modal, setModal] = useState<"project" | "settings" | "skills" | null>(
+    null,
+  );
   const [settingsTab, setSettingsTab] = useState<
     "agents" | "providers" | "ssh" | "appearance" | "archived" | "browser"
   >("agents");
+  const foregroundPage = useRef(modal);
+  foregroundPage.current = modal;
   const [settingsReturnToProject, setSettingsReturnToProject] = useState(false);
   const [busy, setBusy] = useState(false);
   const [projectPath, setProjectPath] = useState("");
@@ -750,7 +754,8 @@ export function useWorkbench() {
             !r.has_more &&
             !["running", "waiting"].includes(r.session.status) &&
             document.visibilityState === "visible" &&
-            document.hasFocus()
+            document.hasFocus() &&
+            foregroundPage.current !== "skills"
           ) {
             try {
               const read = await request(hostId, {
@@ -916,6 +921,7 @@ export function useWorkbench() {
     else if (result.kind !== "ok") throw new Error("会话操作失败");
   }
   function openSession(target: HostedSession) {
+    if (modal === "skills") setModal(null);
     if (target.hostId === hostId && target.id === sessionId) {
       if (target.unread && connected)
         void sessionAction(target.hostId, {
@@ -1001,6 +1007,7 @@ export function useWorkbench() {
   async function createSession(target?: HostedProject): Promise<void> {
     if (target && !hosts.some((h) => h.id === target.hostId))
       throw new Error("项目所在主机已移除");
+    if (modal === "skills") setModal(null);
     pendingSession.current = null;
     draft.current = true;
     setDraftWorkspaceId(crypto.randomUUID());
@@ -1071,7 +1078,7 @@ export function useWorkbench() {
       if (
         (event.metaKey || event.ctrlKey) &&
         event.key.toLowerCase() === "n" &&
-        !modal &&
+        (!modal || modal === "skills") &&
         !document.querySelector('[role="dialog"]')
       ) {
         event.preventDefault();
@@ -1267,6 +1274,7 @@ export function useWorkbench() {
     setHostId(id);
   }
   function selectProject(targetHostId: string, id: string) {
+    if (modal === "skills") setModal(null);
     pendingSession.current = null;
     if (id === projectId && targetHostId === hostId) return;
     draft.current = false;
