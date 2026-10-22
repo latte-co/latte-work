@@ -38,7 +38,7 @@ PasswordAuthentication no
 KbdInteractiveAuthentication no
 UsePAM no
 AllowUsers {pwd.getpwuid(os.getuid()).pw_name}
-LogLevel ERROR
+LogLevel VERBOSE
 ''')
         for name, key in [('known_hosts', 'host'), ('wrong_hosts', 'wrong-host')]:
             (root / name).write_text(f'[127.0.0.1]:{port} ' + (root / f'{key}.pub').read_text())
@@ -60,7 +60,7 @@ Host latte-skill-badkey
         tools = root / 'tools'
         tools.mkdir()
         wrapper = tools / 'ssh'
-        wrapper.write_text(f'#!/bin/sh\nexec {shlex.quote(ssh)} -F {shlex.quote(str(root / "ssh_config"))} "$@"\n')
+        wrapper.write_text(f'#!/bin/sh\nexec {shlex.quote(ssh)} -E {shlex.quote(str(root / "ssh-client.log"))} -vv -F {shlex.quote(str(root / "ssh_config"))} "$@"\n')
         wrapper.chmod(0o700)
         with (root / 'sshd.log').open('w+') as log:
             daemon = subprocess.Popen([sshd, '-D', '-e', '-f', str(root / 'sshd_config')], stdout=log, stderr=log)
@@ -77,11 +77,16 @@ Host latte-skill-badkey
                 else:
                     raise RuntimeError('disposable sshd readiness timeout')
                 env = {**os.environ, 'PATH': str(tools) + os.pathsep + os.environ['PATH'], 'LATTE_WORK_TEST_SSH': '1'}
+                subprocess.run([str(wrapper), '-T', '-o', 'BatchMode=yes', 'latte-skill-test', 'true'],
+                               env=env, check=True, timeout=15)
                 subprocess.run(['cargo', 'test', '-p', 'latte-work-server', '--test', 'e2e', '--locked',
                     'global_skills_over_real_ssh', '--', '--ignored', '--test-threads=1'], env=env, check=True, timeout=480)
             except Exception:
                 log.seek(0)
                 print(log.read())
+                client_log = root / 'ssh-client.log'
+                if client_log.exists():
+                    print(client_log.read_text())
                 raise
             finally:
                 daemon.terminate()
