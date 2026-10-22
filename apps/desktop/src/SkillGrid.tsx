@@ -1,9 +1,9 @@
 import { Box, Check } from "lucide-react";
 import type { ManagedSkill, SkillScope, SkillState } from "./protocol";
-export const skillScopes: { value: SkillScope; label: string }[] = [
+export type GlobalSkillScope = Exclude<SkillScope, "project">;
+export const skillScopes: { value: GlobalSkillScope; label: string }[] = [
   { value: "platform", label: "平台内置" },
   { value: "system", label: "系统" },
-  { value: "project", label: "项目" },
 ];
 export const skillStates: Record<SkillState, string> = {
   enabled: "已启用",

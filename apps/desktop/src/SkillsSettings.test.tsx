@@ -20,6 +20,7 @@ const state = {
     { id: "devbox", name: "devbox" },
   ],
   projects: [{ id: "p", hostId: "local", name: "Project", path: "/project" }],
+  projectId: "p",
   isHostConnected: () => true,
   hostConnectionVersions: {},
   hostSupportsSkills: () => true,
@@ -49,7 +50,7 @@ afterEach(() => {
   cleanup();
   vi.clearAllMocks();
 });
-it("searches and expands/collapses installed skills, and scopes requests to selected host/project", async () => {
+it("searches and expands/collapses installed skills, and keeps every request global on the selected host", async () => {
   request.mockResolvedValue(
     catalog([
       platform,
@@ -70,15 +71,12 @@ it("searches and expands/collapses installed skills, and scopes requests to sele
     target: { value: "Review 7" },
   });
   expect(screen.getByRole("button", { name: /Review 7/ })).toBeTruthy();
-  fireEvent.click(screen.getByRole("tab", { name: "项目" }));
-  fireEvent.click(screen.getByRole("combobox", { name: "技能所在项目" }));
-  fireEvent.click(screen.getByRole("option", { name: "Project" }));
-  await waitFor(() =>
-    expect(request).toHaveBeenLastCalledWith("local", {
-      method: "skills",
-      project_id: "p",
-    }),
-  );
+  expect(screen.queryByRole("tab", { name: "项目" })).toBeNull();
+  expect(screen.queryByRole("combobox", { name: "技能所在项目" })).toBeNull();
+  expect(request).toHaveBeenCalledWith("local", {
+    method: "skills",
+    project_id: null,
+  });
   fireEvent.click(screen.getByRole("combobox", { name: "技能所在主机" }));
   fireEvent.click(screen.getByRole("option", { name: "devbox" }));
   await waitFor(() =>
@@ -253,12 +251,14 @@ it("explains an older remote server without exposing the wire parser error, then
   expect(request.mock.calls.length).toBe(count + 1);
   expect(screen.queryByRole("alert")).toBeNull();
 });
-it("imports a directory on the selected host, keeping project and operation boundaries", async () => {
+it("imports a directory on the selected host, only into the global directory", async () => {
   request.mockResolvedValue(catalog());
   render(<SkillsSettings state={state} active onBusy={() => {}} />);
   await screen.findByRole("button", { name: /System Review/ });
   fireEvent.click(screen.getByRole("button", { name: "添加" }));
   const modal = screen.getByRole("dialog", { name: "添加技能" });
+  expect(within(modal).queryByRole("combobox")).toBeNull();
+  expect(within(modal).getByText(/~\/.agents\/skills/)).toBeTruthy();
   fireEvent.change(within(modal).getByRole("textbox"), {
     target: { value: "/import/my-skill" },
   });
@@ -273,31 +273,92 @@ it("imports a directory on the selected host, keeping project and operation boun
   );
 });
 
-it("Try now passes the chosen project without sending a prompt, and Escape closes only the dialog", async () => {
-  const onTry = vi.fn().mockResolvedValue(undefined);
-  request.mockImplementation(async (_host, action) =>
-    action.method === "skill_detail"
-      ? { kind: "skill_detail", skill: system, markdown: "# Skill" }
-      : catalog(),
-  );
-  render(
-    <SkillsSettings state={state} active onBusy={() => {}} onTry={onTry} />,
-  );
+it.each(["enabled", "disabled"] as const)(
+  "shows an installed %s skill without a trial project or task action",
+  async (skillState) => {
+    const entry = { ...system, state: skillState };
+    request.mockImplementation(async (_host, action) =>
+      action.method === "skill_detail"
+        ? { kind: "skill_detail", skill: entry, markdown: "# Skill" }
+        : catalog([entry]),
+    );
+    render(<SkillsSettings state={state} active onBusy={() => {}} />);
+    fireEvent.click(
+      await screen.findByRole("button", { name: /System Review/ }),
+    );
+    const installed = await screen.findByRole("button", { name: "已安装" });
+    expect((installed as HTMLButtonElement).disabled).toBe(true);
+    expect(screen.queryByRole("button", { name: "立即试用" })).toBeNull();
+    expect(
+      screen.queryByRole("combobox", { name: "试用技能的项目" }),
+    ).toBeNull();
+    fireEvent.click(installed);
+    expect(
+      request.mock.calls.every(([, action]) =>
+        ["skills", "skill_detail"].includes(action.method),
+      ),
+    ).toBe(true);
+    fireEvent.keyDown(screen.getByRole("dialog"), { key: "Escape" });
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  },
+);
+it("installs an uninstalled global skill with explicit confirmation and never creates a task", async () => {
+  let entry: ManagedSkill = { ...system, state: "uninstalled" };
+  request.mockImplementation(async (_host, action) => {
+    if (action.method === "skill_detail")
+      return { kind: "skill_detail", skill: entry, markdown: "# Skill" };
+    if (action.method === "set_skill_state")
+      entry = { ...entry, state: action.state };
+    return catalog([entry]);
+  });
+  render(<SkillsSettings state={state} active onBusy={() => {}} />);
+  await screen.findByRole("tab", { name: "系统" });
+  fireEvent.click(screen.getByRole("tab", { name: "系统" }));
   fireEvent.click(await screen.findByRole("button", { name: /System Review/ }));
-  await screen.findByRole("switch");
-  const trial = screen.getByRole("button", { name: "立即试用" });
-  expect((trial as HTMLButtonElement).disabled).toBe(true);
-  fireEvent.click(screen.getByRole("combobox", { name: "试用技能的项目" }));
-  fireEvent.click(screen.getByRole("option", { name: "Project" }));
-  fireEvent.click(trial);
-  await waitFor(() => expect(onTry).toHaveBeenCalledWith("local", "p", system));
+  fireEvent.click(await screen.findByRole("button", { name: "安装" }));
+  const dialog = screen.getByRole("dialog", { name: "安装 System Review？" });
+  expect(
+    request.mock.calls.some(
+      ([, action]) => action.method === "set_skill_state",
+    ),
+  ).toBe(false);
+  fireEvent.click(within(dialog).getByRole("button", { name: "确认" }));
+  await screen.findByText("已保存。对后续新建的 Agent 会话生效。");
+  expect(request).toHaveBeenCalledWith("local", {
+    method: "set_skill_state",
+    project_id: null,
+    id: system.id,
+    state: "enabled",
+    expected_state: "uninstalled",
+  });
   expect(
     request.mock.calls.every(([, action]) =>
-      ["skills", "skill_detail"].includes(action.method),
+      ["skills", "skill_detail", "set_skill_state"].includes(action.method),
     ),
   ).toBe(true);
-  fireEvent.keyDown(screen.getByRole("dialog"), { key: "Escape" });
-  await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+});
+it("ignores legacy project entries and current conversation project changes", async () => {
+  request.mockResolvedValue(
+    catalog([
+      platform,
+      system,
+      { ...system, id: "project-only", scope: "project", name: "Project Only" },
+    ]),
+  );
+  const view = render(
+    <SkillsSettings state={state} active onBusy={() => {}} />,
+  );
+  await screen.findByRole("button", { name: /System Review/ });
+  expect(screen.queryByRole("button", { name: /Project Only/ })).toBeNull();
+  const calls = request.mock.calls.length;
+  view.rerender(
+    <SkillsSettings
+      state={{ ...state, projectId: "another" }}
+      active
+      onBusy={() => {}}
+    />,
+  );
+  expect(request.mock.calls.length).toBe(calls);
 });
 
 it("restores focus after uninstall removes the installed-row trigger and describes the confirmation impact", async () => {
@@ -336,9 +397,9 @@ it("associates import instructions and limits with the dialog and wraps category
   const platformTab = screen.getByRole("tab", { name: "平台内置" });
   fireEvent.keyDown(platformTab, { key: "ArrowLeft" });
   expect(
-    screen.getByRole("tab", { name: "项目" }).getAttribute("aria-selected"),
+    screen.getByRole("tab", { name: "系统" }).getAttribute("aria-selected"),
   ).toBe("true");
-  fireEvent.keyDown(screen.getByRole("tab", { name: "项目" }), {
+  fireEvent.keyDown(screen.getByRole("tab", { name: "系统" }), {
     key: "ArrowRight",
   });
   expect(platformTab.getAttribute("aria-selected")).toBe("true");

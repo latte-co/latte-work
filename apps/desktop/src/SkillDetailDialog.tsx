@@ -5,10 +5,8 @@ import remarkGfm from "remark-gfm";
 import { message } from "./api";
 import { copyText } from "./clipboard";
 import { Modal } from "./Modal";
-import { Select } from "./Select";
 import { skillScopes as scopes, skillStates as states } from "./SkillGrid";
 import type { ManagedSkill, Response, SkillState } from "./protocol";
-import type { Workbench } from "./useWorkbench";
 export function SkillDetailDialog({
   detail,
   skill,
@@ -16,14 +14,10 @@ export function SkillDetailDialog({
   busy,
   connected,
   hostName,
-  projects,
-  projectId,
-  defaultTrialProject,
   onClose,
   onChange,
   onError,
   onRefresh,
-  onTry,
 }: {
   detail?: Extract<Response, { kind: "skill_detail" }>;
   skill?: ManagedSkill;
@@ -31,17 +25,12 @@ export function SkillDetailDialog({
   busy: boolean;
   connected: boolean;
   hostName?: string;
-  projects: Workbench["projects"];
-  projectId?: string;
-  defaultTrialProject: string;
   onClose: () => void;
   onChange: (skill: ManagedSkill, next: SkillState) => void;
   onError: (error: string) => void;
   onRefresh: () => void;
-  onTry?: (projectId: string, skill: ManagedSkill) => Promise<void>;
 }) {
   const [copied, setCopied] = useState(false);
-  const [trialProject, setTrialProject] = useState(defaultTrialProject);
   return (
     <div
       className="modal-backdrop"
@@ -125,39 +114,16 @@ export function SkillDetailDialog({
                 )}
               </ReactMarkdown>
             </div>
-            {onTry && (
-              <div className="skill-trial-project">
-                <Select
-                  label="试用技能的项目"
-                  compact
-                  value={trialProject}
-                  disabled={busy}
-                  options={[
-                    { value: "", label: "选择试用项目" },
-                    ...projects
-                      .filter(
-                        (p) => skill?.scope !== "project" || p.id === projectId,
-                      )
-                      .map((p) => ({ value: p.id, label: p.name })),
-                  ]}
-                  onChange={setTrialProject}
-                />
-              </div>
-            )}
             <footer className="skill-detail-actions">
-              <button
-                className={skill?.state !== "uninstalled" ? "danger" : ""}
-                disabled={busy || !connected}
-                onClick={() =>
-                  skill &&
-                  onChange(
-                    skill,
-                    skill.state === "uninstalled" ? "enabled" : "uninstalled",
-                  )
-                }
-              >
-                {skill?.state === "uninstalled" ? "重新安装" : "卸载"}
-              </button>
+              {skill && skill.state !== "uninstalled" && (
+                <button
+                  className="danger"
+                  disabled={busy || !connected}
+                  onClick={() => onChange(skill, "uninstalled")}
+                >
+                  卸载
+                </button>
+              )}
               <button
                 disabled={busy}
                 onClick={() => {
@@ -169,22 +135,15 @@ export function SkillDetailDialog({
                 <Copy size={15} />
                 {copied ? "已复制" : "复制 Markdown"}
               </button>
-              {onTry && (
-                <button
-                  className="primary"
-                  disabled={
-                    busy ||
-                    !connected ||
-                    skill?.state !== "enabled" ||
-                    !trialProject
-                  }
-                  onClick={() => {
-                    if (skill) void onTry?.(trialProject, skill);
-                  }}
-                >
-                  立即试用
-                </button>
-              )}
+              <button
+                className="primary"
+                disabled={busy || !connected || skill?.state !== "uninstalled"}
+                onClick={() => {
+                  if (skill) onChange(skill, "enabled");
+                }}
+              >
+                {skill?.state === "uninstalled" ? "安装" : "已安装"}
+              </button>
             </footer>
           </>
         )}

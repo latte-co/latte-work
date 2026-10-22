@@ -7779,32 +7779,49 @@ async fn skill_management_is_host_local_reversible_and_prompt_free() {
         skills,
         warnings,
         truncated,
-    } = ask(
-        &mut client,
-        Request::Skills {
-            project_id: project_id.clone(),
-        },
-    )
-    .await
+    } = ask(&mut client, Request::Skills { project_id: None }).await
     else {
         panic!("catalog")
     };
     assert!(warnings.is_empty());
     assert!(!truncated);
-    assert_eq!(skills.len(), 3);
+    assert_eq!(skills.len(), 2);
     let system_id = skills
         .iter()
         .find(|s| s.scope == SkillScope::System)
         .unwrap()
         .id
         .clone();
-    let project_id_skill = skills
-        .iter()
-        .find(|s| s.scope == SkillScope::Project)
-        .unwrap()
-        .id
-        .clone();
-    assert_ne!(system_id, project_id_skill);
+    assert!(skills.iter().all(|s| s.scope != SkillScope::Project));
+    // Legacy project requests must fail before resolving a project or touching its files.
+    for request in [
+        Request::Skills {
+            project_id: project_id.clone(),
+        },
+        Request::SkillDetail {
+            project_id: project_id.clone(),
+            id: system_id.clone(),
+        },
+        Request::SetSkillState {
+            project_id: project_id.clone(),
+            id: system_id.clone(),
+            state: SkillState::Disabled,
+            expected_state: SkillState::Enabled,
+        },
+        Request::InstallSkill {
+            project_id: project_id.clone(),
+            scope: SkillScope::System,
+            path: system.to_string_lossy().into(),
+        },
+        Request::InstallSkill {
+            project_id: None,
+            scope: SkillScope::Project,
+            path: system.to_string_lossy().into(),
+        },
+    ] {
+        let response = ask(&mut client, request).await;
+        assert!(matches!(response, Response::Error { message, .. } if message.contains("全局")));
+    }
     let mut expected_state = SkillState::Enabled;
     for state in [
         SkillState::Disabled,
@@ -7814,8 +7831,8 @@ async fn skill_management_is_host_local_reversible_and_prompt_free() {
         let Response::Skills { skills, .. } = ask(
             &mut client,
             Request::SetSkillState {
-                project_id: project_id.clone(),
-                id: project_id_skill.clone(),
+                project_id: None,
+                id: system_id.clone(),
                 state,
                 expected_state,
             },
@@ -7825,20 +7842,16 @@ async fn skill_management_is_host_local_reversible_and_prompt_free() {
             panic!("state")
         };
         assert_eq!(
-            skills
-                .iter()
-                .find(|s| s.id == project_id_skill)
-                .unwrap()
-                .state,
+            skills.iter().find(|s| s.id == system_id).unwrap().state,
             state
         );
         expected_state = state;
-        assert!(system.join("SKILL.md").exists());
+        assert!(project_skill.join("SKILL.md").exists());
         let Response::SkillDetail { skill, markdown } = ask(
             &mut client,
             Request::SkillDetail {
-                project_id: project_id.clone(),
-                id: project_id_skill.clone(),
+                project_id: None,
+                id: system_id.clone(),
             },
         )
         .await
@@ -7857,7 +7870,7 @@ async fn skill_management_is_host_local_reversible_and_prompt_free() {
             &mut client,
             Request::SetSkillState {
                 project_id: None,
-                id: project_id_skill,
+                id: "file:project-only".into(),
                 state: SkillState::Disabled,
                 expected_state: SkillState::Enabled,
             }
@@ -7961,31 +7974,30 @@ async fn skill_import_copies_full_packages_and_rejects_unsafe_content_without_pr
     )
     .unwrap();
     std::fs::write(source.join("scripts/check.sh"), "touch MUST_NOT_EXECUTE").unwrap();
-    for scope in [SkillScope::Project, SkillScope::System] {
-        let response = ask(
-            &mut client,
-            Request::InstallSkill {
-                project_id: Some(project.id.clone()),
-                scope,
-                path: source.to_string_lossy().into(),
-            },
+    let scope = SkillScope::System;
+    let response = ask(
+        &mut client,
+        Request::InstallSkill {
+            project_id: None,
+            scope,
+            path: source.to_string_lossy().into(),
+        },
+    )
+    .await;
+    let Response::Skills { skills, .. } = response else {
+        panic!("{response:?}")
+    };
+    let installed = skills
+        .iter()
+        .find(|s| s.scope == scope && s.name == "Imported")
+        .unwrap();
+    assert_eq!(
+        std::fs::read_to_string(
+            Path::new(installed.directory.as_ref().unwrap()).join("scripts/check.sh")
         )
-        .await;
-        let Response::Skills { skills, .. } = response else {
-            panic!("{response:?}")
-        };
-        let installed = skills
-            .iter()
-            .find(|s| s.scope == scope && s.name == "Imported")
-            .unwrap();
-        assert_eq!(
-            std::fs::read_to_string(
-                Path::new(installed.directory.as_ref().unwrap()).join("scripts/check.sh")
-            )
-            .unwrap(),
-            "touch MUST_NOT_EXECUTE"
-        );
-    }
+        .unwrap(),
+        "touch MUST_NOT_EXECUTE"
+    );
     let unsafe_package = packages.path().join("unsafe-package");
     std::fs::create_dir(&unsafe_package).unwrap();
     std::fs::copy(source.join("SKILL.md"), unsafe_package.join("SKILL.md")).unwrap();
@@ -7994,15 +8006,16 @@ async fn skill_import_copies_full_packages_and_rejects_unsafe_content_without_pr
         ask(
             &mut client,
             Request::InstallSkill {
-                project_id: Some(project.id.clone()),
-                scope: SkillScope::Project,
+                project_id: None,
+                scope: SkillScope::System,
                 path: unsafe_package.to_string_lossy().into()
             }
         )
         .await,
         Response::Error { .. }
     ));
-    assert!(!root.path().join(".agents/skills/unsafe-package").exists());
+    assert!(!home.path().join(".agents/skills/unsafe-package").exists());
+    assert!(!root.path().join(".agents").exists());
     assert!(source.join("SKILL.md").exists());
     assert!(!root.path().join("MUST_NOT_EXECUTE").exists());
     assert!(

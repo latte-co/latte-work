@@ -1225,12 +1225,19 @@ The main sidebar’s Skills entry below New task reads the selected local/SSH ho
 requests. Hello advertises `skill_management`; an absent/false flag keeps the client
 from sending these requests and shows an upgrade instruction. Older remote Servers
 must be updated before using the page.
-The desktop keeps host/project identities separate and discards late responses.
+Management is global to the selected host: only platform and system skills are
+listed. Project selection never affects this page. Legacy non-null `project_id`
+arguments and project-scope installs fail explicitly before project resolution;
+the fields remain in the wire schema for compatibility. Project skill directories
+are never scanned or modified by management. Native Agent project skill discovery
+and conversation skill references remain independent of this global inventory.
+The desktop keeps host identities separate and discards late responses.
 The host menu has its own minimum width. Capability checks avoid unsupported wire
 requests on legacy Servers; import stays disabled until inventory loads.
 Reconnecting the selected host reloads inventory.
-Try now opens a draft for the chosen project, appending a skill reference while
-preserving existing draft text. It does not submit a prompt or open an Agent.
+Details offer Install for uninstalled skills and a disabled Installed status for
+enabled/disabled installations, alongside the enable switch, uninstall and copy
+actions. There is no trial project or task creation flow.
 
 Platform skills ship in `skills/`, are embedded in the standalone Server, and are
 enabled by default. Corrupt, oversized or symlinked preferences skip platform
@@ -1259,12 +1266,10 @@ history may retain previously loaded instructions. No session is stopped or repl
 
 System roots include the shell-resolved `CLAUDE_CONFIG_DIR/skills` (otherwise
 `~/.claude/skills`), `~/.agents/skills`, `~/.codex/skills` and its `.system` subfolder,
-`~/.trae/skills`, and `~/.traex/skills`. Project roots are the corresponding
-`.claude`, `.agents`, `.codex`, `.trae`, `.traex` skill directories directly under
-the registered project. Installed plugin caches and ancestor projects are outside
-this inventory. System roots are trusted user-owned configuration: native root
-symlinks may resolve outside HOME. Project skill roots must remain inside the
-canonical registered project. Import resolves aliases of the trusted home/project
+`~/.trae/skills`, and `~/.traex/skills`. Project roots, installed plugin caches
+and ancestor projects are outside this inventory. System roots are trusted
+user-owned configuration: native root symlinks may resolve outside HOME.
+Import resolves aliases of the trusted HOME
 base first, then refuses symlinks inside its destination. Conflicting installations
 and invalid names are reported with names/paths. Showing a skill does not assert that every Agent supports that root;
 native discovery and eligibility remain Agent-specific.
@@ -1281,8 +1286,8 @@ external removal or conflicting state copies require explicit reconciliation.
 State updates compare the displayed prior state; stale actions cannot restore a
 newly uninstalled skill. Identical acknowledged target states reconcile safely.
 
-Add imports a complete directory already on the chosen host into system or project
-`.agents/skills`, preserving resources and source files. Imports are staged, reject
+Add imports a complete directory already on the chosen host into that host's global
+`~/.agents/skills`, preserving resources and source files. Imports are staged, reject
 nested symlinks/special files, and allow 512 entries, 16 MiB total and eight directory
 levels. No download, shell expansion, package manager or skill body is executed.
 Inventory reads at most 512 entries per directory, returns at most 512 skills and

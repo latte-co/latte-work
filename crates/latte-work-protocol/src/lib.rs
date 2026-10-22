@@ -378,6 +378,7 @@ pub struct SkillInfo {
 pub enum SkillScope {
     Platform,
     System,
+    /// Legacy wire value; global skill management rejects project scope.
     Project,
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -775,6 +776,7 @@ pub enum Request {
         session_id: String,
         path: String,
     },
+    /// Global skill management. Legacy project_id values must be absent/null.
     Skills {
         project_id: Option<String>,
     },

@@ -1278,17 +1278,16 @@ async fn dispatch(s: &Service, request: Request) -> Result<Response> {
                 | Request::InstallSkill { project_id, .. } => project_id.as_deref(),
                 _ => unreachable!(),
             };
-            let project = project_id
-                .map(|id| db(&s.database, |d| d.project(id)))
-                .transpose()?
-                .map(|p| PathBuf::from(p.path));
+            if project_id.is_some() {
+                bail!("技能管理仅支持当前主机的全局技能，不支持项目级管理");
+            }
             let manager = s.skills.clone();
             s.skill_worker
                 .run(move |budget| {
                     let manager = manager.with_budget(budget);
                     match action {
                         Request::SkillDetail { id, .. } => {
-                            let (skill, markdown) = manager.detail(project.as_deref(), &id)?;
+                            let (skill, markdown) = manager.detail(None, &id)?;
                             Ok(Response::SkillDetail { skill, markdown })
                         }
                         action => {
@@ -1298,18 +1297,13 @@ async fn dispatch(s: &Service, request: Request) -> Result<Response> {
                                     state,
                                     expected_state,
                                     ..
-                                } => manager.set_state_checked(
-                                    project.as_deref(),
-                                    &id,
-                                    expected_state,
-                                    state,
-                                )?,
+                                } => manager.set_state_checked(None, &id, expected_state, state)?,
                                 Request::InstallSkill { scope, path, .. } => {
-                                    manager.install(project.as_deref(), scope, Path::new(&path))?
+                                    manager.install(None, scope, Path::new(&path))?
                                 }
                                 _ => {}
                             }
-                            let catalog = manager.list(project.as_deref())?;
+                            let catalog = manager.list(None)?;
                             Ok(Response::Skills {
                                 skills: catalog.skills,
                                 warnings: catalog.warnings,

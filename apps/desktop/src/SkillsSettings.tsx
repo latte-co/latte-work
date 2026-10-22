@@ -4,13 +4,12 @@ import { message, request } from "./api";
 import { Modal } from "./Modal";
 import { Select } from "./Select";
 import { SkillDetailDialog } from "./SkillDetailDialog";
-import { SkillGrid, skillScopes as scopes } from "./SkillGrid";
-import type {
-  ManagedSkill,
-  Response,
-  SkillScope,
-  SkillState,
-} from "./protocol";
+import {
+  SkillGrid,
+  skillScopes as scopes,
+  type GlobalSkillScope,
+} from "./SkillGrid";
+import type { ManagedSkill, Response, SkillState } from "./protocol";
 import type { Workbench } from "./useWorkbench";
 import "./skills.css";
 
@@ -24,20 +23,13 @@ export function SkillsSettings({
   state,
   active,
   onBusy,
-  onTry,
 }: {
   state: Workbench;
   active: boolean;
   onBusy: (busy: boolean) => void;
-  onTry?: (
-    hostId: string,
-    projectId: string,
-    skill: ManagedSkill,
-  ) => Promise<void>;
 }) {
   const [hostId, setHostId] = useState(state.host.id);
-  const [projectId, setProjectId] = useState(state.projectId ?? "");
-  const [scope, setScope] = useState<SkillScope>("platform");
+  const [scope, setScope] = useState<GlobalSkillScope>("platform");
   const [query, setQuery] = useState("");
   const [catalog, setCatalog] = useState<Catalog>();
   const [revision, setRevision] = useState(0);
@@ -53,9 +45,6 @@ export function SkillsSettings({
   }>();
   const [add, setAdd] = useState(false);
   const [importPath, setImportPath] = useState("");
-  const [importScope, setImportScope] = useState<"system" | "project">(
-    "system",
-  );
   const [installedExpanded, setInstalledExpanded] = useState(false);
   const [categoryExpanded, setCategoryExpanded] = useState(false);
   const refresh = useRef<HTMLButtonElement>(null);
@@ -63,13 +52,11 @@ export function SkillsSettings({
   const restoreFocus = useRef(false);
   const generation = useRef(0);
   const operation = useRef(false);
-  const projects = state.projects.filter((p) => p.hostId === hostId);
-  const project = projects.find((p) => p.id === projectId);
   const host = state.hosts.find((h) => h.id === hostId);
   const connected = !!host && state.isHostConnected(hostId);
   const supported = state.hostSupportsSkills(hostId);
   const upgrade = upgradeMessage(host?.name ?? "所选主机", hostId !== "local");
-  const context = `${supported}:${hostId}:${state.hostConnectionVersions[hostId] ?? 0}:${project?.id ?? ""}:${active}:${connected}`;
+  const context = `${supported}:${hostId}:${state.hostConnectionVersions[hostId] ?? 0}:${active}:${connected}`;
   const describeError = (cause: unknown) => message(cause);
   const contextRef = useRef(context);
   // Invalidate during render as well as effect cleanup: stale async results cannot mutate a new scope.
@@ -99,7 +86,7 @@ export function SkillsSettings({
     }
     const version = ++generation.current;
     setLoading(true);
-    void request(hostId, { method: "skills", project_id: project?.id ?? null })
+    void request(hostId, { method: "skills", project_id: null })
       .then((response) => {
         if (version !== generation.current) return;
         if (response.kind !== "skills") throw new Error(upgrade);
@@ -122,7 +109,7 @@ export function SkillsSettings({
     setDetail(undefined);
     void request(hostId, {
       method: "skill_detail",
-      project_id: project?.id ?? null,
+      project_id: null,
       id: selected,
     })
       .then((response) => {
@@ -141,9 +128,7 @@ export function SkillsSettings({
   }, [selected, context]);
 
   async function mutate(
-    action:
-      | { skill: ManagedSkill; next: SkillState }
-      | { path: string; scope: SkillScope },
+    action: { skill: ManagedSkill; next: SkillState } | { path: string },
   ) {
     if (operation.current || !connected) return;
     operation.current = true;
@@ -158,15 +143,15 @@ export function SkillsSettings({
         "skill" in action
           ? {
               method: "set_skill_state",
-              project_id: project?.id ?? null,
+              project_id: null,
               id: action.skill.id,
               state: action.next,
               expected_state: action.skill.state,
             }
           : {
               method: "install_skill",
-              project_id: project?.id ?? null,
-              scope: action.scope,
+              project_id: null,
+              scope: "system",
               path: action.path.trim(),
             },
       );
@@ -191,31 +176,17 @@ export function SkillsSettings({
       onBusy(false);
     }
   }
-  async function trySkill(targetProject: string, skill: ManagedSkill) {
-    if (!onTry || operation.current) return;
-    operation.current = true;
-    setBusy(true);
-    onBusy(true);
-    const version = generation.current;
-    try {
-      await onTry(hostId, targetProject, skill);
-    } catch (cause) {
-      if (version === generation.current) setError(message(cause));
-    } finally {
-      operation.current = false;
-      setBusy(false);
-      onBusy(false);
-    }
-  }
   function change(skill: ManagedSkill, next: SkillState) {
     if (skill.scope !== "platform" || next === "uninstalled")
       setConfirm({ skill, next });
     else void mutate({ skill, next });
   }
-  const filtered = (catalog?.skills ?? []).filter((s) =>
-    `${s.name} ${s.description} ${s.origin}`
-      .toLocaleLowerCase()
-      .includes(query.trim().toLocaleLowerCase()),
+  const filtered = (catalog?.skills ?? []).filter(
+    (s) =>
+      s.scope !== "project" &&
+      `${s.name} ${s.description} ${s.origin}`
+        .toLocaleLowerCase()
+        .includes(query.trim().toLocaleLowerCase()),
   );
   const installed = filtered.filter((s) => s.state !== "uninstalled");
   const category = filtered.filter((s) => s.scope === scope);
@@ -266,7 +237,7 @@ export function SkillsSettings({
       <header className="skills-header">
         <div>
           <h2>技能</h2>
-          <p>通过技能扩展 Agent 的能力</p>
+          <p>管理当前主机的全局技能</p>
         </div>
         <div className="skills-toolbar">
           <div className="skills-search">
@@ -289,10 +260,7 @@ export function SkillsSettings({
               value={hostId}
               disabled={busy}
               options={state.hosts.map((h) => ({ value: h.id, label: h.name }))}
-              onChange={(id) => {
-                setHostId(id);
-                setProjectId("");
-              }}
+              onChange={setHostId}
             />
           </span>
           <button
@@ -410,29 +378,11 @@ export function SkillsSettings({
                   </button>
                 ))}
               </div>
-              {scope === "project" && (
-                <Select
-                  label="技能所在项目"
-                  value={project?.id ?? ""}
-                  disabled={busy}
-                  searchable
-                  compact
-                  options={[
-                    { value: "", label: "选择项目" },
-                    ...projects.map((p) => ({ value: p.id, label: p.name })),
-                  ]}
-                  onChange={setProjectId}
-                />
-              )}
             </div>
             <p className="skills-scope-note">
               {scope === "platform"
                 ? "随 Latte Work 提供，仅注入 Work 启动的 Agent。"
-                : scope === "system"
-                  ? "当前主机的全局技能；文件操作会影响该主机上的其他 Agent。"
-                  : project
-                    ? project.path
-                    : "按所选主机和项目读取，不会启动 Agent。"}
+                : "当前主机的全局技能；文件操作会影响该主机上的其他 Agent。"}
             </p>
             <div
               role="tabpanel"
@@ -447,11 +397,7 @@ export function SkillsSettings({
                 loading={loading}
                 disabled={busy || !connected}
                 label="分类技能"
-                emptyMessage={
-                  scope === "project" && !project
-                    ? "选择项目后查看项目技能"
-                    : "暂无技能"
-                }
+                emptyMessage="暂无技能"
                 onSelect={selectSkill}
               />
             </div>
@@ -467,13 +413,6 @@ export function SkillsSettings({
           busy={busy}
           connected={connected}
           hostName={host?.name}
-          projects={projects}
-          projectId={project?.id}
-          defaultTrialProject={
-            project?.id ??
-            projects.find((p) => p.id === state.projectId)?.id ??
-            ""
-          }
           onClose={() => {
             if (!busy && !confirm) {
               setSelected(undefined);
@@ -486,7 +425,6 @@ export function SkillsSettings({
             setSelected(undefined);
             setRevision((v) => v + 1);
           }}
-          onTry={onTry ? trySkill : undefined}
         />
       )}
       {active && confirm && (
@@ -501,7 +439,9 @@ export function SkillsSettings({
                 ? "卸载"
                 : confirm.next === "disabled"
                   ? "禁用"
-                  : "启用"}{" "}
+                  : confirm.skill.state === "uninstalled"
+                    ? "安装"
+                    : "启用"}{" "}
               {confirm.skill.name}？
             </h2>
             <div id="skill-confirm-description">
@@ -512,7 +452,9 @@ export function SkillsSettings({
               <p>
                 {confirm.skill.scope === "platform"
                   ? "仅影响此主机上由 Latte Work 启动的 Agent。"
-                  : "会移动当前安装目录，影响这台主机上使用此目录的其他 Agent。"}
+                  : confirm.skill.state === "uninstalled"
+                    ? "会恢复到此主机的全局技能目录，影响使用该目录的其他 Agent。"
+                    : "会移动当前安装目录，影响这台主机上使用此目录的其他 Agent。"}
                 {confirm.next === "uninstalled"
                   ? "卸载后保留恢复副本，可在分类中重新安装。"
                   : "可以随时在此恢复。"}{" "}
@@ -550,22 +492,6 @@ export function SkillsSettings({
               SKILL.md，不会执行其中的命令。
             </p>
             <label>
-              安装到
-              <Select
-                label="技能安装范围"
-                disabled={busy}
-                value={importScope}
-                options={[
-                  { value: "system", label: "系统 · ~/.agents/skills" },
-                  ...(project
-                    ? [{ value: "project", label: `项目 · ${project.name}` }]
-                    : []),
-                ]}
-                onChange={(v) => setImportScope(v as "system" | "project")}
-              />
-            </label>
-            {!project && <p>如需添加到项目，请先在「项目」分类选择项目。</p>}
-            <label>
               技能目录的绝对路径
               <input
                 aria-label="技能目录的绝对路径"
@@ -576,7 +502,7 @@ export function SkillsSettings({
               />
             </label>
             <p id="skill-add-limits">
-              复制到 .agents/skills；原目录保留。最多 512 项、16
+              安装到当前主机的 ~/.agents/skills；原目录保留。最多 512 项、16
               MiB，不支持包内符号链接。
             </p>
             {error && <p role="alert">{error}</p>}
@@ -587,14 +513,9 @@ export function SkillsSettings({
               <button
                 className="primary"
                 disabled={
-                  busy ||
-                  !connected ||
-                  !importPath.trim().startsWith("/") ||
-                  (importScope === "project" && !project)
+                  busy || !connected || !importPath.trim().startsWith("/")
                 }
-                onClick={() =>
-                  void mutate({ path: importPath, scope: importScope })
-                }
+                onClick={() => void mutate({ path: importPath })}
               >
                 {busy ? "正在导入…" : "添加"}
               </button>

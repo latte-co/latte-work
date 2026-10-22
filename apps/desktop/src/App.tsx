@@ -489,22 +489,6 @@ export default function App() {
               </>
             ) : null
           }
-          onTry={async (hostId, projectId, skill) => {
-            const project = workbench.projects.find(
-              (p) => p.hostId === hostId && p.id === projectId,
-            );
-            if (!project) throw new Error("试用项目已不可用，请重新选择");
-            await workbench.createSession(project);
-            const current = drafts.get("new-task");
-            const instruction = skill.directory
-              ? `请使用此技能，先读取所选主机上的 SKILL.md 再按需执行：${JSON.stringify({ name: skill.name, path: `${skill.directory}/SKILL.md` })}`
-              : `请使用此 Latte Work 平台内置技能：${JSON.stringify(skill.name)}`;
-            drafts.update("new-task", {
-              text: [current.text, instruction].filter(Boolean).join("\n\n"),
-            });
-            workbench.setSettingsReturnToProject(false);
-            workbench.setModal(null);
-          }}
         />
         <HostDialogs state={workbench} />
       </div>

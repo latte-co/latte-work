@@ -69,20 +69,16 @@ impl Skills {
             Err(e) => Err(e.into()),
         }
     }
-    fn roots(&self, project: Option<&Path>) -> Vec<(SkillScope, PathBuf)> {
+    fn roots(&self) -> Vec<(SkillScope, PathBuf)> {
         let mut roots = vec![(SkillScope::System, self.claude.join("skills"))];
         for config in [".agents", ".codex", ".trae", ".traex"] {
             roots.push((SkillScope::System, self.home.join(config).join("skills")));
         }
         roots.push((SkillScope::System, self.home.join(".codex/skills/.system")));
-        if let Some(project) = project {
-            for config in [".claude", ".agents", ".codex", ".trae", ".traex"] {
-                roots.push((SkillScope::Project, project.join(config).join("skills")));
-            }
-        }
         roots
     }
     fn inventory(&self, project: Option<&Path>) -> Result<(Vec<Entry>, Vec<String>, bool)> {
+        require_global(project)?;
         self.check_budget()?;
         let (prefs, mut warnings) = match self.preferences() {
             Ok(prefs) => (Some(prefs), Vec::new()),
@@ -118,7 +114,7 @@ impl Skills {
         let started = std::time::Instant::now();
         let mut seen = HashSet::new();
         let mut truncated = false;
-        for (scope, root) in self.roots(project) {
+        for (scope, root) in self.roots() {
             self.check_budget()?;
             // Canonical parent prevents aliases from duplicating an installation. Skill-folder
             // symlinks remain entries: state changes move the link, never its shared target.
@@ -145,12 +141,6 @@ impl Skills {
             } else {
                 root
             };
-            if scope == SkillScope::Project
-                && !root.starts_with(project.context("项目目录无效")?.canonicalize()?)
-            {
-                warnings.push(format!("项目技能根目录超出项目范围：{}", root.display()));
-                continue;
-            }
             if !seen.insert(root.clone()) {
                 continue;
             }
@@ -390,9 +380,12 @@ impl Skills {
         Ok(())
     }
     pub fn install(&self, project: Option<&Path>, scope: SkillScope, source: &Path) -> Result<()> {
+        require_global(project)?;
         self.check_budget()?;
-        if scope == SkillScope::Platform {
-            bail!("平台技能随 Latte Work 提供，请从详情重新安装");
+        match scope {
+            SkillScope::Platform => bail!("平台技能随 Latte Work 提供，请从详情安装"),
+            SkillScope::Project => bail!("技能管理仅支持当前主机的全局技能，不支持项目级安装"),
+            SkillScope::System => {}
         }
         if !source.is_absolute() {
             bail!("请输入所选主机上的绝对目录路径");
@@ -404,14 +397,9 @@ impl Skills {
             .filter(|s| component(s))
             .context("Skill 目录名称无效")?;
         inspect(&source, slug)?.context("目录中缺少 SKILL.md")?;
-        // Resolve the trusted base (e.g. macOS /var or Linux /home aliases)
+        // Resolve the trusted HOME (e.g. macOS /var or Linux /home aliases)
         // before refusing symlinks inside its installation destination.
-        let base = match scope {
-            SkillScope::System => self.home.as_path(),
-            SkillScope::Project => project.context("请先选择项目")?,
-            SkillScope::Platform => unreachable!(),
-        }
-        .canonicalize()?;
+        let base = self.home.canonicalize()?;
         let root = base.join(".agents/skills");
         safe_folder(&root)?;
         let root = root.canonicalize()?;
@@ -432,6 +420,13 @@ impl Skills {
         std::fs::rename(target, root.join(slug))?;
         Ok(())
     }
+}
+// Retain the legacy wire argument for compatibility, but never resolve or scan a project.
+fn require_global(project: Option<&Path>) -> Result<()> {
+    if project.is_some() {
+        bail!("技能管理仅支持当前主机的全局技能，不支持项目级管理");
+    }
+    Ok(())
 }
 fn component(s: &str) -> bool {
     !s.is_empty()
@@ -644,9 +639,9 @@ mod tests {
             claude: root.join("home/.claude"),
             budget: None,
         };
-        let project = root.join("project");
-        std::fs::create_dir(&project).unwrap();
-        (temp, manager, project)
+        let home = manager.home.clone();
+        std::fs::create_dir(&home).unwrap();
+        (temp, manager, home)
     }
     fn skill(path: &Path) {
         std::fs::create_dir_all(path).unwrap();
@@ -656,8 +651,8 @@ mod tests {
     #[test]
     fn corrupt_preferences_skip_only_platform_injection_and_preserve_native_inventory() {
         for case in ["json", "oversize", "symlink"] {
-            let (temp, manager, project) = setup();
-            skill(&project.join(".agents/skills/native"));
+            let (temp, manager, home) = setup();
+            skill(&home.join(".agents/skills/native"));
             let path = manager.directory.join("skills.json");
             match case {
                 "json" => std::fs::write(&path, "{invalid").unwrap(),
@@ -669,9 +664,9 @@ mod tests {
                 }
             }
             assert!(platform_instructions(&manager.directory).is_empty());
-            let catalog = manager.list(Some(&project)).unwrap();
+            let catalog = manager.list(None).unwrap();
             assert_eq!(catalog.skills.len(), 1);
-            assert_eq!(catalog.skills[0].scope, SkillScope::Project);
+            assert_eq!(catalog.skills[0].scope, SkillScope::System);
             assert!(catalog.warnings.iter().any(|w| w.contains("skills.json")));
             assert!(manager.preferences().is_err());
         }
@@ -694,7 +689,7 @@ mod tests {
             ("depth", true),
             ("depth", false),
         ] {
-            let (temp, manager, project) = setup();
+            let (temp, manager, home) = setup();
             let source = temp.path().canonicalize().unwrap().join("boundary");
             skill(&source);
             match case {
@@ -719,64 +714,59 @@ mod tests {
                     std::fs::write(nested.join("data"), "kept").unwrap();
                 }
             }
-            let result = manager.install(Some(&project), SkillScope::Project, &source);
+            let result = manager.install(None, SkillScope::System, &source);
             assert_eq!(result.is_ok(), accepted, "{case}: {result:?}");
-            assert_eq!(project.join(".agents/skills/boundary").exists(), accepted);
+            assert_eq!(home.join(".agents/skills/boundary").exists(), accepted);
             assert!(source.join("SKILL.md").exists());
-            assert!(
-                std::fs::read_dir(project.join(".agents"))
-                    .unwrap()
-                    .all(|e| !e
-                        .unwrap()
-                        .file_name()
-                        .to_string_lossy()
-                        .starts_with(".latte-work-skill-import-"))
-            );
+            assert!(std::fs::read_dir(home.join(".agents")).unwrap().all(|e| {
+                !e.unwrap()
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".latte-work-skill-import-")
+            }));
         }
     }
 
     #[test]
-    fn imports_resolve_trusted_base_aliases_but_refuse_destination_symlinks() {
-        let (temp, manager, project) = setup();
+    fn imports_resolve_trusted_home_aliases_but_refuse_destination_symlinks() {
+        let (temp, manager, home) = setup();
         let source = temp.path().canonicalize().unwrap().join("package");
         skill(&source);
-        let alias = temp.path().join("project-alias");
-        std::os::unix::fs::symlink(&project, &alias).unwrap();
-        manager
-            .install(Some(&alias), SkillScope::Project, &source)
-            .unwrap();
-        assert!(project.join(".agents/skills/package/SKILL.md").exists());
-        let second_project = temp.path().join("other-project");
-        std::fs::create_dir(&second_project).unwrap();
+        let alias = temp.path().join("home-alias");
+        std::os::unix::fs::symlink(&home, &alias).unwrap();
+        let aliased = Skills {
+            home: alias,
+            ..manager.clone()
+        };
+        aliased.install(None, SkillScope::System, &source).unwrap();
+        assert!(home.join(".agents/skills/package/SKILL.md").exists());
+        let other_home = temp.path().join("other-home");
+        std::fs::create_dir(&other_home).unwrap();
         let outside = temp.path().join("outside");
         std::fs::create_dir(&outside).unwrap();
-        std::os::unix::fs::symlink(&outside, second_project.join(".agents")).unwrap();
-        assert!(
-            manager
-                .install(Some(&second_project), SkillScope::Project, &source)
-                .is_err()
-        );
+        std::os::unix::fs::symlink(&outside, other_home.join(".agents")).unwrap();
+        let other = Skills {
+            home: other_home,
+            ..manager
+        };
+        assert!(other.install(None, SkillScope::System, &source).is_err());
         assert!(!outside.join("skills/package").exists());
     }
     #[test]
     fn expired_import_does_not_create_destination_directories() {
-        let (temp, manager, project) = setup();
+        let (temp, manager, home) = setup();
         let source = temp.path().canonicalize().unwrap().join("source");
         skill(&source);
         let manager = manager.with_budget(Budget::new(std::time::Duration::ZERO));
-        assert!(
-            manager
-                .install(Some(&project), SkillScope::Project, &source)
-                .is_err()
-        );
-        assert!(!project.join(".agents").exists());
+        assert!(manager.install(None, SkillScope::System, &source).is_err());
+        assert!(!home.join(".agents").exists());
     }
     #[test]
     fn non_utf8_and_invalid_installation_names_are_reported_with_paths() {
         #[cfg(target_os = "linux")]
         use std::os::unix::ffi::OsStringExt;
-        let (_temp, manager, project) = setup();
-        let root = project.join(".agents/skills");
+        let (_temp, manager, home) = setup();
+        let root = home.join(".agents/skills");
         let invalid = root.join("技能");
         skill(&invalid);
         #[cfg(target_os = "linux")]
@@ -784,7 +774,7 @@ mod tests {
             let non_utf8 = root.join(std::ffi::OsString::from_vec(vec![0xff]));
             skill(&non_utf8);
         }
-        let catalog = manager.list(Some(&project)).unwrap();
+        let catalog = manager.list(None).unwrap();
         #[cfg(target_os = "linux")]
         assert!(catalog.warnings.iter().any(|w| w.contains("UTF-8")));
         assert!(
@@ -795,13 +785,15 @@ mod tests {
         );
     }
     #[test]
-    fn scans_scopes_and_persists_platform_without_touching_native_directories() {
-        let (_temp, manager, project) = setup();
-        skill(&manager.home.join(".agents/skills/example"));
+    fn scans_only_global_roots_and_preserves_project_skills() {
+        let (temp, manager, home) = setup();
+        skill(&home.join(".agents/skills/example"));
         skill(&manager.claude.join("skills/example"));
-        skill(&project.join(".claude/skills/example"));
-        let entries = manager.list(Some(&project)).unwrap();
-        assert_eq!(entries.skills.len(), 4);
+        let project = temp.path().join("project");
+        let project_skill = project.join(".claude/skills/project-only");
+        skill(&project_skill);
+        let entries = manager.list(None).unwrap();
+        assert_eq!(entries.skills.len(), 3);
         assert_eq!(
             entries
                 .skills
@@ -810,13 +802,23 @@ mod tests {
                 .count(),
             2
         );
-        assert_eq!(
-            entries
-                .skills
-                .iter()
-                .filter(|s| s.scope == SkillScope::Project)
-                .count(),
-            1
+        assert!(
+            manager
+                .list(Some(&project))
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("全局")
+        );
+        assert!(
+            manager
+                .install(Some(&project), SkillScope::System, &project_skill)
+                .is_err()
+        );
+        assert!(
+            manager
+                .install(None, SkillScope::Project, &project_skill)
+                .is_err()
         );
         for state in [
             SkillState::Disabled,
@@ -826,27 +828,23 @@ mod tests {
             manager.set_state(None, BUILTIN_ID, state).unwrap();
             assert_eq!(manager.detail(None, BUILTIN_ID).unwrap().0.state, state);
             assert!(!manager.claude.join("skills/latte-work-context").exists());
-            assert!(
-                !manager
-                    .home
-                    .join(".agents/skills/latte-work-context")
-                    .exists()
-            );
+            assert!(!home.join(".agents/skills/latte-work-context").exists());
         }
+        assert!(project_skill.join("SKILL.md").exists());
         assert!(!project.join("MUST_NOT_EXIST").exists());
     }
     #[test]
     fn native_state_moves_complete_installation_and_survives_reopen() {
-        let (_temp, manager, project) = setup();
-        let directory = project.join(".agents/skills/example");
+        let (_temp, manager, home) = setup();
+        let directory = home.join(".agents/skills/example");
         skill(&directory);
         std::fs::write(directory.join("reference.txt"), "original").unwrap();
         let id = manager
-            .list(Some(&project))
+            .list(None)
             .unwrap()
             .skills
             .into_iter()
-            .find(|s| s.scope == SkillScope::Project)
+            .find(|s| s.scope == SkillScope::System)
             .unwrap()
             .id;
         for state in [
@@ -854,8 +852,8 @@ mod tests {
             SkillState::Uninstalled,
             SkillState::Enabled,
         ] {
-            manager.set_state(Some(&project), &id, state).unwrap();
-            let info = manager.detail(Some(&project), &id).unwrap().0;
+            manager.set_state(None, &id, state).unwrap();
+            let info = manager.detail(None, &id).unwrap().0;
             assert_eq!(info.state, state);
             assert_eq!(
                 std::fs::read_to_string(
@@ -865,8 +863,12 @@ mod tests {
                 "original"
             );
         }
-        assert!(manager.set_state(None, &id, SkillState::Disabled).is_err());
-        assert!(manager.detail(Some(&project), "../../secret").is_err());
+        assert!(
+            manager
+                .set_state(None, "file:unknown", SkillState::Disabled)
+                .is_err()
+        );
+        assert!(manager.detail(None, "../../secret").is_err());
     }
     #[test]
     fn moves_skill_links_without_modifying_shared_target_and_rejects_escaping_markdown() {
@@ -907,26 +909,20 @@ mod tests {
     }
     #[test]
     fn conflicts_symlink_destinations_and_oversize_files_are_explicit() {
-        let (_temp, manager, project) = setup();
-        let root = project.join(".agents/skills");
+        let (_temp, manager, home) = setup();
+        let root = home.join(".agents/skills");
         skill(&root.join("example"));
         let id = manager
-            .list(Some(&project))
+            .list(None)
             .unwrap()
             .skills
             .into_iter()
-            .find(|s| s.scope == SkillScope::Project)
+            .find(|s| s.scope == SkillScope::System)
             .unwrap()
             .id;
-        manager
-            .set_state(Some(&project), &id, SkillState::Disabled)
-            .unwrap();
+        manager.set_state(None, &id, SkillState::Disabled).unwrap();
         std::fs::create_dir(root.join("example")).unwrap();
-        assert!(
-            manager
-                .set_state(Some(&project), &id, SkillState::Enabled)
-                .is_err()
-        );
+        assert!(manager.set_state(None, &id, SkillState::Enabled).is_err());
         assert!(
             state_root(&root, SkillState::Disabled)
                 .unwrap()
@@ -936,8 +932,8 @@ mod tests {
         let large = root.join("large");
         std::fs::create_dir(&large).unwrap();
         std::fs::write(large.join("SKILL.md"), vec![b'a'; FILE_LIMIT as usize + 1]).unwrap();
-        assert!(!manager.list(Some(&project)).unwrap().warnings.is_empty());
-        let outside = project.join("outside");
+        assert!(!manager.list(None).unwrap().warnings.is_empty());
+        let outside = home.join("outside");
         std::fs::create_dir(&outside).unwrap();
         std::os::unix::fs::symlink(
             &outside,
@@ -946,79 +942,70 @@ mod tests {
         .unwrap();
         assert!(
             manager
-                .set_state(Some(&project), &id, SkillState::Uninstalled)
+                .set_state(None, &id, SkillState::Uninstalled)
                 .is_err()
         );
     }
     #[test]
     fn import_preserves_resources_and_original_and_rejects_unsafe_packages() {
-        let (temp, manager, project) = setup();
+        let (temp, manager, home) = setup();
         let source = temp.path().canonicalize().unwrap().join("imported");
         skill(&source);
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&source, std::fs::Permissions::from_mode(0o700)).unwrap();
         std::fs::create_dir(source.join("scripts")).unwrap();
         std::fs::write(source.join("scripts/check.sh"), "echo test").unwrap();
-        manager
-            .install(Some(&project), SkillScope::Project, &source)
-            .unwrap();
+        manager.install(None, SkillScope::System, &source).unwrap();
         assert!(
-            project
-                .join(".agents/skills/imported/scripts/check.sh")
+            home.join(".agents/skills/imported/scripts/check.sh")
                 .exists()
         );
         assert!(source.join("SKILL.md").exists());
         assert_eq!(
-            std::fs::metadata(project.join(".agents/skills/imported"))
+            std::fs::metadata(home.join(".agents/skills/imported"))
                 .unwrap()
                 .permissions()
                 .mode()
                 & 0o777,
             0o700
         );
-        assert!(
-            manager
-                .install(Some(&project), SkillScope::Project, &source)
-                .is_err()
-        );
-        assert!(manager.install(None, SkillScope::Project, &source).is_err());
+        assert!(manager.install(None, SkillScope::System, &source).is_err());
         assert!(
             manager
                 .install(None, SkillScope::Platform, &source)
                 .is_err()
         );
-        std::os::unix::fs::symlink("/etc/passwd", source.join("secret")).unwrap();
-        assert!(manager.install(None, SkillScope::System, &source).is_err());
-        assert!(!manager.home.join(".agents/skills/imported").exists());
+        let unsafe_source = temp.path().canonicalize().unwrap().join("unsafe-package");
+        skill(&unsafe_source);
+        std::os::unix::fs::symlink("/etc/passwd", unsafe_source.join("secret")).unwrap();
+        assert!(
+            manager
+                .install(None, SkillScope::System, &unsafe_source)
+                .is_err()
+        );
+        assert!(!home.join(".agents/skills/unsafe-package").exists());
     }
     #[test]
     fn conflicting_state_copies_are_disclosed_without_duplicate_ui_identities() {
-        let (_temp, manager, project) = setup();
-        let root = project.join(".agents/skills");
+        let (_temp, manager, home) = setup();
+        let root = home.join(".agents/skills");
         skill(&root.join("example"));
         let id = manager
-            .list(Some(&project))
+            .list(None)
             .unwrap()
             .skills
             .into_iter()
-            .find(|s| s.scope == SkillScope::Project)
+            .find(|s| s.scope == SkillScope::System)
             .unwrap()
             .id;
-        manager
-            .set_state(Some(&project), &id, SkillState::Disabled)
-            .unwrap();
+        manager.set_state(None, &id, SkillState::Disabled).unwrap();
         skill(&root.join("example"));
-        let catalog = manager.list(Some(&project)).unwrap();
+        let catalog = manager.list(None).unwrap();
         assert!(!catalog.warnings.is_empty());
-        assert!(
-            !catalog
-                .skills
-                .iter()
-                .any(|s| s.scope == SkillScope::Project)
-        );
+        assert!(!catalog.skills.iter().any(|s| s.scope == SkillScope::System));
         assert!(
             manager
-                .set_state(Some(&project), &id, SkillState::Uninstalled)
+                .set_state(None, &id, SkillState::Uninstalled)
                 .is_err()
         );
     }
@@ -1052,8 +1039,8 @@ mod tests {
         );
     }
     #[test]
-    fn aliases_do_not_duplicate_inventory_and_project_roots_cannot_escape() {
-        let (_temp, manager, project) = setup();
+    fn aliases_do_not_duplicate_global_inventory() {
+        let (_temp, manager, _) = setup();
         let root = manager.home.join(".agents/skills");
         skill(&root.join("example"));
         std::fs::create_dir_all(&manager.claude).unwrap();
@@ -1069,15 +1056,7 @@ mod tests {
             .id;
         manager.set_state(None, &id, SkillState::Disabled).unwrap();
         manager.set_state(None, &id, SkillState::Enabled).unwrap();
-        std::os::unix::fs::symlink(manager.home.join(".agents"), project.join(".agents")).unwrap();
-        let catalog = manager.list(Some(&project)).unwrap();
-        assert!(!catalog.warnings.is_empty());
-        assert!(
-            !catalog
-                .skills
-                .iter()
-                .any(|s| s.scope == SkillScope::Project)
-        );
+        assert_eq!(manager.list(None).unwrap().skills.len(), 2);
     }
     #[test]
     fn inventory_bounds_large_directories_and_special_files_do_not_block() {

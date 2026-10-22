@@ -159,10 +159,6 @@
   flex-wrap: wrap;
   justify-content: space-between;
 }
-.skills-category-toolbar .select-trigger {
-  margin: 0;
-  max-width: 240px;
-}
 .skills-settings .skills-scope-note {
   font-size: var(--text-xs);
   margin: 16px 10px;
@@ -285,12 +281,6 @@
   }
 }
 
-.skill-trial-project {
-  margin-top: 16px;
-}
-.skill-trial-project .select-trigger {
-  margin: 0;
-}
 .skill-detail-actions {
   flex-wrap: wrap;
 }
