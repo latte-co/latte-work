@@ -275,21 +275,26 @@ it("adding a host initializes it once and preserves other hosts' live connection
     mocks.connect.mock.calls.filter(([h]) => h.id === "local"),
   ).toHaveLength(1);
 });
-it("preserves completion unread in the background and acknowledges it when viewed", async () => {
-  const hook = renderHook(useWorkbench);
-  await act(async () => {});
-  await act(async () =>
-    hook.result.current.openSession({ ...session(), hostId: "local" }),
-  );
-  expect(hook.result.current.session?.unread).toBe(true);
-  expect(acknowledgements()).toHaveLength(0);
-  focused = true;
-  await act(async () => {
-    await vi.advanceTimersByTimeAsync(650);
-  });
-  expect(acknowledgements()).toHaveLength(1);
-  expect(hook.result.current.session?.unread).toBe(false);
-});
+it.each(["completed", "failed"] as const)(
+  "preserves %s unread in the background and acknowledges it when viewed",
+  async (terminalStatus) => {
+    status = terminalStatus;
+    const hook = renderHook(useWorkbench);
+    await act(async () => {});
+    await act(async () =>
+      hook.result.current.openSession({ ...session(), hostId: "local" }),
+    );
+    expect(hook.result.current.session?.unread).toBe(true);
+    expect(acknowledgements()).toHaveLength(0);
+    focused = true;
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(650);
+    });
+    expect(acknowledgements()).toHaveLength(1);
+    expect(hook.result.current.session?.unread).toBe(false);
+    expect(hook.result.current.session?.status).toBe(terminalStatus);
+  },
+);
 it("does not acknowledge running output, and marks the completed turn read only at the end of replay", async () => {
   focused = true;
   status = "running";

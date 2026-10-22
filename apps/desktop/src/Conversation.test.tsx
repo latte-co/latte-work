@@ -1027,7 +1027,7 @@ it("renders a question directly, submits once for its session and preserves pane
   expect(screen.queryByRole("form", { name: "待回答问题" })).toBeNull();
 });
 
-it("can queue a follow-up while the current turn runs and keeps a separate stop action", async () => {
+it("can queue a follow-up while the current turn runs with a single composer action", async () => {
   const p = props();
   render(
     <Conversation
@@ -1038,6 +1038,8 @@ it("can queue a follow-up while the current turn runs and keeps a separate stop 
   );
   const input = screen.getByRole("textbox", { name: "任务输入" });
   fireEvent.change(input, { target: { value: "Next task" } });
+  // While a draft is present the composer offers exactly one action: queue.
+  expect(screen.queryByRole("button", { name: "停止任务" })).toBeNull();
   fireEvent.click(await screen.findByRole("button", { name: "加入队列" }));
   await waitFor(() =>
     expect(p.send).toHaveBeenCalledWith(
@@ -1049,6 +1051,10 @@ it("can queue a follow-up while the current turn runs and keeps a separate stop 
     ),
   );
   expect(p.cancel).not.toHaveBeenCalled();
+  // Clearing the draft turns the single action back into stop.
+  fireEvent.change(input, { target: { value: "" } });
+  expect(await screen.findByRole("button", { name: "停止任务" })).toBeTruthy();
+  expect(screen.queryByRole("button", { name: "加入队列" })).toBeNull();
 });
 
 it("takes a queued message into the composer, retains existing draft and references, and resubmits it as a new queued message", async () => {

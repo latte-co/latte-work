@@ -28,6 +28,10 @@ struct PendingRequest {
     interrupt_turn: Option<String>,
     queued_input: Option<(String, String)>,
 }
+struct BackgroundCommand {
+    turn: String,
+    process: Option<String>,
+}
 #[derive(Default)]
 pub struct Traex {
     phase: Phase,
@@ -51,6 +55,7 @@ pub struct Traex {
     approvals: HashMap<String, &'static str>,
     streamed: HashSet<String>,
     tools: HashSet<String>,
+    background_commands: HashMap<String, BackgroundCommand>,
     children: HashSet<String>,
     interrupt_requested: bool,
     rename: Option<String>,
@@ -65,6 +70,16 @@ fn field<'a>(value: &'a Value, key: &str) -> Result<&'a str> {
         .as_str()
         .filter(|s| !s.is_empty() && s.len() <= 1024)
         .with_context(|| format!("Traex 缺少有效的 {key}"))
+}
+fn command_process(item: &Value) -> Option<String> {
+    // rawOutput retains the legacy snake_case fields in current Traex schemas.
+    let process = item["processId"].as_str().map(str::to_owned).or_else(|| {
+        match &item["rawOutput"]["process_id"] {
+            Value::String(id) => Some(id.clone()),
+            value => value.as_u64().map(|id| id.to_string()),
+        }
+    })?;
+    (!process.is_empty() && process.len() <= 1024).then_some(process)
 }
 impl Traex {
     fn request(&mut self, method: &'static str, params: Value) -> Result<Action> {
@@ -437,6 +452,20 @@ impl Traex {
             self.early_completions.insert(id, message.clone());
             return Ok(vec![]);
         }
+        // A command can outlive its turn. Accept later snapshots only for an
+        // already observed item in that exact native thread/turn, including idle.
+        if method == "item/completed"
+            && params["item"]["type"] == "commandExecution"
+            && let Some(command) = params["item"]["id"]
+                .as_str()
+                .and_then(|id| self.background_commands.get(id))
+        {
+            return if params["turnId"].as_str() == Some(&command.turn) {
+                self.item(&params["item"], true)
+            } else {
+                Ok(vec![])
+            };
+        }
         if !matches!(self.phase, Phase::Running | Phase::Starting) {
             return Ok(vec![]);
         }
@@ -575,7 +604,7 @@ impl Traex {
             }
         }
         let mut actions = Vec::new();
-        if !self.tools.contains(&id) {
+        if !self.tools.contains(&id) && !self.background_commands.contains_key(&id) {
             if self.tools.len() >= 4096 {
                 bail!("Traex 工具数量超出限制");
             }
@@ -594,6 +623,40 @@ impl Traex {
             }));
         }
         if completed {
+            if kind == "commandExecution" && item["status"] == "backgrounded" {
+                if self.background_commands.len() >= 512
+                    && !self.background_commands.contains_key(&id)
+                {
+                    bail!("Traex 后台命令数量超出限制");
+                }
+                let process = command_process(item).or_else(|| {
+                    self.background_commands
+                        .get(&id)
+                        .and_then(|command| command.process.clone())
+                });
+                let turn = self
+                    .background_commands
+                    .get(&id)
+                    .map(|command| command.turn.clone())
+                    .or_else(|| self.turn.clone())
+                    .context("Traex 后台命令缺少轮次身份")?;
+                // item/completed ends the tool's foreground wait, not the
+                // process. Keep the Tool unresolved; a result would imply success
+                // in existing clients. Notices preserve output/identity without
+                // changing the shared wire contract or inventing an exit status.
+                actions.push(Action::Event(EventKind::Notice {
+                    text: format!(
+                        "命令已转入后台，结果待确认（工具 ID：{id}，进程 ID：{}）\n{}",
+                        process.as_deref().unwrap_or("未提供"),
+                        // Preserve output directly, without duplicating rawOutput
+                        // or JSON-escaping it again inside the persisted notice.
+                        item["aggregatedOutput"].as_str().unwrap_or_default()
+                    ),
+                }));
+                self.background_commands
+                    .insert(id, BackgroundCommand { turn, process });
+                return Ok(actions);
+            }
             if kind != "webSearch"
                 && !matches!(
                     item["status"].as_str(),
@@ -612,6 +675,21 @@ impl Traex {
             } else {
                 item.clone()
             };
+            if kind == "commandExecution" {
+                if matches!(item["status"].as_str(), Some("completed" | "failed")) {
+                    self.background_commands.remove(&id);
+                }
+                // Native write_stdin/poll calls may have a new item ID. Only an
+                // explicit process exit releases matching background work; a
+                // declined or failed polling request alone cannot do so.
+                if matches!(item["status"].as_str(), Some("completed" | "failed"))
+                    && item["exitCode"].as_i64().is_some()
+                    && let Some(process) = command_process(item)
+                {
+                    self.background_commands
+                        .retain(|_, command| command.process.as_ref() != Some(&process));
+                }
+            }
             actions.push(Action::Event(EventKind::ToolResult {
                 id,
                 content,
@@ -627,14 +705,17 @@ impl AgentAdapter for Traex {
         // That history is not emitted as a public event or replayed to the model.
         16 * 1024 * 1024
     }
+    fn can_reconfigure(&self) -> bool {
+        self.phase == Phase::Ready && !self.has_background_work() && self.pending.is_empty()
+    }
     fn can_start_turn(&self) -> bool {
+        // Live children must not fence the next turn: their terminal snapshots
+        // are only observed inside a turn, so blocking here would deadlock the
+        // session. Reconfiguration stays fenced by `can_reconfigure`.
         self.phase == Phase::Ready && self.pending.is_empty()
     }
-    fn can_reconfigure(&self) -> bool {
-        self.can_start_turn() && self.children.is_empty()
-    }
     fn has_background_work(&self) -> bool {
-        !self.children.is_empty()
+        !self.children.is_empty() || !self.background_commands.is_empty()
     }
     fn knows_subagent(&self, _: &str) -> bool {
         false
@@ -948,16 +1029,6 @@ mod tests {
         );
     }
     #[test]
-    fn idle_parent_can_continue_while_children_still_prevent_reconfiguration() {
-        let mut agent = opened();
-        agent.children.insert("child-thread".into());
-        assert!(agent.can_start_turn());
-        assert!(!agent.can_reconfigure());
-        agent.advance(Input::Start { prompt: "followup" }).unwrap();
-        assert!(!agent.can_start_turn());
-        assert!(agent.children.contains("child-thread"));
-    }
-    #[test]
     fn only_the_active_native_turn_can_stream_or_finish() {
         let mut agent = running();
         assert!(message(&mut agent,json!({"method":"turn/completed","params":{"threadId":"child","turn":{"id":"turn","status":"completed"}}})).is_empty());
@@ -1267,9 +1338,246 @@ mod tests {
         );
         assert!(agent.has_background_work());
         assert!(!agent.can_reconfigure());
+        // Children fence reconfiguration only; a later turn must still start
+        // through the real message entry so their snapshots can be observed.
+        assert!(agent.can_start_turn());
         agent.item(&json!({"id":"wait","type":"collabAgentToolCall","tool":"wait","receiverThreadIds":["child"],"agentsStates":{"child":{"status":"completed"}},"status":"completed"}),true).unwrap();
         assert!(!agent.has_background_work());
         assert!(agent.can_reconfigure());
+    }
+    #[test]
+    fn live_children_release_through_a_real_follow_up_turn_entry() {
+        let mut agent = opened();
+        // Turn 1 runs through the real start entry and leaves a child alive.
+        agent
+            .advance(Input::Start {
+                prompt: "spawn a child",
+            })
+            .unwrap();
+        message(
+            &mut agent,
+            json!({"id":"latte-4","result":{"turn":{"id":"turn"}}}),
+        );
+        message(
+            &mut agent,
+            json!({"method":"turn/started","params":{"threadId":"t","turn":{"id":"turn"}}}),
+        );
+        message(
+            &mut agent,
+            json!({"method":"item/completed","params":{"threadId":"t","turnId":"turn","item":{"id":"spawn","type":"collabAgentToolCall","tool":"spawnAgent","receiverThreadIds":["child"],"agentsStates":{},"status":"completed"}}}),
+        );
+        message(
+            &mut agent,
+            json!({"method":"turn/completed","params":{"threadId":"t","turn":{"id":"turn","status":"completed"}}}),
+        );
+        assert!(agent.has_background_work());
+        assert!(!agent.can_reconfigure());
+        // The next turn must be able to reuse the process: only inside a turn
+        // can the adapter observe the child's terminal snapshot.
+        assert!(agent.can_start_turn());
+        agent
+            .advance(Input::Start {
+                prompt: "wait for the child",
+            })
+            .unwrap();
+        message(
+            &mut agent,
+            json!({"id":"latte-5","result":{"turn":{"id":"next"}}}),
+        );
+        message(
+            &mut agent,
+            json!({"method":"turn/started","params":{"threadId":"t","turn":{"id":"next"}}}),
+        );
+        message(
+            &mut agent,
+            json!({"method":"item/completed","params":{"threadId":"t","turnId":"next","item":{"id":"wait","type":"collabAgentToolCall","tool":"wait","receiverThreadIds":["child"],"agentsStates":{"child":{"status":"completed"}},"status":"completed"}}}),
+        );
+        assert!(!agent.has_background_work());
+        message(
+            &mut agent,
+            json!({"method":"turn/completed","params":{"threadId":"t","turn":{"id":"next","status":"completed"}}}),
+        );
+        assert!(agent.can_reconfigure());
+        assert!(agent.can_start_turn());
+    }
+    fn command_item(id: &str, status: &str, process: Value, exit: Value) -> Value {
+        json!({"id":id,"type":"commandExecution","command":"python -m unittest discover","cwd":"/tmp","status":status,"processId":process,"exitCode":exit,"aggregatedOutput":"regression output"})
+    }
+    fn command_message(turn: &str, item: Value) -> Value {
+        json!({"method":"item/completed","params":{"threadId":"t","turnId":turn,"item":item}})
+    }
+    #[test]
+    fn backgrounded_commands_preserve_identity_without_success_and_survive_turns() {
+        for legacy in [false, true] {
+            let mut agent = running();
+            let mut item = command_item("command", "backgrounded", json!("47462"), Value::Null);
+            if legacy {
+                item["processId"] = Value::Null;
+                item["rawOutput"] = json!({"process_id":47462,"stdout":"partial output"});
+            }
+            let actions = message(&mut agent, command_message("turn", item));
+            assert!(matches!(actions[0], Action::Event(EventKind::Tool { .. })));
+            assert!(actions.iter().any(|a| matches!(a, Action::Event(EventKind::Notice {text}) if text.contains("47462") && text.contains("regression output") && text.contains("结果待确认"))));
+            assert!(!actions.iter().any(|a| matches!(
+                a,
+                Action::Event(EventKind::ToolResult { .. }) | Action::Finished { .. }
+            )));
+            message(
+                &mut agent,
+                json!({"method":"turn/completed","params":{"threadId":"t","turn":{"id":"turn","status":"completed"}}}),
+            );
+            assert!(agent.has_background_work());
+            assert!(!agent.can_reconfigure());
+            assert!(agent.can_start_turn());
+            agent
+                .advance(Input::Start {
+                    prompt: "poll the process",
+                })
+                .unwrap();
+            message(
+                &mut agent,
+                json!({"id":"latte-5","result":{"turn":{"id":"next"}}}),
+            );
+            assert!(
+                message(
+                    &mut agent,
+                    command_message(
+                        "next",
+                        command_item("command", "completed", json!("47462"), json!(0))
+                    )
+                )
+                .is_empty(),
+                "a known background item cannot be reassigned to the current turn"
+            );
+            // A declined poll or unrelated process exit is not evidence of exit.
+            message(
+                &mut agent,
+                command_message(
+                    "next",
+                    command_item("declined-poll", "declined", json!("47462"), Value::Null),
+                ),
+            );
+            message(
+                &mut agent,
+                command_message(
+                    "next",
+                    command_item("failed-poll", "failed", json!("47462"), Value::Null),
+                ),
+            );
+            message(
+                &mut agent,
+                command_message(
+                    "next",
+                    command_item("other", "completed", json!("other-process"), json!(0)),
+                ),
+            );
+            assert!(agent.has_background_work());
+            message(
+                &mut agent,
+                command_message(
+                    "next",
+                    command_item("poll", "backgrounded", json!("47462"), Value::Null),
+                ),
+            );
+            let actions = message(
+                &mut agent,
+                command_message(
+                    "next",
+                    command_item("poll", "completed", json!("47462"), json!(1)),
+                ),
+            );
+            assert!(
+                matches!(actions.as_slice(), [Action::Event(EventKind::ToolResult {is_error:true, content, ..})] if content == "regression output")
+            );
+            assert!(!agent.has_background_work());
+            message(
+                &mut agent,
+                json!({"method":"turn/completed","params":{"threadId":"t","turn":{"id":"next","status":"completed"}}}),
+            );
+            assert!(agent.can_reconfigure());
+        }
+    }
+    #[test]
+    fn late_background_results_are_fenced_by_thread_turn_and_item_even_while_idle() {
+        for exit in [0, 1] {
+            let mut agent = running();
+            message(
+                &mut agent,
+                command_message(
+                    "turn",
+                    command_item("command", "backgrounded", Value::Null, Value::Null),
+                ),
+            );
+            message(
+                &mut agent,
+                json!({"method":"turn/completed","params":{"threadId":"t","turn":{"id":"turn","status":"completed"}}}),
+            );
+            let item = command_item("command", "completed", Value::Null, json!(exit));
+            for (thread, turn, id) in [
+                ("other", "turn", "command"),
+                ("t", "stale", "command"),
+                ("t", "turn", "other"),
+            ] {
+                let mut stale = command_message(turn, item.clone());
+                stale["params"]["threadId"] = json!(thread);
+                stale["params"]["item"]["id"] = json!(id);
+                assert!(message(&mut agent, stale).is_empty());
+                assert!(agent.has_background_work());
+            }
+            let actions = message(&mut agent, command_message("turn", item));
+            assert!(
+                matches!(actions.as_slice(), [Action::Event(EventKind::ToolResult {is_error, ..})] if *is_error == (exit != 0))
+            );
+            assert!(!agent.has_background_work());
+            assert!(agent.can_reconfigure());
+        }
+    }
+    #[test]
+    fn background_tracking_is_bounded_and_does_not_relax_other_tool_statuses() {
+        let mut agent = running();
+        for index in 0..512 {
+            agent
+                .item(
+                    &command_item(
+                        &format!("command-{index}"),
+                        "backgrounded",
+                        Value::Null,
+                        Value::Null,
+                    ),
+                    true,
+                )
+                .unwrap();
+        }
+        agent
+            .item(
+                &command_item("command-0", "backgrounded", Value::Null, Value::Null),
+                true,
+            )
+            .unwrap();
+        assert!(
+            agent
+                .item(
+                    &command_item("overflow", "backgrounded", Value::Null, Value::Null),
+                    true
+                )
+                .is_err()
+        );
+        assert!(
+            agent
+                .item(
+                    &json!({"id":"file","type":"fileChange","status":"backgrounded"}),
+                    true
+                )
+                .is_err()
+        );
+        assert!(
+            agent
+                .item(
+                    &command_item("bad", "unknown", Value::Null, Value::Null),
+                    true
+                )
+                .is_err()
+        );
     }
     #[test]
     fn steer_is_turn_bound_and_only_completion_retires_the_input() {

@@ -106,6 +106,38 @@ for line in sys.stdin:
             complete()
         elif prompt == 'failed':
             complete('failed')
+        elif prompt in ('background', 'background-wait'):
+            item = {'id': 'background-start', 'type': 'commandExecution', 'command': 'python -m unittest discover',
+                    'cwd': os.getcwd(), 'status': 'inProgress'}
+            notify('item/started', {'item': item})
+            notify('item/completed', {'item': {**item, 'status': 'backgrounded', 'processId': '47462',
+                    'exitCode': None, 'aggregatedOutput': 'partial regression output',
+                    'rawOutput': {'process_id': 47462}}})
+            text('BACKGROUND_WAITING')
+            if prompt == 'background':
+                complete()
+        elif prompt in ('background-write-hold', 'background-write-eof'):
+            pathlib.Path('background-late.txt').write_text('written by background command\n')
+            notify('item/completed', {'item': {'id': 'background-poll', 'type': 'commandExecution',
+                    'command': '', 'cwd': os.getcwd(), 'source': 'unifiedExecInteraction', 'status': 'completed',
+                    'processId': '47462', 'exitCode': 0, 'aggregatedOutput': 'final regression output'}})
+            text('BACKGROUND_LATE')
+            if prompt == 'background-write-eof':
+                sys.exit(0)
+        elif prompt == 'background-write':
+            pathlib.Path('background-late.txt').write_text('written by background command\n')
+            notify('item/completed', {'item': {'id': 'background-poll', 'type': 'commandExecution',
+                    'command': '', 'cwd': os.getcwd(), 'source': 'unifiedExecInteraction', 'status': 'completed',
+                    'processId': '47462', 'exitCode': 0, 'aggregatedOutput': 'final regression output'}})
+            text('BACKGROUND_WROTE')
+            complete()
+        elif prompt in ('background-poll-success', 'background-poll-failure'):
+            code = 0 if prompt.endswith('success') else 1
+            notify('item/completed', {'item': {'id': 'background-poll', 'type': 'commandExecution',
+                    'command': '', 'cwd': os.getcwd(), 'source': 'unifiedExecInteraction', 'status': 'completed',
+                    'processId': '47462', 'exitCode': code, 'aggregatedOutput': 'final regression output'}})
+            text('BACKGROUND_FINISHED')
+            complete()
         else:
             notify('item/started', {'item': {'id': 'bash', 'type': 'commandExecution', 'command': 'echo fixture', 'cwd': os.getcwd(), 'status': 'inProgress'}})
             notify('item/completed', {'item': {'id': 'bash', 'type': 'commandExecution', 'command': 'echo fixture', 'cwd': os.getcwd(), 'status': 'completed', 'exitCode': 0, 'aggregatedOutput': 'fixture'}})

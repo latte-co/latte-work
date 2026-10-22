@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { FileText, Image, Plug, Wrench } from "lucide-react";
 import { message } from "./api";
-import { CodeView } from "./CodeView";
+import { FileTextView } from "./FileTextView";
 import {
   loadSource,
   systemPreview,
@@ -134,6 +134,7 @@ export function SourcePreview({
   open,
   embedded = false,
   wrap = false,
+  markdown = false,
 }: {
   hostId: string;
   projectId: string;
@@ -143,6 +144,7 @@ export function SourcePreview({
   open: (source: SourceItem) => void;
   embedded?: boolean;
   wrap?: boolean;
+  markdown?: boolean;
 }) {
   const [revision, refresh] = useState(0);
   const preview = usePreview(
@@ -281,9 +283,10 @@ export function SourcePreview({
                 />
               </>
             ) : data.mime === "text/plain" ? (
-              <CodeView
+              <FileTextView
                 content={new TextDecoder().decode(data.bytes)}
                 wrap={wrap}
+                markdown={markdown}
               />
             ) : (
               <p>此格式可使用系统预览打开。</p>
