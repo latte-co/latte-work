@@ -1426,3 +1426,21 @@ it("keeps the selected conversation unread while Skills is visible and returns o
   expect(hook.result.current.modal).toBeNull();
   expect(hook.result.current.sessionId).toBe("");
 });
+
+it("reads skill support independently from each connected host hello", async () => {
+  mocks.loadHosts.mockResolvedValue([
+    { id: "local", name: "Local" },
+    { id: "remote", name: "Remote", ssh: "fixture-host", server_path: null },
+  ]);
+  mocks.connect.mockImplementation(async (host: { id: string }) => ({
+    kind: "hello",
+    server_id: `server-${host.id}`,
+    agents: [],
+    skill_management: host.id === "local",
+  }));
+  const hook = renderHook(useWorkbench);
+  await act(async () => {});
+  expect(hook.result.current.hostSupportsSkills("local")).toBe(true);
+  expect(hook.result.current.hostSupportsSkills("remote")).toBe(false);
+  expect(hook.result.current.hostSupportsSkills("missing")).toBe(false);
+});

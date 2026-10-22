@@ -672,6 +672,7 @@ export type Response =
       agents: Array<AgentInfo>;
       permission_settings: boolean;
       history_window: boolean;
+      skill_management: boolean;
     }
   | { kind: "projects"; projects: Array<Project> }
   | { kind: "project"; project: Project }

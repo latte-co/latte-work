@@ -22,6 +22,7 @@ const state = {
   projects: [{ id: "p", hostId: "local", name: "Project", path: "/project" }],
   isHostConnected: () => true,
   hostConnectionVersions: {},
+  hostSupportsSkills: () => true,
 } as unknown as Workbench;
 const platform: ManagedSkill = {
   id: "platform:context",
@@ -214,14 +215,14 @@ it("keeps host labels readable in a right-aligned menu wider than the compact tr
   );
 });
 it("explains an older remote server without exposing the wire parser error, then reloads after reconnect", async () => {
-  const parserError =
-    "unknown variant `skills`, expected one of `hello`, `projects` at line 1 column 18";
-  request.mockImplementation(async (host) => {
-    if (host === "devbox") throw new Error(parserError);
-    return catalog();
-  });
+  let remoteSupported = false;
+  const capabilityState = {
+    ...state,
+    hostSupportsSkills: (id: string) => id === "local" || remoteSupported,
+  };
+  request.mockResolvedValue(catalog());
   const view = render(
-    <SkillsSettings state={state} active onBusy={() => {}} />,
+    <SkillsSettings state={capabilityState} active onBusy={() => {}} />,
   );
   await screen.findByRole("button", { name: /System Review/ });
   fireEvent.click(screen.getByRole("combobox", { name: "技能所在主机" }));
@@ -229,7 +230,7 @@ it("explains an older remote server without exposing the wire parser error, then
   const alert = await screen.findByRole("alert");
   expect(alert.textContent).toContain("devbox 的 Server 版本较旧");
   expect(alert.textContent).toContain("在该远程主机上更新并重启");
-  expect(alert.textContent).not.toContain("unknown variant");
+  expect(request.mock.calls.some(([host]) => host === "devbox")).toBe(false);
   expect(
     (screen.getByRole("button", { name: "添加" }) as HTMLButtonElement)
       .disabled,
@@ -239,10 +240,11 @@ it("explains an older remote server without exposing the wire parser error, then
       .disabled,
   ).toBe(false);
   const count = request.mock.calls.length;
+  remoteSupported = true;
   request.mockResolvedValue(catalog([{ ...system, name: "Remote Updated" }]));
   view.rerender(
     <SkillsSettings
-      state={{ ...state, hostConnectionVersions: { devbox: 2 } }}
+      state={{ ...capabilityState, hostConnectionVersions: { devbox: 2 } }}
       active
       onBusy={() => {}}
     />,
@@ -296,4 +298,58 @@ it("Try now passes the chosen project without sending a prompt, and Escape close
   ).toBe(true);
   fireEvent.keyDown(screen.getByRole("dialog"), { key: "Escape" });
   await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+});
+
+it("restores focus after uninstall removes the installed-row trigger and describes the confirmation impact", async () => {
+  let entry = { ...system };
+  request.mockImplementation(async (_host, action) => {
+    if (action.method === "skill_detail")
+      return { kind: "skill_detail", skill: entry, markdown: "# Skill" };
+    if (action.method === "set_skill_state")
+      entry = { ...entry, state: action.state };
+    return catalog([platform, entry]);
+  });
+  render(<SkillsSettings state={state} active onBusy={() => {}} />);
+  const row = await screen.findByRole("button", { name: /System Review/ });
+  row.focus();
+  fireEvent.click(row);
+  fireEvent.click(await screen.findByRole("button", { name: "卸载" }));
+  const confirm = screen.getByRole("dialog", { name: /卸载 System Review/ });
+  const description = document.getElementById(
+    confirm.getAttribute("aria-describedby")!,
+  );
+  expect(description?.textContent).toContain("会移动当前安装目录");
+  expect(description?.textContent).toContain(system.directory);
+  fireEvent.click(within(confirm).getByRole("button", { name: "确认" }));
+  await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  expect(row.isConnected).toBe(false);
+  await waitFor(() =>
+    expect(document.activeElement).toBe(
+      screen.getByRole("button", { name: "刷新技能" }),
+    ),
+  );
+});
+it("associates import instructions and limits with the dialog and wraps category keyboard navigation", async () => {
+  request.mockResolvedValue(catalog());
+  render(<SkillsSettings state={state} active onBusy={() => {}} />);
+  await screen.findByRole("button", { name: /System Review/ });
+  const platformTab = screen.getByRole("tab", { name: "平台内置" });
+  fireEvent.keyDown(platformTab, { key: "ArrowLeft" });
+  expect(
+    screen.getByRole("tab", { name: "项目" }).getAttribute("aria-selected"),
+  ).toBe("true");
+  fireEvent.keyDown(screen.getByRole("tab", { name: "项目" }), {
+    key: "ArrowRight",
+  });
+  expect(platformTab.getAttribute("aria-selected")).toBe("true");
+  fireEvent.click(screen.getByRole("button", { name: "添加" }));
+  const dialog = screen.getByRole("dialog", { name: "添加技能" });
+  const description = dialog
+    .getAttribute("aria-describedby")!
+    .split(" ")
+    .map((id) => document.getElementById(id)?.textContent)
+    .join(" ");
+  expect(description).toContain("现有目录导入完整技能");
+  expect(description).toContain("512");
+  expect(description).toContain("原目录保留");
 });

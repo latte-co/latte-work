@@ -410,7 +410,7 @@ impl AgentAdapter for Claude {
                 .or_else(|| config.provider.as_ref().map(|p| p.metadata.model.clone())),
         );
         let mut command = crate::agent_environment::command(binary);
-        let instructions = crate::skills::platform_instructions(&config.settings_dir)?;
+        let instructions = crate::skills::platform_instructions(&config.settings_dir);
         if !instructions.is_empty() {
             command.arg("--append-system-prompt").arg(instructions);
         }

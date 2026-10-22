@@ -1,22 +1,10 @@
 import { useEffect, useRef, useState } from "react";
-import {
-  Box,
-  Check,
-  Copy,
-  Folder,
-  Globe2,
-  Monitor,
-  Plus,
-  RefreshCw,
-  Search,
-  X,
-} from "lucide-react";
-import ReactMarkdown from "react-markdown";
-import remarkGfm from "remark-gfm";
+import { Globe2, Monitor, Plus, RefreshCw, Search } from "lucide-react";
 import { message, request } from "./api";
-import { copyText } from "./clipboard";
 import { Modal } from "./Modal";
 import { Select } from "./Select";
+import { SkillDetailDialog } from "./SkillDetailDialog";
+import { SkillGrid, skillScopes as scopes } from "./SkillGrid";
 import type {
   ManagedSkill,
   Response,
@@ -28,26 +16,8 @@ import "./skills.css";
 
 type Catalog = Extract<Response, { kind: "skills" }>;
 type Detail = Extract<Response, { kind: "skill_detail" }>;
-const scopes: { value: SkillScope; label: string }[] = [
-  { value: "platform", label: "平台内置" },
-  { value: "system", label: "系统" },
-  { value: "project", label: "项目" },
-];
-const states: Record<SkillState, string> = {
-  enabled: "已启用",
-  disabled: "已禁用",
-  uninstalled: "已卸载",
-};
-function skillError(cause: unknown, hostName: string, remote: boolean) {
-  const detail = message(cause);
-  if (
-    /unknown variant [`'"](?:skills|skill_detail|set_skill_state|install_skill)[`'"]/.test(
-      detail,
-    ) ||
-    detail.includes("此 Server 不支持技能管理")
-  )
-    return `${hostName} 的 Server 版本较旧，尚不支持技能管理。请${remote ? "在该远程主机上更新并重启同版本 Server，再重新连接" : "更新本机 Server 后重新连接"}；重启前请先完成任务并关闭终端。`;
-  return detail;
+function upgradeMessage(hostName: string, remote: boolean) {
+  return `${hostName} 的 Server 版本较旧，尚不支持技能管理。请${remote ? "在该远程主机上更新并重启同版本 Server，再重新连接" : "更新本机 Server 后重新连接"}；重启前请先完成任务并关闭终端。`;
 }
 
 export function SkillsSettings({
@@ -67,7 +37,6 @@ export function SkillsSettings({
 }) {
   const [hostId, setHostId] = useState(state.host.id);
   const [projectId, setProjectId] = useState(state.projectId ?? "");
-  const [trialProject, setTrialProject] = useState("");
   const [scope, setScope] = useState<SkillScope>("platform");
   const [query, setQuery] = useState("");
   const [catalog, setCatalog] = useState<Catalog>();
@@ -89,16 +58,19 @@ export function SkillsSettings({
   );
   const [installedExpanded, setInstalledExpanded] = useState(false);
   const [categoryExpanded, setCategoryExpanded] = useState(false);
-  const [copied, setCopied] = useState(false);
+  const refresh = useRef<HTMLButtonElement>(null);
+  const selectionTrigger = useRef<HTMLButtonElement>(null);
+  const restoreFocus = useRef(false);
   const generation = useRef(0);
   const operation = useRef(false);
   const projects = state.projects.filter((p) => p.hostId === hostId);
   const project = projects.find((p) => p.id === projectId);
   const host = state.hosts.find((h) => h.id === hostId);
   const connected = !!host && state.isHostConnected(hostId);
-  const context = `${hostId}:${state.hostConnectionVersions[hostId] ?? 0}:${project?.id ?? ""}:${active}:${connected}`;
-  const describeError = (cause: unknown) =>
-    skillError(cause, host?.name ?? "所选主机", hostId !== "local");
+  const supported = state.hostSupportsSkills(hostId);
+  const upgrade = upgradeMessage(host?.name ?? "所选主机", hostId !== "local");
+  const context = `${supported}:${hostId}:${state.hostConnectionVersions[hostId] ?? 0}:${project?.id ?? ""}:${active}:${connected}`;
+  const describeError = (cause: unknown) => message(cause);
   const contextRef = useRef(context);
   // Invalidate during render as well as effect cleanup: stale async results cannot mutate a new scope.
   if (contextRef.current !== context) {
@@ -120,13 +92,17 @@ export function SkillsSettings({
       setLoading(false);
       return;
     }
+    if (!supported) {
+      setLoading(false);
+      setError(upgrade);
+      return;
+    }
     const version = ++generation.current;
     setLoading(true);
     void request(hostId, { method: "skills", project_id: project?.id ?? null })
       .then((response) => {
         if (version !== generation.current) return;
-        if (response.kind !== "skills")
-          throw new Error("此 Server 不支持技能管理，请更新所选主机的 Server");
+        if (response.kind !== "skills") throw new Error(upgrade);
         setCatalog(response);
       })
       .catch((cause) => {
@@ -144,7 +120,6 @@ export function SkillsSettings({
     const version = generation.current;
     let disposed = false;
     setDetail(undefined);
-    setCopied(false);
     void request(hostId, {
       method: "skill_detail",
       project_id: project?.id ?? null,
@@ -198,6 +173,7 @@ export function SkillsSettings({
       if (version !== generation.current) return;
       if (response.kind !== "skills")
         throw new Error("操作结果待核对，请刷新列表确认状态");
+      restoreFocus.current = true;
       setCatalog(response);
       setConfirm(undefined);
       setAdd(false);
@@ -209,6 +185,22 @@ export function SkillsSettings({
         setError(
           `${describeError(cause)}。可刷新列表核对状态；不会自动重试操作。`,
         );
+    } finally {
+      operation.current = false;
+      setBusy(false);
+      onBusy(false);
+    }
+  }
+  async function trySkill(targetProject: string, skill: ManagedSkill) {
+    if (!onTry || operation.current) return;
+    operation.current = true;
+    setBusy(true);
+    onBusy(true);
+    const version = generation.current;
+    try {
+      await onTry(hostId, targetProject, skill);
+    } catch (cause) {
+      if (version === generation.current) setError(message(cause));
     } finally {
       operation.current = false;
       setBusy(false);
@@ -228,74 +220,27 @@ export function SkillsSettings({
   const installed = filtered.filter((s) => s.state !== "uninstalled");
   const category = filtered.filter((s) => s.scope === scope);
   const locked = busy || loading || !connected;
-  function grid(
-    skills: ManagedSkill[],
-    expanded: boolean,
-    setExpanded: (expanded: boolean) => void,
-    label: string,
-  ) {
-    return (
-      <>
-        <div className="skills-grid" aria-label={label}>
-          {(expanded || query ? skills : skills.slice(0, 6)).map((skill) => (
-            <button
-              key={skill.id}
-              className="skills-row"
-              disabled={busy || !connected}
-              onClick={() => {
-                setError("");
-                setSelected(skill.id);
-                setTrialProject(
-                  project?.id ??
-                    projects.find((p) => p.id === state.projectId)?.id ??
-                    "",
-                );
-              }}
-            >
-              <span className="skills-icon">
-                <Box size={22} />
-              </span>
-              <span className="skills-row-copy">
-                <span>{skill.name}</span>
-                <small title={skill.description || skill.origin}>
-                  {skill.description || skill.origin}
-                </small>
-              </span>
-              <span
-                className={`skills-state ${skill.state}`}
-                title={states[skill.state]}
-                aria-label={states[skill.state]}
-              >
-                {skill.state === "enabled" ? (
-                  <Check size={17} />
-                ) : (
-                  states[skill.state]
-                )}
-              </span>
-            </button>
-          ))}
-        </div>
-        {!skills.length && !loading && (
-          <p className="skills-empty">
-            {query
-              ? "没有匹配的技能"
-              : scope === "project" && !project && label !== "已安装技能"
-                ? "选择项目后查看项目技能"
-                : "暂无技能"}
-          </p>
-        )}
-        {skills.length > 6 && !query && (
-          <button
-            className="skills-expand"
-            aria-expanded={expanded}
-            onClick={() => setExpanded(!expanded)}
-          >
-            {expanded ? "收起" : `查看全部，另有 ${skills.length - 6} 项`}
-          </button>
-        )}
-      </>
-    );
+  function selectSkill(skill: ManagedSkill, trigger: HTMLButtonElement) {
+    selectionTrigger.current = trigger;
+    setError("");
+    setSelected(skill.id);
   }
+  useEffect(() => {
+    if (!restoreFocus.current || selected) return;
+    restoreFocus.current = false;
+    if (!active) return;
+    const frame = requestAnimationFrame(() => {
+      const trigger = selectionTrigger.current;
+      if (
+        trigger?.isConnected &&
+        !trigger.disabled &&
+        !trigger.closest("[hidden], [inert]")
+      )
+        trigger.focus();
+      else refresh.current?.focus();
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [selected, active]);
   const skill = detail?.skill;
   return (
     <div
@@ -352,6 +297,7 @@ export function SkillsSettings({
           </span>
           <button
             className="icon-button"
+            ref={refresh}
             aria-label="刷新技能"
             title="刷新技能"
             disabled={locked}
@@ -399,7 +345,9 @@ export function SkillsSettings({
                 <p key={i}>{w}</p>
               ))}
               {catalog.truncated && (
-                <p>扫描达到 512 项上限，请缩小技能目录后刷新。</p>
+                <p>
+                  扫描达到数量、大小或时间上限，部分技能可能未显示；请整理目录后刷新。
+                </p>
               )}
             </details>
           )}
@@ -407,12 +355,17 @@ export function SkillsSettings({
             <h3>
               已安装 <small>{installed.length}</small>
             </h3>
-            {grid(
-              installed,
-              installedExpanded,
-              setInstalledExpanded,
-              "已安装技能",
-            )}
+            <SkillGrid
+              skills={installed}
+              expanded={installedExpanded}
+              onExpand={setInstalledExpanded}
+              query={query}
+              loading={loading}
+              disabled={busy || !connected}
+              label="已安装技能"
+              emptyMessage="暂无技能"
+              onSelect={selectSkill}
+            />
           </section>
           <section className="skills-categories">
             <div className="skills-category-toolbar">
@@ -441,8 +394,11 @@ export function SkillsSettings({
                         e.key === "Home"
                           ? 0
                           : e.key === "End"
-                            ? 2
-                            : (i + (e.key === "ArrowRight" ? 1 : -1) + 3) % 3;
+                            ? scopes.length - 1
+                            : (i +
+                                (e.key === "ArrowRight" ? 1 : -1) +
+                                scopes.length) %
+                              scopes.length;
                       setScope(scopes[next].value);
                       setCategoryExpanded(false);
                       document
@@ -483,204 +439,63 @@ export function SkillsSettings({
               id="skill-category-panel"
               aria-labelledby={`skill-tab-${scope}`}
             >
-              {grid(
-                category,
-                categoryExpanded,
-                setCategoryExpanded,
-                "分类技能",
-              )}
+              <SkillGrid
+                skills={category}
+                expanded={categoryExpanded}
+                onExpand={setCategoryExpanded}
+                query={query}
+                loading={loading}
+                disabled={busy || !connected}
+                label="分类技能"
+                emptyMessage={
+                  scope === "project" && !project
+                    ? "选择项目后查看项目技能"
+                    : "暂无技能"
+                }
+                onSelect={selectSkill}
+              />
             </div>
           </section>
         </>
       )}
       {active && selected && (
-        <div
-          className="modal-backdrop"
-          onMouseDown={(e) => {
-            if (e.target === e.currentTarget && !busy && !confirm) {
+        <SkillDetailDialog
+          key={selected}
+          detail={detail}
+          skill={skill}
+          error={error}
+          busy={busy}
+          connected={connected}
+          hostName={host?.name}
+          projects={projects}
+          projectId={project?.id}
+          defaultTrialProject={
+            project?.id ??
+            projects.find((p) => p.id === state.projectId)?.id ??
+            ""
+          }
+          onClose={() => {
+            if (!busy && !confirm) {
               setSelected(undefined);
               setDetail(undefined);
             }
           }}
-        >
-          <Modal
-            className="modal skill-detail"
-            aria-labelledby="skill-detail-title"
-          >
-            <div className="skill-detail-top">
-              <span className="skills-icon">
-                <Box size={23} />
-              </span>
-              <div>
-                {skill && (
-                  <button
-                    className="skill-toggle"
-                    role="switch"
-                    aria-label="启用技能"
-                    aria-checked={skill.state === "enabled"}
-                    disabled={
-                      busy || !connected || skill.state === "uninstalled"
-                    }
-                    onClick={() =>
-                      change(
-                        skill,
-                        skill.state === "enabled" ? "disabled" : "enabled",
-                      )
-                    }
-                  >
-                    <span />
-                  </button>
-                )}
-                <button
-                  className="icon-button"
-                  aria-label="关闭技能详情"
-                  disabled={busy}
-                  onClick={() => {
-                    setSelected(undefined);
-                    setDetail(undefined);
-                  }}
-                >
-                  <X size={18} />
-                </button>
-              </div>
-            </div>
-            <h2 id="skill-detail-title">{skill?.name ?? "技能详情"}</h2>
-            {!detail && (
-              <p role="status">{error ? "技能详情暂不可用" : "正在读取…"}</p>
-            )}
-            {detail && (
-              <>
-                <p>{skill?.description}</p>
-                <div className="skill-detail-meta">
-                  <span>
-                    {scopes.find((s) => s.value === skill?.scope)?.label} ·{" "}
-                    {skill && states[skill.state]}
-                  </span>
-                  <span>{host?.name}</span>
-                </div>
-                {skill?.directory && (
-                  <div className="skill-detail-path" title={skill.directory}>
-                    <Folder size={14} />
-                    <span>{skill.directory}</span>
-                  </div>
-                )}
-                <div className="skill-markdown markdown" tabIndex={0}>
-                  <ReactMarkdown
-                    remarkPlugins={[remarkGfm]}
-                    components={{
-                      a: ({ children, href }) => (
-                        <span title={href}>{children}</span>
-                      ),
-                      img: ({ alt }) => <span>{alt || "图片"}</span>,
-                    }}
-                  >
-                    {detail.markdown.replace(
-                      /^---\r?\n[\s\S]*?\r?\n---(?:\r?\n|$)/,
-                      "",
-                    )}
-                  </ReactMarkdown>
-                </div>
-                {onTry && (
-                  <div className="skill-trial-project">
-                    <Select
-                      label="试用技能的项目"
-                      compact
-                      value={trialProject}
-                      disabled={busy}
-                      options={[
-                        { value: "", label: "选择试用项目" },
-                        ...projects
-                          .filter(
-                            (p) =>
-                              skill?.scope !== "project" ||
-                              p.id === project?.id,
-                          )
-                          .map((p) => ({ value: p.id, label: p.name })),
-                      ]}
-                      onChange={setTrialProject}
-                    />
-                  </div>
-                )}
-                <footer className="skill-detail-actions">
-                  <button
-                    className={skill?.state !== "uninstalled" ? "danger" : ""}
-                    disabled={busy || !connected}
-                    onClick={() =>
-                      skill &&
-                      change(
-                        skill,
-                        skill.state === "uninstalled"
-                          ? "enabled"
-                          : "uninstalled",
-                      )
-                    }
-                  >
-                    {skill?.state === "uninstalled" ? "重新安装" : "卸载"}
-                  </button>
-                  <button
-                    disabled={busy}
-                    onClick={() => {
-                      void copyText(detail.markdown)
-                        .then(() => setCopied(true))
-                        .catch((e) => setError(message(e)));
-                    }}
-                  >
-                    <Copy size={15} />
-                    {copied ? "已复制" : "复制 Markdown"}
-                  </button>
-                  {onTry && (
-                    <button
-                      className="primary"
-                      disabled={
-                        busy ||
-                        !connected ||
-                        skill?.state !== "enabled" ||
-                        !trialProject
-                      }
-                      onClick={() => {
-                        if (!skill || operation.current) return;
-                        operation.current = true;
-                        setBusy(true);
-                        onBusy(true);
-                        const version = generation.current;
-                        void onTry(hostId, trialProject, skill)
-                          .catch((cause) => {
-                            if (version === generation.current)
-                              setError(message(cause));
-                          })
-                          .finally(() => {
-                            operation.current = false;
-                            setBusy(false);
-                            onBusy(false);
-                          });
-                      }}
-                    >
-                      立即试用
-                    </button>
-                  )}
-                </footer>
-              </>
-            )}
-            {error && (
-              <p role="alert">
-                {error}
-                <button
-                  disabled={busy}
-                  onClick={() => {
-                    setSelected(undefined);
-                    setRevision((v) => v + 1);
-                  }}
-                >
-                  刷新核对
-                </button>
-              </p>
-            )}
-          </Modal>
-        </div>
+          onChange={change}
+          onError={setError}
+          onRefresh={() => {
+            setSelected(undefined);
+            setRevision((v) => v + 1);
+          }}
+          onTry={onTry ? trySkill : undefined}
+        />
       )}
       {active && confirm && (
         <div className="modal-backdrop skill-confirm-backdrop">
-          <Modal className="modal" aria-labelledby="skill-confirm-title">
+          <Modal
+            className="modal"
+            aria-labelledby="skill-confirm-title"
+            aria-describedby="skill-confirm-description"
+          >
             <h2 id="skill-confirm-title">
               {confirm.next === "uninstalled"
                 ? "卸载"
@@ -689,19 +504,21 @@ export function SkillsSettings({
                   : "启用"}{" "}
               {confirm.skill.name}？
             </h2>
-            <p>主机：{host?.name}</p>
-            <p className="skill-detail-path">
-              {confirm.skill.directory ?? "Latte Work 平台内置技能"}
-            </p>
-            <p>
-              {confirm.skill.scope === "platform"
-                ? "仅影响此主机上由 Latte Work 启动的 Agent。"
-                : "会移动当前安装目录，影响这台主机上使用此目录的其他 Agent。"}
-              {confirm.next === "uninstalled"
-                ? "卸载后保留恢复副本，可在分类中重新安装。"
-                : "可以随时在此恢复。"}{" "}
-              已运行的会话及历史上下文保持原样，对后续新建的 Agent 会话生效。
-            </p>
+            <div id="skill-confirm-description">
+              <p>主机：{host?.name}</p>
+              <p className="skill-detail-path">
+                {confirm.skill.directory ?? "Latte Work 平台内置技能"}
+              </p>
+              <p>
+                {confirm.skill.scope === "platform"
+                  ? "仅影响此主机上由 Latte Work 启动的 Agent。"
+                  : "会移动当前安装目录，影响这台主机上使用此目录的其他 Agent。"}
+                {confirm.next === "uninstalled"
+                  ? "卸载后保留恢复副本，可在分类中重新安装。"
+                  : "可以随时在此恢复。"}{" "}
+                已运行的会话及历史上下文保持原样，对后续新建的 Agent 会话生效。
+              </p>
+            </div>
             {error && <p role="alert">{error}</p>}
             <div className="modal-actions">
               <button disabled={busy} onClick={() => setConfirm(undefined)}>
@@ -722,9 +539,13 @@ export function SkillsSettings({
       )}
       {active && add && (
         <div className="modal-backdrop">
-          <Modal className="modal" aria-labelledby="skill-add-title">
+          <Modal
+            className="modal"
+            aria-labelledby="skill-add-title"
+            aria-describedby="skill-add-description skill-add-limits"
+          >
             <h2 id="skill-add-title">添加技能</h2>
-            <p>
+            <p id="skill-add-description">
               从 {host?.name} 上的现有目录导入完整技能。目录需包含
               SKILL.md，不会执行其中的命令。
             </p>
@@ -754,7 +575,7 @@ export function SkillsSettings({
                 onChange={(e) => setImportPath(e.target.value)}
               />
             </label>
-            <p>
+            <p id="skill-add-limits">
               复制到 .agents/skills；原目录保留。最多 512 项、16
               MiB，不支持包内符号链接。
             </p>

@@ -82,3 +82,70 @@ it("keeps Select portals inside the modal and isolates nested dialog focus", () 
   fireEvent.click(screen.getByText("返回"));
   expect(document.activeElement).toBe(screen.getByText("嵌套"));
 });
+
+function SimultaneousClose({ siblings }: { siblings: boolean }) {
+  const [open, setOpen] = useState(false);
+  const [nested, setNested] = useState(false);
+  const inner = (
+    <div>
+      <Modal aria-label="确认">
+        <button
+          onClick={() => {
+            setNested(false);
+            setOpen(false);
+          }}
+        >
+          完成操作
+        </button>
+      </Modal>
+    </div>
+  );
+  return (
+    <>
+      <div data-testid="background">
+        <button
+          onClick={(event) => {
+            event.currentTarget.focus();
+            setOpen(true);
+          }}
+        >
+          打开详情
+        </button>
+      </div>
+      <aside data-testid="preexisting">原先不可交互的区域</aside>
+      {open && (
+        <div>
+          <Modal aria-label="详情">
+            <button
+              onClick={(event) => {
+                event.currentTarget.focus();
+                setNested(true);
+              }}
+            >
+              确认操作
+            </button>
+            {nested && !siblings && inner}
+          </Modal>
+        </div>
+      )}
+      {open && nested && siblings && inner}
+    </>
+  );
+}
+for (const siblings of [false, true]) {
+  it(`restores shared background when both ${siblings ? "sibling" : "nested"} dialogs close together`, () => {
+    render(<SimultaneousClose siblings={siblings} />);
+    const background = screen.getByTestId("background");
+    const preexisting = screen.getByTestId("preexisting");
+    preexisting.inert = true;
+    fireEvent.click(screen.getByText("打开详情"));
+    fireEvent.click(screen.getByText("确认操作"));
+    expect(background.inert).toBe(true);
+    fireEvent.click(screen.getByText("完成操作"));
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(background.inert).toBe(false);
+    expect(preexisting.inert).toBe(true);
+    screen.getByText("打开详情").focus();
+    expect(document.activeElement).toBe(screen.getByText("打开详情"));
+  });
+}

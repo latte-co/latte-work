@@ -1222,20 +1222,37 @@ Native UI and actual SSH execution remain separate acceptance evidence.
 
 The main sidebar’s Skills entry below New task reads the selected local/SSH host without starting an Agent.
 `skills`, `skill_detail`, `set_skill_state` and `install_skill` are additive host
-requests; older remote Servers report unsupported requests and must be updated.
+requests. Hello advertises `skill_management`; an absent/false flag keeps the client
+from sending these requests and shows an upgrade instruction. Older remote Servers
+must be updated before using the page.
 The desktop keeps host/project identities separate and discards late responses.
-The host menu has its own minimum width. Legacy Servers rejecting the new requests
-show an upgrade instruction instead of the wire parser diagnostic; import stays
-disabled until inventory loads. Reconnecting the selected host reloads inventory.
+The host menu has its own minimum width. Capability checks avoid unsupported wire
+requests on legacy Servers; import stays disabled until inventory loads.
+Reconnecting the selected host reloads inventory.
 Try now opens a draft for the chosen project, appending a skill reference while
 preserving existing draft text. It does not submit a prompt or open an Agent.
 
-Platform skills ship in `skills/` and are embedded in the standalone Server.
+Platform skills ship in `skills/`, are embedded in the standalone Server, and are
+enabled by default. Corrupt, oversized or symlinked preferences skip platform
+injection without blocking Agent startup or command discovery. Inventory still
+shows native skills and a diagnostic with the preferences path; the damaged file
+is preserved rather than silently reset.
 The initial `latte-work-context` skill explains host paths and attached references.
 Enabled platform content is passed only to Work's Claude child through
 `--append-system-prompt`, and to Traex thread start/resume through the native
-`developerInstructions` field, appended to the native configured developer instructions. Both fields were checked against installed CLI
-help/schema. No native configuration or global skill directory is written.
+`developerInstructions` field, appended to the native configured developer instructions.
+Only the Markdown body is injected. With platform skills enabled Traex reads its
+native configuration before opening/resuming a thread, including when an App
+Provider is selected. This adds a metadata round trip; if the configuration request
+fails, native session opening fails explicitly. Missing or malformed native
+instruction fields omit the override with a diagnostic, preserving CLI defaults;
+explicit null means no configured instructions. No native configuration or global
+skill directory is written.
+
+The checked CLI is Traex 0.210.1-alpha.3. Reproduce its schema and metadata-only
+sentinel check with `python3 scripts/smoke-traex-skill-contract.py`; it creates no
+thread and sends no model prompt. The deterministic fixture asserts preservation
+on both start and resume and tests that disabling platform skills removes the override.
 Host preferences are atomically saved in the private state directory's `skills.json`.
 Changes apply to new Agent sessions; running processes and native conversation
 history may retain previously loaded instructions. No session is stopped or replayed.
@@ -1245,7 +1262,11 @@ System roots include the shell-resolved `CLAUDE_CONFIG_DIR/skills` (otherwise
 `~/.trae/skills`, and `~/.traex/skills`. Project roots are the corresponding
 `.claude`, `.agents`, `.codex`, `.trae`, `.traex` skill directories directly under
 the registered project. Installed plugin caches and ancestor projects are outside
-this inventory. Showing a skill does not assert that every Agent supports that root;
+this inventory. System roots are trusted user-owned configuration: native root
+symlinks may resolve outside HOME. Project skill roots must remain inside the
+canonical registered project. Import resolves aliases of the trusted home/project
+base first, then refuses symlinks inside its destination. Conflicting installations
+and invalid names are reported with names/paths. Showing a skill does not assert that every Agent supports that root;
 native discovery and eligibility remain Agent-specific.
 
 Native enable/disable moves the complete top-level directory or symlink between
@@ -1266,11 +1287,17 @@ nested symlinks/special files, and allow 512 entries, 16 MiB total and eight dir
 levels. No download, shell expansion, package manager or skill body is executed.
 Inventory reads at most 512 entries per directory, returns at most 512 skills and
 half a wire frame of metadata, bounds SKILL.md to 64 KiB and scanning to three
-seconds between filesystem operations. The worker admission is bounded; requests
-have a 15-second response deadline. A timeout is unconfirmed, never auto-replayed;
-refresh reconciles the actual installation state.
+seconds between filesystem operations. A dedicated one-slot skill worker is
+independent of Agent probe capacity; provider model reads use the metadata lane.
+Requests have a 15-second response deadline. Cancellation and deadline checks run
+between filesystem steps, copy chunks and before committing a move/import. A
+blocking OS syscall cannot be forcibly cancelled: the worker retains its slot
+until it exits, preventing abandoned threads from accumulating, while Agent probes
+remain available. A timeout is unconfirmed, never auto-replayed; refresh reconciles
+the actual installation state.
 
-Focused checks: `skills::` and `platform_skills_` server unit tests,
-`skill_management_is_host_local_reversible_and_prompt_free` final-binary test,
-and `SkillsSettings.test.tsx`. CLI fixtures, browser layout, native UI and actual
-SSH execution are separate evidence scopes.
+Focused checks: `skills::`, `skill_worker::`, `skill_admission_tests::` and
+`platform_skills_` server unit tests; `skill_` final-binary tests cover inventory,
+import, damaged preferences and Traex start/resume preservation. UI regressions
+live in `SkillsSettings.test.tsx` and `Modal.test.tsx`. CLI fixtures, browser layout,
+native UI and actual SSH execution are separate evidence scopes.

@@ -34,6 +34,7 @@ pub fn lane(request: &Request) -> Lane {
         | Request::AgentCommands { .. }
         | Request::AgentPermissions { .. }
         | Request::Models { .. }
+        | Request::ModelsForProvider { .. }
         | Request::ReadFile { .. }
         | Request::SubagentTranscript { .. }
         | Request::Diff { .. }
@@ -82,6 +83,16 @@ mod tests {
         sync::atomic::{AtomicUsize, Ordering},
         time::Duration,
     };
+    #[test]
+    fn provider_model_reads_use_metadata_lane() {
+        let request = Request::ModelsForProvider {
+            agent: "traex".into(),
+            model: None,
+            project_id: None,
+            provider: None,
+        };
+        assert!(matches!(lane(&request), Lane::Metadata));
+    }
     #[tokio::test]
     async fn slow_control_does_not_block_history_or_metadata_and_connections_are_reused() {
         let primary = Arc::new(Mutex::new(0_u8));

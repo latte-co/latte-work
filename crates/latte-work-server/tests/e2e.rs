@@ -7926,3 +7926,151 @@ async fn skill_management_is_host_local_reversible_and_prompt_free() {
         SkillState::Enabled
     );
 }
+
+#[tokio::test]
+async fn skill_import_copies_full_packages_and_rejects_unsafe_content_without_prompts() {
+    use latte_work_protocol::SkillScope;
+    let home = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let packages = tempfile::tempdir().unwrap();
+    let host = Host::start_with_environment(&[("HOME", home.path().as_os_str())]).await;
+    let mut client = host.client().await;
+    assert!(matches!(
+        ask(&mut client, Request::Hello { version: VERSION }).await,
+        Response::Hello {
+            skill_management: true,
+            ..
+        }
+    ));
+    let Response::Project { project } = ask(
+        &mut client,
+        Request::AddProject {
+            path: root.path().to_string_lossy().into(),
+            name: None,
+        },
+    )
+    .await
+    else {
+        panic!("project")
+    };
+    let source = packages.path().join("imported");
+    std::fs::create_dir_all(source.join("scripts")).unwrap();
+    std::fs::write(
+        source.join("SKILL.md"),
+        "---\nname: Imported\ndescription: Fixture\n---\n!`touch MUST_NOT_EXECUTE`\n",
+    )
+    .unwrap();
+    std::fs::write(source.join("scripts/check.sh"), "touch MUST_NOT_EXECUTE").unwrap();
+    for scope in [SkillScope::Project, SkillScope::System] {
+        let response = ask(
+            &mut client,
+            Request::InstallSkill {
+                project_id: Some(project.id.clone()),
+                scope,
+                path: source.to_string_lossy().into(),
+            },
+        )
+        .await;
+        let Response::Skills { skills, .. } = response else {
+            panic!("{response:?}")
+        };
+        let installed = skills
+            .iter()
+            .find(|s| s.scope == scope && s.name == "Imported")
+            .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(
+                Path::new(installed.directory.as_ref().unwrap()).join("scripts/check.sh")
+            )
+            .unwrap(),
+            "touch MUST_NOT_EXECUTE"
+        );
+    }
+    let unsafe_package = packages.path().join("unsafe-package");
+    std::fs::create_dir(&unsafe_package).unwrap();
+    std::fs::copy(source.join("SKILL.md"), unsafe_package.join("SKILL.md")).unwrap();
+    std::os::unix::fs::symlink(source.join("SKILL.md"), unsafe_package.join("linked")).unwrap();
+    assert!(matches!(
+        ask(
+            &mut client,
+            Request::InstallSkill {
+                project_id: Some(project.id.clone()),
+                scope: SkillScope::Project,
+                path: unsafe_package.to_string_lossy().into()
+            }
+        )
+        .await,
+        Response::Error { .. }
+    ));
+    assert!(!root.path().join(".agents/skills/unsafe-package").exists());
+    assert!(source.join("SKILL.md").exists());
+    assert!(!root.path().join("MUST_NOT_EXECUTE").exists());
+    assert!(
+        matches!(ask(&mut client,Request::Sessions{project_id:project.id}).await,Response::Sessions{sessions}if sessions.is_empty())
+    );
+}
+#[tokio::test]
+async fn damaged_skill_preferences_do_not_block_agent_sessions_or_command_discovery() {
+    for damage in ["json", "oversize", "symlink"] {
+        let host = Host::start().await;
+        let mut client = host.client().await;
+        let root = tempfile::tempdir().unwrap();
+        let prefs = host.directory.path().join("skills.json");
+        match damage {
+            "json" => std::fs::write(&prefs, "not-json").unwrap(),
+            "oversize" => std::fs::write(&prefs, " ".repeat(64 * 1024 + 1)).unwrap(),
+            _ => {
+                let external = root.path().join("external.json");
+                std::fs::write(&external, "{}").unwrap();
+                std::os::unix::fs::symlink(external, &prefs).unwrap();
+            }
+        }
+        let id = session(&mut client, root.path()).await;
+        let Response::Session { session: current } = ask(
+            &mut client,
+            Request::Session {
+                session_id: id.clone(),
+            },
+        )
+        .await
+        else {
+            panic!("session")
+        };
+        for agent in ["claude", "traex"] {
+            assert!(matches!(
+                ask(
+                    &mut client,
+                    Request::AgentCommands {
+                        project_id: current.project_id.clone(),
+                        agent: agent.into()
+                    }
+                )
+                .await,
+                Response::AgentCommands { .. }
+            ));
+            let id = if agent == "claude" {
+                id.clone()
+            } else {
+                let Response::Session { session } = ask(
+                    &mut client,
+                    Request::CreateSession {
+                        project_id: current.project_id.clone(),
+                        agent: agent.into(),
+                    },
+                )
+                .await
+                else {
+                    panic!("session")
+                };
+                session.id
+            };
+            let reply = send(&mut client, &id, &format!("damaged-prefs-{agent}"), "hello").await;
+            assert!(
+                matches!(reply, Response::Accepted { .. }),
+                "{damage}/{agent}: {reply:?}"
+            );
+            wait(&mut client, &id, Status::Completed).await;
+        }
+        assert!(prefs.symlink_metadata().is_ok());
+    }
+}

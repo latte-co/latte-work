@@ -1082,6 +1082,8 @@ pub enum Response {
         permission_settings: bool,
         #[serde(default)]
         history_window: bool,
+        #[serde(default)]
+        skill_management: bool,
     },
     Projects {
         projects: Vec<Project>,
@@ -1157,6 +1159,28 @@ pub enum Response {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn skill_capability_is_explicit_and_defaults_to_unsupported_for_older_servers() {
+        let legacy =
+            serde_json::json!({"kind":"hello","version":1,"server_id":"legacy","agents":[]});
+        assert!(matches!(
+            serde_json::from_value::<Response>(legacy.clone()).unwrap(),
+            Response::Hello {
+                skill_management: false,
+                ..
+            }
+        ));
+        let mut current = legacy;
+        current["skill_management"] = serde_json::json!(true);
+        assert!(matches!(
+            serde_json::from_value::<Response>(current).unwrap(),
+            Response::Hello {
+                skill_management: true,
+                ..
+            }
+        ));
+    }
+
     #[test]
     fn subagent_roles_are_optional_for_old_history_and_preserved_on_the_wire() {
         let old = serde_json::json!({

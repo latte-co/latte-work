@@ -1423,6 +1423,10 @@ export function useWorkbench() {
           ? "connected"
           : "connecting",
     hostConnectionVersions,
+    hostSupportsSkills: (id: string) => {
+      const target = hosts.find((host) => host.id === id);
+      return !!target && cachedHello(target)?.skill_management === true;
+    },
     connecting,
     serverId,
     agent,

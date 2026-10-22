@@ -305,6 +305,19 @@ impl Traex {
                 self.native_developer_instructions = result["config"]["developer_instructions"]
                     .as_str()
                     .map(str::to_owned);
+                if !self.platform_instructions.is_empty()
+                    && !matches!(
+                        result["config"].get("developer_instructions"),
+                        Some(Value::String(_) | Value::Null)
+                    )
+                {
+                    // Older/unknown schemas cannot prove the configured instructions
+                    // were read. Preserve native defaults by omitting the override.
+                    eprintln!(
+                        "Latte Work：Traex 未返回可识别的 developer_instructions；已跳过平台技能注入，保留原生配置"
+                    );
+                    self.platform_instructions.clear();
+                }
                 if self.config.as_ref().is_some_and(|c| c.provider.is_none()) {
                     self.model_provider = Some(
                         result["config"]["model_provider"]
@@ -736,7 +749,7 @@ impl AgentAdapter for Traex {
         ) {
             bail!("Traex 不支持所选权限模式");
         }
-        self.platform_instructions = crate::skills::platform_instructions(&config.settings_dir)?;
+        self.platform_instructions = crate::skills::platform_instructions(&config.settings_dir);
         self.cwd = cwd.into();
         self.resume = resume.map(str::to_owned);
         let mut resolved = config.clone();
@@ -1000,6 +1013,30 @@ mod tests {
                 .unwrap()
                 .starts_with("KEEP_USER_INSTRUCTIONS\n\nLatte Work")
         );
+    }
+
+    #[test]
+    fn missing_or_malformed_native_instruction_fields_preserve_cli_defaults() {
+        for native in [None, Some(json!({"unexpected":"shape"})), Some(Value::Null)] {
+            let mut agent = Traex::default();
+            agent.command("traex", "/tmp", None, &config()).unwrap();
+            agent.advance(Input::Open).unwrap();
+            message(&mut agent, json!({"id":"latte-1","result":{}}));
+            let mut config = json!({"model_provider":"native"});
+            if let Some(value) = &native {
+                config["developer_instructions"] = value.clone();
+            }
+            let actions = message(
+                &mut agent,
+                json!({"id":"latte-2","result":{"config":config}}),
+            );
+            let frames = encoded(&actions);
+            assert_eq!(frames[0]["method"], "thread/start");
+            assert_eq!(
+                frames[0]["params"].get("developerInstructions").is_some(),
+                native == Some(Value::Null)
+            );
+        }
     }
     #[test]
     fn open_is_prompt_free_and_resume_is_identity_bound() {

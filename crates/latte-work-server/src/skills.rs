@@ -1,5 +1,6 @@
 //! Host-owned skill inventory. Never execute skill bodies or change global Agent config.
 use crate::agents::claude_skills::{field, read};
+use crate::skill_worker::Budget;
 use anyhow::{Context, Result, bail};
 use latte_work_protocol::{ManagedSkill, SkillScope, SkillState};
 use serde::{Deserialize, Serialize};
@@ -17,10 +18,12 @@ const BUILTIN_ID: &str = "platform:latte-work-context";
 struct Preferences {
     platform: BTreeMap<String, SkillState>,
 }
+#[derive(Clone)]
 pub struct Skills {
     directory: PathBuf,
     home: PathBuf,
     claude: PathBuf,
+    budget: Option<Budget>,
 }
 struct Entry {
     skill: ManagedSkill,
@@ -43,9 +46,21 @@ impl Skills {
             directory: directory.into(),
             home,
             claude,
+            budget: None,
         })
     }
+    /// Each admitted request owns its cancellation state; no cross-request deadline.
+    pub fn with_budget(&self, budget: Budget) -> Self {
+        Self {
+            budget: Some(budget),
+            ..self.clone()
+        }
+    }
+    fn check_budget(&self) -> Result<()> {
+        self.budget.as_ref().map_or(Ok(()), Budget::check)
+    }
     fn preferences(&self) -> Result<Preferences> {
+        self.check_budget()?;
         let path = self.directory.join("skills.json");
         match std::fs::symlink_metadata(&path) {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Preferences::default()),
@@ -68,7 +83,17 @@ impl Skills {
         roots
     }
     fn inventory(&self, project: Option<&Path>) -> Result<(Vec<Entry>, Vec<String>, bool)> {
-        let prefs = self.preferences()?;
+        self.check_budget()?;
+        let (prefs, mut warnings) = match self.preferences() {
+            Ok(prefs) => (Some(prefs), Vec::new()),
+            Err(error) => (
+                None,
+                vec![format!(
+                    "平台技能偏好不可用，已跳过平台技能；请核对 {}：{error}",
+                    self.directory.join("skills.json").display()
+                )],
+            ),
+        };
         let mut entries = vec![Entry {
             skill: ManagedSkill {
                 id: BUILTIN_ID.into(),
@@ -76,8 +101,9 @@ impl Skills {
                 description: field(BUILTIN, "description"),
                 scope: SkillScope::Platform,
                 state: prefs
-                    .platform
-                    .get(BUILTIN_ID)
+                    .as_ref()
+                    .map(|prefs| &prefs.platform)
+                    .and_then(|platform| platform.get(BUILTIN_ID))
                     .copied()
                     .unwrap_or(SkillState::Enabled),
                 directory: None,
@@ -86,11 +112,14 @@ impl Skills {
             root: None,
             slug: "latte-work-context".into(),
         }];
-        let mut warnings = Vec::new();
+        if prefs.is_none() {
+            entries.clear();
+        }
         let started = std::time::Instant::now();
         let mut seen = HashSet::new();
         let mut truncated = false;
         for (scope, root) in self.roots(project) {
+            self.check_budget()?;
             // Canonical parent prevents aliases from duplicating an installation. Skill-folder
             // symlinks remain entries: state changes move the link, never its shared target.
             let parent = match root.parent().context("Skill 根目录无效")?.canonicalize() {
@@ -160,6 +189,7 @@ impl Skills {
                 }
                 names.sort_by_key(|entry| entry.file_name());
                 for item in names {
+                    self.check_budget()?;
                     if entries.len() >= LIMIT
                         || started.elapsed() > std::time::Duration::from_secs(3)
                     {
@@ -167,9 +197,20 @@ impl Skills {
                         break;
                     }
                     let Some(slug) = item.file_name().to_str().map(str::to_owned) else {
+                        warnings.push(format!(
+                            "技能目录名称不是 UTF-8，已跳过：{}",
+                            item.path().display()
+                        ));
                         continue;
                     };
                     if !component(&slug) {
+                        // .system is inventoried separately, not a skill installation.
+                        if slug != ".system" {
+                            warnings.push(format!(
+                                "技能目录名称不符合要求，已跳过：{}",
+                                item.path().display()
+                            ));
+                        }
                         continue;
                     }
                     match inspect(&item.path(), &slug) {
@@ -217,10 +258,28 @@ impl Skills {
             .filter(|entry| !ids.insert(entry.skill.id.clone()))
             .map(|entry| entry.skill.id.clone())
             .collect();
+        let mut conflict_warnings = Vec::new();
         if !duplicates.is_empty() {
-            warnings.push(
-                "部分技能有多个状态副本，请先核对 skills 及其禁用／卸载目录，刷新后再操作。".into(),
-            );
+            let mut duplicate_ids: Vec<_> = duplicates.iter().collect();
+            duplicate_ids.sort();
+            for id in duplicate_ids {
+                let copies: Vec<_> = entries.iter().filter(|e| &e.skill.id == id).collect();
+                let paths = copies
+                    .iter()
+                    .filter_map(|e| e.skill.directory.as_deref())
+                    .collect::<Vec<_>>()
+                    .join("；");
+                conflict_warnings.push(format!(
+                    "技能「{}」有多个状态副本，请核对并保留一个副本后刷新：{paths}",
+                    copies[0].skill.name
+                ));
+            }
+        }
+        conflict_warnings.append(&mut warnings);
+        let mut warnings = conflict_warnings;
+        warnings.truncate(32);
+        for warning in &mut warnings {
+            *warning = warning.chars().take(1024).collect();
         }
         let mut bytes = 0;
         let mut truncated = truncated;
@@ -253,12 +312,18 @@ impl Skills {
         let entry = matching
             .next()
             .context("Skill 已变更或不存在，请刷新列表")?;
-        if matching.next().is_some() {
-            bail!("Skill 有多个状态副本，请先核对安装目录");
+        if let Some(other) = matching.next() {
+            bail!(
+                "技能「{}」有多个状态副本，请核对 {} 与 {}",
+                entry.skill.name,
+                entry.skill.directory.as_deref().unwrap_or(""),
+                other.skill.directory.as_deref().unwrap_or("")
+            );
         }
         Ok(entry)
     }
     pub fn detail(&self, project: Option<&Path>, id: &str) -> Result<(ManagedSkill, String)> {
+        self.check_budget()?;
         let entry = self.find(project, id)?;
         let markdown = if let Some(path) = &entry.skill.directory {
             inspect(Path::new(path), &entry.slug)?
@@ -283,6 +348,7 @@ impl Skills {
         self.set_state(project, id, state)
     }
     pub fn set_state(&self, project: Option<&Path>, id: &str, state: SkillState) -> Result<()> {
+        self.check_budget()?;
         let entry = self.find(project, id)?;
         if entry.skill.state == state {
             return Ok(());
@@ -308,6 +374,7 @@ impl Skills {
                 }
             }
             // Rename only the discovered top-level directory/link; never recursively delete.
+            self.check_budget()?;
             std::fs::rename(&source, &destination)
                 .context("无法移动 Skill，请检查目录权限和目标位置")?;
         } else {
@@ -317,11 +384,13 @@ impl Skills {
             use std::io::Write;
             file.write_all(&serde_json::to_vec(&prefs)?)?;
             file.as_file().sync_all()?;
+            self.check_budget()?;
             file.persist(self.directory.join("skills.json"))?;
         }
         Ok(())
     }
     pub fn install(&self, project: Option<&Path>, scope: SkillScope, source: &Path) -> Result<()> {
+        self.check_budget()?;
         if scope == SkillScope::Platform {
             bail!("平台技能随 Latte Work 提供，请从详情重新安装");
         }
@@ -335,11 +404,15 @@ impl Skills {
             .filter(|s| component(s))
             .context("Skill 目录名称无效")?;
         inspect(&source, slug)?.context("目录中缺少 SKILL.md")?;
-        let root = match scope {
-            SkillScope::System => self.home.join(".agents/skills"),
-            SkillScope::Project => project.context("请先选择项目")?.join(".agents/skills"),
+        // Resolve the trusted base (e.g. macOS /var or Linux /home aliases)
+        // before refusing symlinks inside its installation destination.
+        let base = match scope {
+            SkillScope::System => self.home.as_path(),
+            SkillScope::Project => project.context("请先选择项目")?,
             SkillScope::Platform => unreachable!(),
-        };
+        }
+        .canonicalize()?;
+        let root = base.join(".agents/skills");
         safe_folder(&root)?;
         let root = root.canonicalize()?;
         for state in [
@@ -354,7 +427,8 @@ impl Skills {
             .tempdir_in(root.parent().context("Skill 安装根目录无效")?)?;
         let target = staging.path().join(slug);
         let mut budget = (0usize, 0u64);
-        copy_tree(&source, &target, 0, &mut budget)?;
+        copy_tree(&source, &target, 0, &mut budget, self.budget.as_ref())?;
+        self.check_budget()?;
         std::fs::rename(target, root.join(slug))?;
         Ok(())
     }
@@ -441,12 +515,24 @@ fn inspect(directory: &Path, slug: &str) -> Result<Option<(String, String, Strin
         body,
     )))
 }
-fn copy_tree(source: &Path, target: &Path, depth: usize, budget: &mut (usize, u64)) -> Result<()> {
+fn copy_tree(
+    source: &Path,
+    target: &Path,
+    depth: usize,
+    budget: &mut (usize, u64),
+    deadline: Option<&Budget>,
+) -> Result<()> {
+    if let Some(deadline) = deadline {
+        deadline.check()?;
+    }
     if depth > 8 {
         bail!("Skill 目录层数超过 8 层");
     }
     std::fs::create_dir(target)?;
     for item in std::fs::read_dir(source)? {
+        if let Some(deadline) = deadline {
+            deadline.check()?;
+        }
         budget.0 += 1;
         if budget.0 > 512 {
             bail!("Skill 文件数量超过 512 项");
@@ -459,6 +545,7 @@ fn copy_tree(source: &Path, target: &Path, depth: usize, budget: &mut (usize, u6
                 &target.join(item.file_name()),
                 depth + 1,
                 budget,
+                deadline,
             )?;
         } else if meta.is_file() {
             budget.1 = budget.1.saturating_add(meta.len());
@@ -476,7 +563,18 @@ fn copy_tree(source: &Path, target: &Path, depth: usize, budget: &mut (usize, u6
                 bail!("Skill 包含非普通文件");
             }
             let mut bytes = Vec::new();
-            file.take(meta.len() + 1).read_to_end(&mut bytes)?;
+            let mut file = file.take(meta.len() + 1);
+            loop {
+                if let Some(deadline) = deadline {
+                    deadline.check()?;
+                }
+                let mut chunk = [0; 64 * 1024];
+                let count = file.read(&mut chunk)?;
+                if count == 0 {
+                    break;
+                }
+                bytes.extend_from_slice(&chunk[..count]);
+            }
             if bytes.len() as u64 != meta.len() {
                 bail!("Skill 文件在读取期间发生变化");
             }
@@ -484,7 +582,12 @@ fn copy_tree(source: &Path, target: &Path, depth: usize, budget: &mut (usize, u6
                 .write(true)
                 .create_new(true)
                 .open(target.join(item.file_name()))?;
-            out.write_all(&bytes)?;
+            for chunk in bytes.chunks(64 * 1024) {
+                if let Some(deadline) = deadline {
+                    deadline.check()?;
+                }
+                out.write_all(chunk)?;
+            }
             std::fs::set_permissions(target.join(item.file_name()), meta.permissions())?;
         } else {
             bail!("Skill 包含符号链接或特殊文件，请先整理后再导入");
@@ -494,24 +597,37 @@ fn copy_tree(source: &Path, target: &Path, depth: usize, budget: &mut (usize, u6
     Ok(())
 }
 /// Process-local built-in instructions. No installation in native discovery roots.
-pub fn platform_instructions(directory: &Path) -> Result<String> {
-    let manager = Skills::new(directory)?;
-    let prefs = manager.preferences()?;
-    Ok(
-        if prefs
-            .platform
-            .get(BUILTIN_ID)
-            .copied()
-            .unwrap_or(SkillState::Enabled)
-            == SkillState::Enabled
-        {
-            format!(
-                "Latte Work platform skill (applies to this Work-launched session only):\n{BUILTIN}"
-            )
-        } else {
-            String::new()
-        },
-    )
+pub fn platform_instructions(directory: &Path) -> String {
+    let prefs = match Skills::new(directory).and_then(|manager| manager.preferences()) {
+        Ok(prefs) => prefs,
+        Err(error) => {
+            eprintln!(
+                "Latte Work：平台技能注入已跳过，请核对 {}：{error}",
+                directory.join("skills.json").display()
+            );
+            return String::new();
+        }
+    };
+    if prefs
+        .platform
+        .get(BUILTIN_ID)
+        .copied()
+        .unwrap_or(SkillState::Enabled)
+        == SkillState::Enabled
+    {
+        format!(
+            "Latte Work platform skill (applies to this Work-launched session only):\n{}",
+            builtin_body()
+        )
+    } else {
+        String::new()
+    }
+}
+fn builtin_body() -> &'static str {
+    BUILTIN
+        .strip_prefix("---\n")
+        .and_then(|text| text.split_once("\n---\n"))
+        .map_or(BUILTIN, |(_, body)| body.trim_start())
 }
 
 #[cfg(test)]
@@ -526,6 +642,7 @@ mod tests {
             directory: state,
             home: root.join("home"),
             claude: root.join("home/.claude"),
+            budget: None,
         };
         let project = root.join("project");
         std::fs::create_dir(&project).unwrap();
@@ -534,6 +651,148 @@ mod tests {
     fn skill(path: &Path) {
         std::fs::create_dir_all(path).unwrap();
         std::fs::write(path.join("SKILL.md"), "---\nname: Example\ndescription: >-\n  Bounded skill\n  metadata\n---\n# Body\n!`touch MUST_NOT_EXIST`\n").unwrap();
+    }
+
+    #[test]
+    fn corrupt_preferences_skip_only_platform_injection_and_preserve_native_inventory() {
+        for case in ["json", "oversize", "symlink"] {
+            let (temp, manager, project) = setup();
+            skill(&project.join(".agents/skills/native"));
+            let path = manager.directory.join("skills.json");
+            match case {
+                "json" => std::fs::write(&path, "{invalid").unwrap(),
+                "oversize" => std::fs::write(&path, " ".repeat(FILE_LIMIT as usize + 1)).unwrap(),
+                _ => {
+                    let target = temp.path().join("external.json");
+                    std::fs::write(&target, "{}").unwrap();
+                    std::os::unix::fs::symlink(target, &path).unwrap();
+                }
+            }
+            assert!(platform_instructions(&manager.directory).is_empty());
+            let catalog = manager.list(Some(&project)).unwrap();
+            assert_eq!(catalog.skills.len(), 1);
+            assert_eq!(catalog.skills[0].scope, SkillScope::Project);
+            assert!(catalog.warnings.iter().any(|w| w.contains("skills.json")));
+            assert!(manager.preferences().is_err());
+        }
+    }
+    #[test]
+    fn platform_context_injects_body_without_yaml_metadata() {
+        let (_temp, manager, _) = setup();
+        let text = platform_instructions(&manager.directory);
+        assert!(text.contains("# Latte Work"));
+        assert!(!text.contains("description:"));
+        assert!(!text.contains("---"));
+    }
+    #[test]
+    fn imports_enforce_entry_byte_and_depth_boundaries_without_partial_installations() {
+        for (case, accepted) in [
+            ("entries", true),
+            ("entries", false),
+            ("bytes", true),
+            ("bytes", false),
+            ("depth", true),
+            ("depth", false),
+        ] {
+            let (temp, manager, project) = setup();
+            let source = temp.path().canonicalize().unwrap().join("boundary");
+            skill(&source);
+            match case {
+                "entries" => {
+                    for i in 0..if accepted { 511 } else { 512 } {
+                        std::fs::write(source.join(format!("file-{i}")), "").unwrap();
+                    }
+                }
+                "bytes" => {
+                    let size = 16 * 1024 * 1024
+                        - std::fs::metadata(source.join("SKILL.md")).unwrap().len()
+                        + u64::from(!accepted);
+                    std::fs::File::create(source.join("data"))
+                        .unwrap()
+                        .set_len(size)
+                        .unwrap();
+                }
+                _ => {
+                    let nested = (0..if accepted { 8 } else { 9 })
+                        .fold(source.clone(), |p, _| p.join("nested"));
+                    std::fs::create_dir_all(&nested).unwrap();
+                    std::fs::write(nested.join("data"), "kept").unwrap();
+                }
+            }
+            let result = manager.install(Some(&project), SkillScope::Project, &source);
+            assert_eq!(result.is_ok(), accepted, "{case}: {result:?}");
+            assert_eq!(project.join(".agents/skills/boundary").exists(), accepted);
+            assert!(source.join("SKILL.md").exists());
+            assert!(
+                std::fs::read_dir(project.join(".agents"))
+                    .unwrap()
+                    .all(|e| !e
+                        .unwrap()
+                        .file_name()
+                        .to_string_lossy()
+                        .starts_with(".latte-work-skill-import-"))
+            );
+        }
+    }
+
+    #[test]
+    fn imports_resolve_trusted_base_aliases_but_refuse_destination_symlinks() {
+        let (temp, manager, project) = setup();
+        let source = temp.path().canonicalize().unwrap().join("package");
+        skill(&source);
+        let alias = temp.path().join("project-alias");
+        std::os::unix::fs::symlink(&project, &alias).unwrap();
+        manager
+            .install(Some(&alias), SkillScope::Project, &source)
+            .unwrap();
+        assert!(project.join(".agents/skills/package/SKILL.md").exists());
+        let second_project = temp.path().join("other-project");
+        std::fs::create_dir(&second_project).unwrap();
+        let outside = temp.path().join("outside");
+        std::fs::create_dir(&outside).unwrap();
+        std::os::unix::fs::symlink(&outside, second_project.join(".agents")).unwrap();
+        assert!(
+            manager
+                .install(Some(&second_project), SkillScope::Project, &source)
+                .is_err()
+        );
+        assert!(!outside.join("skills/package").exists());
+    }
+    #[test]
+    fn expired_import_does_not_create_destination_directories() {
+        let (temp, manager, project) = setup();
+        let source = temp.path().canonicalize().unwrap().join("source");
+        skill(&source);
+        let manager = manager.with_budget(Budget::new(std::time::Duration::ZERO));
+        assert!(
+            manager
+                .install(Some(&project), SkillScope::Project, &source)
+                .is_err()
+        );
+        assert!(!project.join(".agents").exists());
+    }
+    #[test]
+    fn non_utf8_and_invalid_installation_names_are_reported_with_paths() {
+        #[cfg(target_os = "linux")]
+        use std::os::unix::ffi::OsStringExt;
+        let (_temp, manager, project) = setup();
+        let root = project.join(".agents/skills");
+        let invalid = root.join("技能");
+        skill(&invalid);
+        #[cfg(target_os = "linux")]
+        {
+            let non_utf8 = root.join(std::ffi::OsString::from_vec(vec![0xff]));
+            skill(&non_utf8);
+        }
+        let catalog = manager.list(Some(&project)).unwrap();
+        #[cfg(target_os = "linux")]
+        assert!(catalog.warnings.iter().any(|w| w.contains("UTF-8")));
+        assert!(
+            catalog
+                .warnings
+                .iter()
+                .any(|w| w.contains(&invalid.to_string_lossy().to_string()))
+        );
     }
     #[test]
     fn scans_scopes_and_persists_platform_without_touching_native_directories() {
