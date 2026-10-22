@@ -38,6 +38,17 @@ const states: Record<SkillState, string> = {
   disabled: "已禁用",
   uninstalled: "已卸载",
 };
+function skillError(cause: unknown, hostName: string, remote: boolean) {
+  const detail = message(cause);
+  if (
+    /unknown variant [`'"](?:skills|skill_detail|set_skill_state|install_skill)[`'"]/.test(
+      detail,
+    ) ||
+    detail.includes("此 Server 不支持技能管理")
+  )
+    return `${hostName} 的 Server 版本较旧，尚不支持技能管理。请${remote ? "在该远程主机上更新并重启同版本 Server，再重新连接" : "更新本机 Server 后重新连接"}；重启前请先完成任务并关闭终端。`;
+  return detail;
+}
 
 export function SkillsSettings({
   state,
@@ -85,7 +96,9 @@ export function SkillsSettings({
   const project = projects.find((p) => p.id === projectId);
   const host = state.hosts.find((h) => h.id === hostId);
   const connected = !!host && state.isHostConnected(hostId);
-  const context = `${hostId}:${project?.id ?? ""}:${active}:${connected}`;
+  const context = `${hostId}:${state.hostConnectionVersions[hostId] ?? 0}:${project?.id ?? ""}:${active}:${connected}`;
+  const describeError = (cause: unknown) =>
+    skillError(cause, host?.name ?? "所选主机", hostId !== "local");
   const contextRef = useRef(context);
   // Invalidate during render as well as effect cleanup: stale async results cannot mutate a new scope.
   if (contextRef.current !== context) {
@@ -117,7 +130,7 @@ export function SkillsSettings({
         setCatalog(response);
       })
       .catch((cause) => {
-        if (version === generation.current) setError(message(cause));
+        if (version === generation.current) setError(describeError(cause));
       })
       .finally(() => {
         if (version === generation.current) setLoading(false);
@@ -145,7 +158,7 @@ export function SkillsSettings({
       })
       .catch((cause) => {
         if (!disposed && version === generation.current)
-          setError(message(cause));
+          setError(describeError(cause));
       });
     return () => {
       disposed = true;
@@ -193,7 +206,9 @@ export function SkillsSettings({
       setNotice("已保存。对后续新建的 Agent 会话生效。");
     } catch (cause) {
       if (version === generation.current)
-        setError(`${message(cause)}。可刷新列表核对状态；不会自动重试操作。`);
+        setError(
+          `${describeError(cause)}。可刷新列表核对状态；不会自动重试操作。`,
+        );
     } finally {
       operation.current = false;
       setBusy(false);
@@ -323,6 +338,8 @@ export function SkillsSettings({
             <Select
               label="技能所在主机"
               menuTitle="主机"
+              minMenuWidth={240}
+              align="end"
               compact
               value={hostId}
               disabled={busy}
@@ -344,7 +361,7 @@ export function SkillsSettings({
           </button>
           <button
             className="primary skills-add"
-            disabled={locked}
+            disabled={locked || !catalog}
             onClick={() => {
               setError("");
               setAdd(true);

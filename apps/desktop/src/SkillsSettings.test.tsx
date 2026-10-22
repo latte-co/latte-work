@@ -21,6 +21,7 @@ const state = {
   ],
   projects: [{ id: "p", hostId: "local", name: "Project", path: "/project" }],
   isHostConnected: () => true,
+  hostConnectionVersions: {},
 } as unknown as Workbench;
 const platform: ManagedSkill = {
   id: "platform:context",
@@ -161,7 +162,7 @@ it("shows unsupported-server errors and does not retry a failed mutation", async
   request.mockResolvedValueOnce({ kind: "ok" });
   render(<SkillsSettings state={state} active onBusy={() => {}} />);
   await screen.findByRole("alert");
-  expect(screen.getByText(/此 Server 不支持技能管理/)).toBeTruthy();
+  expect(screen.getByText(/本机 的 Server 版本较旧/)).toBeTruthy();
   request.mockImplementation(async (_host, action) => {
     if (action.method === "skill_detail")
       return { kind: "skill_detail", skill: platform, markdown: "# Platform" };
@@ -180,6 +181,75 @@ it("shows unsupported-server errors and does not retry a failed mutation", async
       ([, action]) => action.method === "set_skill_state",
     ),
   ).toHaveLength(1);
+});
+it("keeps host labels readable in a right-aligned menu wider than the compact trigger", async () => {
+  HTMLElement.prototype.scrollIntoView = vi.fn();
+  request.mockResolvedValue(catalog());
+  render(<SkillsSettings state={state} active onBusy={() => {}} />);
+  await screen.findByRole("button", { name: /System Review/ });
+  const trigger = screen.getByRole("combobox", { name: "技能所在主机" });
+  vi.spyOn(trigger, "getBoundingClientRect").mockReturnValue({
+    left: 600,
+    right: 680,
+    top: 50,
+    bottom: 86,
+    width: 80,
+    height: 36,
+    x: 600,
+    y: 50,
+    toJSON: () => ({}),
+  });
+  fireEvent.click(trigger);
+  const menu = screen.getByRole("listbox").parentElement!;
+  expect(menu.style.width).toBe("240px");
+  expect(menu.style.left).toBe("440px");
+  expect(screen.getByRole("option", { name: "本机" })).toBeTruthy();
+  fireEvent.keyDown(trigger, { key: "ArrowDown" });
+  fireEvent.keyDown(trigger, { key: "Enter" });
+  await waitFor(() =>
+    expect(request).toHaveBeenLastCalledWith("devbox", {
+      method: "skills",
+      project_id: null,
+    }),
+  );
+});
+it("explains an older remote server without exposing the wire parser error, then reloads after reconnect", async () => {
+  const parserError =
+    "unknown variant `skills`, expected one of `hello`, `projects` at line 1 column 18";
+  request.mockImplementation(async (host) => {
+    if (host === "devbox") throw new Error(parserError);
+    return catalog();
+  });
+  const view = render(
+    <SkillsSettings state={state} active onBusy={() => {}} />,
+  );
+  await screen.findByRole("button", { name: /System Review/ });
+  fireEvent.click(screen.getByRole("combobox", { name: "技能所在主机" }));
+  fireEvent.click(screen.getByRole("option", { name: "devbox" }));
+  const alert = await screen.findByRole("alert");
+  expect(alert.textContent).toContain("devbox 的 Server 版本较旧");
+  expect(alert.textContent).toContain("在该远程主机上更新并重启");
+  expect(alert.textContent).not.toContain("unknown variant");
+  expect(
+    (screen.getByRole("button", { name: "添加" }) as HTMLButtonElement)
+      .disabled,
+  ).toBe(true);
+  expect(
+    (screen.getByRole("button", { name: "刷新技能" }) as HTMLButtonElement)
+      .disabled,
+  ).toBe(false);
+  const count = request.mock.calls.length;
+  request.mockResolvedValue(catalog([{ ...system, name: "Remote Updated" }]));
+  view.rerender(
+    <SkillsSettings
+      state={{ ...state, hostConnectionVersions: { devbox: 2 } }}
+      active
+      onBusy={() => {}}
+    />,
+  );
+  await screen.findByRole("button", { name: /Remote Updated/ });
+  expect(request.mock.calls.length).toBe(count + 1);
+  expect(screen.queryByRole("alert")).toBeNull();
 });
 it("imports a directory on the selected host, keeping project and operation boundaries", async () => {
   request.mockResolvedValue(catalog());

@@ -1210,6 +1210,9 @@ The main sidebar’s Skills entry below New task reads the selected local/SSH ho
 `skills`, `skill_detail`, `set_skill_state` and `install_skill` are additive host
 requests; older remote Servers report unsupported requests and must be updated.
 The desktop keeps host/project identities separate and discards late responses.
+The host menu has its own minimum width. Legacy Servers rejecting the new requests
+show an upgrade instruction instead of the wire parser diagnostic; import stays
+disabled until inventory loads. Reconnecting the selected host reloads inventory.
 Try now opens a draft for the chosen project, appending a skill reference while
 preserving existing draft text. It does not submit a prompt or open an Agent.
 
