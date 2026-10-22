@@ -2356,7 +2356,7 @@ button.recent-notice {
   flex-shrink: 0;
   gap: var(--space-1);
 }
-.workspace-file-actions button[aria-pressed="true"] {
+.workspace-file-actions button[aria-pressed="true"]:not(:disabled) {
   background: var(--color-selected);
   color: var(--color-text);
 }
@@ -2374,6 +2374,14 @@ button.recent-notice {
   min-width: 0;
   min-height: 0;
   overflow: hidden;
+}
+.workspace-markdown-preview {
+  flex: 1;
+  min-height: 0;
+  padding: var(--space-6);
+  overflow: auto;
+  overflow-wrap: anywhere;
+  overscroll-behavior: contain;
 }
 .workspace-reference-content {
   display: flex;

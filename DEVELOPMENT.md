@@ -1152,6 +1152,20 @@ turn IDs) and applied only after the start response/notification confirms its ID
 An interrupt RPC error is obsolete only after that exact turn has explicitly
 completed; active-turn failures still surface, without rewriting a stopped turn.
 
+Command items completed with native `backgrounded` status only end the foreground
+wait. They emit an explicit pending-result notice with the process identity and
+partial output, leaving the original tool unconfirmed rather than reporting a
+successful command. Background commands remain bounded (512 items) across turns
+and fence process reconfiguration, idle close and undo. A later identity-bound
+terminal item, or a native polling item with the same process ID and an explicit
+exit code, releases the work; declining a poll does not imply process exit.
+Late original-item results must match the observed native thread, turn and item,
+including after the main turn settles. Stop, EOF and missing exit evidence never
+synthesize command success. The existing notice/tool-result protocol is unchanged.
+Queue admission/draining distinguishes starting another turn in the same process
+from replacing it. Traex can continue polling background commands with the same
+configuration; configuration changes still fail without interrupting that work.
+
 An empty Traex thread has no durable rollout until a turn is admitted. Its ID
 stays in the actor until native turn admission, so closing/reconfiguring an empty
 task starts another prompt-free thread rather than resuming a nonexistent file.

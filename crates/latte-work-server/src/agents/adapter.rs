@@ -103,10 +103,13 @@ pub trait AgentAdapter: Send {
     fn max_output_frame_length(&self) -> usize {
         1024 * 1024
     }
-    /// Native foreground input is ready; background work may remain alive.
-    fn can_start_turn(&self) -> bool;
     /// Only true between turns when replacing the process cannot discard live work.
     fn can_reconfigure(&self) -> bool;
+    /// A new turn may reuse a process that still owns background work. This
+    /// never authorizes replacing that process or changing its configuration.
+    fn can_start_turn(&self) -> bool {
+        self.can_reconfigure()
+    }
     /// Actual native tasks that outlive the main turn; distinct from reconfiguration readiness.
     fn has_background_work(&self) -> bool;
     /// Only children observed by this process share its credential redaction context.

@@ -104,6 +104,175 @@ async fn until(
     }
 }
 #[tokio::test]
+async fn traex_backgrounded_commands_keep_native_process_and_confirm_only_explicit_exits() {
+    for failed in [false, true] {
+        let host = Host::start().await;
+        let root = tempfile::tempdir().unwrap();
+        let mut client = host.client().await;
+        let id = session(&mut client, root.path()).await;
+        send(&mut client, &id, "background", "background").await;
+        let (_, events) = until(&mut client, &id, Status::Completed).await;
+        assert!(events.iter().any(|e| matches!(&e.event, EventKind::Notice {text} if text.contains("47462") && text.contains("partial regression output") && text.contains("结果待确认"))));
+        assert!(!events.iter().any(
+            |e| matches!(&e.event, EventKind::ToolResult {id, ..} if id == "background-start")
+        ));
+        assert!(events.iter().any(
+            |e| matches!(&e.event, EventKind::TurnChanges {changes} if changes.background_pending)
+        ));
+        assert!(matches!(
+            ask(
+                &mut client,
+                Request::CloseAgentSession {
+                    session_id: id.clone(),
+                    only_if_idle: Some(true)
+                }
+            )
+            .await,
+            Response::Error { .. }
+        ));
+        // Reconnecting reads durable evidence without reopening/replaying work.
+        drop(client);
+        let mut client = host.client().await;
+        let (_, restored) = until(&mut client, &id, Status::Completed).await;
+        assert_eq!(events.len(), restored.len());
+        assert!(
+            matches!(
+                ask(
+                    &mut client,
+                    Request::SendQueued {
+                        session_id: id.clone(),
+                        request_id: "reconfigure".into(),
+                        text: "must not dispatch".into(),
+                        model: Some("gpt-test".into()),
+                        effort: Some(Effort::High),
+                        permission_mode: Some("default".into()),
+                        provider: Some(TurnProvider::Cli)
+                    }
+                )
+                .await,
+                Response::Error { .. }
+            ),
+            "changing configuration must preserve the live background process"
+        );
+        let prompt = if failed {
+            "background-poll-failure"
+        } else {
+            "background-poll-success"
+        };
+        send(&mut client, &id, "poll", prompt).await;
+        let (_, events) = until(&mut client, &id, Status::Completed).await;
+        assert!(events.iter().any(|e| matches!(&e.event, EventKind::ToolResult {id, is_error, content} if id == "background-poll" && *is_error == failed && content == "final regression output")));
+        assert!(!events.iter().any(|e| matches!(
+            &e.event,
+            EventKind::State {
+                status: Status::Failed,
+                ..
+            }
+        )));
+        let inputs = std::fs::read_to_string(root.path().join("traex-inputs"))
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(inputs.len(), 2, "reconnect must not replay a prompt");
+        assert_eq!(
+            inputs[0]["pid"], inputs[1]["pid"],
+            "background work must retain its owning process"
+        );
+        assert!(matches!(
+            ask(
+                &mut client,
+                Request::CloseAgentSession {
+                    session_id: id.clone(),
+                    only_if_idle: Some(true)
+                }
+            )
+            .await,
+            Response::Ok
+        ));
+    }
+}
+#[tokio::test]
+async fn traex_backgrounded_commands_stay_unconfirmed_after_stop_or_eof() {
+    for eof in [false, true] {
+        let host = Host::start().await;
+        let root = tempfile::tempdir().unwrap();
+        let mut client = host.client().await;
+        let id = session(&mut client, root.path()).await;
+        send(
+            &mut client,
+            &id,
+            "background",
+            if eof { "background" } else { "background-wait" },
+        )
+        .await;
+        if eof {
+            until(&mut client, &id, Status::Completed).await;
+            send(&mut client, &id, "eof", "eof").await;
+        } else {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            loop {
+                let (_, events) = until(&mut client, &id, Status::Running).await;
+                if events.iter().any(
+                    |e| matches!(&e.event, EventKind::Text {text} if text == "BACKGROUND_WAITING"),
+                ) {
+                    break;
+                }
+                assert!(Instant::now() < deadline);
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            assert!(matches!(
+                ask(
+                    &mut client,
+                    Request::Cancel {
+                        session_id: id.clone()
+                    }
+                )
+                .await,
+                Response::Ok
+            ));
+        }
+        let (_, events) = until(
+            &mut client,
+            &id,
+            if eof { Status::Failed } else { Status::Stopped },
+        )
+        .await;
+        assert!(!events.iter().any(
+            |e| matches!(&e.event, EventKind::ToolResult {id, ..} if id == "background-start")
+        ));
+        if !eof {
+            // Stop pauses the durable queue. Explicit resume must drain a poll
+            // through the existing process even with unfinished background work.
+            send(&mut client, &id, "poll", "background-poll-success").await;
+            assert!(matches!(
+                ask(
+                    &mut client,
+                    Request::ResumeMessageQueue {
+                        session_id: id.clone(),
+                        provider: Some(TurnProvider::Cli)
+                    }
+                )
+                .await,
+                Response::MessageQueue { .. }
+            ));
+            let (_, events) = until(&mut client, &id, Status::Completed).await;
+            assert!(events.iter().any(|e| matches!(&e.event, EventKind::ToolResult {id,is_error:false,..} if id == "background-poll")));
+        }
+        assert!(matches!(
+            ask(
+                &mut client,
+                Request::CloseAgentSession {
+                    session_id: id.clone(),
+                    only_if_idle: None
+                }
+            )
+            .await,
+            Response::Ok
+        ));
+    }
+}
+#[tokio::test]
 async fn traex_completed_items_and_early_completions_settle_without_duplicate_text() {
     let host = Host::start().await;
     let root = tempfile::tempdir().unwrap();
