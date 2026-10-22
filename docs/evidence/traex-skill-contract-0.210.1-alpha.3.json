@@ -1,0 +1,36 @@
+{
+  "cli_version": "traecli 0.210.1-alpha.3\ninstallation: internal",
+  "binary_sha256": "38277ca8e6b2be026d817f66289bab773f44aa8e3d953a4f83605231221c5206",
+  "schemas": {
+    "ThreadStartParams": {
+      "sha256": "131a1ef8965635c936978d3e61e284e0e27adc562e055562a5b0291a4b3bd536",
+      "instruction_field": {
+        "type": [
+          "string",
+          "null"
+        ]
+      }
+    },
+    "ThreadResumeParams": {
+      "sha256": "55a2e87ee954e40a32e708c2b9c3078fe47ed175f9001044c47bc9cfdc7e3731",
+      "instruction_field": {
+        "type": [
+          "string",
+          "null"
+        ]
+      }
+    },
+    "ConfigReadResponse": {
+      "sha256": "302c54e0198252ba5d98259bc7e2a9907a46321e2f9465bd936012b270b4b381",
+      "instruction_field": {
+        "type": [
+          "string",
+          "null"
+        ]
+      }
+    }
+  },
+  "config_read_preserves_sentinel": true,
+  "thread_started": false,
+  "prompts_sent": 0
+}

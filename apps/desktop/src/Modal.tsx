@@ -7,6 +7,13 @@ const inertOwners = new Map<
   HTMLElement,
   { count: number; previous: boolean }
 >();
+const canFocus = (item: HTMLElement) =>
+  item.tabIndex >= 0 &&
+  !item.matches(":disabled") &&
+  !item.closest("[hidden], [inert]") &&
+  getComputedStyle(item).display !== "none" &&
+  getComputedStyle(item).visibility !== "hidden" &&
+  (!item.closest("details:not([open])") || item.tagName === "SUMMARY");
 const focusable =
   "button, input, textarea, select, a[href], summary, [tabindex]";
 /** Native modal behavior shared by every dialog. Nested dialogs suspend their parent. */
@@ -16,6 +23,13 @@ export function Modal(props: ComponentProps<"section">) {
   useLayoutEffect(() => {
     const element = root.current!;
     stack.push(element);
+    const ancestors: HTMLElement[] = [];
+    for (
+      let node = trigger.current?.parentElement;
+      node && node !== document.body;
+      node = node.parentElement
+    )
+      ancestors.push(node);
     const inert: HTMLElement[] = [];
     let branch: HTMLElement = element;
     while (branch.parentElement) {
@@ -36,13 +50,7 @@ export function Modal(props: ComponentProps<"section">) {
     }
     const candidates = () =>
       Array.from(element.querySelectorAll<HTMLElement>(focusable)).filter(
-        (item) =>
-          item.tabIndex >= 0 &&
-          !item.matches(":disabled") &&
-          !item.closest("[hidden], [inert]") &&
-          getComputedStyle(item).display !== "none" &&
-          getComputedStyle(item).visibility !== "hidden" &&
-          (!item.closest("details:not([open])") || item.tagName === "SUMMARY"),
+        canFocus,
       );
     if (!element.contains(document.activeElement))
       (candidates()[0] ?? element).focus();
@@ -81,8 +89,37 @@ export function Modal(props: ComponentProps<"section">) {
         }
       }
       const target = trigger.current;
-      if (target?.isConnected && !target.closest("[hidden], [inert]"))
+      if (target?.isConnected && canFocus(target)) {
         target.focus();
+      } else {
+        // Wait for the closing subtree to be removed and all inert leases released.
+        // A surviving parent dialog or the trigger's nearest live section is the
+        // logical fallback; preserve any focus explicitly moved by the caller.
+        queueMicrotask(() => {
+          const active = document.activeElement;
+          if (
+            active instanceof HTMLElement &&
+            active !== document.body &&
+            active.isConnected &&
+            !element.contains(active) &&
+            canFocus(active)
+          )
+            return;
+          const parent = stack.at(-1);
+          const regions = parent ? [parent] : ancestors;
+          for (const region of regions) {
+            if (!region.isConnected || region.closest("[hidden], [inert]"))
+              continue;
+            const candidate = Array.from(
+              region.querySelectorAll<HTMLElement>(focusable),
+            ).find(canFocus);
+            if (candidate) {
+              candidate.focus();
+              return;
+            }
+          }
+        });
+      }
     };
   }, []);
   return (

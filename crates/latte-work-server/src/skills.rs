@@ -35,6 +35,30 @@ pub struct Catalog {
     pub warnings: Vec<String>,
     pub truncated: bool,
 }
+// Reserve independent wire budgets so copy conflicts cannot hide scan failures.
+#[derive(Default)]
+struct Warnings {
+    messages: Vec<String>,
+    omitted: usize,
+}
+impl Warnings {
+    fn push(&mut self, message: String) {
+        if self.messages.len() < 15 {
+            self.messages.push(message.chars().take(1024).collect());
+        } else {
+            self.omitted += 1;
+        }
+    }
+    fn finish(mut self, category: &str) -> Vec<String> {
+        if self.omitted > 0 {
+            self.messages.push(format!(
+                "另有 {} 条{category}未显示，请先处理已列问题后刷新。",
+                self.omitted
+            ));
+        }
+        self.messages
+    }
+}
 impl Skills {
     pub fn new(directory: &Path) -> Result<Self> {
         let home =
@@ -81,14 +105,15 @@ impl Skills {
         require_global(project)?;
         self.check_budget()?;
         let (prefs, mut warnings) = match self.preferences() {
-            Ok(prefs) => (Some(prefs), Vec::new()),
-            Err(error) => (
-                None,
-                vec![format!(
+            Ok(prefs) => (Some(prefs), Warnings::default()),
+            Err(error) => {
+                let mut warnings = Warnings::default();
+                warnings.push(format!(
                     "平台技能偏好不可用，已跳过平台技能；请核对 {}：{error}",
                     self.directory.join("skills.json").display()
-                )],
-            ),
+                ));
+                (None, warnings)
+            }
         };
         let mut entries = vec![Entry {
             skill: ManagedSkill {
@@ -233,12 +258,7 @@ impl Skills {
                 .cmp(&b.skill.name.to_lowercase())
                 .then(a.skill.id.cmp(&b.skill.id))
         });
-        // Descriptions and warning text have independent aggregate wire bounds.
-        warnings.truncate(32);
-        for warning in &mut warnings {
-            *warning = warning.chars().take(1024).collect();
-        }
-        Ok((entries, warnings, truncated))
+        Ok((entries, warnings.finish("扫描诊断"), truncated))
     }
     pub fn list(&self, project: Option<&Path>) -> Result<Catalog> {
         let (entries, mut warnings, truncated) = self.inventory(project)?;
@@ -248,7 +268,7 @@ impl Skills {
             .filter(|entry| !ids.insert(entry.skill.id.clone()))
             .map(|entry| entry.skill.id.clone())
             .collect();
-        let mut conflict_warnings = Vec::new();
+        let mut conflict_warnings = Warnings::default();
         if !duplicates.is_empty() {
             let mut duplicate_ids: Vec<_> = duplicates.iter().collect();
             duplicate_ids.sort();
@@ -265,12 +285,9 @@ impl Skills {
                 ));
             }
         }
-        conflict_warnings.append(&mut warnings);
-        let mut warnings = conflict_warnings;
-        warnings.truncate(32);
-        for warning in &mut warnings {
-            *warning = warning.chars().take(1024).collect();
-        }
+        let mut conflicts = conflict_warnings.finish("副本冲突警告");
+        conflicts.append(&mut warnings);
+        let warnings = conflicts;
         let mut bytes = 0;
         let mut truncated = truncated;
         let skills = entries
@@ -1008,6 +1025,44 @@ mod tests {
                 .set_state(None, &id, SkillState::Uninstalled)
                 .is_err()
         );
+    }
+    #[test]
+    fn conflict_and_scan_warning_budgets_are_independent_and_disclose_omissions() {
+        let (_temp, manager, home) = setup();
+        let root = home.join(".agents/skills");
+        let disabled = state_root(&root, SkillState::Disabled).unwrap();
+        for n in 0..20 {
+            skill(&root.join(format!("copy-{n:02}")));
+            skill(&disabled.join(format!("copy-{n:02}")));
+            skill(&root.join(format!("invalid name {n:02}")));
+        }
+        let catalog = manager.list(None).unwrap();
+        assert_eq!(catalog.warnings.len(), 32);
+        assert_eq!(
+            catalog
+                .warnings
+                .iter()
+                .filter(|w| w.contains("多个状态副本"))
+                .count(),
+            15
+        );
+        assert_eq!(
+            catalog
+                .warnings
+                .iter()
+                .filter(|w| w.contains("名称不符合要求"))
+                .count(),
+            15
+        );
+        assert!(
+            catalog
+                .warnings
+                .iter()
+                .any(|w| w.contains("5 条副本冲突警告"))
+        );
+        assert!(catalog.warnings.iter().any(|w| w.contains("5 条扫描诊断")));
+        assert!(!catalog.skills.iter().any(|s| s.scope == SkillScope::System));
+        assert!(catalog.warnings.iter().all(|w| w.chars().count() <= 1024));
     }
     #[test]
     fn stale_actions_cannot_restore_an_uninstalled_skill_but_receipts_can_reconcile() {

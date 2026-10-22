@@ -149,3 +149,43 @@ for (const siblings of [false, true]) {
     expect(document.activeElement).toBe(screen.getByText("打开详情"));
   });
 }
+
+it("restores focus to the nearest available control when the trigger is removed", async () => {
+  function RemovedTrigger() {
+    const [open, setOpen] = useState(false);
+    const [removed, setRemoved] = useState(false);
+    return (
+      <main>
+        <button disabled>不可用</button>
+        {!removed && (
+          <button
+            onClick={(event) => {
+              event.currentTarget.focus();
+              setOpen(true);
+            }}
+          >
+            查看条目
+          </button>
+        )}
+        <button>列表刷新</button>
+        {open && (
+          <Modal aria-label="条目">
+            <button
+              onClick={() => {
+                setRemoved(true);
+                setOpen(false);
+              }}
+            >
+              删除条目
+            </button>
+          </Modal>
+        )}
+      </main>
+    );
+  }
+  render(<RemovedTrigger />);
+  fireEvent.click(screen.getByText("查看条目"));
+  fireEvent.click(screen.getByText("删除条目"));
+  await Promise.resolve();
+  expect(document.activeElement).toBe(screen.getByText("列表刷新"));
+});

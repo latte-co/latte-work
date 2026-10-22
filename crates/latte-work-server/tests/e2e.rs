@@ -1,4 +1,6 @@
 //! Final-binary tests: real daemon, real socket/bridge, deterministic native processes.
+#[path = "support/ssh.rs"]
+mod ssh_e2e;
 #[path = "support/traex.rs"]
 mod traex_e2e;
 use latte_work_client::Client;

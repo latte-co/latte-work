@@ -11,7 +11,11 @@ import {
 import { SkillsSettings } from "./SkillsSettings";
 import type { Workbench } from "./useWorkbench";
 import type { ManagedSkill } from "./protocol";
-const { request } = vi.hoisted(() => ({ request: vi.fn() }));
+const { request, copyText } = vi.hoisted(() => ({
+  request: vi.fn(),
+  copyText: vi.fn().mockResolvedValue(undefined),
+}));
+vi.mock("./clipboard", () => ({ copyText }));
 vi.mock("./api", () => ({ request, message: (e: unknown) => String(e) }));
 const state = {
   host: { id: "local", name: "本机" },
@@ -413,4 +417,42 @@ it("associates import instructions and limits with the dialog and wraps category
   expect(description).toContain("现有目录导入完整技能");
   expect(description).toContain("512");
   expect(description).toContain("原目录保留");
+});
+
+it("describes skill details and copies a complete reusable SKILL.md including its metadata", async () => {
+  const markdown = "---\nname: Review\ndescription: Review code\n---\n# Body";
+  request.mockImplementation(async (_host, action) =>
+    action.method === "skill_detail"
+      ? { kind: "skill_detail", skill: system, markdown }
+      : catalog([system]),
+  );
+  render(<SkillsSettings state={state} active onBusy={() => {}} />);
+  fireEvent.click(await screen.findByRole("button", { name: /System Review/ }));
+  const copy = await screen.findByRole("button", { name: "复制 Markdown" });
+  const dialog = screen.getByRole("dialog", { name: "System Review" });
+  expect(
+    document.getElementById(dialog.getAttribute("aria-describedby")!)
+      ?.textContent,
+  ).toBe(system.description);
+  expect(copy.title).toContain("完整 SKILL.md");
+  fireEvent.click(copy);
+  await screen.findByRole("button", { name: "已复制" });
+  expect(copyText).toHaveBeenCalledWith(markdown);
+});
+it("keeps a failed detail read out of a later import dialog and page-level errors", async () => {
+  request.mockImplementation(async (_host, action) => {
+    if (action.method === "skill_detail") throw new Error("detail unavailable");
+    return catalog([system]);
+  });
+  render(<SkillsSettings state={state} active onBusy={() => {}} />);
+  fireEvent.click(await screen.findByRole("button", { name: /System Review/ }));
+  await screen.findByText(/detail unavailable/);
+  fireEvent.click(screen.getByRole("button", { name: "关闭技能详情" }));
+  expect(screen.queryByRole("alert")).toBeNull();
+  fireEvent.click(screen.getByRole("button", { name: "添加" }));
+  expect(
+    within(screen.getByRole("dialog", { name: "添加技能" })).queryByRole(
+      "alert",
+    ),
+  ).toBeNull();
 });

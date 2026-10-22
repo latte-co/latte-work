@@ -43,6 +43,7 @@ export function SkillDetailDialog({
       <Modal
         className="modal skill-detail"
         aria-labelledby="skill-detail-title"
+        aria-describedby="skill-detail-description"
       >
         <div className="skill-detail-top">
           <span className="skills-icon">
@@ -80,11 +81,15 @@ export function SkillDetailDialog({
         </div>
         <h2 id="skill-detail-title">{skill?.name ?? "技能详情"}</h2>
         {!detail && (
-          <p role="status">{error ? "技能详情暂不可用" : "正在读取…"}</p>
+          <p id="skill-detail-description" role="status">
+            {error ? "技能详情暂不可用" : "正在读取…"}
+          </p>
         )}
         {detail && (
           <>
-            <p>{skill?.description}</p>
+            <p id="skill-detail-description">
+              {skill?.description || "此技能未提供描述。"}
+            </p>
             <div className="skill-detail-meta">
               <span>
                 {scopes.find((s) => s.value === skill?.scope)?.label} ·{" "}
@@ -126,6 +131,7 @@ export function SkillDetailDialog({
               )}
               <button
                 disabled={busy}
+                title="复制完整 SKILL.md，包含名称和描述元数据"
                 onClick={() => {
                   void copyText(detail.markdown)
                     .then(() => setCopied(true))

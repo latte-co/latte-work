@@ -28,8 +28,13 @@ on Linux and macOS. Frontend UT/build runs on Linux, macOS, and Windows;
 Windows also checks, lints, and tests the portable Rust protocol and client.
 The server uses Unix sockets and process groups, so Windows CI does not claim
 server or native desktop support. A separate macOS job runs `make test-native`
-with a three-minute step deadline before building the native app. A failed native
-test fails that job and therefore `PR Gate`; successful compilation alone is not
+with a three-minute step deadline before building the native app. The same job
+runs `make package`, verifies the ad-hoc signed release bundle and remounted drag-install DMG, and uploads the image
+and checksum as CI artifacts. A Linux job runs `make test-ssh-skills` through a
+disposable, host-key-pinned loopback sshd; it exercises the production SSH client,
+capability handshake, independent host inventories, state changes, package import,
+and reconnect. The wrong-key case must fail. It does not connect to a configured
+remote host or use a model. A failed native test fails that job and therefore `PR Gate`; successful compilation alone is not
 treated as native behavioral coverage.
 `PR Gate` fails when any dependent job fails, is cancelled, or is skipped.
 The repository ruleset must require `PR Gate` on `main` for this to block a
@@ -1237,7 +1242,10 @@ requests on legacy Servers; import stays disabled until inventory loads.
 Reconnecting the selected host reloads inventory.
 Details offer Install for uninstalled skills and a disabled Installed status for
 enabled/disabled installations, alongside the enable switch, uninstall and copy
-actions. There is no trial project or task creation flow.
+actions. Copy preserves the complete SKILL.md, including its frontmatter, so the
+result remains a reusable skill; the rendered preview and injected prompt contain
+only the Markdown body. The detail description is associated with the dialog for
+assistive technology. There is no trial project or task creation flow.
 
 Platform skills ship in `skills/`, are embedded in the standalone Server, and are
 enabled by default. Corrupt, oversized or symlinked preferences skip platform
@@ -1257,9 +1265,16 @@ explicit null means no configured instructions. No native configuration or globa
 skill directory is written.
 
 The checked CLI is Traex 0.210.1-alpha.3. Reproduce its schema and metadata-only
-sentinel check with `python3 scripts/smoke-traex-skill-contract.py`; it creates no
-thread and sends no model prompt. The deterministic fixture asserts preservation
-on both start and resume and tests that disabling platform skills removes the override.
+sentinel check with `make smoke-traex-skill-contract` (`TRAEX` selects the
+installed executable, `TRAEX_CONTRACT_OUTPUT` selects the JSON report). It creates no
+thread and sends no model prompt. The sanitized, version-bound sample under
+`docs/evidence/traex-skill-contract-0.210.1-alpha.3.json` records the executable/schema
+hashes and observed metadata contract; it is historical evidence, not a claim about
+another installed CLI. The manually dispatched **Traex skill contract** GitHub
+workflow accepts an explicit trusted Linux executable HTTPS URL, SHA256 and exact
+version, checks all three, and retains its fresh report as an artifact. This is
+separate from the mandatory fixture E2E and needs no model/account credentials.
+The deterministic fixture asserts preservation on both start and resume and tests that disabling platform skills removes the override.
 Host preferences are atomically saved in the private state directory's `skills.json`.
 Changes apply to new Agent sessions; running processes and native conversation
 history may retain previously loaded instructions. No session is stopped or replayed.
@@ -1291,8 +1306,10 @@ Add imports a complete directory already on the chosen host into that host's glo
 nested symlinks/special files, and allow 512 entries, 16 MiB total and eight directory
 levels. No download, shell expansion, package manager or skill body is executed.
 Inventory reads at most 512 entries per directory, returns at most 512 skills and
-half a wire frame of metadata, bounds SKILL.md to 64 KiB and scanning to three
-seconds between filesystem operations. A dedicated one-slot skill worker is
+half a wire frame of metadata. Copy-conflict and scan diagnostics have independent
+16-message wire budgets (15 examples plus an omitted-count summary), so one class
+cannot hide the other; each message is bounded to 1024 characters. Inventory bounds
+SKILL.md to 64 KiB and scanning to three seconds between filesystem operations. A dedicated one-slot skill worker is
 independent of Agent probe capacity; provider model reads use the metadata lane.
 Requests have a 15-second response deadline. Cancellation and deadline checks run
 between filesystem steps, copy chunks and before committing a move/import. A
@@ -1304,5 +1321,9 @@ the actual installation state.
 Focused checks: `skills::`, `skill_worker::`, `skill_admission_tests::` and
 `platform_skills_` server unit tests; `skill_` final-binary tests cover inventory,
 import, damaged preferences and Traex start/resume preservation. UI regressions
-live in `SkillsSettings.test.tsx` and `Modal.test.tsx`. CLI fixtures, browser layout,
-native UI and actual SSH execution are separate evidence scopes.
+live in `SkillsSettings.test.tsx` and `Modal.test.tsx`. Page presentation, host
+request/mutation lifecycle, and operation dialogs are separated into
+`SkillsSettings`, `useSkills`, and `SkillOperationDialogs`. Catalog, detail and
+operation errors have distinct state. The shared Modal falls back to a surviving
+parent dialog or the trigger's nearest live region when the trigger disappears.
+CLI fixtures, browser layout, native UI and actual SSH execution are separate evidence scopes.

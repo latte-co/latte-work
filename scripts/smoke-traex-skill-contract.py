@@ -52,9 +52,12 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--traex', default=str(Path.home() / '.local/bin/traex'))
     parser.add_argument('--output', default='target/traex-skill-contract.json')
+    parser.add_argument('--expected-version', help='require this exact CLI version before checking')
     args = parser.parse_args()
     binary = str(Path(args.traex).resolve(strict=True))
     version = subprocess.check_output([binary, '--version'], text=True, timeout=5).strip()
+    if args.expected_version and version != args.expected_version:
+        raise RuntimeError(f'Traex version mismatch: {version!r}')
     schemas = {}
     with tempfile.TemporaryDirectory(prefix='latte-skill-schema-') as temporary:
         subprocess.run([binary, 'app-server', 'generate-json-schema', '--out', temporary], check=True,
@@ -68,8 +71,14 @@ def main():
                 field = data['properties']['developerInstructions']
             assert 'string' in field['type'], f'{name} instruction type changed'
             schemas[name] = {'sha256': hashlib.sha256(path.read_bytes()).hexdigest(), 'instruction_field': field}
-    asyncio.run(read_config(binary))
-    report = {'cli_version': version, 'schemas': schemas, 'config_read_preserves_sentinel': True,
+    async def bounded_read():
+        await asyncio.wait_for(read_config(binary), 20)
+    asyncio.run(bounded_read())
+    digest = hashlib.sha256()
+    with open(binary, 'rb') as executable:
+        for block in iter(lambda: executable.read(1024 * 1024), b''):
+            digest.update(block)
+    report = {'cli_version': version, 'binary_sha256': digest.hexdigest(), 'schemas': schemas, 'config_read_preserves_sentinel': True,
               'thread_started': False, 'prompts_sent': 0}
     output = Path(args.output)
     output.parent.mkdir(parents=True, exist_ok=True)
