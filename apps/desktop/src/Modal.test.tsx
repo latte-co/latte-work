@@ -82,3 +82,177 @@ it("keeps Select portals inside the modal and isolates nested dialog focus", () 
   fireEvent.click(screen.getByText("返回"));
   expect(document.activeElement).toBe(screen.getByText("嵌套"));
 });
+
+function SimultaneousClose({ siblings }: { siblings: boolean }) {
+  const [open, setOpen] = useState(false);
+  const [nested, setNested] = useState(false);
+  const inner = (
+    <div>
+      <Modal aria-label="确认">
+        <button
+          onClick={() => {
+            setNested(false);
+            setOpen(false);
+          }}
+        >
+          完成操作
+        </button>
+      </Modal>
+    </div>
+  );
+  return (
+    <>
+      <div data-testid="background">
+        <button
+          onClick={(event) => {
+            event.currentTarget.focus();
+            setOpen(true);
+          }}
+        >
+          打开详情
+        </button>
+      </div>
+      <aside data-testid="preexisting">原先不可交互的区域</aside>
+      {open && (
+        <div>
+          <Modal aria-label="详情">
+            <button
+              onClick={(event) => {
+                event.currentTarget.focus();
+                setNested(true);
+              }}
+            >
+              确认操作
+            </button>
+            {nested && !siblings && inner}
+          </Modal>
+        </div>
+      )}
+      {open && nested && siblings && inner}
+    </>
+  );
+}
+for (const siblings of [false, true]) {
+  it(`restores shared background when both ${siblings ? "sibling" : "nested"} dialogs close together`, () => {
+    render(<SimultaneousClose siblings={siblings} />);
+    const background = screen.getByTestId("background");
+    const preexisting = screen.getByTestId("preexisting");
+    preexisting.inert = true;
+    fireEvent.click(screen.getByText("打开详情"));
+    fireEvent.click(screen.getByText("确认操作"));
+    expect(background.inert).toBe(true);
+    fireEvent.click(screen.getByText("完成操作"));
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(background.inert).toBe(false);
+    expect(preexisting.inert).toBe(true);
+    screen.getByText("打开详情").focus();
+    expect(document.activeElement).toBe(screen.getByText("打开详情"));
+  });
+}
+
+it("restores focus to the nearest available control when the trigger is removed", async () => {
+  function RemovedTrigger() {
+    const [open, setOpen] = useState(false);
+    const [removed, setRemoved] = useState(false);
+    return (
+      <main>
+        <button disabled>不可用</button>
+        {!removed && (
+          <button
+            onClick={(event) => {
+              event.currentTarget.focus();
+              setOpen(true);
+            }}
+          >
+            查看条目
+          </button>
+        )}
+        <button>列表刷新</button>
+        {open && (
+          <Modal aria-label="条目">
+            <button
+              onClick={() => {
+                setRemoved(true);
+                setOpen(false);
+              }}
+            >
+              删除条目
+            </button>
+          </Modal>
+        )}
+      </main>
+    );
+  }
+  render(<RemovedTrigger />);
+  fireEvent.click(screen.getByText("查看条目"));
+  fireEvent.click(screen.getByText("删除条目"));
+  await Promise.resolve();
+  expect(document.activeElement).toBe(screen.getByText("列表刷新"));
+});
+
+it("restores a programmatically focused trigger outside the Tab sequence", () => {
+  function NegativeTabTrigger() {
+    const [open, setOpen] = useState(false);
+    return (
+      <main>
+        <button
+          tabIndex={-1}
+          onClick={(event) => {
+            event.currentTarget.focus();
+            setOpen(true);
+          }}
+        >
+          面板操作
+        </button>
+        {open && (
+          <Modal aria-label="操作">
+            <button onClick={() => setOpen(false)}>返回面板</button>
+          </Modal>
+        )}
+      </main>
+    );
+  }
+  render(<NegativeTabTrigger />);
+  fireEvent.click(screen.getByText("面板操作"));
+  fireEvent.click(screen.getByText("返回面板"));
+  expect(document.activeElement).toBe(screen.getByText("面板操作"));
+});
+it("falls back to the parent dialog itself when its last control disappears", async () => {
+  function EmptyParent() {
+    const [inner, setInner] = useState(false);
+    const [removed, setRemoved] = useState(false);
+    return (
+      <Modal aria-label="父弹窗">
+        {!removed && (
+          <button
+            onClick={(event) => {
+              event.currentTarget.focus();
+              setInner(true);
+            }}
+          >
+            子弹窗
+          </button>
+        )}
+        {inner && (
+          <Modal aria-label="子弹窗">
+            <button
+              onClick={() => {
+                setRemoved(true);
+                setInner(false);
+              }}
+            >
+              完成
+            </button>
+          </Modal>
+        )}
+      </Modal>
+    );
+  }
+  render(<EmptyParent />);
+  fireEvent.click(screen.getByText("子弹窗"));
+  fireEvent.click(screen.getByText("完成"));
+  await Promise.resolve();
+  expect(document.activeElement).toBe(
+    screen.getByRole("dialog", { name: "父弹窗" }),
+  );
+});

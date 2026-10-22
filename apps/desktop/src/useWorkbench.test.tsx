@@ -1400,3 +1400,47 @@ it("persists pinned ordering through native refresh, disconnect/reconnect and re
     "pin-a",
   ]);
 });
+
+it("keeps the selected conversation unread while Skills is visible and returns on task navigation", async () => {
+  const hook = renderHook(useWorkbench);
+  await act(async () => {});
+  await act(async () =>
+    hook.result.current.openSession({ ...session(), hostId: "local" }),
+  );
+  const original = hook.result.current.sessionId;
+  focused = true;
+  mocks.request.mockClear();
+  act(() => hook.result.current.setModal("skills"));
+  await act(async () => vi.advanceTimersByTimeAsync(1500));
+  expect(hook.result.current.sessionId).toBe(original);
+  expect(
+    mocks.request.mock.calls.filter(
+      ([, request]) => request.method === "mark_session_unread",
+    ),
+  ).toHaveLength(0);
+  act(() => hook.result.current.openSession({ ...session(), hostId: "local" }));
+  expect(hook.result.current.modal).toBeNull();
+  expect(hook.result.current.sessionId).toBe(original);
+  act(() => hook.result.current.setModal("skills"));
+  await act(async () => hook.result.current.createSession());
+  expect(hook.result.current.modal).toBeNull();
+  expect(hook.result.current.sessionId).toBe("");
+});
+
+it("reads skill support independently from each connected host hello", async () => {
+  mocks.loadHosts.mockResolvedValue([
+    { id: "local", name: "Local" },
+    { id: "remote", name: "Remote", ssh: "fixture-host", server_path: null },
+  ]);
+  mocks.connect.mockImplementation(async (host: { id: string }) => ({
+    kind: "hello",
+    server_id: `server-${host.id}`,
+    agents: [],
+    skill_management: host.id === "local",
+  }));
+  const hook = renderHook(useWorkbench);
+  await act(async () => {});
+  expect(hook.result.current.hostSupportsSkills("local")).toBe(true);
+  expect(hook.result.current.hostSupportsSkills("remote")).toBe(false);
+  expect(hook.result.current.hostSupportsSkills("missing")).toBe(false);
+});

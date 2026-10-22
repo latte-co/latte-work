@@ -54,6 +54,22 @@ vi.mock("./Workspace", () => ({
       </header>
     ) : null,
 }));
+vi.mock("./SkillsPage", () => ({
+  SkillsPage: ({
+    active,
+    controls,
+    onClose,
+  }: {
+    active: boolean;
+    controls: ReactNode;
+    onClose: () => void;
+  }) => (
+    <main aria-label="技能管理" hidden={!active}>
+      {controls}
+      <button onClick={onClose}>返回对话</button>
+    </main>
+  ),
+}));
 vi.mock("./SettingsPage", () => ({ SettingsPage: () => null }));
 vi.mock("./HostDialogs", () => ({ HostDialogs: () => null }));
 vi.mock("./SshPasswordDialog", () => ({ SshPasswordDialog: () => null }));
@@ -221,4 +237,23 @@ it("clears a background host failure after recovery and only reconnects on an ex
   expect(screen.getByRole("button", { name: "状态提示" })).toBeTruthy();
   expect(screen.queryByText("SSH 连接已关闭")).toBeNull();
   expect(screen.getByRole("dialog").textContent).toContain("当前没有状态提示");
+});
+
+it("shows Skills in the main content area while preserving the sidebar and hiding conversation/workspace", () => {
+  mocks.state = {
+    ...mocks.state,
+    modal: "skills",
+    panel: true,
+    workspace: { ...mocks.state.workspace, expanded: true },
+  };
+  const view = render(<App />);
+  expect(screen.getByRole("main", { name: "技能管理" })).toBeTruthy();
+  expect(screen.getByRole("button", { name: "侧栏项目" })).toBeTruthy();
+  expect(document.getElementById("conversation-panel")?.hidden).toBe(true);
+  expect(document.querySelector(".app.workspace-visible")).toBeNull();
+  expect(screen.queryByRole("tablist", { name: "设置分类" })).toBeNull();
+  mocks.state = { ...mocks.state, modal: null };
+  view.rerender(<App />);
+  expect(screen.queryByRole("main", { name: "技能管理" })).toBeNull();
+  expect(document.getElementById("conversation-panel")?.hidden).toBe(false);
 });

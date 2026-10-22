@@ -232,6 +232,17 @@ export type SkillInfo = {
   description: string;
   directory: string;
 };
+export type SkillScope = "platform" | "system" | "project";
+export type SkillState = "enabled" | "disabled" | "uninstalled";
+export type ManagedSkill = {
+  id: string;
+  name: string;
+  description: string;
+  scope: SkillScope;
+  state: SkillState;
+  directory: string | null;
+  origin: string;
+};
 export type QueuedMessage = {
   request_id: string;
   text: string;
@@ -542,6 +553,21 @@ export type Request =
       path: string;
     }
   | { method: "task_change_diff"; session_id: string; path: string }
+  | { method: "skills"; project_id: string | null }
+  | { method: "skill_detail"; project_id: string | null; id: string }
+  | {
+      method: "set_skill_state";
+      project_id: string | null;
+      id: string;
+      state: SkillState;
+      expected_state: SkillState;
+    }
+  | {
+      method: "install_skill";
+      project_id: string | null;
+      scope: SkillScope;
+      path: string;
+    }
   | { method: "skill_info"; session_id: string; name: string }
   | { method: "sources"; session_id: string }
   | {
@@ -566,6 +592,13 @@ export type Response =
   | { kind: "last_turn_changes"; changes: TurnChanges | null }
   | { kind: "turn_changes"; changes: TurnChanges }
   | { kind: "change_summary"; summary: ChangeSummary }
+  | {
+      kind: "skills";
+      skills: Array<ManagedSkill>;
+      warnings: Array<string>;
+      truncated: boolean;
+    }
+  | { kind: "skill_detail"; skill: ManagedSkill; markdown: string }
   | { kind: "skill_info"; skill: SkillInfo | null }
   | { kind: "sources"; entries: Array<TaskSource>; truncated: boolean }
   | {
@@ -639,6 +672,7 @@ export type Response =
       agents: Array<AgentInfo>;
       permission_settings: boolean;
       history_window: boolean;
+      skill_management: boolean;
     }
   | { kind: "projects"; projects: Array<Project> }
   | { kind: "project"; project: Project }

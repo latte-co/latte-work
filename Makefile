@@ -74,3 +74,12 @@ lint-ci: ## Validate GitHub workflow and shell scripts
 .PHONY: package-dmg
 package-dmg: ## Repackage the existing signed release app without rebuilding
 	./scripts/package-dmg.sh
+
+.PHONY: test-ssh-skills smoke-traex-skill-contract
+# Explicit integration entries; neither changes a configured remote host.
+test-ssh-skills: ## Real OpenSSH loopback skill integration (requires sshd)
+	python3 scripts/test-ssh-skills.py
+TRAEX ?= $(HOME)/.local/bin/traex
+TRAEX_CONTRACT_OUTPUT ?= target/traex-skill-contract.json
+smoke-traex-skill-contract: ## Installed Traex schema/config contract, no model turn
+	python3 scripts/smoke-traex-skill-contract.py --traex "$(TRAEX)" --output "$(TRAEX_CONTRACT_OUTPUT)"

@@ -16,10 +16,10 @@ fn component(name: &str) -> bool {
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || b"_-".contains(&b))
 }
-fn read(path: &Path, limit: u64) -> Result<String> {
+pub(crate) fn read(path: &Path, limit: u64) -> Result<String> {
     let file = std::fs::OpenOptions::new()
         .read(true)
-        .custom_flags(nix::libc::O_NONBLOCK)
+        .custom_flags(nix::libc::O_NONBLOCK | nix::libc::O_NOFOLLOW)
         .open(path)?;
     let meta = file.metadata()?;
     if !meta.is_file() || meta.len() > limit {
@@ -33,7 +33,7 @@ fn read(path: &Path, limit: u64) -> Result<String> {
     String::from_utf8(bytes).context("Skill 文件不是 UTF-8")
 }
 // Only display scalar frontmatter fields. Never evaluate templates, YAML tags or body commands.
-fn field(document: &str, key: &str) -> String {
+pub(crate) fn field(document: &str, key: &str) -> String {
     let mut lines = document.trim_start_matches('\u{feff}').lines();
     if lines.next().map(str::trim) != Some("---") {
         return String::new();

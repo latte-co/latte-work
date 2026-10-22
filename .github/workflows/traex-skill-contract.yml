@@ -1,0 +1,46 @@
+name: Traex skill contract
+on:
+  workflow_dispatch:
+    inputs:
+      cli_url:
+        description: HTTPS URL of a trusted Linux x86_64 Traex executable (no archive)
+        required: true
+        type: string
+      cli_sha256:
+        description: Expected SHA256 of that executable
+        required: true
+        type: string
+      cli_version:
+        description: Exact expected output of traex --version
+        required: true
+        type: string
+permissions:
+  contents: read
+jobs:
+  contract:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Fetch explicitly pinned CLI
+        env:
+          CLI_URL: ${{ inputs.cli_url }}
+          CLI_SHA256: ${{ inputs.cli_sha256 }}
+        shell: bash
+        run: |
+          [[ "$CLI_URL" == https://* ]]
+          [[ "$CLI_SHA256" =~ ^[a-fA-F0-9]{64}$ ]]
+          curl --fail --location --proto '=https' --proto-redir '=https' --max-time 60 --max-filesize 134217728 "$CLI_URL" -o "$RUNNER_TEMP/traex"
+          printf '%s  %s\n' "$CLI_SHA256" "$RUNNER_TEMP/traex" | sha256sum -c -
+          chmod 700 "$RUNNER_TEMP/traex"
+      - name: Verify schema and configured instruction preservation without a thread
+        env:
+          CLI_VERSION: ${{ inputs.cli_version }}
+        run: python3 scripts/smoke-traex-skill-contract.py --traex "$RUNNER_TEMP/traex" --expected-version "$CLI_VERSION" --output target/traex-skill-contract.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: traex-skill-contract-${{ github.sha }}
+          path: target/traex-skill-contract.json
+          if-no-files-found: error

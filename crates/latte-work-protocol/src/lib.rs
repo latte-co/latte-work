@@ -372,6 +372,32 @@ pub struct SkillInfo {
     pub description: String,
     pub directory: String,
 }
+/// Host-local skill installations. Platform skills are scoped to Work launches.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+pub enum SkillScope {
+    Platform,
+    System,
+    /// Legacy wire value; global skill management rejects project scope.
+    Project,
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+pub enum SkillState {
+    Enabled,
+    Disabled,
+    Uninstalled,
+}
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+pub struct ManagedSkill {
+    pub id: String,
+    pub name: String,
+    pub description: String,
+    pub scope: SkillScope,
+    pub state: SkillState,
+    pub directory: Option<String>,
+    pub origin: String,
+}
 /// A command reported by the selected native Agent in the project context.
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 pub struct QueuedMessage {
@@ -750,6 +776,25 @@ pub enum Request {
         session_id: String,
         path: String,
     },
+    /// Global skill management. Legacy project_id values must be absent/null.
+    Skills {
+        project_id: Option<String>,
+    },
+    SkillDetail {
+        project_id: Option<String>,
+        id: String,
+    },
+    SetSkillState {
+        project_id: Option<String>,
+        id: String,
+        state: SkillState,
+        expected_state: SkillState,
+    },
+    InstallSkill {
+        project_id: Option<String>,
+        scope: SkillScope,
+        path: String,
+    },
     SkillInfo {
         session_id: String,
         name: String,
@@ -927,6 +972,15 @@ pub enum Response {
     ChangeSummary {
         summary: ChangeSummary,
     },
+    Skills {
+        skills: Vec<ManagedSkill>,
+        warnings: Vec<String>,
+        truncated: bool,
+    },
+    SkillDetail {
+        skill: ManagedSkill,
+        markdown: String,
+    },
     SkillInfo {
         skill: Option<SkillInfo>,
     },
@@ -1030,6 +1084,8 @@ pub enum Response {
         permission_settings: bool,
         #[serde(default)]
         history_window: bool,
+        #[serde(default)]
+        skill_management: bool,
     },
     Projects {
         projects: Vec<Project>,
@@ -1105,6 +1161,28 @@ pub enum Response {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn skill_capability_is_explicit_and_defaults_to_unsupported_for_older_servers() {
+        let legacy =
+            serde_json::json!({"kind":"hello","version":1,"server_id":"legacy","agents":[]});
+        assert!(matches!(
+            serde_json::from_value::<Response>(legacy.clone()).unwrap(),
+            Response::Hello {
+                skill_management: false,
+                ..
+            }
+        ));
+        let mut current = legacy;
+        current["skill_management"] = serde_json::json!(true);
+        assert!(matches!(
+            serde_json::from_value::<Response>(current).unwrap(),
+            Response::Hello {
+                skill_management: true,
+                ..
+            }
+        ));
+    }
+
     #[test]
     fn subagent_roles_are_optional_for_old_history_and_preserved_on_the_wire() {
         let old = serde_json::json!({

@@ -28,8 +28,13 @@ on Linux and macOS. Frontend UT/build runs on Linux, macOS, and Windows;
 Windows also checks, lints, and tests the portable Rust protocol and client.
 The server uses Unix sockets and process groups, so Windows CI does not claim
 server or native desktop support. A separate macOS job runs `make test-native`
-with a three-minute step deadline before building the native app. A failed native
-test fails that job and therefore `PR Gate`; successful compilation alone is not
+with a three-minute step deadline before building the native app. The same job
+runs `make package`, verifies the ad-hoc signed release bundle and remounted drag-install DMG, and uploads the image
+and checksum as CI artifacts. A Linux job runs `make test-ssh-skills` through a
+disposable, host-key-pinned loopback sshd; it exercises the production SSH client,
+capability handshake, independent host inventories, state changes, package import,
+and reconnect. The wrong-key case must fail. It does not connect to a configured
+remote host or use a model. A failed native test fails that job and therefore `PR Gate`; successful compilation alone is not
 treated as native behavioral coverage.
 `PR Gate` fails when any dependent job fails, is cancelled, or is skipped.
 The repository ruleset must require `PR Gate` on `main` for this to block a
@@ -1217,3 +1222,108 @@ turns and close/resume verification; this uses the CLI account's model service.
 `--model <native-id>` checks explicit selection, and `--live-tools` verifies a
 real file write in the disposable project.
 Native UI and actual SSH execution remain separate acceptance evidence.
+
+## Skill management
+
+The main sidebar’s Skills entry below New task reads the selected local/SSH host without starting an Agent.
+`skills`, `skill_detail`, `set_skill_state` and `install_skill` are additive host
+requests. Hello advertises `skill_management`; an absent/false flag keeps the client
+from sending these requests and shows an upgrade instruction. Older remote Servers
+must be updated before using the page.
+Management is global to the selected host: only platform and system skills are
+listed. Project selection never affects this page. Legacy non-null `project_id`
+arguments and project-scope installs fail explicitly before project resolution;
+the fields remain in the wire schema for compatibility. Project skill directories
+are never scanned or modified by management. Native Agent project skill discovery
+and conversation skill references remain independent of this global inventory.
+The desktop keeps host identities separate and discards late responses.
+The host menu has its own minimum width. Capability checks avoid unsupported wire
+requests on legacy Servers; import stays disabled until inventory loads.
+Reconnecting the selected host reloads inventory.
+Details offer Install for uninstalled skills and a disabled Installed status for
+enabled/disabled installations, alongside the enable switch, uninstall and copy
+actions. Copy preserves the complete SKILL.md, including its frontmatter, so the
+result remains a reusable skill; the rendered preview and injected prompt contain
+only the Markdown body. The detail description is associated with the dialog for
+assistive technology. There is no trial project or task creation flow.
+
+Platform skills ship in `skills/`, are embedded in the standalone Server, and are
+enabled by default. Corrupt, oversized or symlinked preferences skip platform
+injection without blocking Agent startup or command discovery. Inventory still
+shows native skills and a diagnostic with the preferences path; the damaged file
+is preserved rather than silently reset.
+The initial `latte-work-context` skill explains host paths and attached references.
+Enabled platform content is passed only to Work's Claude child through
+`--append-system-prompt`, and to Traex thread start/resume through the native
+`developerInstructions` field, appended to the native configured developer instructions.
+Only the Markdown body is injected. With platform skills enabled Traex reads its
+native configuration before opening/resuming a thread, including when an App
+Provider is selected. This adds a metadata round trip; if the configuration request
+fails, native session opening fails explicitly. Missing or malformed native
+instruction fields omit the override with a diagnostic, preserving CLI defaults;
+explicit null means no configured instructions. No native configuration or global
+skill directory is written.
+
+The checked CLI is Traex 0.210.1-alpha.3. Reproduce its schema and metadata-only
+sentinel check with `make smoke-traex-skill-contract` (`TRAEX` selects the
+installed executable, `TRAEX_CONTRACT_OUTPUT` selects the JSON report). It creates no
+thread and sends no model prompt. The sanitized, version-bound sample under
+`docs/evidence/traex-skill-contract-0.210.1-alpha.3.json` records the executable/schema
+hashes and observed metadata contract; it is historical evidence, not a claim about
+another installed CLI. The manually dispatched **Traex skill contract** GitHub
+workflow accepts an explicit trusted Linux executable HTTPS URL, SHA256 and exact
+version, checks all three, and retains its fresh report as an artifact. This is
+separate from the mandatory fixture E2E and needs no model/account credentials.
+The deterministic fixture asserts preservation on both start and resume and tests that disabling platform skills removes the override.
+Host preferences are atomically saved in the private state directory's `skills.json`.
+Changes apply to new Agent sessions; running processes and native conversation
+history may retain previously loaded instructions. No session is stopped or replayed.
+
+System roots include the shell-resolved `CLAUDE_CONFIG_DIR/skills` (otherwise
+`~/.claude/skills`), `~/.agents/skills`, `~/.codex/skills` and its `.system` subfolder,
+`~/.trae/skills`, and `~/.traex/skills`. Project roots, installed plugin caches
+and ancestor projects are outside this inventory. System roots are trusted
+user-owned configuration: native root symlinks may resolve outside HOME.
+Import resolves aliases of the trusted HOME
+base first, then refuses symlinks inside its destination. Conflicting installations
+and invalid names are reported with names/paths. Showing a skill does not assert that every Agent supports that root;
+native discovery and eligibility remain Agent-specific.
+
+Native enable/disable moves the complete top-level directory or symlink between
+`skills` and its sibling `skills.latte-work-disabled`; uninstall moves it to the
+sibling `skills.latte-work-uninstalled`, retaining a recoverable copy. Codex `.system`
+archives live outside `skills`, in `.codex/skills-system.latte-work-*`.
+The UI confirms the host/path and effect on other Agent launches using that root.
+The server never recursively deletes native skills, follows the top-level skill
+link for mutation, or overwrites a conflicting destination. Relative links that
+would break after moving are rejected. Reinstall restores the archived directory;
+external removal or conflicting state copies require explicit reconciliation.
+State updates compare the displayed prior state; stale actions cannot restore a
+newly uninstalled skill. Identical acknowledged target states reconcile safely.
+
+Add imports a complete directory already on the chosen host into that host's global
+`~/.agents/skills`, preserving resources and source files. Imports are staged, reject
+nested symlinks/special files, and allow 512 entries, 16 MiB total and eight directory
+levels. No download, shell expansion, package manager or skill body is executed.
+Inventory reads at most 512 entries per directory, returns at most 512 skills and
+half a wire frame of metadata. Copy-conflict and scan diagnostics have independent
+16-message wire budgets (15 examples plus an omitted-count summary), so one class
+cannot hide the other; each message is bounded to 1024 characters. Inventory bounds
+SKILL.md to 64 KiB and scanning to three seconds between filesystem operations. A dedicated one-slot skill worker is
+independent of Agent probe capacity; provider model reads use the metadata lane.
+Requests have a 15-second response deadline. Cancellation and deadline checks run
+between filesystem steps, copy chunks and before committing a move/import. A
+blocking OS syscall cannot be forcibly cancelled: the worker retains its slot
+until it exits, preventing abandoned threads from accumulating, while Agent probes
+remain available. A timeout is unconfirmed, never auto-replayed; refresh reconciles
+the actual installation state.
+
+Focused checks: `skills::`, `skill_worker::`, `skill_admission_tests::` and
+`platform_skills_` server unit tests; `skill_` final-binary tests cover inventory,
+import, damaged preferences and Traex start/resume preservation. UI regressions
+live in `SkillsSettings.test.tsx` and `Modal.test.tsx`. Page presentation, host
+request/mutation lifecycle, and operation dialogs are separated into
+`SkillsSettings`, `useSkills`, and `SkillOperationDialogs`. Catalog, detail and
+operation errors have distinct state. The shared Modal falls back to a surviving
+parent dialog or the trigger's nearest live region when the trigger disappears.
+CLI fixtures, browser layout, native UI and actual SSH execution are separate evidence scopes.

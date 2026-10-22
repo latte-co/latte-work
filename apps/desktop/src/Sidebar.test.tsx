@@ -1184,3 +1184,24 @@ it("includes pinned and unselected conversations once in project hover counts an
   view.rerender(<Sidebar state={{ ...base, connected: false }} />);
   expect(within(info).getByText("3 个任务 · 会话状态待确认")).toBeTruthy();
 });
+
+it("places Skills directly below New task as a primary navigation entry", () => {
+  const value = {
+    ...state([session("completed")]),
+    setModal: vi.fn(),
+    setSettingsReturnToProject: vi.fn(),
+    createSession: vi.fn().mockResolvedValue(undefined),
+  };
+  const view = render(<Sidebar state={value} />);
+  const newTask = screen.getByRole("button", { name: /新任务/ });
+  const skills = screen.getByRole("button", { name: "技能" });
+  expect(newTask.nextElementSibling).toBe(skills);
+  fireEvent.click(skills);
+  expect(value.setModal).toHaveBeenCalledWith("skills");
+  expect(value.createSession).not.toHaveBeenCalled();
+  view.rerender(<Sidebar state={{ ...value, modal: "skills" }} />);
+  expect(skills.getAttribute("aria-current")).toBe("page");
+  expect(
+    screen.getByRole("button", { name: "Task" }).classList.contains("active"),
+  ).toBe(false);
+});

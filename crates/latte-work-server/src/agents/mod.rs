@@ -3,7 +3,7 @@ mod adapter;
 mod claude;
 mod claude_models;
 mod claude_sessions;
-mod claude_skills;
+pub(crate) mod claude_skills;
 pub(crate) mod traex;
 pub use adapter::{Action, AgentAdapter, AgentCommand, Input};
 use anyhow::{Result, bail};

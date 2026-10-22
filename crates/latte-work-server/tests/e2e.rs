@@ -1,4 +1,6 @@
 //! Final-binary tests: real daemon, real socket/bridge, deterministic native processes.
+#[path = "support/ssh.rs"]
+mod ssh_e2e;
 #[path = "support/traex.rs"]
 mod traex_e2e;
 use latte_work_client::Client;
@@ -7742,4 +7744,348 @@ async fn snapshot_legacy_oversized_events_advance_cursor_and_leave_other_session
         Response::Accepted { .. }
     ));
     wait(&mut client, &other, Status::Completed).await;
+}
+
+#[tokio::test]
+async fn skill_management_is_host_local_reversible_and_prompt_free() {
+    use latte_work_protocol::{SkillScope, SkillState};
+    let home = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let config = home.path().join(".claude");
+    let host = Host::start_with_environment(&[
+        ("HOME", home.path().as_os_str()),
+        ("CLAUDE_CONFIG_DIR", config.as_os_str()),
+    ])
+    .await;
+    let mut client = host.client().await;
+    let system = home.path().join(".agents/skills/shared");
+    let project_skill = root.path().join(".claude/skills/shared");
+    for path in [&system, &project_skill] {
+        std::fs::create_dir_all(path).unwrap();
+        std::fs::write(path.join("SKILL.md"), "---\nname: Shared\ndescription: Host-local installed skill\n---\n!`touch SHOULD_NOT_EXECUTE`\n").unwrap();
+        std::fs::write(path.join("resource.txt"), "keep").unwrap();
+    }
+    let Response::Project { project } = ask(
+        &mut client,
+        Request::AddProject {
+            path: root.path().to_string_lossy().into(),
+            name: None,
+        },
+    )
+    .await
+    else {
+        panic!("project")
+    };
+    let project_id = Some(project.id.clone());
+    let Response::Skills {
+        skills,
+        warnings,
+        truncated,
+    } = ask(&mut client, Request::Skills { project_id: None }).await
+    else {
+        panic!("catalog")
+    };
+    assert!(warnings.is_empty());
+    assert!(!truncated);
+    assert_eq!(skills.len(), 2);
+    let system_id = skills
+        .iter()
+        .find(|s| s.scope == SkillScope::System)
+        .unwrap()
+        .id
+        .clone();
+    assert!(skills.iter().all(|s| s.scope != SkillScope::Project));
+    // Legacy project requests must fail before resolving a project or touching its files.
+    for request in [
+        Request::Skills {
+            project_id: project_id.clone(),
+        },
+        Request::SkillDetail {
+            project_id: project_id.clone(),
+            id: system_id.clone(),
+        },
+        Request::SetSkillState {
+            project_id: project_id.clone(),
+            id: system_id.clone(),
+            state: SkillState::Disabled,
+            expected_state: SkillState::Enabled,
+        },
+        Request::InstallSkill {
+            project_id: project_id.clone(),
+            scope: SkillScope::System,
+            path: system.to_string_lossy().into(),
+        },
+        Request::InstallSkill {
+            project_id: None,
+            scope: SkillScope::Project,
+            path: system.to_string_lossy().into(),
+        },
+    ] {
+        let response = ask(&mut client, request).await;
+        assert!(matches!(response, Response::Error { message, .. } if message.contains("全局")));
+    }
+    let mut expected_state = SkillState::Enabled;
+    for state in [
+        SkillState::Disabled,
+        SkillState::Uninstalled,
+        SkillState::Enabled,
+    ] {
+        let Response::Skills { skills, .. } = ask(
+            &mut client,
+            Request::SetSkillState {
+                project_id: None,
+                id: system_id.clone(),
+                state,
+                expected_state,
+            },
+        )
+        .await
+        else {
+            panic!("state")
+        };
+        assert_eq!(
+            skills.iter().find(|s| s.id == system_id).unwrap().state,
+            state
+        );
+        expected_state = state;
+        assert!(project_skill.join("SKILL.md").exists());
+        let Response::SkillDetail { skill, markdown } = ask(
+            &mut client,
+            Request::SkillDetail {
+                project_id: None,
+                id: system_id.clone(),
+            },
+        )
+        .await
+        else {
+            panic!("detail")
+        };
+        assert!(markdown.contains("SHOULD_NOT_EXECUTE"));
+        assert_eq!(
+            std::fs::read_to_string(Path::new(&skill.directory.unwrap()).join("resource.txt"))
+                .unwrap(),
+            "keep"
+        );
+    }
+    assert!(matches!(
+        ask(
+            &mut client,
+            Request::SetSkillState {
+                project_id: None,
+                id: "file:project-only".into(),
+                state: SkillState::Disabled,
+                expected_state: SkillState::Enabled,
+            }
+        )
+        .await,
+        Response::Error { .. }
+    ));
+    let builtin = skills
+        .iter()
+        .find(|s| s.scope == SkillScope::Platform)
+        .unwrap();
+    ask(
+        &mut client,
+        Request::SetSkillState {
+            project_id: None,
+            id: builtin.id.clone(),
+            state: SkillState::Disabled,
+            expected_state: SkillState::Enabled,
+        },
+    )
+    .await;
+    let mut reconnect = host.client().await;
+    let Response::Skills { skills, .. } =
+        ask(&mut reconnect, Request::Skills { project_id: None }).await
+    else {
+        panic!("reconnect")
+    };
+    assert_eq!(
+        skills
+            .iter()
+            .find(|s| s.scope == SkillScope::Platform)
+            .unwrap()
+            .state,
+        SkillState::Disabled
+    );
+    assert!(home.path().join(".agents/skills/shared/SKILL.md").exists());
+    assert!(
+        !home
+            .path()
+            .join(".agents/skills/latte-work-context")
+            .exists()
+    );
+    assert!(!config.join("skills/latte-work-context").exists());
+    assert!(!root.path().join("SHOULD_NOT_EXECUTE").exists());
+    assert!(
+        matches!(ask(&mut client, Request::Sessions { project_id: project.id }).await, Response::Sessions { sessions } if sessions.is_empty())
+    );
+    // A second server with the same HOME does not inherit Work's state-dir preference.
+    let other = Host::start_with_environment(&[
+        ("HOME", home.path().as_os_str()),
+        ("CLAUDE_CONFIG_DIR", config.as_os_str()),
+    ])
+    .await;
+    let mut other_client = other.client().await;
+    let Response::Skills { skills, .. } =
+        ask(&mut other_client, Request::Skills { project_id: None }).await
+    else {
+        panic!("other host")
+    };
+    assert_eq!(
+        skills
+            .iter()
+            .find(|s| s.scope == SkillScope::Platform)
+            .unwrap()
+            .state,
+        SkillState::Enabled
+    );
+}
+
+#[tokio::test]
+async fn skill_import_copies_full_packages_and_rejects_unsafe_content_without_prompts() {
+    use latte_work_protocol::SkillScope;
+    let home = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let packages = tempfile::tempdir().unwrap();
+    let host = Host::start_with_environment(&[("HOME", home.path().as_os_str())]).await;
+    let mut client = host.client().await;
+    assert!(matches!(
+        ask(&mut client, Request::Hello { version: VERSION }).await,
+        Response::Hello {
+            skill_management: true,
+            ..
+        }
+    ));
+    let Response::Project { project } = ask(
+        &mut client,
+        Request::AddProject {
+            path: root.path().to_string_lossy().into(),
+            name: None,
+        },
+    )
+    .await
+    else {
+        panic!("project")
+    };
+    let source = packages.path().join("imported");
+    std::fs::create_dir_all(source.join("scripts")).unwrap();
+    std::fs::write(
+        source.join("SKILL.md"),
+        "---\nname: Imported\ndescription: Fixture\n---\n!`touch MUST_NOT_EXECUTE`\n",
+    )
+    .unwrap();
+    std::fs::write(source.join("scripts/check.sh"), "touch MUST_NOT_EXECUTE").unwrap();
+    let scope = SkillScope::System;
+    let response = ask(
+        &mut client,
+        Request::InstallSkill {
+            project_id: None,
+            scope,
+            path: source.to_string_lossy().into(),
+        },
+    )
+    .await;
+    let Response::Skills { skills, .. } = response else {
+        panic!("{response:?}")
+    };
+    let installed = skills
+        .iter()
+        .find(|s| s.scope == scope && s.name == "Imported")
+        .unwrap();
+    assert_eq!(
+        std::fs::read_to_string(
+            Path::new(installed.directory.as_ref().unwrap()).join("scripts/check.sh")
+        )
+        .unwrap(),
+        "touch MUST_NOT_EXECUTE"
+    );
+    let unsafe_package = packages.path().join("unsafe-package");
+    std::fs::create_dir(&unsafe_package).unwrap();
+    std::fs::copy(source.join("SKILL.md"), unsafe_package.join("SKILL.md")).unwrap();
+    std::os::unix::fs::symlink(source.join("SKILL.md"), unsafe_package.join("linked")).unwrap();
+    assert!(matches!(
+        ask(
+            &mut client,
+            Request::InstallSkill {
+                project_id: None,
+                scope: SkillScope::System,
+                path: unsafe_package.to_string_lossy().into()
+            }
+        )
+        .await,
+        Response::Error { .. }
+    ));
+    assert!(!home.path().join(".agents/skills/unsafe-package").exists());
+    assert!(!root.path().join(".agents").exists());
+    assert!(source.join("SKILL.md").exists());
+    assert!(!root.path().join("MUST_NOT_EXECUTE").exists());
+    assert!(
+        matches!(ask(&mut client,Request::Sessions{project_id:project.id}).await,Response::Sessions{sessions}if sessions.is_empty())
+    );
+}
+#[tokio::test]
+async fn damaged_skill_preferences_do_not_block_agent_sessions_or_command_discovery() {
+    for damage in ["json", "oversize", "symlink"] {
+        let host = Host::start().await;
+        let mut client = host.client().await;
+        let root = tempfile::tempdir().unwrap();
+        let prefs = host.directory.path().join("skills.json");
+        match damage {
+            "json" => std::fs::write(&prefs, "not-json").unwrap(),
+            "oversize" => std::fs::write(&prefs, " ".repeat(64 * 1024 + 1)).unwrap(),
+            _ => {
+                let external = root.path().join("external.json");
+                std::fs::write(&external, "{}").unwrap();
+                std::os::unix::fs::symlink(external, &prefs).unwrap();
+            }
+        }
+        let id = session(&mut client, root.path()).await;
+        let Response::Session { session: current } = ask(
+            &mut client,
+            Request::Session {
+                session_id: id.clone(),
+            },
+        )
+        .await
+        else {
+            panic!("session")
+        };
+        for agent in ["claude", "traex"] {
+            assert!(matches!(
+                ask(
+                    &mut client,
+                    Request::AgentCommands {
+                        project_id: current.project_id.clone(),
+                        agent: agent.into()
+                    }
+                )
+                .await,
+                Response::AgentCommands { .. }
+            ));
+            let id = if agent == "claude" {
+                id.clone()
+            } else {
+                let Response::Session { session } = ask(
+                    &mut client,
+                    Request::CreateSession {
+                        project_id: current.project_id.clone(),
+                        agent: agent.into(),
+                    },
+                )
+                .await
+                else {
+                    panic!("session")
+                };
+                session.id
+            };
+            let reply = send(&mut client, &id, &format!("damaged-prefs-{agent}"), "hello").await;
+            assert!(
+                matches!(reply, Response::Accepted { .. }),
+                "{damage}/{agent}: {reply:?}"
+            );
+            wait(&mut client, &id, Status::Completed).await;
+        }
+        assert!(prefs.symlink_metadata().is_ok());
+    }
 }

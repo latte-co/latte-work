@@ -1,6 +1,19 @@
 import { useLayoutEffect, useRef, type ComponentProps } from "react";
 
 const stack: HTMLElement[] = [];
+// Different dialogs may suspend the same background node. A previous-value
+// snapshot per dialog would restore stale inert=true when both close together.
+const inertOwners = new Map<
+  HTMLElement,
+  { count: number; previous: boolean }
+>();
+const canFocus = (item: HTMLElement) =>
+  !item.matches(":disabled") &&
+  !item.closest("[hidden], [inert]") &&
+  getComputedStyle(item).display !== "none" &&
+  getComputedStyle(item).visibility !== "hidden" &&
+  (!item.closest("details:not([open])") || item.tagName === "SUMMARY");
+const tabbable = (item: HTMLElement) => item.tabIndex >= 0 && canFocus(item);
 const focusable =
   "button, input, textarea, select, a[href], summary, [tabindex]";
 /** Native modal behavior shared by every dialog. Nested dialogs suspend their parent. */
@@ -10,12 +23,25 @@ export function Modal(props: ComponentProps<"section">) {
   useLayoutEffect(() => {
     const element = root.current!;
     stack.push(element);
-    const inert: { element: HTMLElement; previous: boolean }[] = [];
+    const ancestors: HTMLElement[] = [];
+    for (
+      let node = trigger.current?.parentElement;
+      node && node !== document.body;
+      node = node.parentElement
+    )
+      ancestors.push(node);
+    const inert: HTMLElement[] = [];
     let branch: HTMLElement = element;
     while (branch.parentElement) {
       for (const sibling of Array.from(branch.parentElement.children)) {
         if (sibling !== branch && sibling instanceof HTMLElement) {
-          inert.push({ element: sibling, previous: sibling.inert });
+          const owner = inertOwners.get(sibling) ?? {
+            count: 0,
+            previous: !!sibling.inert,
+          };
+          owner.count++;
+          inertOwners.set(sibling, owner);
+          inert.push(sibling);
           sibling.inert = true;
         }
       }
@@ -24,13 +50,7 @@ export function Modal(props: ComponentProps<"section">) {
     }
     const candidates = () =>
       Array.from(element.querySelectorAll<HTMLElement>(focusable)).filter(
-        (item) =>
-          item.tabIndex >= 0 &&
-          !item.matches(":disabled") &&
-          !item.closest("[hidden], [inert]") &&
-          getComputedStyle(item).display !== "none" &&
-          getComputedStyle(item).visibility !== "hidden" &&
-          (!item.closest("details:not([open])") || item.tagName === "SUMMARY"),
+        tabbable,
       );
     if (!element.contains(document.activeElement))
       (candidates()[0] ?? element).focus();
@@ -60,10 +80,46 @@ export function Modal(props: ComponentProps<"section">) {
       stack.splice(stack.indexOf(element), 1);
       document.removeEventListener("keydown", key);
       document.removeEventListener("focusin", focus);
-      for (const item of inert) item.element.inert = item.previous;
+      for (const item of inert) {
+        const owner = inertOwners.get(item)!;
+        if (--owner.count === 0) {
+          // A page transition may already have removed inert explicitly.
+          if (item.inert) item.inert = owner.previous;
+          inertOwners.delete(item);
+        }
+      }
       const target = trigger.current;
-      if (target?.isConnected && !target.closest("[hidden], [inert]"))
+      if (target?.isConnected && canFocus(target)) {
         target.focus();
+      } else {
+        // Wait for the closing subtree to be removed and all inert leases released.
+        // A surviving parent dialog or the trigger's nearest live section is the
+        // logical fallback; preserve any focus explicitly moved by the caller.
+        queueMicrotask(() => {
+          const active = document.activeElement;
+          if (
+            active instanceof HTMLElement &&
+            active !== document.body &&
+            active.isConnected &&
+            !element.contains(active) &&
+            canFocus(active)
+          )
+            return;
+          const parent = stack.at(-1);
+          const regions = parent ? [parent] : ancestors;
+          for (const region of regions) {
+            if (!region.isConnected || region.closest("[hidden], [inert]"))
+              continue;
+            const candidate = Array.from(
+              region.querySelectorAll<HTMLElement>(focusable),
+            ).find(tabbable);
+            if (candidate || region === parent) {
+              (candidate ?? region).focus();
+              return;
+            }
+          }
+        });
+      }
     };
   }, []);
   return (

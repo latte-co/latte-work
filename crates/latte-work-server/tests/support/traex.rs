@@ -1501,3 +1501,70 @@ async fn traex_model_variants_are_native_and_survive_close_resume_and_queue() {
             && entry["params"]["config"]["model_backend_variant"] == variant));
     }
 }
+
+#[tokio::test]
+async fn traex_platform_instructions_preserve_native_text_on_start_resume_and_disable() {
+    use latte_work_protocol::SkillState;
+    let home = tempfile::tempdir().unwrap();
+    let host = Host::start_with_environment(&[("HOME", home.path().as_os_str())]).await;
+    let root = tempfile::tempdir().unwrap();
+    let mut client = host.client().await;
+    let id = session(&mut client, root.path()).await;
+    for (request, text) in [("first", "first"), ("resumed", "resumed")] {
+        send(&mut client, &id, request, text).await;
+        until(&mut client, &id, Status::Completed).await;
+        assert!(matches!(
+            ask(
+                &mut client,
+                Request::CloseAgentSession {
+                    session_id: id.clone(),
+                    only_if_idle: Some(true)
+                }
+            )
+            .await,
+            Response::Ok
+        ));
+    }
+    let opens: Vec<serde_json::Value> = std::fs::read_to_string(root.path().join("traex-opens"))
+        .unwrap()
+        .lines()
+        .map(|s| serde_json::from_str(s).unwrap())
+        .collect();
+    assert!(opens.iter().any(|v| v["method"] == "thread/start"));
+    assert!(opens.iter().any(|v| v["method"] == "thread/resume"));
+    for open in &opens {
+        let instructions = open["params"]["developerInstructions"].as_str().unwrap();
+        assert!(instructions.starts_with("FIXTURE_NATIVE_DEVELOPER_INSTRUCTIONS\n\nLatte Work"));
+        assert!(!instructions.contains("description:"));
+    }
+    assert!(matches!(
+        ask(
+            &mut client,
+            Request::SetSkillState {
+                project_id: None,
+                id: "platform:latte-work-context".into(),
+                state: SkillState::Disabled,
+                expected_state: SkillState::Enabled
+            }
+        )
+        .await,
+        Response::Skills { .. }
+    ));
+    send(&mut client, &id, "disabled", "disabled").await;
+    until(&mut client, &id, Status::Completed).await;
+    let last: serde_json::Value = serde_json::from_str(
+        std::fs::read_to_string(root.path().join("traex-opens"))
+            .unwrap()
+            .lines()
+            .last()
+            .unwrap(),
+    )
+    .unwrap();
+    assert!(last["params"].get("developerInstructions").is_none());
+    assert!(
+        !home
+            .path()
+            .join(".agents/skills/latte-work-context")
+            .exists()
+    );
+}
