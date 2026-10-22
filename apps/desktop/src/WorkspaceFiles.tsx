@@ -1,8 +1,8 @@
 import { useAppClose } from "./appLifecycle";
 import { SourcePreview } from "./SourcePreview";
-import { CodeView } from "./CodeView";
+import { FileTextView, isMarkdownFile } from "./FileTextView";
 import { useEffect, useState } from "react";
-import { Folders, RefreshCw, WrapText } from "lucide-react";
+import { Code2, Eye, Folders, RefreshCw, WrapText } from "lucide-react";
 import type { FileEntry, Project } from "./protocol";
 import { request, message } from "./api";
 import { ChangesView } from "./ChangesView";
@@ -57,6 +57,10 @@ export function WorkspaceFiles({
   const [loading, setLoading] = useState(false);
   const [treeOpen, setTreeOpen] = useState(true);
   const [wrap, setWrap] = useState(savedWrap);
+  const [markdownScope, setMarkdownScope] = useState("");
+  const fileScope = JSON.stringify([hostId, project.id, reference?.path, file]);
+  const markdown = isMarkdownFile(file) && markdownScope === fileScope;
+  useEffect(() => setMarkdownScope(""), [fileScope]);
   const treeWidth = useFileTreeWidth(active && tab === "files" && treeOpen);
   useEffect(() => {
     try {
@@ -155,11 +159,24 @@ export function WorkspaceFiles({
           <span className="workspace-file-truncated">内容已截断</span>
         )}
         <div className="workspace-file-actions">
+          {isMarkdownFile(file) && (
+            <button
+              className="icon-button"
+              aria-label={markdown ? "查看源码" : "预览 Markdown"}
+              title={markdown ? "查看源码" : "预览 Markdown"}
+              aria-pressed={markdown}
+              disabled={!active}
+              onClick={() => setMarkdownScope(markdown ? "" : fileScope)}
+            >
+              {markdown ? <Code2 size={16} /> : <Eye size={16} />}
+            </button>
+          )}
           <button
             className="icon-button"
             aria-label="自动换行"
             title="自动换行"
             aria-pressed={wrap}
+            disabled={markdown}
             onClick={() => setWrap((value) => !value)}
           >
             <WrapText size={16} />
@@ -207,13 +224,19 @@ export function WorkspaceFiles({
               open={() => {}}
               embedded
               wrap={wrap}
+              markdown={markdown}
             />
           ) : loading ? (
             <div className="panel-empty" role="status">
               正在读取…
             </div>
           ) : error ? null : (
-            <CodeView key={file} content={content} wrap={wrap} />
+            <FileTextView
+              key={file}
+              content={content}
+              wrap={wrap}
+              markdown={markdown}
+            />
           )}
         </div>
         <div

@@ -31,6 +31,105 @@ function Harness({ tab, file = "" }: { tab: "files" | "diff"; file?: string }) {
     />
   );
 }
+it("opens Markdown as source and toggles a rendered preview without reading again", async () => {
+  const content =
+    '# Guide\n\nA **bold** paragraph.\n\n| Key | Value |\n| --- | --- |\n| mode | source |\n\n```ts\nconst answer = 42;\n```\n\n<script>alert("unsafe")</script>\n\n[Unsafe](javascript:alert%281%29)';
+  mocks.request.mockImplementation(async (_host, r) =>
+    r.method === "read_file"
+      ? { kind: "content", text: content, truncated: true }
+      : { kind: "files", entries: [] },
+  );
+  const view = render(<Harness tab="files" file="README.md" />);
+  const source = await screen.findByRole("region", { name: "文件内容" });
+  expect(source.textContent).toContain("# Guide");
+  expect(screen.queryByRole("heading", { name: "Guide" })).toBeNull();
+  const calls = mocks.request.mock.calls.length;
+  fireEvent.click(screen.getByRole("button", { name: "预览 Markdown" }));
+  const preview = screen.getByRole("region", { name: "Markdown 预览" });
+  expect(within(preview).getByRole("heading", { name: "Guide" })).toBeTruthy();
+  expect(within(preview).getByRole("table")).toBeTruthy();
+  expect(preview.querySelector("strong")?.textContent).toBe("bold");
+  expect(
+    within(preview).getByRole("button", { name: "复制代码" }),
+  ).toBeTruthy();
+  expect(
+    view.container.querySelector("script, a[href^='javascript:']"),
+  ).toBeNull();
+  expect(screen.getByText("内容已截断")).toBeTruthy();
+  expect(
+    screen.getByRole("button", { name: "自动换行" }).hasAttribute("disabled"),
+  ).toBe(true);
+  expect(
+    screen
+      .getByRole("button", { name: "查看源码" })
+      .getAttribute("aria-pressed"),
+  ).toBe("true");
+  fireEvent.click(screen.getByRole("button", { name: "查看源码" }));
+  expect(screen.getByRole("region", { name: "文件内容" }).textContent).toBe(
+    source.textContent,
+  );
+  expect(screen.queryByRole("region", { name: "Markdown 预览" })).toBeNull();
+  expect(
+    screen.getByRole("button", { name: "自动换行" }).hasAttribute("disabled"),
+  ).toBe(false);
+  expect(mocks.request).toHaveBeenCalledTimes(calls);
+});
+it("preserves preview on refresh but opens each different file in source mode", async () => {
+  let revision = 0;
+  mocks.request.mockImplementation(async (_host, r) =>
+    r.method === "read_file"
+      ? { kind: "content", text: `# ${r.path} ${++revision}`, truncated: false }
+      : {
+          kind: "files",
+          entries: [
+            { name: "other.MD", path: "other.MD", directory: false },
+            { name: "plain.txt", path: "plain.txt", directory: false },
+            { name: "README.md", path: "README.md", directory: false },
+          ],
+        },
+  );
+  render(<Harness tab="files" file="README.md" />);
+  await screen.findByRole("region", { name: "文件内容" });
+  fireEvent.click(screen.getByRole("button", { name: "预览 Markdown" }));
+  await screen.findByRole("heading", { name: "README.md 1" });
+  fireEvent.click(screen.getByRole("button", { name: "刷新" }));
+  await screen.findByRole("heading", { name: "README.md 2" });
+  fireEvent.click(screen.getByRole("button", { name: "other.MD" }));
+  await screen.findByText("# other.MD 3");
+  expect(
+    screen
+      .getByRole("button", { name: "预览 Markdown" })
+      .getAttribute("aria-pressed"),
+  ).toBe("false");
+  fireEvent.click(screen.getByRole("button", { name: "预览 Markdown" }));
+  fireEvent.click(screen.getByRole("button", { name: "plain.txt" }));
+  await screen.findByText("# plain.txt 4");
+  expect(screen.queryByRole("button", { name: "预览 Markdown" })).toBeNull();
+  fireEvent.click(screen.getByRole("button", { name: "README.md" }));
+  await screen.findByText("# README.md 5");
+  expect(screen.queryByRole("region", { name: "Markdown 预览" })).toBeNull();
+});
+it("resets Markdown preview when the same file path belongs to a different host", async () => {
+  mocks.request.mockImplementation(async (host, r) =>
+    r.method === "read_file"
+      ? { kind: "content", text: `# ${host}`, truncated: false }
+      : { kind: "files", entries: [] },
+  );
+  const props = {
+    project: { id: "p", name: "P", path: "/project" },
+    tab: "files" as const,
+    active: true,
+    path: "",
+    file: "guide.markdown",
+    navigate: vi.fn(),
+  };
+  const view = render(<WorkspaceFiles {...props} hostId="local" />);
+  await screen.findByText("# local");
+  fireEvent.click(screen.getByRole("button", { name: "预览 Markdown" }));
+  view.rerender(<WorkspaceFiles {...props} hostId="ssh" />);
+  await screen.findByText("# ssh");
+  expect(screen.queryByRole("region", { name: "Markdown 预览" })).toBeNull();
+});
 it("keeps the same right tree before opening a file and after a preview fails", async () => {
   mocks.request.mockImplementation(async (_host, r) => {
     if (r.method === "read_file") throw new Error("仅预览文本文件");
@@ -452,7 +551,7 @@ it("opens a Skill's SKILL.md directly in the shared file browser and navigates i
 });
 it("reads an explicitly selected external file without browsing its parent directory", async () => {
   const path = "/private/tmp/report.md";
-  const data = Array.from(new TextEncoder().encode("Report body"));
+  const data = Array.from(new TextEncoder().encode("# Report body"));
   mocks.request.mockResolvedValue({
     kind: "source_preview",
     data,
@@ -474,7 +573,13 @@ it("reads an explicitly selected external file without browsing its parent direc
       navigate={vi.fn()}
     />,
   );
-  expect(await screen.findByText("Report body")).toBeTruthy();
+  expect(await screen.findByText("# Report body")).toBeTruthy();
+  fireEvent.click(screen.getByRole("button", { name: "预览 Markdown" }));
+  expect(
+    await screen.findByRole("heading", { name: "Report body" }),
+  ).toBeTruthy();
+  fireEvent.click(screen.getByRole("button", { name: "查看源码" }));
+  expect(screen.getByRole("region", { name: "文件内容" })).toBeTruthy();
   expect(mocks.request).toHaveBeenCalledExactlyOnceWith("ssh", {
     method: "preview_source",
     project_id: "p",

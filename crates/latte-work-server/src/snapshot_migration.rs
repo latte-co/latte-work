@@ -61,20 +61,20 @@ pub fn migrate(db: &Connection, directory: &Path) -> Result<()> {
                 &format!("UPDATE {table} SET {column}=?2 WHERE rowid=?1"),
                 params![rowid, replacement],
             )?;
-            tx.execute(
-                "INSERT INTO events(session_id,at,data) VALUES (?1,?2,?3)",
-                params![
-                    session,
-                    crate::store::now(),
-                    serde_json::to_string(&latte_work_protocol::EventKind::Notice {
-                        text: if recovered {
-                            "旧版快照已迁移到独立存储，原始记录已归档。".into()
-                        } else {
-                            unavailable.into()
-                        }
-                    })?
-                ],
-            )?;
+            // Successful migrations are internal maintenance and stay silent;
+            // only records whose undo state remains unknown surface a notice.
+            if !recovered {
+                tx.execute(
+                    "INSERT INTO events(session_id,at,data) VALUES (?1,?2,?3)",
+                    params![
+                        session,
+                        crate::store::now(),
+                        serde_json::to_string(&latte_work_protocol::EventKind::Notice {
+                            text: unavailable.into()
+                        })?
+                    ],
+                )?;
+            }
             tx.commit()?;
             last_rowid = rowid;
         }
