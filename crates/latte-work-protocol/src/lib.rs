@@ -820,6 +820,14 @@ pub enum Request {
         #[ts(type = "number")]
         offset: u64,
     },
+    /// Read one raster-image version from the same comparison as the diff.
+    PreviewChange {
+        target: ChangePreviewTarget,
+        path: String,
+        before: bool,
+        #[ts(type = "number")]
+        offset: u64,
+    },
     ChangeDiff {
         project_id: String,
         path: String,
@@ -832,6 +840,48 @@ pub enum ChangeSection {
     Unstaged,
     Staged,
     Untracked,
+}
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ChangePreviewTarget {
+    Git {
+        project_id: String,
+        scope: GitReviewScope,
+        base: Option<String>,
+        head: Option<String>,
+    },
+    Task {
+        session_id: String,
+    },
+    Turn {
+        session_id: String,
+        request_id: String,
+    },
+}
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+pub struct ImagePreviewChunk {
+    pub data: Vec<u8>,
+    pub mime_type: String,
+    #[ts(type = "number")]
+    pub size: u64,
+    #[ts(type = "number")]
+    pub next: u64,
+    pub has_more: bool,
+    /// Changes across live-file edits, stable for immutable objects.
+    pub version: String,
+    pub sha256: Option<String>,
+}
+/// Agent-neutral blocks inside ToolResult.content arrays. Native adapters own conversion.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ToolOutputBlock {
+    Text {
+        text: String,
+    },
+    Image {
+        mime_type: String,
+        data_base64: String,
+    },
 }
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 pub struct QuestionOption {
@@ -1011,6 +1061,10 @@ pub enum Response {
     SourceDirectory {
         entries: Vec<FileEntry>,
         truncated: bool,
+    },
+    ChangePreview {
+        /// None means this side does not exist (added/deleted file).
+        chunk: Option<ImagePreviewChunk>,
     },
     Subagents {
         tasks: Vec<Subagent>,

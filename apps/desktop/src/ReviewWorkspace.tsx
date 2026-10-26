@@ -20,6 +20,8 @@ import {
 import type { GitReviewFile } from "./protocol";
 import { message } from "./api";
 import { ReviewDiff } from "./ReviewDiff";
+import { ReviewImageDiff } from "./ReviewImageDiff";
+import type { ChangeImageLoader } from "./changeImageLoader";
 import { useStatusIssues } from "./statusNotices";
 
 type DiffContent = { text: string; truncated: boolean };
@@ -120,6 +122,7 @@ function ReviewFileSection({
   initiallyVisible,
   selected,
   loadDiff,
+  loadImage,
   enqueue,
   split,
   wrap,
@@ -132,6 +135,7 @@ function ReviewFileSection({
   initiallyVisible: boolean;
   selected: boolean;
   loadDiff: Loader;
+  loadImage?: ChangeImageLoader;
   enqueue: ReturnType<typeof diffQueue>;
   split: boolean;
   wrap: boolean;
@@ -188,7 +192,14 @@ function ReviewFileSection({
     }
   }, [reveal]);
   useEffect(() => {
-    if (!active || !visible || collapsed || content) return;
+    if (
+      !active ||
+      !visible ||
+      collapsed ||
+      content ||
+      (loadImage && /\.(png|jpe?g|gif|webp)$/i.test(file.path))
+    )
+      return;
     let disposed = false;
     setLoading(true);
     setFailure("");
@@ -206,7 +217,16 @@ function ReviewFileSection({
       disposed = true;
     };
     // A cached result is retained through layout toggles and hide/show.
-  }, [active, visible, collapsed, loadDiff, file.path, enqueue, retry]);
+  }, [
+    active,
+    visible,
+    collapsed,
+    loadDiff,
+    loadImage,
+    file.path,
+    enqueue,
+    retry,
+  ]);
   useStatusIssues([
     {
       id: `review-file:${issueId}`,
@@ -258,7 +278,13 @@ function ReviewFileSection({
                 {file.previous_path} → {file.path}
               </p>
             )}
-            {content ? (
+            {loadImage && /\.(png|jpe?g|gif|webp)$/i.test(file.path) ? (
+              <ReviewImageDiff
+                path={file.path}
+                load={loadImage}
+                active={active}
+              />
+            ) : content ? (
               content.text ? (
                 <ReviewDiff
                   content={content.text}
@@ -317,6 +343,7 @@ export function ReviewWorkspace({
   overlay,
   refresh,
   loadDiff,
+  loadImage,
 }: {
   scopeControl: ReactNode;
   comparisonControl?: ReactNode;
@@ -334,6 +361,7 @@ export function ReviewWorkspace({
   overlay?: ReactNode;
   refresh: () => void;
   loadDiff: Loader;
+  loadImage?: ChangeImageLoader;
 }) {
   const [selected, select] = useState(initialPath ?? files[0]?.path ?? "");
   const [split, setSplit] = useState(false),
@@ -552,6 +580,7 @@ export function ReviewWorkspace({
                 initiallyVisible={file.path === selectedFile || index === 0}
                 selected={file.path === selectedFile}
                 loadDiff={loadDiff}
+                loadImage={loadImage}
                 enqueue={enqueue}
                 split={split}
                 wrap={wrap}

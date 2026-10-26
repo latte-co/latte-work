@@ -7,6 +7,43 @@ use latte_work_protocol::{
     ContextUsage, EventKind, ExecutionPhase, SubagentStatus, SubagentUpdate, TurnUsage,
 };
 use serde_json::{Value, json};
+
+/// Native image sources never cross the adapter boundary. Only bounded inline
+/// raster bytes become public image blocks; URLs are never fetched.
+pub(super) fn tool_content(mut content: Value) -> Value {
+    let Some(blocks) = content.as_array_mut() else {
+        return content;
+    };
+    let mut remaining = 384 * 1024;
+    let mut images = 0;
+    for block in blocks {
+        if block["type"] != "image" || block.get("source").is_none() {
+            continue;
+        }
+        let source = &block["source"];
+        let mime = source["media_type"].as_str().unwrap_or_default();
+        let data = source["data"].as_str().unwrap_or_default();
+        let supported = source["type"] == "base64"
+            && matches!(
+                mime,
+                "image/png" | "image/jpeg" | "image/gif" | "image/webp"
+            )
+            && !data.is_empty()
+            && data.len() <= remaining
+            && images < 4
+            && data
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"+/=".contains(&b));
+        *block = if supported {
+            remaining -= data.len();
+            images += 1;
+            json!({"type":"image", "mime_type":mime, "data_base64":data})
+        } else {
+            json!({"type":"text", "text":"图片未展示：格式不支持或内容超过预览上限。"})
+        };
+    }
+    content
+}
 use std::{
     collections::{HashMap, HashSet},
     io::Write,
@@ -895,7 +932,7 @@ impl Claude {
                         {
                             output.push(capture(EventKind::ToolResult {
                                 id: id.into(),
-                                content: block["content"].clone(),
+                                content: tool_content(block["content"].clone()),
                                 is_error: block["is_error"].as_bool().unwrap_or(false),
                             }));
                         }
@@ -1368,7 +1405,7 @@ impl Claude {
                             }
                             output.push(Action::Event(EventKind::ToolResult {
                                 id: block["tool_use_id"].as_str().unwrap_or_default().into(),
-                                content: block["content"].clone(),
+                                content: tool_content(block["content"].clone()),
                                 is_error: block["is_error"].as_bool().unwrap_or(false),
                             }));
                         }
@@ -1552,7 +1589,7 @@ pub(super) fn parse_child_history(
                         .as_str()
                         .map(|id| EventKind::ToolResult {
                             id: id.into(),
-                            content: block["content"].clone(),
+                            content: tool_content(block["content"].clone()),
                             is_error: block["is_error"].as_bool().unwrap_or(false),
                         })
                 }
@@ -1682,7 +1719,7 @@ pub(super) fn parse_child_transcript(
                         .as_str()
                         .map(|id| EventKind::ToolResult {
                             id: id.into(),
-                            content: block["content"].clone(),
+                            content: tool_content(block["content"].clone()),
                             is_error: block["is_error"].as_bool().unwrap_or(false),
                         })
                 }

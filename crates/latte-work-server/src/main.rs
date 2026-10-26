@@ -4,6 +4,7 @@ mod agents;
 mod attachments;
 mod files;
 mod git_review;
+mod image_preview;
 mod message_queue;
 mod providers;
 mod questions;
@@ -1467,6 +1468,77 @@ async fn dispatch(s: &Service, request: Request) -> Result<Response> {
                 db(&s.database, |d| d.baseline(&session_id))?.context("此任务没有记录文件基线")?;
             let (text, truncated) = baseline.patch(Path::new(&project.path), &path).await?;
             Response::Content { text, truncated }
+        }
+        Request::PreviewChange {
+            target,
+            path,
+            before,
+            offset,
+        } => {
+            let _permit = image_preview::permit()?;
+            let chunk = tokio::time::timeout(Duration::from_secs(20), async {
+                use latte_work_protocol::ChangePreviewTarget;
+                match target {
+                    ChangePreviewTarget::Turn {
+                        session_id,
+                        request_id,
+                    } => {
+                        let turn = db(&s.database, |d| d.turn_changes(&session_id, &request_id))?;
+                        turn.image_chunk(&path, before, offset).await
+                    }
+                    ChangePreviewTarget::Task { session_id } => {
+                        let session = db(&s.database, |d| d.session(&session_id))?;
+                        let project = db(&s.database, |d| d.project(&session.project_id))?;
+                        let baseline = db(&s.database, |d| d.baseline(&session_id))?
+                            .context("此任务没有记录文件基线")?;
+                        if before {
+                            baseline.image_chunk(&path, offset).await
+                        } else {
+                            task_changes::validate_path(&path)?;
+                            let root = Path::new(&project.path);
+                            let mut target = root.to_path_buf();
+                            for component in Path::new(&path).components() {
+                                target.push(component);
+                                let metadata = match target.symlink_metadata() {
+                                    Ok(metadata) => metadata,
+                                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                                        return Ok(None);
+                                    }
+                                    Err(error) => return Err(error.into()),
+                                };
+                                anyhow::ensure!(
+                                    !metadata.file_type().is_symlink(),
+                                    "符号链接不支持图片预览"
+                                );
+                            }
+                            image_preview::file(&files::resolve(root, &path)?, offset, None, None)
+                                .await
+                                .map(Some)
+                        }
+                    }
+                    ChangePreviewTarget::Git {
+                        project_id,
+                        scope,
+                        base,
+                        head,
+                    } => {
+                        let project = db(&s.database, |d| d.project(&project_id))?;
+                        git_review::image_chunk(
+                            Path::new(&project.path),
+                            scope,
+                            base.as_deref(),
+                            head.as_deref(),
+                            &path,
+                            before,
+                            offset,
+                        )
+                        .await
+                    }
+                }
+            })
+            .await
+            .context("读取图片预览超时")??;
+            Response::ChangePreview { chunk }
         }
         Request::PreviewSource {
             project_id,

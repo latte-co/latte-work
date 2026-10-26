@@ -19,7 +19,7 @@ function pump() {
     });
   }
 }
-function imageRead<T>(
+export function imageRead<T>(
   read: () => Promise<T>,
   valid: () => boolean,
 ): Promise<T> {

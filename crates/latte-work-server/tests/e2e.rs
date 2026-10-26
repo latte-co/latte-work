@@ -4767,6 +4767,76 @@ async fn task_baselines_and_sources_integrate_with_real_process_reconnect_and_bo
 }
 
 #[tokio::test]
+async fn image_outputs_and_frozen_previews_survive_bridge_reconnect_without_live_fallback() {
+    use latte_work_protocol::ChangePreviewTarget;
+    let host = Host::start().await;
+    let mut client = host.client().await;
+    let root = tempfile::tempdir().unwrap();
+    let old = b"\x89PNG\r\n\x1a\nold\0";
+    std::fs::write(root.path().join("fixture.png"), old).unwrap();
+    let id = session(&mut client, root.path()).await;
+    send(&mut client, &id, "image-r1", "image-output").await;
+    let events = wait(&mut client, &id, Status::Completed).await;
+    assert!(events.iter().any(|e|matches!(&e.event,EventKind::ToolResult{content,..} if content[1]["mime_type"]=="image/png" && content[1]["data_base64"].is_string() && content[1].get("source").is_none())));
+    std::fs::write(root.path().join("fixture.png"), "later live change").unwrap();
+    client = host.client().await;
+    for (before, expected) in [
+        (true, old.as_slice()),
+        (false, b"\x89PNG\r\n\x1a\nfixture\0".as_slice()),
+    ] {
+        let response = ask(
+            &mut client,
+            Request::PreviewChange {
+                target: ChangePreviewTarget::Turn {
+                    session_id: id.clone(),
+                    request_id: "image-r1".into(),
+                },
+                path: "fixture.png".into(),
+                before,
+                offset: 0,
+            },
+        )
+        .await;
+        let Response::ChangePreview { chunk: Some(chunk) } = response else {
+            panic!("{response:?}")
+        };
+        assert_eq!(chunk.data, expected);
+        assert_eq!(chunk.mime_type, "image/png");
+        assert!(!chunk.has_more);
+        assert!(chunk.sha256.is_some());
+    }
+    for path in ["../fixture.png", "unknown.png"] {
+        assert!(matches!(
+            ask(
+                &mut client,
+                Request::PreviewChange {
+                    target: ChangePreviewTarget::Turn {
+                        session_id: id.clone(),
+                        request_id: "image-r1".into()
+                    },
+                    path: path.into(),
+                    before: false,
+                    offset: 0
+                }
+            )
+            .await,
+            Response::Error { .. }
+        ));
+    }
+    let Response::History { events, .. } = ask(
+        &mut client,
+        Request::History {
+            session_id: id,
+            before: None,
+        },
+    )
+    .await
+    else {
+        panic!()
+    };
+    assert!(events.iter().any(|e|matches!(&e.event,EventKind::ToolResult{content,..} if content[1]["data_base64"].is_string())));
+}
+#[tokio::test]
 async fn ordinary_directory_turn_changes_survive_followup_and_reconnect() {
     let host = Host::start().await;
     let mut client = host.client().await;

@@ -12,6 +12,7 @@ import { request, message } from "./api";
 import { ChangeScopePicker, type ReviewScope } from "./ChangeScopePicker";
 import { ReviewOptions } from "./ReviewOptions";
 import { ReviewWorkspace } from "./ReviewWorkspace";
+import { loadChangeImage } from "./changeImageLoader";
 import { formatMessageTimestamp } from "./MessageTimestamp";
 import { Select } from "./Select";
 import { useStatusIssues } from "./statusNotices";
@@ -338,6 +339,34 @@ export function ChangesView({
     },
     [hostId, project.id, scope, snapshot, turn, review, fullContext],
   );
+  const loadImage = useCallback(
+    (path: string, before: boolean, valid: () => boolean) =>
+      loadChangeImage(
+        hostId,
+        scope === "turn" || scope === "lastTurn"
+          ? {
+              kind: "turn",
+              session_id: snapshot!.sessionId!,
+              request_id: turn!.request_id,
+            }
+          : scope === "task"
+            ? { kind: "task", session_id: snapshot!.sessionId! }
+            : {
+                kind: "git",
+                project_id: project.id,
+                scope: scope as Exclude<
+                  ReviewScope,
+                  "lastTurn" | "turn" | "task"
+                >,
+                base: review!.base,
+                head: review!.head,
+              },
+        path,
+        before,
+        valid,
+      ),
+    [hostId, project.id, scope, snapshot, turn, review],
+  );
   const options = info
     ? [
         ...info.refs.map((ref) => ({ value: ref.full_name, label: ref.name })),
@@ -404,6 +433,7 @@ export function ChangesView({
             : "此范围没有变更"
       }
       loadDiff={loadDiff}
+      loadImage={loadImage}
       refresh={() => {
         setFilePage(undefined);
         refresh((v) => v + 1);

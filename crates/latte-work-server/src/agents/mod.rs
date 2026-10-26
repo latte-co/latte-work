@@ -8,6 +8,44 @@ pub(crate) mod traex;
 pub use adapter::{Action, AgentAdapter, AgentCommand, Input};
 use anyhow::{Result, bail};
 pub type ChildTranscript = (Vec<latte_work_protocol::Event>, bool);
+pub fn normalize_history_event(
+    agent: &str,
+    mut event: latte_work_protocol::EventKind,
+) -> latte_work_protocol::EventKind {
+    if agent == "claude"
+        && let latte_work_protocol::EventKind::ToolResult { content, .. } = &mut event
+    {
+        *content = claude::tool_content(std::mem::take(content));
+    }
+    event
+}
+#[cfg(test)]
+mod image_tests {
+    use super::*;
+    #[test]
+    fn image_outputs_have_one_agent_neutral_bounded_contract() {
+        let image = |source| serde_json::json!({"type":"image","source":source});
+        let native = serde_json::json!([
+            {"type":"text","text":"caption"},
+            image(serde_json::json!({"type":"base64","media_type":"image/png","data":"iVBORw0KGgo="})),
+            image(serde_json::json!({"type":"url","url":"https://example.test/image.png"})),
+            image(serde_json::json!({"type":"base64","media_type":"image/svg+xml","data":"PHN2Zz4="})),
+            image(serde_json::json!({"type":"base64","media_type":"image/png","data":"a".repeat(384*1024+1)})),
+        ]);
+        let normalized = claude::tool_content(native);
+        assert_eq!(normalized[0]["text"], "caption");
+        let block: latte_work_protocol::ToolOutputBlock =
+            serde_json::from_value(normalized[1].clone()).unwrap();
+        assert!(
+            matches!(block, latte_work_protocol::ToolOutputBlock::Image{mime_type,..} if mime_type == "image/png")
+        );
+        for i in 2..5 {
+            assert_eq!(normalized[i]["type"], "text");
+        }
+        assert!(!normalized.to_string().contains("example.test"));
+        assert_eq!(claude::tool_content(normalized.clone()), normalized);
+    }
+}
 pub fn confirmed_child_report(
     tool: &latte_work_protocol::EventKind,
     result: &latte_work_protocol::EventKind,

@@ -5,10 +5,12 @@ import { MessageContent } from "./MessageContent";
 import { WorkingStatus } from "./WorkingStatus";
 import { ReplyActions } from "./ReplyActions";
 import { ToolRow, ToolGroup } from "./ToolActivity";
+import { ToolImages } from "./ToolImages";
 import { ProcessDisclosure } from "./TurnTranscript";
 import type { Event, Subagent } from "./protocol";
 
 function renderItem(item: ActivityItem) {
+  if (item.type === "tool_images") return <ToolImages images={item.images} />;
   if (item.type === "assistant")
     return (
       <article className="markdown">
@@ -65,7 +67,10 @@ export function SubagentTranscript({
       ? lastAssistant.text
       : task.summary
     : null;
-  const process = hasFinalText ? items.slice(0, finalIndex) : items;
+  const images = items.filter((item) => item.type === "tool_images");
+  const process = (hasFinalText ? items.slice(0, finalIndex) : items).filter(
+    (item) => item.type !== "tool_images",
+  );
   return (
     <div className="subagent-transcript">
       {instruction && (
@@ -99,6 +104,9 @@ export function SubagentTranscript({
             <Fragment key={item.key}>{renderItem(item)}</Fragment>
           ))
         ))}
+      {images.map((item) => (
+        <Fragment key={item.key}>{renderItem(item)}</Fragment>
+      ))}
       {final ? (
         <>
           <article className="markdown subagent-result">

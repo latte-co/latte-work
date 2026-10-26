@@ -151,7 +151,7 @@ pub async fn preview(target: &Path, offset: u64) -> Result<latte_work_protocol::
     .await
     .context("读取来源预览超时")?
 }
-fn mime(bytes: &[u8], path: &Path) -> &'static str {
+pub(crate) fn mime(bytes: &[u8], path: &Path) -> &'static str {
     if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
         "image/png"
     } else if bytes.starts_with(&[0xff, 0xd8, 0xff]) {

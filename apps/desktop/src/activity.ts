@@ -1,5 +1,6 @@
 import type { Event, JsonValue } from "./protocol";
 import { transcript, queuedInputReceipts, type Item } from "./transcript";
+import { toolOutput, type ToolImage } from "./toolOutput";
 
 export interface ToolActivity {
   key: number;
@@ -17,6 +18,7 @@ export interface ToolActivity {
     | "unconfirmed";
 }
 export type ActivityItem =
+  | { key: number; type: "tool_images"; images: ToolImage[] }
   | (Item & { approvalTool?: ToolActivity })
   | ToolActivity
   | {
@@ -77,9 +79,10 @@ export function activityTranscript(
       unfinished.add(tool);
       if (value.id) pending.set(value.id, tool);
     } else if (value.kind === "tool_result") {
+      const output = toolOutput(value.content);
       const tool = value.id ? pending.get(value.id) : undefined;
       if (tool) {
-        tool.output = value.content;
+        tool.output = output.content;
         if (tool.status !== "denied")
           tool.status = value.is_error ? "failed" : "completed";
         pending.delete(value.id);
@@ -90,10 +93,16 @@ export function activityTranscript(
           key: item.key,
           type: "tool",
           name: "工具输出",
-          output: value.content,
+          output: output.content,
           status: value.is_error ? "failed" : "completed",
         });
       }
+      if (output.images.length)
+        rows.push({
+          key: item.key + 0.5,
+          type: "tool_images",
+          images: output.images,
+        });
     } else {
       if (
         (value.kind === "approval" || value.kind === "question") &&

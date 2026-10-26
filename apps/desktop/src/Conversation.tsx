@@ -38,6 +38,7 @@ import { TaskProjectPicker } from "./TaskProjectPicker";
 import { TurnTranscript, turnTranscript } from "./TurnTranscript";
 import { TurnNavigator, turnNavigationEntries } from "./TurnNavigator";
 import { ToolGroup, ToolRow } from "./ToolActivity";
+import { ToolImages } from "./ToolImages";
 export const statusNames = {
   ready: "就绪",
   running: "执行中",
@@ -597,6 +598,12 @@ export function Conversation({
                     >
                       <MessageContent text={item.text} />
                     </article>
+                  ) : item.type === "tool_images" ? (
+                    <ToolImages
+                      key={item.key}
+                      images={item.images}
+                      active={!settingsOpen && !preparingHistory}
+                    />
                   ) : item.type === "tool" ? (
                     <ToolRow key={item.key} tool={item} />
                   ) : item.type === "tools" ? (

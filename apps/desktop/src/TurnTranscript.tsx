@@ -97,6 +97,7 @@ export function turnTranscript(events: Event[]) {
           hasFinal &&
             index < finalIndex &&
             item.type !== "user" &&
+            item.type !== "tool_images" &&
             !isSkillLoadNotice(item),
         ),
       );

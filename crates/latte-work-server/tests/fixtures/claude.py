@@ -96,6 +96,15 @@ for line in sys.stdin:
             emit({'type':'result','subtype':'success','is_error':False})
             continue
 
+        if text=='image-output':
+            import base64
+            image=b'\x89PNG\r\n\x1a\n'+b'fixture\0'
+            pathlib.Path('fixture.png').write_bytes(image)
+            emit({'type':'assistant','message':{'content':[{'type':'tool_use','id':'image-read','name':'Read','input':{'file_path':'fixture.png'}}]}})
+            emit({'type':'user','message':{'content':[{'type':'tool_result','tool_use_id':'image-read','content':[{'type':'text','text':'fixture image'},{'type':'image','source':{'type':'base64','media_type':'image/png','data':base64.b64encode(image).decode()}}]}]}})
+            emit({'type':'assistant','message':{'content':[{'type':'text','text':'IMAGE_OK'}]}})
+            emit({'type':'result','subtype':'success','is_error':False})
+            continue
         if text.startswith('task-edit'):
             emit({'type':'system','subtype':'session_state_changed','state':'busy'})
             with open('task.txt','w') as f:f.write('third line\n' if text.startswith('task-edit-second') else 'agent change\nsecond line\n')

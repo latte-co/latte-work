@@ -151,6 +151,31 @@ export type Event = {
 };
 export type FileEntry = { name: string; path: string; directory: boolean };
 export type ChangeSection = "unstaged" | "staged" | "untracked";
+export type ChangePreviewTarget =
+  | {
+      kind: "git";
+      project_id: string;
+      scope: GitReviewScope;
+      base: string | null;
+      head: string | null;
+    }
+  | { kind: "task"; session_id: string }
+  | { kind: "turn"; session_id: string; request_id: string };
+export type ImagePreviewChunk = {
+  data: Array<number>;
+  mime_type: string;
+  size: number;
+  next: number;
+  has_more: boolean;
+  /**
+   * Changes across live-file edits, stable for immutable objects.
+   */
+  version: string;
+  sha256: string | null;
+};
+export type ToolOutputBlock =
+  | { type: "text"; text: string }
+  | { type: "image"; mime_type: string; data_base64: string };
 export type GitChange = {
   path: string;
   previous_path: string | null;
@@ -584,6 +609,13 @@ export type Request =
       offset: number;
     }
   | {
+      method: "preview_change";
+      target: ChangePreviewTarget;
+      path: string;
+      before: boolean;
+      offset: number;
+    }
+  | {
       method: "change_diff";
       project_id: string;
       path: string;
@@ -616,6 +648,13 @@ export type Response =
       has_more: boolean;
     }
   | { kind: "source_directory"; entries: Array<FileEntry>; truncated: boolean }
+  | {
+      kind: "change_preview";
+      /**
+       * None means this side does not exist (added/deleted file).
+       */
+      chunk: ImagePreviewChunk | null;
+    }
   | { kind: "subagents"; tasks: Array<Subagent>; truncated: boolean }
   | { kind: "subagent_transcript"; events: Array<Event>; truncated: boolean }
   | {

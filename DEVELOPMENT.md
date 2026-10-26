@@ -713,6 +713,24 @@ SDK lifecycle reference: [native task types](https://github.com/anthropics/claud
 
 ### Task changes and source previews
 
+Claude tool-result images are converted in the adapter to agent-neutral
+`ToolOutputBlock` arrays (text or inline raster MIME/base64). Image bytes are bounded
+to four blocks and 384 KiB encoded per result. URL and SVG image sources are not
+loaded. Existing saved Claude results are projected on read without rewriting the
+original events. Transcript image rows remain visible outside folded tools and
+completed execution details; click opens the shared modal image view.
+
+The additive `preview_change` request reads the exact before/after version of a
+turn, task or Git comparison. It returns at most 64 KiB per chunk, rejects images
+over 16 MiB, uses byte-sniffed PNG/JPEG/GIF/WebP MIME, and permits two host readers
+with a 20-second per-request deadline. Frozen turns never fall back to live files;
+snapshot SHA-256 is checked before rendering. Git blob IDs and live-file metadata
+fence versions across chunks; index, commit, rename and untracked scopes follow
+the same comparison as the textual diff. Missing sides are explicit. Desktop
+reads stop after a 30-second overall deadline or when hidden/replaced. A matching
+execution-host Server is required; older Servers report unsupported preview.
+No filesystem grants, Agent execution, or remote daemon restart are introduced.
+
 Before the first accepted agent request spawns, the server stores a durable file
 baseline in the task database. The request is persisted first. Git-visible files
 (including tracked and untracked dirty files) are read without changing the index,
