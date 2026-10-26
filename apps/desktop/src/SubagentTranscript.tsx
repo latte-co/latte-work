@@ -1,6 +1,11 @@
 import { Fragment } from "react";
 import { ChevronRight } from "lucide-react";
-import { activityTranscript, type ActivityItem } from "./activity";
+import {
+  activityTranscript,
+  activitySegments,
+  isProcessActivity,
+  type ActivityItem,
+} from "./activity";
 import { MessageContent } from "./MessageContent";
 import { WorkingStatus } from "./WorkingStatus";
 import { ReplyActions } from "./ReplyActions";
@@ -62,15 +67,27 @@ export function SubagentTranscript({
     !items
       .slice(finalIndex + 1)
       .some((item) => item.type === "tool" || item.type === "tools");
+  const summaryItem =
+    completed && !hasFinalText && task.summary
+      ? [...items]
+          .reverse()
+          .find(
+            (item) => item.type === "assistant" && item.text === task.summary,
+          )
+      : undefined;
   const final = completed
     ? hasFinalText && lastAssistant?.type === "assistant"
       ? lastAssistant.text
-      : task.summary
+      : summaryItem
+        ? null
+        : task.summary
     : null;
-  const images = items.filter((item) => item.type === "tool_images");
-  const process = (hasFinalText ? items.slice(0, finalIndex) : items).filter(
-    (item) => item.type !== "tool_images",
+  const body = hasFinalText ? items.slice(0, finalIndex) : items;
+  const segments = activitySegments(
+    body,
+    (item) => completed && isProcessActivity(item),
   );
+  const processCount = segments.filter((segment) => segment.process).length;
   return (
     <div className="subagent-transcript">
       {instruction && (
@@ -84,29 +101,36 @@ export function SubagentTranscript({
           </div>
         </details>
       )}
-      {process.length > 0 &&
-        (completed ? (
-          <ProcessDisclosure key={`${task.id}:${task.status}`}>
+      {segments.map((segment) =>
+        segment.process ? (
+          <ProcessDisclosure key={`${task.id}:process:${segment.items[0].key}`}>
             <summary>
-              <span>{elapsed ? `用时 ${elapsed}` : "执行过程"}</span>
+              <span>
+                {processCount === 1 && elapsed ? `用时 ${elapsed}` : "执行过程"}
+              </span>
               <ChevronRight size={14} aria-hidden="true" />
             </summary>
             {() => (
               <div className="turn-process-content">
-                {process.map((item) => (
+                {segment.items.map((item) => (
                   <Fragment key={item.key}>{renderItem(item)}</Fragment>
                 ))}
               </div>
             )}
           </ProcessDisclosure>
         ) : (
-          process.map((item) => (
-            <Fragment key={item.key}>{renderItem(item)}</Fragment>
-          ))
-        ))}
-      {images.map((item) => (
-        <Fragment key={item.key}>{renderItem(item)}</Fragment>
-      ))}
+          <Fragment key={`${task.id}:visible:${segment.items[0].key}`}>
+            {segment.items.map((item) => (
+              <Fragment key={item.key}>
+                {renderItem(item)}
+                {item === summaryItem && (
+                  <ReplyActions text={task.summary!} at={task.updated_at} />
+                )}
+              </Fragment>
+            ))}
+          </Fragment>
+        ),
+      )}
       {final ? (
         <>
           <article className="markdown subagent-result">
@@ -114,11 +138,11 @@ export function SubagentTranscript({
           </article>
           <ReplyActions text={final} at={task.updated_at} />
         </>
-      ) : !readingMore && task.summary ? (
+      ) : !readingMore && task.summary && !summaryItem ? (
         <article className="markdown subagent-result">
           <MessageContent text={task.summary} />
         </article>
-      ) : completed ? (
+      ) : completed && !summaryItem ? (
         <p className="subagent-empty">未收到最终输出</p>
       ) : null}
       {readingMore && <WorkingStatus label="正在读取完整记录…" animated />}

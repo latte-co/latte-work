@@ -578,7 +578,11 @@ export function Conversation({
                   </button>
                 </div>
               )}
-              <TurnTranscript events={events} turns={turns}>
+              <TurnTranscript
+                key={JSON.stringify([hostId, session?.id])}
+                events={events}
+                turns={turns}
+              >
                 {(item) =>
                   item.type === "user" ? (
                     <UserMessage

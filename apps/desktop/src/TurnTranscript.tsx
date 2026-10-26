@@ -2,13 +2,13 @@ import { Fragment, useMemo, useState, type ReactNode } from "react";
 import { ChevronRight } from "lucide-react";
 import { ReplyActions } from "./ReplyActions";
 import type { Event } from "./protocol";
-import { activityTranscript, type ActivityItem } from "./activity";
+import {
+  activityTranscript,
+  activitySegments,
+  isProcessActivity,
+  type ActivityItem,
+} from "./activity";
 import { queuedInputReceipts } from "./transcript";
-
-const isSkillLoadNotice = (item: ActivityItem) =>
-  item.type === "event" &&
-  item.value.kind === "notice" &&
-  /^已加载 Skill：\S+$/.test(item.value.text);
 
 /** Fold confirmed outcomes only; stopped turns retain their prose and approvals. */
 export function turnTranscript(events: Event[]) {
@@ -57,8 +57,8 @@ export function turnTranscript(events: Event[]) {
       .reverse()
       .find((item) => item.type === "assistant");
     const finalIndex = lastAssistant ? items.indexOf(lastAssistant) : -1;
-    // Text before a later tool is progress, not a final answer. Incomplete histories
-    // and failed/interrupted turns keep all evidence visible.
+    // This identifies the trailing copy/timestamp action, not which prose is
+    // important. Earlier replies may contain the actual report or deliverable.
     const hasFinal =
       !!user &&
       completed &&
@@ -78,33 +78,13 @@ export function turnTranscript(events: Event[]) {
           (item.value.kind === "approval" || item.value.kind === "question") &&
           !item.resolved,
       );
-    // Split at visible handoffs rather than disabling folding for the whole turn.
-    // Pair tools before splitting so results stay with their original invocation.
-    const segments: { process: boolean; items: ActivityItem[] }[] = [];
-    function append(item: ActivityItem, process: boolean) {
-      const last = segments.at(-1);
-      if (last?.process === process) last.items.push(item);
-      else segments.push({ process, items: [item] });
-    }
-    if (stopped) {
-      for (const item of items.filter(isTool)) append(item, true);
-      for (const item of items.filter((item) => !isTool(item)))
-        append(item, false);
-    } else {
-      items.forEach((item, index) =>
-        append(
-          item,
-          hasFinal &&
-            index < finalIndex &&
-            item.type !== "user" &&
-            item.type !== "tool_images" &&
-            !isSkillLoadNotice(item),
-        ),
-      );
-    }
+    const segments = activitySegments(items, (item, index) =>
+      stopped
+        ? isTool(item)
+        : hasFinal && index < finalIndex && isProcessActivity(item),
+    );
     return {
       key: `${events[0].session_id}:${events[0].seq}`,
-      outcomeKey: end?.seq,
       user,
       status: end?.event.kind === "state" ? end.event.status : undefined,
       finalKey: hasFinal ? lastAssistant?.key : undefined,
@@ -145,14 +125,14 @@ export function TurnTranscript({
       data-turn-key={turn.user ? turn.key : undefined}
     >
       {turn.user && !turn.user.hidden && children(turn.user)}
-      {turn.stopped && turn.process.length === 0 && (
+      {turn.stopped && turn.processCount !== 1 && (
         <div className="turn-stop-summary" title="已执行的文件改动不会撤销。">
           {turn.elapsed}
         </div>
       )}
       {turn.segments.map((segment) =>
         segment.process ? (
-          <ProcessDisclosure key={`${turn.outcomeKey}:${segment.items[0].key}`}>
+          <ProcessDisclosure key={`process:${segment.items[0].key}`}>
             <summary
               title={turn.stopped ? "已执行的文件改动不会撤销。" : undefined}
             >

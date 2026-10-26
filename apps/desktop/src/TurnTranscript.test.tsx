@@ -30,6 +30,59 @@ const result: EventKind = {
 };
 const events = (...values: EventKind[]): Event[] =>
   values.map((event, seq) => ({ seq, session_id: "s", at: seq, event }));
+it("keeps a review report visible before follow-up tools and a short completion receipt", () => {
+  const rows = events(
+    user("review"),
+    tool,
+    result,
+    text("完整评审报告：发现与依据"),
+    { ...tool, id: "memory", name: "Write" },
+    { ...result, id: "memory" },
+    text("评审已完成，记忆已同步"),
+    state("completed"),
+  );
+  const content = (rows: Event[]) => (
+    <TurnTranscript events={rows}>
+      {(item) => (
+        <p>
+          {item.type === "assistant"
+            ? item.text
+            : item.type === "tool"
+              ? item.name
+              : "record"}
+        </p>
+      )}
+    </TurnTranscript>
+  );
+  const view = render(content(rows));
+  const report = screen.getByText("完整评审报告：发现与依据");
+  const receipt = screen.getByText("评审已完成，记忆已同步");
+  expect(report.closest("details")).toBeNull();
+  const parts = view.container.querySelectorAll("details");
+  expect(parts).toHaveLength(2);
+  expect(
+    parts[0].compareDocumentPosition(report) & Node.DOCUMENT_POSITION_FOLLOWING,
+  ).toBeTruthy();
+  expect(
+    report.compareDocumentPosition(parts[1]) & Node.DOCUMENT_POSITION_FOLLOWING,
+  ).toBeTruthy();
+  expect(
+    parts[1].compareDocumentPosition(receipt) &
+      Node.DOCUMENT_POSITION_FOLLOWING,
+  ).toBeTruthy();
+  parts[0].open = true;
+  fireEvent(parts[0], new window.Event("toggle"));
+  const extra = events(
+    { ...tool, id: "late", name: "Read" },
+    { ...result, id: "late" },
+    text("补充验证完成"),
+    state("completed"),
+  ).map((event, i) => ({ ...event, seq: rows.length + i }));
+  view.rerender(content([...rows, ...extra]));
+  expect(screen.getByText("完整评审报告：发现与依据")).toBe(report);
+  expect(parts[0].isConnected && parts[0].open).toBe(true);
+  expect(screen.getByText("补充验证完成").closest("details")).toBeNull();
+});
 it.each(["running", "completed", "failed", "stopped"] as Status[])(
   "keeps confirmed Skill loads visible outside folded process in %s turns",
   (status) => {
@@ -172,9 +225,9 @@ it("folds process on both sides of a handoff independently while keeping the bub
   expect(screen.getAllByRole("button", { name: "复制回复" })).toHaveLength(1);
   parts[0].open = true;
   fireEvent(parts[0], new window.Event("toggle"));
-  expect(parts[0].contains(screen.getByText("before handoff"))).toBe(true);
-  expect(screen.queryByText("after handoff")).toBeNull();
-  const firstTool = turnTranscript(rows)[0].segments[0].items.find(
+  expect(screen.getByText("before handoff").closest("details")).toBeNull();
+  expect(screen.getByText("after handoff").closest("details")).toBeNull();
+  const firstTool = turnTranscript(rows)[0].process.find(
     (item) => item.type === "tool",
   );
   expect(firstTool).toMatchObject({ status: "completed", output: "ok" });
@@ -183,13 +236,13 @@ it("folds process on both sides of a handoff independently while keeping the bub
   expect(parts[1].open).toBe(false);
   parts[1].open = true;
   fireEvent(parts[1], new window.Event("toggle"));
-  expect(parts[1].contains(screen.getByText("after handoff"))).toBe(true);
+  expect(screen.getByText("after handoff").closest("details")).toBeNull();
   expect(screen.getAllByText("忽略 GLM")).toHaveLength(1);
   view.rerender(
     content([...rows, { ...rows.at(-1)!, seq: rows.length, at: rows.length }]),
   );
   expect(
-    [...view.container.querySelectorAll("details")].every((part) => !part.open),
+    [...view.container.querySelectorAll("details")].every((part) => part.open),
   ).toBe(true);
   expect(screen.getByText("final answer").closest("details")).toBeNull();
 });
@@ -207,9 +260,8 @@ it("preserves repeated and consecutive handoffs without empty process sections",
     state("completed"),
   );
   const turn = turnTranscript(rows)[0];
-  expect(turn.processCount).toBe(2);
+  expect(turn.processCount).toBe(1);
   expect(turn.segments.map((part) => part.process)).toEqual([
-    true,
     false,
     true,
     false,
@@ -260,7 +312,7 @@ it("does not promote pre-handoff text to a final answer without a later reply", 
   expect(turn.finalKey).toBeUndefined();
   expect(turn.processCount).toBe(0);
 });
-it("folds only the process of each completed turn and keeps its final answer outside", () => {
+it("folds only execution records of a completed turn and keeps every reply outside", () => {
   const rows = events(
     user("first"),
     text("progress"),
@@ -274,8 +326,9 @@ it("folds only the process of each completed turn and keeps its final answer out
   );
   const turns = turnTranscript(rows);
   expect(turns).toHaveLength(2);
-  expect(turns[0].process.map((i) => i.type)).toEqual(["assistant", "tool"]);
+  expect(turns[0].process.map((i) => i.type)).toEqual(["tool"]);
   expect(turns[0].visible).toEqual([
+    expect.objectContaining({ text: "progress" }),
     expect.objectContaining({ text: "final" }),
   ]);
   expect(turns[1].process).toEqual([]);
@@ -292,12 +345,13 @@ it("folds only the process of each completed turn and keeps its final answer out
   );
   const details = screen.getByText("用时 0秒").closest("details")!;
   expect(details.open).toBe(false);
-  expect(screen.queryByText("progress")).toBeNull();
+  expect(screen.getByText("progress").closest("details")).toBeNull();
   expect(details.contains(screen.getByText("final"))).toBe(false);
   details.open = true;
   fireEvent(details, new window.Event("toggle"));
   expect(details.open).toBe(true);
-  expect(details.contains(screen.getByText("progress"))).toBe(true);
+  expect(details.contains(screen.getByText("progress"))).toBe(false);
+  expect(details.contains(screen.getByText("tool"))).toBe(true);
 });
 it.each(["running", "waiting", "failed", "unknown"] as Status[])(
   "does not collapse %s turns",
@@ -309,7 +363,7 @@ it.each(["running", "waiting", "failed", "unknown"] as Status[])(
     ).toEqual([]);
   },
 );
-it("folds streamed progress when a turn completes", () => {
+it("keeps streamed prose visible when a turn completes", () => {
   const rows = events(user("q"), text("progress"), tool, result, text("final"));
   const content = (rows: Event[]) => (
     <TurnTranscript events={rows}>
@@ -326,12 +380,12 @@ it("folds streamed progress when a turn completes", () => {
       ...events(state("completed")).map((e) => ({ ...e, seq: rows.length })),
     ]),
   );
-  expect(screen.queryByText("progress")).toBeNull();
+  expect(screen.getByText("progress").closest("details")).toBeNull();
   expect(screen.getByText("final").closest("details")).toBeNull();
   expect(screen.getByText("用时 0秒").closest("details")!.open).toBe(false);
 });
 it.each(["completion", "session"])(
-  "resets expansion for a new %s but preserves it for the same result",
+  "preserves expansion across a %s refresh and scopes it to the conversation",
   (change) => {
     const rows = events(
       user("q"),
@@ -370,8 +424,10 @@ it.each(["completion", "session"])(
             },
           ];
     view.rerender(content(next));
-    expect(screen.getByText("用时 0秒").closest("details")!.open).toBe(false);
-    expect(screen.queryByText("progress")).toBeNull();
+    expect(screen.getByText("用时 0秒").closest("details")!.open).toBe(
+      change === "completion",
+    );
+    expect(screen.getByText("progress").closest("details")).toBeNull();
     expect(screen.getByText("final").closest("details")).toBeNull();
   },
 );
@@ -549,4 +605,43 @@ it("shows only a non-expandable stopped summary when stopped immediately", () =>
   const summary = screen.getByText("已停止");
   expect(summary.closest("details")).toBeNull();
   expect(summary.querySelector("svg")).toBeNull();
+});
+it("preserves stopped prose order around multiple folded tool segments and shows one stop summary", () => {
+  const rows = events(
+    user("stop"),
+    text("first report"),
+    tool,
+    result,
+    text("second report"),
+    { ...tool, id: "second" },
+    { ...result, id: "second" },
+    text("last report"),
+    state("stopped"),
+  );
+  const view = render(
+    <TurnTranscript events={rows}>
+      {(item) => <p>{item.type === "assistant" ? item.text : "tool record"}</p>}
+    </TurnTranscript>,
+  );
+  const parts = view.container.querySelectorAll("details");
+  expect(parts).toHaveLength(2);
+  const first = screen.getByText("first report"),
+    second = screen.getByText("second report"),
+    last = screen.getByText("last report");
+  expect(
+    [first, second, last].every((node) => node.closest("details") === null),
+  ).toBe(true);
+  expect(
+    first.compareDocumentPosition(parts[0]) & Node.DOCUMENT_POSITION_FOLLOWING,
+  ).toBeTruthy();
+  expect(
+    parts[0].compareDocumentPosition(second) & Node.DOCUMENT_POSITION_FOLLOWING,
+  ).toBeTruthy();
+  expect(
+    second.compareDocumentPosition(parts[1]) & Node.DOCUMENT_POSITION_FOLLOWING,
+  ).toBeTruthy();
+  expect(
+    parts[1].compareDocumentPosition(last) & Node.DOCUMENT_POSITION_FOLLOWING,
+  ).toBeTruthy();
+  expect(screen.getAllByText("已停止")).toHaveLength(1);
 });

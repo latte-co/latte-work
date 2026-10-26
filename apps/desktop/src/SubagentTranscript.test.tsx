@@ -27,7 +27,49 @@ const events = rows(
     is_error: false,
   },
 );
-it("shows live child prose and native tool input/output, then folds it on completion", () => {
+it("keeps a child review report visible around later tools and a delivery receipt", () => {
+  render(
+    <SubagentTranscript
+      task={{ ...task, status: "completed", summary: "交付完成" }}
+      elapsed="3s"
+      events={rows(
+        { kind: "text", text: "完整子评审报告" },
+        { kind: "tool", id: "save", name: "Write", input: {} },
+        { kind: "tool_result", id: "save", content: "saved", is_error: false },
+        { kind: "text", text: "交付完成" },
+      )}
+    />,
+  );
+  const report = screen.getByText("完整子评审报告");
+  expect(report.closest("details")).toBeNull();
+  const process = screen.getByText("用时 3s").closest("details")!;
+  expect(process.open).toBe(false);
+  expect(
+    report.compareDocumentPosition(process) & Node.DOCUMENT_POSITION_FOLLOWING,
+  ).toBeTruthy();
+  expect(
+    process.compareDocumentPosition(screen.getByText("交付完成")) &
+      Node.DOCUMENT_POSITION_FOLLOWING,
+  ).toBeTruthy();
+});
+it("shows a delivered report only once when the summary repeats prose before a trailing tool", () => {
+  render(
+    <SubagentTranscript
+      task={{ ...task, status: "completed", summary: "完整报告" }}
+      elapsed="3s"
+      events={rows(
+        { kind: "text", text: "完整报告" },
+        { kind: "tool", id: "save", name: "Write", input: {} },
+        { kind: "tool_result", id: "save", content: "saved", is_error: false },
+      )}
+    />,
+  );
+  expect(screen.getAllByText("完整报告")).toHaveLength(1);
+  expect(screen.getByText("完整报告").closest("details")).toBeNull();
+  expect(screen.queryByText("未收到最终输出")).toBeNull();
+  expect(screen.getAllByRole("button", { name: "复制回复" })).toHaveLength(1);
+});
+it("keeps child prose visible and folds only native tool records on completion", () => {
   const view = render(
     <SubagentTranscript task={task} events={events} elapsed="1s" />,
   );
@@ -42,7 +84,7 @@ it("shows live child prose and native tool input/output, then folds it on comple
       elapsed="3s"
     />,
   );
-  expect(screen.queryByText("child progress")).toBeNull();
+  expect(screen.getByText("child progress").closest("details")).toBeNull();
   expect(screen.getByText("child final").closest("details")).toBeNull();
   expect(view.container.querySelector("time")!.dateTime).toBe(
     new Date(task.updated_at).toISOString(),
@@ -52,7 +94,10 @@ it("shows live child prose and native tool input/output, then folds it on comple
   expect(details.open).toBe(false);
   details.open = true;
   fireEvent(details, new window.Event("toggle"));
-  expect(screen.getByText("child progress").closest("details")).toBe(details);
+  expect(screen.getByText("child progress").closest("details")).toBeNull();
+  expect(screen.getByText("native read output").closest(".turn-process")).toBe(
+    details,
+  );
   view.rerender(
     <SubagentTranscript
       task={{ ...task, id: "b", status: "completed", summary: "other final" }}
@@ -173,4 +218,59 @@ it("keeps the original delegated prompt available above the folded process and f
     "Review the complete changes. Preserve this exact input.",
   );
   expect(screen.getByText("Final report").closest("details")).toBeNull();
+});
+it("preserves independently expanded child tool segments when later output and metadata arrive", () => {
+  const initial = rows(
+    { kind: "text", text: "review one" },
+    { kind: "tool", id: "save", name: "Write", input: {} },
+    {
+      kind: "tool_result",
+      id: "save",
+      content: "save result",
+      is_error: false,
+    },
+    { kind: "text", text: "review two" },
+    { kind: "tool", id: "check", name: "Bash", input: {} },
+    {
+      kind: "tool_result",
+      id: "check",
+      content: "check result",
+      is_error: false,
+    },
+    { kind: "text", text: "done" },
+  );
+  const content = (events: Event[], updated_at = 1000) => (
+    <SubagentTranscript
+      task={{ ...task, status: "completed", updated_at }}
+      events={events}
+      elapsed="3s"
+    />
+  );
+  const view = render(content(initial));
+  const parts = view.container.querySelectorAll(".turn-process");
+  expect(parts).toHaveLength(2);
+  const first = parts[0] as HTMLDetailsElement;
+  first.open = true;
+  fireEvent(first, new window.Event("toggle"));
+  view.rerender(
+    content(
+      [
+        ...initial,
+        {
+          seq: initial.length,
+          at: 100,
+          session_id: "s",
+          event: { kind: "text", text: "; verification saved" },
+        },
+      ],
+      2000,
+    ),
+  );
+  expect(first.isConnected && first.open).toBe(true);
+  expect((parts[1] as HTMLDetailsElement).open).toBe(false);
+  expect(screen.getByText("review one").closest("details")).toBeNull();
+  expect(screen.getByText("review two").closest("details")).toBeNull();
+  expect(
+    screen.getByText("done; verification saved").closest("details"),
+  ).toBeNull();
 });

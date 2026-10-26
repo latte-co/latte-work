@@ -493,6 +493,16 @@ pending reveal work so a stale session cannot reveal the new conversation.
 
 ## Conversation lifetime and reading position
 
+Completed main and child transcripts fold only explicit execution records (tools,
+progress/usage metadata and ordinary notices). Assistant text has no public phase
+metadata and always remains visible, including reports followed by tools and a
+short delivery receipt. Approvals, images, Skill-load notices and change results
+stay outside the folded process. Segments preserve original order, including
+stopped turns. Disclosure identity uses the owning host/session and the segment
+start rather than the latest completion event, preserving user expansion through
+metadata refreshes and later prose; new segments start collapsed. This changes
+presentation only and applies to old history without rewriting stored events.
+
 Opening an unarchived conversation also opens its native Agent session, even without
 sending a message. Switching conversations preserves all opened sessions. The
 conversation menu's Close releases the native runtime and returns the selected

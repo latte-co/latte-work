@@ -27,6 +27,32 @@ export type ActivityItem =
       tools: ToolActivity[];
     };
 
+/** Only execution records are safe to hide. Plain assistant text has no phase. */
+export function isProcessActivity(item: ActivityItem): boolean {
+  if (item.type === "tool" || item.type === "tools") return true;
+  if (item.type !== "event") return false;
+  if (item.value.kind === "progress" || item.value.kind === "usage")
+    return true;
+  return (
+    item.value.kind === "notice" && !/^已加载 Skill：\S+$/.test(item.value.text)
+  );
+}
+
+/** Keep original order and stable group identities around visible replies. */
+export function activitySegments(
+  items: ActivityItem[],
+  fold: (item: ActivityItem, index: number) => boolean,
+) {
+  const segments: { process: boolean; items: ActivityItem[] }[] = [];
+  items.forEach((item, index) => {
+    const process = fold(item, index);
+    const last = segments.at(-1);
+    if (last?.process === process) last.items.push(item);
+    else segments.push({ process, items: [item] });
+  });
+  return segments;
+}
+
 /** Pair by tool ID within a user turn, never by result arrival order. */
 export function activityTranscript(
   events: Event[],
