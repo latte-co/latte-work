@@ -68,6 +68,12 @@
   border-radius: 24px;
   padding: 0 14px;
 }
+.skill-add-menu {
+  min-width: 0;
+  width: min(206px, calc(100vw - 16px));
+  max-height: calc(100dvh - 16px);
+  overflow-y: auto;
+}
 .skills-installed {
   border-top: 1px solid var(--color-border-subtle);
   padding-top: 20px;

@@ -1242,7 +1242,9 @@ requests on legacy Servers; import stays disabled until inventory loads.
 Reconnecting the selected host reloads inventory.
 Details offer Install for uninstalled skills and a disabled Installed status for
 enabled/disabled installations, alongside the enable switch, uninstall and copy
-actions. The Create skill action opens a new unsaved task on the selected host with
+actions. The toolbar's single Add dropdown offers Create skill and Import skill;
+its menu uses the shared action-menu styles and restores trigger focus on Escape
+or import cancellation. The Create skill action opens a new unsaved task on the selected host with
 a removable **Skill Creator** preset. It preserves existing unsent text and does
 not send, create a persisted session, or start an Agent. On explicit submission,
 the App-provided authoring instructions accompany the user request and direct the

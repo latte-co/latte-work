@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
-import { Globe2, Monitor, Plus, RefreshCw, Search } from "lucide-react";
+import { Globe2, Monitor, RefreshCw, Search } from "lucide-react";
 import { Select } from "./Select";
+import { SkillAddMenu } from "./SkillAddMenu";
 import { SkillDetailDialog } from "./SkillDetailDialog";
 import { SkillChangeDialog, SkillImportDialog } from "./SkillOperationDialogs";
 import {
@@ -131,25 +132,16 @@ export function SkillsSettings({
           >
             <RefreshCw size={17} className={loading ? "skills-spinning" : ""} />
           </button>
-          <button
-            className="skills-create"
-            disabled={busy || !onCreate}
-            onClick={() => onCreate?.(hostId)}
-          >
-            创建技能
-          </button>
-          <button
-            className="primary skills-add"
-            disabled={locked || !catalog}
-            onClick={(event) => {
-              event.currentTarget.focus();
+          <SkillAddMenu
+            key={context}
+            disabled={busy || !active}
+            importDisabled={locked || !catalog}
+            onCreate={onCreate ? () => onCreate(hostId) : undefined}
+            onImport={() => {
               clearErrors();
               setAdd(true);
             }}
-          >
-            <Plus size={16} />
-            添加
-          </button>
+          />
         </div>
       </header>
       {!connected && (

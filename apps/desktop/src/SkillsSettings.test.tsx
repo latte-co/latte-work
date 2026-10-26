@@ -275,6 +275,7 @@ it("selects a skill file and imports its contents to the selected host without a
   render(<SkillsSettings state={state} active onBusy={() => {}} />);
   await screen.findByRole("button", { name: /System Review/ });
   fireEvent.click(screen.getByRole("button", { name: "添加" }));
+  fireEvent.click(screen.getByRole("menuitem", { name: "导入技能" }));
   const modal = screen.getByRole("dialog", { name: "添加技能" });
   expect(within(modal).queryByRole("combobox")).toBeNull();
   expect(within(modal).getByText(/~\/.agents\/skills/)).toBeTruthy();
@@ -430,6 +431,7 @@ it("associates import instructions and limits with the dialog and wraps category
   });
   expect(platformTab.getAttribute("aria-selected")).toBe("true");
   fireEvent.click(screen.getByRole("button", { name: "添加" }));
+  fireEvent.click(screen.getByRole("menuitem", { name: "导入技能" }));
   const dialog = screen.getByRole("dialog", { name: "添加技能" });
   const description = dialog
     .getAttribute("aria-describedby")!
@@ -472,6 +474,7 @@ it("keeps a failed detail read out of a later import dialog and page-level error
   fireEvent.click(screen.getByRole("button", { name: "关闭技能详情" }));
   expect(screen.queryByRole("alert")).toBeNull();
   fireEvent.click(screen.getByRole("button", { name: "添加" }));
+  fireEvent.click(screen.getByRole("menuitem", { name: "导入技能" }));
   expect(
     within(screen.getByRole("dialog", { name: "添加技能" })).queryByRole(
       "alert",
@@ -494,11 +497,77 @@ it("opens Skill Creator for the selected host without performing any agent reque
       project_id: null,
     }),
   );
-  fireEvent.click(screen.getByRole("button", { name: "创建技能" }));
+  expect(screen.queryByRole("button", { name: "创建技能" })).toBeNull();
+  fireEvent.click(screen.getByRole("button", { name: "添加" }));
+  fireEvent.click(screen.getByRole("menuitem", { name: "创建技能" }));
+  expect(screen.queryByRole("menu")).toBeNull();
   expect(create).toHaveBeenCalledWith("devbox");
   expect(
     request.mock.calls.every(([, action]) => action.method === "skills"),
   ).toBe(true);
+});
+it("navigates the combined Add menu by keyboard and returns focus after cancelling import", async () => {
+  request.mockResolvedValue(catalog());
+  const create = vi.fn();
+  render(
+    <SkillsSettings state={state} active onBusy={() => {}} onCreate={create} />,
+  );
+  await screen.findByRole("button", { name: /System Review/ });
+  const add = screen.getByRole("button", { name: "添加" });
+  add.focus();
+  fireEvent.keyDown(add, { key: "ArrowDown" });
+  const menu = screen.getByRole("menu", { name: "添加技能" });
+  expect(document.activeElement).toBe(
+    within(menu).getByRole("menuitem", { name: "创建技能" }),
+  );
+  expect(screen.queryByRole("dialog")).toBeNull();
+  expect(create).not.toHaveBeenCalled();
+  fireEvent.keyDown(document.activeElement!, { key: "ArrowDown" });
+  const importItem = within(menu).getByRole("menuitem", { name: "导入技能" });
+  expect(document.activeElement).toBe(importItem);
+  fireEvent.keyDown(importItem, { key: "Escape" });
+  expect(screen.queryByRole("menu")).toBeNull();
+  expect(document.activeElement).toBe(add);
+  fireEvent.click(add);
+  fireEvent.click(screen.getByRole("menuitem", { name: "导入技能" }));
+  expect(screen.queryByRole("menu")).toBeNull();
+  fireEvent.click(
+    within(screen.getByRole("dialog", { name: "添加技能" })).getByRole(
+      "button",
+      { name: "取消" },
+    ),
+  );
+  await waitFor(() => expect(document.activeElement).toBe(add));
+  expect(
+    request.mock.calls.every(([, action]) => action.method === "skills"),
+  ).toBe(true);
+});
+it("dismisses Add on outside click, host changes and page hiding", async () => {
+  request.mockResolvedValue(catalog());
+  const create = vi.fn();
+  const view = render(
+    <SkillsSettings state={state} active onBusy={() => {}} onCreate={create} />,
+  );
+  await screen.findByRole("button", { name: /System Review/ });
+  fireEvent.click(screen.getByRole("button", { name: "添加" }));
+  fireEvent.pointerDown(screen.getByRole("textbox", { name: "搜索技能" }));
+  expect(screen.queryByRole("menu")).toBeNull();
+  fireEvent.click(screen.getByRole("button", { name: "添加" }));
+  fireEvent.click(screen.getByRole("combobox", { name: "技能所在主机" }));
+  fireEvent.click(screen.getByRole("option", { name: "devbox" }));
+  expect(screen.queryByRole("menu")).toBeNull();
+  fireEvent.click(screen.getByRole("button", { name: "添加" }));
+  expect(screen.getByRole("menu")).toBeTruthy();
+  view.rerender(
+    <SkillsSettings
+      state={state}
+      active={false}
+      onBusy={() => {}}
+      onCreate={create}
+    />,
+  );
+  expect(screen.queryByRole("menu")).toBeNull();
+  expect(create).not.toHaveBeenCalled();
 });
 it("gates file import on an explicit capability even when directory management is supported", async () => {
   request.mockResolvedValue(catalog());
@@ -511,6 +580,7 @@ it("gates file import on an explicit capability even when directory management i
   );
   await screen.findByRole("button", { name: /System Review/ });
   fireEvent.click(screen.getByRole("button", { name: "添加" }));
+  fireEvent.click(screen.getByRole("menuitem", { name: "导入技能" }));
   expect(screen.getByText(/尚不支持文件导入/)).toBeTruthy();
   expect(
     (screen.getByRole("button", { name: "选择文件" }) as HTMLButtonElement)
