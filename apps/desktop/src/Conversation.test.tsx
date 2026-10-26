@@ -348,6 +348,53 @@ it("a late accepted send cannot clear a new draft written after navigation", asy
   expect(input().value).toBe("new draft");
 });
 it.each([true, false])(
+  "clears only an accepted message after reference-scope synchronization (accepted=%s)",
+  async (accepted) => {
+    const p = props();
+    let finish!: (value: boolean) => void;
+    p.send.mockImplementation(
+      () =>
+        new Promise<boolean>((resolve) => {
+          finish = resolve;
+        }),
+    );
+    render(<Conversation {...p} session={session("scope-sync")} />);
+    fireEvent.change(input(), { target: { value: "已发送的消息" } });
+    fireEvent.click(screen.getByRole("button", { name: "发送任务" }));
+    act(() =>
+      p.drafts.update(JSON.stringify(["local", "scope-sync"]), {
+        references: {
+          scope: p.drafts.get(JSON.stringify(["local", "scope-sync"]))
+            .references.scope,
+          entries: [],
+        },
+      }),
+    );
+    await act(async () => finish(accepted));
+    expect(input().value).toBe(accepted ? "" : "已发送的消息");
+  },
+);
+it("preserves a newly retyped identical message while an earlier send is awaiting confirmation", async () => {
+  const p = props();
+  let finish!: (value: boolean) => void;
+  p.send.mockImplementation(
+    () =>
+      new Promise<boolean>((resolve) => {
+        finish = resolve;
+      }),
+  );
+  const key = JSON.stringify(["local", "retyped"]);
+  render(<Conversation {...p} session={session("retyped")} />);
+  fireEvent.change(input(), { target: { value: "相同的文字" } });
+  fireEvent.click(screen.getByRole("button", { name: "发送任务" }));
+  act(() => {
+    p.drafts.update(key, { text: "" });
+    p.drafts.update(key, { text: "相同的文字" });
+  });
+  await act(async () => finish(true));
+  expect(input().value).toBe("相同的文字");
+});
+it.each([true, false])(
   "reconciles a session render that arrives after a fast send response (accepted=%s)",
   async (accepted) => {
     const p = props();
@@ -1193,6 +1240,29 @@ it("preselects a removable Skill Creator preset without sending, and includes it
   expect(p.send.mock.calls[0][0]).toContain("~/.agents/skills/<skill-name>/");
   expect(p.send.mock.calls[0][0]).toContain("创建一个代码评审技能");
   expect(p.send.mock.calls[0][0]).toContain("不要写入项目级技能目录");
+  await waitFor(() => expect(input().value).toBe(""));
+  expect(screen.queryByRole("group", { name: "已选择技能" })).toBeNull();
+});
+it("provides an explicit working-directory action for a creator draft without a project", () => {
+  const p = props();
+  p.drafts.update("new-task", { skillCreator: true, text: "已有需求" });
+  const view = render(
+    <Conversation
+      {...p}
+      projectName={undefined}
+      projectId={undefined}
+      hostId="remote"
+    />,
+  );
+  expect(screen.getByRole("group", { name: "已选择技能" })).toBeTruthy();
+  fireEvent.click(screen.getByRole("button", { name: "选择工作目录" }));
+  expect(p.openProject).toHaveBeenCalledTimes(1);
+  expect(p.send).not.toHaveBeenCalled();
+  expect(input().value).toBe("已有需求");
+  view.rerender(<Conversation {...p} hostId="remote" />);
+  expect(screen.queryByRole("button", { name: "选择工作目录" })).toBeNull();
+  expect(input().value).toBe("已有需求");
+  expect(document.activeElement).toBe(input());
 });
 it("removing Skill Creator preserves the user's draft and normal send behavior", async () => {
   const p = props();

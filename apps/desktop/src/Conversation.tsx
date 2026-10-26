@@ -145,9 +145,9 @@ export function Conversation({
   const [sending, setSending] = useState(false);
   const [composerFocus, setComposerFocus] = useState(0);
   useEffect(() => {
-    if (draft.skillCreator && !settingsOpen)
+    if (draft.skillCreator && projectName && !settingsOpen)
       setComposerFocus((value) => value + 1);
-  }, [draft.skillCreator, settingsOpen]);
+  }, [draft.skillCreator, projectName, settingsOpen]);
   const previousDraftKey = useRef(draftKey);
   const migrated = useRef<string | null>(null);
   const submission = useRef<{
@@ -750,6 +750,14 @@ export function Conversation({
               onAddProject={openProject}
             />
           )}
+          {!session && draft.skillCreator && !projectName && (
+            <div className="skill-creator-context">
+              <span>先选择工作目录，再描述要创建的技能。</span>
+              <button disabled={sending} onClick={openProject}>
+                选择工作目录
+              </button>
+            </div>
+          )}
           {!session && selectAgent && agents.length > 1 ? (
             <div className="agent-picker">
               <Select
@@ -900,7 +908,9 @@ export function Conversation({
                   ? draft.skillCreator
                     ? "描述你想创建的技能…"
                     : "描述任务，@ 添加引用，/ 调用 Agent 命令…"
-                  : "先添加或选择一个项目"
+                  : draft.skillCreator
+                    ? "先选择工作目录以创建技能"
+                    : "先添加或选择一个项目"
           }
           toolbar={(submit, hasContent, localNavigation) => (
             <>

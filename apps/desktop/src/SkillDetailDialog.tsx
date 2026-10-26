@@ -103,7 +103,12 @@ export function SkillDetailDialog({
                 <span>{skill.directory}</span>
               </div>
             )}
-            <div className="skill-markdown markdown" tabIndex={0}>
+            <div
+              className="skill-markdown markdown"
+              role="region"
+              aria-label="技能正文"
+              tabIndex={0}
+            >
               <ReactMarkdown
                 remarkPlugins={[remarkGfm]}
                 components={{

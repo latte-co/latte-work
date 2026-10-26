@@ -15,6 +15,13 @@ import tempfile
 import time
 
 
+def config_path(path):
+    value = str(path)
+    if '\n' in value or '\r' in value:
+        raise ValueError('OpenSSH paths cannot contain line breaks')
+    return '"' + value.replace('\\', '\\\\').replace('"', '\\"') + '"'
+
+
 def main():
     ssh = shutil.which('ssh')
     keygen = shutil.which('ssh-keygen')
@@ -23,7 +30,7 @@ def main():
         raise RuntimeError('OpenSSH client and server are required')
     # StrictModes checks every ancestor of authorized_keys; a shared /tmp is
     # rejected on Linux even though this invocation's child directory is private.
-    with tempfile.TemporaryDirectory(prefix='latte-ssh-', dir=Path.home()) as temporary:
+    with tempfile.TemporaryDirectory(prefix='latte ssh-', dir=Path.home()) as temporary:
         root = Path(temporary)
         for name in ('host', 'identity', 'wrong-host'):
             subprocess.run([keygen, '-q', '-t', 'ed25519', '-N', '', '-f', str(root / name)], check=True, timeout=10)
@@ -32,9 +39,9 @@ def main():
             port = reservation.getsockname()[1]
         (root / 'sshd_config').write_text(f'''ListenAddress 127.0.0.1
 Port {port}
-HostKey {root}/host
-PidFile {root}/sshd.pid
-AuthorizedKeysFile {root}/identity.pub
+HostKey {config_path(root / 'host')}
+PidFile {config_path(root / 'sshd.pid')}
+AuthorizedKeysFile {config_path(root / 'identity.pub')}
 StrictModes yes
 PasswordAuthentication no
 KbdInteractiveAuthentication no
@@ -48,14 +55,14 @@ LogLevel VERBOSE
   HostName 127.0.0.1
   Port {port}
   User {pwd.getpwuid(os.getuid()).pw_name}
-  IdentityFile {root}/identity
+  IdentityFile {config_path(root / 'identity')}
   IdentitiesOnly yes
   StrictHostKeyChecking yes
   GlobalKnownHostsFile /dev/null
 Host latte-skill-test
-  UserKnownHostsFile {root}/known_hosts
+  UserKnownHostsFile {config_path(root / 'known_hosts')}
 Host latte-skill-badkey
-  UserKnownHostsFile {root}/wrong_hosts
+  UserKnownHostsFile {config_path(root / 'wrong_hosts')}
 ''')
         # The production Client still constructs all flags and remote commands.
         # This shim selects only the disposable config; it execs the real OpenSSH.

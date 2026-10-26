@@ -33,7 +33,7 @@ runs `make package`, verifies the ad-hoc signed release bundle and remounted dra
 and checksum as CI artifacts. A Linux job runs `make test-ssh-skills` through a
 disposable, host-key-pinned loopback sshd; it exercises the production SSH client,
 capability handshake, independent host inventories, state changes, package import,
-and reconnect. The wrong-key case must fail. It does not connect to a configured
+and reconnect. Test configuration paths are quoted; its disposable HOME child deliberately contains spaces. CI compiles the final test binary in a separate cold-cache step before the bounded SSH run. The wrong-key case must fail. It does not connect to a configured
 remote host or use a model. A failed native test fails that job and therefore `PR Gate`; successful compilation alone is not
 treated as native behavioral coverage.
 `PR Gate` fails when any dependent job fails, is cancelled, or is skipped.
@@ -527,6 +527,8 @@ control and slower CLI metadata. Local and SSH use identical routing. Additional
 lanes attach to the existing daemon during initial connection and are coalesced;
 navigation does not create transports. A reconnect replaces all lanes and fences
 stale responses by connection identity and daemon ID. No Send is retried.
+
+Draft acknowledgement uses content versions in the in-memory DraftStore. Duplicate input updates and empty-reference scope initialization retain the submitted version; actual text, preset, reference or host/project/Agent scope edits advance it. A successful acknowledgement clears only its version, including after first-send session adoption. Failures and unknown transport outcomes retain the draft without replay. Deleting and retyping the same text is a new edit and survives an older acknowledgement.
 
 ## Native subagent presentation
 
@@ -1249,7 +1251,7 @@ a removable **Skill Creator** preset. It preserves existing unsent text and does
 not send, create a persisted session, or start an Agent. On explicit submission,
 the App-provided authoring instructions accompany the user request and direct the
 Agent to the host-global `~/.agents/skills` directory. This is an authoring task,
-independent of project-level skill management. Copy preserves the complete SKILL.md, including its frontmatter, so the
+independent of project-level skill management. If the chosen host has no project, the unsaved task stays on that host and offers an explicit working-directory action; adding/selecting a directory does not send a message. Copy preserves the complete SKILL.md, including its frontmatter, so the
 result remains a reusable skill; the rendered preview and injected prompt contain
 only the Markdown body. The detail description is associated with the dialog for
 assistive technology. There is no skill trial or trial-project selection.
@@ -1280,7 +1282,7 @@ hashes and observed metadata contract; it is historical evidence, not a claim ab
 another installed CLI. The manually dispatched **Traex skill contract** GitHub
 workflow accepts an explicit trusted Linux executable HTTPS URL, SHA256 and exact
 version, checks all three, and retains its fresh report as an artifact. This is
-separate from the mandatory fixture E2E and needs no model/account credentials.
+separate from the mandatory fixture E2E and needs no model/account credentials. The smoke uses production initialize parameters (no experimental capability) and supplies a disposable `cwd` to `config/read`; the report records both parameter shapes.
 The deterministic fixture asserts preservation on both start and resume and tests that disabling platform skills removes the override.
 Host preferences are atomically saved in the private state directory's `skills.json`.
 Changes apply to new Agent sessions; running processes and native conversation
@@ -1320,12 +1322,12 @@ are limited before content reads. Regular file contents are transferred through 
 existing 64-KiB attachment protocol directly to the selected host. Uploads do not
 preserve original Unix executable metadata; native host-path imports retain their
 existing file-mode behavior. Completed staging follows the existing attachment
-cache policy and quota; incomplete uploads are aborted on cancellation/error.
+cache policy and quota; incomplete uploads are aborted on cancellation/error. Completed attachments may be referenced by saved prompts and are not deleted by skill scratch cleanup.
 The additive `import_skill_files` request accepts only completed upload paths from
 this host's private store, rejects traversal/duplicates/symlinks/special files and
 path conflicts, then stages and installs atomically through the same skill worker.
 Both files and directories count toward 512 entries; depth, 16-MiB aggregate,
-64-KiB metadata and deadline limits apply. Existing installations are never replaced.
+64-KiB metadata and deadline limits apply. Import scratch directories carry a marker and a held file lock. Each staging allocation recovers at most eight marked, unlocked leftovers while scanning at most 512 parent entries, with bounded depth/count and cancellation checks. Active imports, symlink roots, unmarked legacy directories and completed attachments are preserved. The marker remains until payload cleanup succeeds. Existing installations are never replaced.
 Hello advertises `skill_file_import` separately; absent/false keeps the client from
 uploading and explains that this host needs a Server update. The existing global
 inventory and native path-install request remain compatible with older clients.

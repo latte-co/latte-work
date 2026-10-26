@@ -11,6 +11,12 @@ vi.mock("./api", () => ({ request }));
 const skill = () =>
   new File(["---\nname: example\n---\nSafe body"], "SKILL.md");
 afterEach(() => vi.resetAllMocks());
+it("explains invalid UTF-8 without uploading selected content", async () => {
+  await expect(
+    selectedSkillFiles([new File([new Uint8Array([0xff])], "SKILL.md")]),
+  ).rejects.toThrow("SKILL.md 必须使用 UTF-8 编码");
+  expect(request).not.toHaveBeenCalled();
+});
 it("collects a selected directory with complete resource paths", async () => {
   const files = [skill(), new File(["resource"], "note.txt")];
   Object.defineProperty(files[0], "webkitRelativePath", {

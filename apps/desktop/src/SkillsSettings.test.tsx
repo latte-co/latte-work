@@ -277,6 +277,9 @@ it("selects a skill file and imports its contents to the selected host without a
   fireEvent.click(screen.getByRole("button", { name: "添加" }));
   fireEvent.click(screen.getByRole("menuitem", { name: "导入技能" }));
   const modal = screen.getByRole("dialog", { name: "添加技能" });
+  expect(
+    within(modal).getByRole("group", { name: "拖入技能文件或文件夹" }),
+  ).toBeTruthy();
   expect(within(modal).queryByRole("combobox")).toBeNull();
   expect(within(modal).getByText(/~\/.agents\/skills/)).toBeTruthy();
   fireEvent.change(within(modal).getByLabelText("选择 SKILL.md"), {
@@ -454,6 +457,7 @@ it("describes skill details and copies a complete reusable SKILL.md including it
   fireEvent.click(await screen.findByRole("button", { name: /System Review/ }));
   const copy = await screen.findByRole("button", { name: "复制 Markdown" });
   const dialog = screen.getByRole("dialog", { name: "System Review" });
+  expect(within(dialog).getByRole("region", { name: "技能正文" })).toBeTruthy();
   expect(
     document.getElementById(dialog.getAttribute("aria-describedby")!)
       ?.textContent,

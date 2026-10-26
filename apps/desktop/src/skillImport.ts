@@ -64,9 +64,15 @@ async function prepareSkill(
   root?: string,
 ): Promise<SkillUpload> {
   validateSkillFiles(files);
-  const body = new TextDecoder("utf-8", { fatal: true }).decode(
-    await readSkillBytes(files.find((f) => f.path === "SKILL.md")!.file),
+  const bytes = await readSkillBytes(
+    files.find((f) => f.path === "SKILL.md")!.file,
   );
+  let body: string;
+  try {
+    body = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+  } catch {
+    throw new Error("SKILL.md 必须使用 UTF-8 编码，请转换编码后重新选择");
+  }
   const declared = /^---\r?\n[\s\S]*?^name:\s*["']?([^\r\n"']+)/m
     .exec(body)?.[1]
     ?.trim();

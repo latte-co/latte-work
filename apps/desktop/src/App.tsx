@@ -475,10 +475,8 @@ export default function App() {
                   p.hostId === targetHostId && p.id === workbench.projectId,
               ) ?? workbench.projects.find((p) => p.hostId === targetHostId);
             void workbench
-              .createSession(target)
+              .createSession(target, targetHostId)
               .then(() => {
-                if (!target && targetHostId !== workbench.hostId)
-                  workbench.selectProject(targetHostId, "");
                 drafts.update("new-task", { skillCreator: true });
               })
               .catch((cause) => setError(message(cause)));

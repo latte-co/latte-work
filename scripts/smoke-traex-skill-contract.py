@@ -9,12 +9,12 @@ import subprocess
 import tempfile
 
 
-async def read_config(binary):
+async def read_config(binary, cwd):
     sentinel = 'LATTE_WORK_SKILL_CONTRACT_SENTINEL'
     process = await asyncio.create_subprocess_exec(
         binary, 'app-server', '--stdio', '-c', f'developer_instructions="{sentinel}"',
         stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.DEVNULL, limit=4 * 1024 * 1024,
+        stderr=asyncio.subprocess.DEVNULL, limit=4 * 1024 * 1024, cwd=cwd,
     )
 
     async def request(identity, method, params):
@@ -32,10 +32,10 @@ async def read_config(binary):
         raise RuntimeError('Traex metadata message limit exceeded')
 
     try:
-        await request(1, 'initialize', {'clientInfo': {'name': 'latte-skill-contract', 'version': '1'}, 'capabilities': {'experimentalApi': True}})
+        await request(1, 'initialize', {'clientInfo': {'name': 'latte-work', 'version': '0.1.0'}})
         process.stdin.write(b'{"method":"initialized"}\n')
         await process.stdin.drain()
-        result = await request(2, 'config/read', {'includeLayers': False})
+        result = await request(2, 'config/read', {'includeLayers': False, 'cwd': cwd})
         assert result['config']['developer_instructions'] == sentinel, 'configured developer instructions missing'
     finally:
         process.stdin.close()
@@ -71,15 +71,18 @@ def main():
                 field = data['properties']['developerInstructions']
             assert 'string' in field['type'], f'{name} instruction type changed'
             schemas[name] = {'sha256': hashlib.sha256(path.read_bytes()).hexdigest(), 'instruction_field': field}
-    async def bounded_read():
-        await asyncio.wait_for(read_config(binary), 20)
-    asyncio.run(bounded_read())
+    with tempfile.TemporaryDirectory(prefix='latte-skill-cwd-') as cwd:
+        async def bounded_read():
+            await asyncio.wait_for(read_config(binary, cwd), 20)
+        asyncio.run(bounded_read())
     digest = hashlib.sha256()
     with open(binary, 'rb') as executable:
         for block in iter(lambda: executable.read(1024 * 1024), b''):
             digest.update(block)
     report = {'cli_version': version, 'binary_sha256': digest.hexdigest(), 'schemas': schemas, 'config_read_preserves_sentinel': True,
-              'thread_started': False, 'prompts_sent': 0}
+              'thread_started': False, 'prompts_sent': 0,
+              'initialize_params': {'clientInfo': {'name': 'latte-work', 'version': '0.1.0'}},
+              'config_read_params': {'includeLayers': False, 'cwd': '<temporary working directory>'}}
     output = Path(args.output)
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(json.dumps(report, indent=2) + '\n')

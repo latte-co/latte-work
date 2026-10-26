@@ -32,5 +32,15 @@
   },
   "config_read_preserves_sentinel": true,
   "thread_started": false,
-  "prompts_sent": 0
+  "prompts_sent": 0,
+  "initialize_params": {
+    "clientInfo": {
+      "name": "latte-work",
+      "version": "0.1.0"
+    }
+  },
+  "config_read_params": {
+    "includeLayers": false,
+    "cwd": "<temporary working directory>"
+  }
 }

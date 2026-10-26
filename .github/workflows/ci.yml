@@ -104,7 +104,7 @@ jobs:
   ssh-skills:
     name: Skills over real OpenSSH
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -116,6 +116,9 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y openssh-server
           sudo mkdir -p /run/sshd
+      - name: Build SSH test binary with a separate cold-cache budget
+        run: cargo test -p latte-work-server --test e2e --locked --no-run
+        timeout-minutes: 15
       - run: make test-ssh-skills
         timeout-minutes: 10
 

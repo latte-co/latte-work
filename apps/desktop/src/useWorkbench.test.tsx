@@ -396,6 +396,32 @@ it("marks a new unsaved task disconnected after metadata transport failure and r
     mocks.request.mock.calls.filter(([, r]) => r.method === "send_queued"),
   ).toHaveLength(0);
 });
+it("starts an unsaved creator task on a host without projects and opens its directory picker on that host", async () => {
+  const remote = { id: "remote", name: "Remote", ssh: "fixture-host" };
+  mocks.loadHosts.mockResolvedValue([{ id: "local", name: "Local" }, remote]);
+  const base = mocks.request.getMockImplementation()!;
+  mocks.request.mockImplementation(async (host: string, request: Request) =>
+    host === "remote" && request.method === "projects"
+      ? { kind: "projects", projects: [] }
+      : base(host, request),
+  );
+  const hook = renderHook(useWorkbench);
+  await act(async () => {});
+  await act(async () => hook.result.current.createSession(undefined, "remote"));
+  expect(hook.result.current.hostId).toBe("remote");
+  expect(hook.result.current.projectId).toBe("");
+  expect(hook.result.current.sessionId).toBe("");
+  act(() => hook.result.current.openProject());
+  expect(hook.result.current.modal).toBe("project");
+  expect(hook.result.current.projectHostId).toBe("remote");
+  expect(
+    mocks.request.mock.calls.some(([, request]) =>
+      ["create_session", "send_queued", "open_agent_session"].includes(
+        request.method,
+      ),
+    ),
+  ).toBe(false);
+});
 it("a background host's failure does not disconnect the selected host", async () => {
   const hook = renderHook(useWorkbench);
   await act(async () => {});

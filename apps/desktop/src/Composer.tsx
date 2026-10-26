@@ -1076,7 +1076,11 @@ export function Composer(props: Props) {
         </div>
       )}
       {props.skillCreator && (
-        <div className="composer-skill-preset" aria-label="已选择技能">
+        <div
+          className="composer-skill-preset"
+          role="group"
+          aria-label="已选择技能"
+        >
           <span title="Latte Work 内置的技能创建指引；发送需求后创建全局技能">
             <Box size={16} />
             Skill Creator

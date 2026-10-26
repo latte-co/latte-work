@@ -1004,8 +1004,12 @@ export function useWorkbench() {
         setEarlierHistoryLoading(false);
     }
   }
-  async function createSession(target?: HostedProject): Promise<void> {
-    if (target && !hosts.some((h) => h.id === target.hostId))
+  async function createSession(
+    target?: HostedProject,
+    draftHostId?: string,
+  ): Promise<void> {
+    const targetHostId = target?.hostId ?? draftHostId ?? hostId;
+    if (!hosts.some((h) => h.id === targetHostId))
       throw new Error("项目所在主机已移除");
     if (modal === "skills") setModal(null);
     pendingSession.current = null;
@@ -1015,12 +1019,12 @@ export function useWorkbench() {
     setSessionId("");
     setEvents([]);
     setError("");
-    if (target && (target.hostId !== hostId || target.id !== projectId)) {
+    if (targetHostId !== hostId || (target && target.id !== projectId)) {
       setSessions([]);
-      if (target.hostId !== hostId) {
-        activateHost(target.hostId);
+      if (targetHostId !== hostId) {
+        activateHost(targetHostId);
       }
-      setProjectId(target.id);
+      setProjectId(target?.id ?? "");
     }
     resetConversationView();
   }

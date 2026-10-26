@@ -280,8 +280,8 @@ it("opens a creator draft on the requested host and preserves unsent text withou
   await act(async () => {
     await Promise.resolve();
   });
-  expect(mocks.state.createSession).toHaveBeenCalledWith(undefined);
-  expect(mocks.state.selectProject).toHaveBeenCalledWith("remote", "");
+  expect(mocks.state.createSession).toHaveBeenCalledWith(undefined, "remote");
+  expect(mocks.state.selectProject).not.toHaveBeenCalled();
   expect(mocks.drafts!.get("new-task")).toMatchObject({
     text: "保留已有草稿",
     skillCreator: true,

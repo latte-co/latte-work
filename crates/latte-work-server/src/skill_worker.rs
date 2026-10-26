@@ -58,7 +58,7 @@ impl Worker {
             .admission
             .clone()
             .try_acquire_owned()
-            .context("Skill 操作仍在进行，请稍后刷新核对；不会重复执行")?;
+            .context("技能请求仍在进行，请稍后刷新核对")?;
         let budget = Budget::new(limit);
         // Also cancel cooperatively when a disconnected caller drops this future.
         let _cancel = CancelOnDrop(budget.clone());

@@ -405,8 +405,16 @@ impl Skills {
         use std::io::{Read, Write};
         use std::os::unix::fs::OpenOptionsExt;
         self.check_budget()?;
-        if !component(name) || files.is_empty() || files.len() > LIMIT {
-            bail!("技能目录名无效或文件数量超过 512 项");
+        if !component(name) {
+            bail!(
+                "技能目录名无效：最多 128 个英文字母、数字、连字符、下划线或点号，不能以点号开头"
+            );
+        }
+        if files.is_empty() {
+            bail!("技能中没有文件，请选择 SKILL.md 或包含它的文件夹");
+        }
+        if files.len() > LIMIT {
+            bail!("技能文件数量超过 512 项");
         }
         let uploads = crate::attachments::Attachments::new(&self.directory)?;
         let mut names = HashSet::new();
@@ -445,9 +453,11 @@ impl Skills {
         if !names.contains("SKILL.md") {
             bail!("技能中缺少 SKILL.md");
         }
-        let staging = tempfile::Builder::new()
-            .prefix("skill-upload-")
-            .tempdir_in(&self.directory)?;
+        let staging = crate::skill_staging::Staging::new(
+            &self.directory,
+            "skill-upload-",
+            self.budget.as_ref(),
+        )?;
         let source = staging.path().join(name);
         std::fs::create_dir(&source)?;
         let mut total = 0u64;
@@ -466,12 +476,25 @@ impl Skills {
                 bail!("技能上传超出读取范围（总量 16 MiB，SKILL.md 64 KiB）");
             }
             let target = source.join(&item.path);
-            std::fs::create_dir_all(target.parent().context("技能路径无效")?)?;
+            std::fs::create_dir_all(target.parent().context("技能路径无效")?).with_context(
+                || {
+                    format!(
+                        "无法创建技能文件的目录，请核对目标文件系统的名称或路径限制：{}",
+                        item.path
+                    )
+                },
+            )?;
             let mut output = std::fs::OpenOptions::new()
                 .write(true)
                 .create_new(true)
                 .mode(0o600)
-                .open(target)?;
+                .open(&target)
+                .with_context(|| {
+                    format!(
+                        "无法写入技能文件，请核对大小写冲突或目标文件系统的名称限制：{}",
+                        item.path
+                    )
+                })?;
             let mut remaining = metadata.len();
             while remaining > 0 {
                 self.check_budget()?;
@@ -520,9 +543,11 @@ impl Skills {
         ] {
             require_absent(&state_root(&root, state)?.join(slug))?;
         }
-        let staging = tempfile::Builder::new()
-            .prefix(".latte-work-skill-import-")
-            .tempdir_in(root.parent().context("Skill 安装根目录无效")?)?;
+        let staging = crate::skill_staging::Staging::new(
+            root.parent().context("Skill 安装根目录无效")?,
+            ".latte-work-skill-import-",
+            self.budget.as_ref(),
+        )?;
         let target = staging.path().join(slug);
         let mut budget = (0usize, 0u64);
         copy_tree(&source, &target, 0, &mut budget, self.budget.as_ref())?;
@@ -1169,6 +1194,52 @@ mod tests {
             path: path.into(),
             attachment: attachments.finish(&id).unwrap().path,
         }
+    }
+    #[test]
+    fn uploaded_skill_validation_explains_name_empty_and_excessive_packages() {
+        let (_temp, manager, _) = setup();
+        assert!(
+            manager
+                .import_files("../bad", &[])
+                .unwrap_err()
+                .to_string()
+                .contains("目录名无效")
+        );
+        assert!(
+            manager
+                .import_files("empty", &[])
+                .unwrap_err()
+                .to_string()
+                .contains("没有文件")
+        );
+        let file = latte_work_protocol::SkillImportFile {
+            path: "SKILL.md".into(),
+            attachment: "unused".into(),
+        };
+        assert!(
+            manager
+                .import_files("many", &vec![file; LIMIT + 1])
+                .unwrap_err()
+                .to_string()
+                .contains("文件数量超过 512")
+        );
+    }
+    #[test]
+    fn uploaded_skill_case_collisions_explain_the_conflicting_resource_path() {
+        let (temp, manager, home) = setup();
+        std::fs::write(temp.path().join("case-probe"), "probe").unwrap();
+        if !temp.path().join("CASE-PROBE").exists() {
+            return;
+        }
+        let files = [
+            uploaded(&manager, "SKILL.md", b"Body"),
+            uploaded(&manager, "Resource.txt", b"a"),
+            uploaded(&manager, "resource.txt", b"b"),
+        ];
+        let error = manager.import_files("collision", &files).unwrap_err();
+        assert!(error.to_string().contains("大小写冲突"));
+        assert!(error.to_string().contains("resource.txt"));
+        assert!(!home.join(".agents/skills/collision").exists());
     }
     #[test]
     fn uploaded_skill_files_preserve_contents_and_cannot_overwrite_an_installation() {

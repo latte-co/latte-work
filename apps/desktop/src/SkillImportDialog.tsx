@@ -102,6 +102,7 @@ export function SkillImportDialog({
         />
         <div
           className={`skill-import-drop${dragging ? " dragging" : ""}`}
+          role="group"
           aria-label="拖入技能文件或文件夹"
           onDragOver={(event) => {
             if (!Array.from(event.dataTransfer.types).includes("Files")) return;
@@ -158,7 +159,9 @@ export function SkillImportDialog({
                 onChange={(e) => setUpload({ ...upload, name: e.target.value })}
               />
             </label>
-            <p id="skill-name-help">使用英文字母、数字、连字符或下划线。</p>
+            <p id="skill-name-help">
+              最多 128 个英文字母、数字、连字符、下划线或点号，不能以点号开头。
+            </p>
             <p>已选择 {upload.files.length} 个文件</p>
             <ul aria-label="已选择的技能文件" tabIndex={0}>
               {upload.files.map((item) => (

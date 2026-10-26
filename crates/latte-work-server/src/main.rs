@@ -8,6 +8,7 @@ mod message_queue;
 mod providers;
 mod questions;
 mod runtime;
+mod skill_staging;
 mod skill_worker;
 mod skills;
 mod snapshot_migration;
