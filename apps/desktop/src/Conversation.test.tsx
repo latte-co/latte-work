@@ -1179,3 +1179,30 @@ it("offers Agent selection only for drafts and preserves draft text", () => {
   expect(screen.queryByRole("combobox", { name: "Code Agent" })).toBeNull();
   expect(screen.getByTitle("Traex")).toBeTruthy();
 });
+
+it("preselects a removable Skill Creator preset without sending, and includes it only on explicit submission", async () => {
+  const p = props();
+  p.drafts.update("new-task", { skillCreator: true });
+  render(<Conversation {...p} />);
+  expect(screen.getByText("Skill Creator")).toBeTruthy();
+  expect(document.activeElement).toBe(input());
+  expect(p.send).not.toHaveBeenCalled();
+  fireEvent.change(input(), { target: { value: "创建一个代码评审技能" } });
+  fireEvent.keyDown(input(), { key: "Enter" });
+  await waitFor(() => expect(p.send).toHaveBeenCalled());
+  expect(p.send.mock.calls[0][0]).toContain("~/.agents/skills/<skill-name>/");
+  expect(p.send.mock.calls[0][0]).toContain("创建一个代码评审技能");
+  expect(p.send.mock.calls[0][0]).toContain("不要写入项目级技能目录");
+});
+it("removing Skill Creator preserves the user's draft and normal send behavior", async () => {
+  const p = props();
+  p.drafts.update("new-task", { skillCreator: true, text: "已有草稿" });
+  render(<Conversation {...p} />);
+  fireEvent.click(screen.getByRole("button", { name: "移除 Skill Creator" }));
+  expect(screen.queryByText("Skill Creator")).toBeNull();
+  expect(input().value).toBe("已有草稿");
+  expect(document.activeElement).toBe(input());
+  fireEvent.keyDown(input(), { key: "Enter" });
+  await waitFor(() => expect(p.send).toHaveBeenCalled());
+  expect(p.send.mock.calls[0][0]).toBe("已有草稿");
+});

@@ -373,6 +373,13 @@ pub struct SkillInfo {
     pub directory: String,
 }
 /// Host-local skill installations. Platform skills are scoped to Work launches.
+/// One selected file, already uploaded to this host's private attachment store.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+pub struct SkillImportFile {
+    pub path: String,
+    pub attachment: String,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "snake_case")]
 pub enum SkillScope {
@@ -795,6 +802,10 @@ pub enum Request {
         scope: SkillScope,
         path: String,
     },
+    ImportSkillFiles {
+        name: String,
+        files: Vec<SkillImportFile>,
+    },
     SkillInfo {
         session_id: String,
         name: String,
@@ -1086,6 +1097,8 @@ pub enum Response {
         history_window: bool,
         #[serde(default)]
         skill_management: bool,
+        #[serde(default)]
+        skill_file_import: bool,
     },
     Projects {
         projects: Vec<Project>,
@@ -1169,15 +1182,18 @@ mod tests {
             serde_json::from_value::<Response>(legacy.clone()).unwrap(),
             Response::Hello {
                 skill_management: false,
+                skill_file_import: false,
                 ..
             }
         ));
         let mut current = legacy;
         current["skill_management"] = serde_json::json!(true);
+        current["skill_file_import"] = serde_json::json!(true);
         assert!(matches!(
             serde_json::from_value::<Response>(current).unwrap(),
             Response::Hello {
                 skill_management: true,
+                skill_file_import: true,
                 ..
             }
         ));

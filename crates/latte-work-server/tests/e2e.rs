@@ -8089,3 +8089,107 @@ async fn damaged_skill_preferences_do_not_block_agent_sessions_or_command_discov
         assert!(prefs.symlink_metadata().is_ok());
     }
 }
+
+#[tokio::test]
+async fn skill_file_upload_installs_globally_and_rejects_foreign_attachment_paths() {
+    use latte_work_protocol::SkillImportFile;
+    let home = tempfile::tempdir().unwrap();
+    let host = Host::start_with_environment(&[("HOME", home.path().as_os_str())]).await;
+    let mut client = host.client().await;
+    assert!(matches!(
+        ask(&mut client, Request::Hello { version: VERSION }).await,
+        Response::Hello {
+            skill_file_import: true,
+            ..
+        }
+    ));
+    let mut files = Vec::new();
+    for (path, body) in [
+        ("SKILL.md", b"---\nname: upload-e2e\n---\nBody".as_slice()),
+        ("references/note.txt", b"complete resource".as_slice()),
+    ] {
+        let Response::AttachmentUpload { id } = ask(
+            &mut client,
+            Request::BeginAttachment {
+                name: path.rsplit('/').next().unwrap().into(),
+                size: body.len() as u64,
+            },
+        )
+        .await
+        else {
+            panic!("begin upload")
+        };
+        assert!(matches!(
+            ask(
+                &mut client,
+                Request::AttachmentChunk {
+                    id: id.clone(),
+                    offset: 0,
+                    data: body.to_vec()
+                }
+            )
+            .await,
+            Response::Ok
+        ));
+        let Response::FileReference { entry } =
+            ask(&mut client, Request::FinishAttachment { id }).await
+        else {
+            panic!("complete upload")
+        };
+        files.push(SkillImportFile {
+            path: path.into(),
+            attachment: entry.path,
+        });
+    }
+    let bad = SkillImportFile {
+        path: "SKILL.md".into(),
+        attachment: "/etc/passwd".into(),
+    };
+    assert!(matches!(
+        ask(
+            &mut client,
+            Request::ImportSkillFiles {
+                name: "foreign".into(),
+                files: vec![bad]
+            }
+        )
+        .await,
+        Response::Error { .. }
+    ));
+    let Response::Skills { skills, .. } = ask(
+        &mut client,
+        Request::ImportSkillFiles {
+            name: "upload-e2e".into(),
+            files: files.clone(),
+        },
+    )
+    .await
+    else {
+        panic!("global upload")
+    };
+    let entry = skills.iter().find(|s| s.name == "upload-e2e").unwrap();
+    assert_eq!(entry.scope, latte_work_protocol::SkillScope::System);
+    assert_eq!(
+        std::fs::read(
+            home.path()
+                .join(".agents/skills/upload-e2e/references/note.txt")
+        )
+        .unwrap(),
+        b"complete resource"
+    );
+    assert!(matches!(
+        ask(
+            &mut client,
+            Request::ImportSkillFiles {
+                name: "upload-e2e".into(),
+                files
+            }
+        )
+        .await,
+        Response::Error { .. }
+    ));
+    assert!(
+        matches!(ask(&mut client, Request::RecentSessions { before: None }).await, Response::RecentSessions { sessions, .. } if sessions.is_empty())
+    );
+    assert!(!home.path().join(".claude/skills/upload-e2e").exists());
+}

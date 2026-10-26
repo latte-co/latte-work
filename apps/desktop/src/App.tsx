@@ -464,6 +464,25 @@ export default function App() {
           active={skillsOpen}
           busy={skillsBusy}
           onBusy={setSkillsBusy}
+          onCreate={(targetHostId) => {
+            if (!workbench.hosts.some((host) => host.id === targetHostId)) {
+              setError("技能所在主机已移除");
+              return;
+            }
+            const target =
+              workbench.projects.find(
+                (p) =>
+                  p.hostId === targetHostId && p.id === workbench.projectId,
+              ) ?? workbench.projects.find((p) => p.hostId === targetHostId);
+            void workbench
+              .createSession(target)
+              .then(() => {
+                if (!target && targetHostId !== workbench.hostId)
+                  workbench.selectProject(targetHostId, "");
+                drafts.update("new-task", { skillCreator: true });
+              })
+              .catch((cause) => setError(message(cause)));
+          }}
           onClose={() => {
             workbench.setModal(null);
             requestAnimationFrame(() => {

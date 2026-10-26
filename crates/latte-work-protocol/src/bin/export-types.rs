@@ -41,6 +41,7 @@ fn main() {
         TaskSource::decl(),
         SkillInfo::decl(),
         SkillScope::decl(),
+        SkillImportFile::decl(),
         SkillState::decl(),
         ManagedSkill::decl(),
         QueuedMessage::decl(),

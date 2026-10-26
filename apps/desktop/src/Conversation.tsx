@@ -144,6 +144,10 @@ export function Conversation({
   const modelPicker = useRef<ModelPickerHandle>(null);
   const [sending, setSending] = useState(false);
   const [composerFocus, setComposerFocus] = useState(0);
+  useEffect(() => {
+    if (draft.skillCreator && !settingsOpen)
+      setComposerFocus((value) => value + 1);
+  }, [draft.skillCreator, settingsOpen]);
   const previousDraftKey = useRef(draftKey);
   const migrated = useRef<string | null>(null);
   const submission = useRef<{
@@ -861,6 +865,10 @@ export function Conversation({
         />
         <Composer
           focusRequest={composerFocus}
+          skillCreator={draft.skillCreator}
+          onRemoveSkillCreator={() =>
+            drafts.update(draftKey, { skillCreator: undefined })
+          }
           referenceState={draft.references}
           onReferencesChange={(references) =>
             drafts.update(draftKey, { references })
@@ -889,7 +897,9 @@ export function Conversation({
               : session?.archived
                 ? "会话已归档，请通过右键菜单取消归档后继续"
                 : projectName
-                  ? "描述任务，@ 添加引用，/ 调用 Agent 命令…"
+                  ? draft.skillCreator
+                    ? "描述你想创建的技能…"
+                    : "描述任务，@ 添加引用，/ 调用 Agent 命令…"
                   : "先添加或选择一个项目"
           }
           toolbar={(submit, hasContent, localNavigation) => (

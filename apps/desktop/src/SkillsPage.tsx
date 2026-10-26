@@ -10,6 +10,7 @@ export function SkillsPage({
   busy,
   onBusy,
   onClose,
+  onCreate,
   controls,
 }: {
   state: Workbench;
@@ -17,6 +18,7 @@ export function SkillsPage({
   busy: boolean;
   onBusy: (busy: boolean) => void;
   onClose: () => void;
+  onCreate: (hostId: string) => void;
   controls?: ReactNode;
 }) {
   const back = useRef<HTMLButtonElement>(null);
@@ -53,7 +55,12 @@ export function SkillsPage({
         </div>
       </header>
       <div className="skills-page-body">
-        <SkillsSettings state={state} active={active} onBusy={onBusy} />
+        <SkillsSettings
+          state={state}
+          active={active}
+          onBusy={onBusy}
+          onCreate={onCreate}
+        />
       </div>
     </main>
   );

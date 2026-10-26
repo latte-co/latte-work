@@ -309,6 +309,7 @@ async fn connection(stream: UnixStream, service: Service) -> Result<()> {
                             permission_settings: true,
                             history_window: true,
                             skill_management: true,
+                            skill_file_import: true,
                         }
                     } else {
                         Response::Error {
@@ -1270,12 +1271,14 @@ async fn dispatch(s: &Service, request: Request) -> Result<Response> {
         action @ (Request::Skills { .. }
         | Request::SkillDetail { .. }
         | Request::SetSkillState { .. }
-        | Request::InstallSkill { .. }) => {
+        | Request::InstallSkill { .. }
+        | Request::ImportSkillFiles { .. }) => {
             let project_id = match &action {
                 Request::Skills { project_id }
                 | Request::SkillDetail { project_id, .. }
                 | Request::SetSkillState { project_id, .. }
                 | Request::InstallSkill { project_id, .. } => project_id.as_deref(),
+                Request::ImportSkillFiles { .. } => None,
                 _ => unreachable!(),
             };
             if project_id.is_some() {
@@ -1300,6 +1303,9 @@ async fn dispatch(s: &Service, request: Request) -> Result<Response> {
                                 } => manager.set_state_checked(None, &id, expected_state, state)?,
                                 Request::InstallSkill { scope, path, .. } => {
                                     manager.install(None, scope, Path::new(&path))?
+                                }
+                                Request::ImportSkillFiles { name, files } => {
+                                    manager.import_files(&name, &files)?
                                 }
                                 _ => {}
                             }

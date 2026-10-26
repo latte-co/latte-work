@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { message, request } from "./api";
+import { uploadSkill, type SkillUpload } from "./skillImport";
 import type { ManagedSkill, Response, SkillState } from "./protocol";
 import type { Workbench } from "./useWorkbench";
 export type SkillChange = { skill: ManagedSkill; next: SkillState };
@@ -117,9 +118,7 @@ export function useSkills(
     };
   }, [selected, context]);
 
-  async function mutate(
-    action: { skill: ManagedSkill; next: SkillState } | { path: string },
-  ) {
+  async function mutate(action: SkillChange | SkillUpload) {
     if (operation.current || !connected) return;
     operation.current = true;
     const version = generation.current;
@@ -128,23 +127,20 @@ export function useSkills(
     clearErrors();
     setNotice("");
     try {
-      const response = await request(
-        hostId,
+      const response =
         "skill" in action
-          ? {
+          ? await request(hostId, {
               method: "set_skill_state",
               project_id: null,
               id: action.skill.id,
               state: action.next,
               expected_state: action.skill.state,
-            }
-          : {
-              method: "install_skill",
-              project_id: null,
-              scope: "system",
-              path: action.path.trim(),
-            },
-      );
+            })
+          : await uploadSkill(
+              hostId,
+              action,
+              () => version === generation.current,
+            );
       if (version !== generation.current) return;
       if (response.kind !== "skills")
         throw new Error("操作结果待核对，请刷新列表确认状态");

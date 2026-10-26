@@ -108,6 +108,55 @@ async fn global_skills_over_real_ssh_are_isolated_reversible_and_reconnectable()
         "complete package"
     );
     assert!(!local_home.join(".agents/skills/imported").exists());
+    let body = b"---\nname: ssh-upload\n---\nUploaded over SSH";
+    let Response::AttachmentUpload { id: upload_id } = ask(
+        &mut client,
+        Request::BeginAttachment {
+            name: "SKILL.md".into(),
+            size: body.len() as u64,
+        },
+    )
+    .await
+    else {
+        panic!("SSH upload")
+    };
+    assert!(matches!(
+        ask(
+            &mut client,
+            Request::AttachmentChunk {
+                id: upload_id.clone(),
+                offset: 0,
+                data: body.to_vec()
+            }
+        )
+        .await,
+        Response::Ok
+    ));
+    let Response::FileReference { entry } =
+        ask(&mut client, Request::FinishAttachment { id: upload_id }).await
+    else {
+        panic!("SSH finish")
+    };
+    assert!(matches!(
+        ask(
+            &mut client,
+            Request::ImportSkillFiles {
+                name: "ssh-upload".into(),
+                files: vec![latte_work_protocol::SkillImportFile {
+                    path: "SKILL.md".into(),
+                    attachment: entry.path
+                }]
+            }
+        )
+        .await,
+        Response::Skills { .. }
+    ));
+    assert!(
+        remote_home
+            .join(".agents/skills/ssh-upload/SKILL.md")
+            .is_file()
+    );
+    assert!(!local_home.join(".agents/skills/ssh-upload").exists());
     drop(client);
     let mut client = Client::ssh("latte-skill-test", binary).await.unwrap();
     assert!(

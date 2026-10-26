@@ -233,6 +233,7 @@ export type SkillInfo = {
   directory: string;
 };
 export type SkillScope = "platform" | "system" | "project";
+export type SkillImportFile = { path: string; attachment: string };
 export type SkillState = "enabled" | "disabled" | "uninstalled";
 export type ManagedSkill = {
   id: string;
@@ -568,6 +569,11 @@ export type Request =
       scope: SkillScope;
       path: string;
     }
+  | {
+      method: "import_skill_files";
+      name: string;
+      files: Array<SkillImportFile>;
+    }
   | { method: "skill_info"; session_id: string; name: string }
   | { method: "sources"; session_id: string }
   | {
@@ -673,6 +679,7 @@ export type Response =
       permission_settings: boolean;
       history_window: boolean;
       skill_management: boolean;
+      skill_file_import: boolean;
     }
   | { kind: "projects"; projects: Array<Project> }
   | { kind: "project"; project: Project }

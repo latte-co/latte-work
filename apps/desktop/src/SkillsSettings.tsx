@@ -15,10 +15,12 @@ export function SkillsSettings({
   state,
   active,
   onBusy,
+  onCreate,
 }: {
   state: Workbench;
   active: boolean;
   onBusy: (busy: boolean) => void;
+  onCreate?: (hostId: string) => void;
 }) {
   const [scope, setScope] = useState<GlobalSkillScope>("platform");
   const [query, setQuery] = useState("");
@@ -130,9 +132,17 @@ export function SkillsSettings({
             <RefreshCw size={17} className={loading ? "skills-spinning" : ""} />
           </button>
           <button
+            className="skills-create"
+            disabled={busy || !onCreate}
+            onClick={() => onCreate?.(hostId)}
+          >
+            创建技能
+          </button>
+          <button
             className="primary skills-add"
             disabled={locked || !catalog}
-            onClick={() => {
+            onClick={(event) => {
+              event.currentTarget.focus();
               clearErrors();
               setAdd(true);
             }}
@@ -299,9 +309,10 @@ export function SkillsSettings({
           hostName={host?.name}
           busy={busy}
           connected={connected}
+          supported={state.hostSupportsSkillFiles(hostId)}
           error={operationError}
           onClose={() => setAdd(false)}
-          onImport={(path) => void mutate({ path })}
+          onImport={(upload) => void mutate(upload)}
         />
       )}
     </div>

@@ -1437,10 +1437,14 @@ it("reads skill support independently from each connected host hello", async () 
     server_id: `server-${host.id}`,
     agents: [],
     skill_management: host.id === "local",
+    skill_file_import: host.id === "local",
   }));
   const hook = renderHook(useWorkbench);
   await act(async () => {});
   expect(hook.result.current.hostSupportsSkills("local")).toBe(true);
   expect(hook.result.current.hostSupportsSkills("remote")).toBe(false);
   expect(hook.result.current.hostSupportsSkills("missing")).toBe(false);
+  expect(hook.result.current.hostSupportsSkillFiles("local")).toBe(true);
+  expect(hook.result.current.hostSupportsSkillFiles("remote")).toBe(false);
+  expect(hook.result.current.hostSupportsSkillFiles("missing")).toBe(false);
 });

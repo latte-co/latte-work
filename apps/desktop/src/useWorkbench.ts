@@ -1427,6 +1427,10 @@ export function useWorkbench() {
       const target = hosts.find((host) => host.id === id);
       return !!target && cachedHello(target)?.skill_management === true;
     },
+    hostSupportsSkillFiles: (id: string) => {
+      const target = hosts.find((host) => host.id === id);
+      return !!target && cachedHello(target)?.skill_file_import === true;
+    },
     connecting,
     serverId,
     agent,

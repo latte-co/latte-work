@@ -1242,10 +1242,15 @@ requests on legacy Servers; import stays disabled until inventory loads.
 Reconnecting the selected host reloads inventory.
 Details offer Install for uninstalled skills and a disabled Installed status for
 enabled/disabled installations, alongside the enable switch, uninstall and copy
-actions. Copy preserves the complete SKILL.md, including its frontmatter, so the
+actions. The Create skill action opens a new unsaved task on the selected host with
+a removable **Skill Creator** preset. It preserves existing unsent text and does
+not send, create a persisted session, or start an Agent. On explicit submission,
+the App-provided authoring instructions accompany the user request and direct the
+Agent to the host-global `~/.agents/skills` directory. This is an authoring task,
+independent of project-level skill management. Copy preserves the complete SKILL.md, including its frontmatter, so the
 result remains a reusable skill; the rendered preview and injected prompt contain
 only the Markdown body. The detail description is associated with the dialog for
-assistive technology. There is no trial project or task creation flow.
+assistive technology. There is no skill trial or trial-project selection.
 
 Platform skills ship in `skills/`, are embedded in the standalone Server, and are
 enabled by default. Corrupt, oversized or symlinked preferences skip platform
@@ -1305,6 +1310,24 @@ Add imports a complete directory already on the chosen host into that host's glo
 `~/.agents/skills`, preserving resources and source files. Imports are staged, reject
 nested symlinks/special files, and allow 512 entries, 16 MiB total and eight directory
 levels. No download, shell expansion, package manager or skill body is executed.
+The Add dialog accepts a local `SKILL.md`, folder selection or an HTML5 file/folder
+drop, previews the complete file list and an editable installation name, and waits
+for explicit Install. It never interprets a local selection as an SSH-host path.
+Directory entry readers are drained across batches with bounded count/depth; files
+are limited before content reads. Regular file contents are transferred through the
+existing 64-KiB attachment protocol directly to the selected host. Uploads do not
+preserve original Unix executable metadata; native host-path imports retain their
+existing file-mode behavior. Completed staging follows the existing attachment
+cache policy and quota; incomplete uploads are aborted on cancellation/error.
+The additive `import_skill_files` request accepts only completed upload paths from
+this host's private store, rejects traversal/duplicates/symlinks/special files and
+path conflicts, then stages and installs atomically through the same skill worker.
+Both files and directories count toward 512 entries; depth, 16-MiB aggregate,
+64-KiB metadata and deadline limits apply. Existing installations are never replaced.
+Hello advertises `skill_file_import` separately; absent/false keeps the client from
+uploading and explains that this host needs a Server update. The existing global
+inventory and native path-install request remain compatible with older clients.
+
 Inventory reads at most 512 entries per directory, returns at most 512 skills and
 half a wire frame of metadata. Copy-conflict and scan diagnostics have independent
 16-message wire budgets (15 examples plus an omitted-count summary), so one class

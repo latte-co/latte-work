@@ -30,6 +30,7 @@ pub fn lane(request: &Request) -> Lane {
         | Request::SkillDetail { .. }
         | Request::SetSkillState { .. }
         | Request::InstallSkill { .. }
+        | Request::ImportSkillFiles { .. }
         | Request::SkillInfo { .. }
         | Request::AgentCommands { .. }
         | Request::AgentPermissions { .. }

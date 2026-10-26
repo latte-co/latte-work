@@ -314,3 +314,71 @@
   background: var(--color-selected);
   color: var(--color-text);
 }
+
+.skill-import-drop {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  padding: 24px 16px;
+  border: 1px dashed var(--color-border-strong);
+  border-radius: 12px;
+  color: var(--color-text-secondary);
+  text-align: center;
+}
+.skill-import-drop.dragging {
+  background: var(--color-focus-background);
+}
+.skill-import-drop span,
+.skill-import-selection p {
+  font-size: var(--text-sm);
+  color: var(--color-text-muted);
+}
+.skill-import-choose {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  justify-content: center;
+}
+.skill-import-choose button {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: var(--color-input);
+}
+.skill-import-selection {
+  margin-top: 20px;
+}
+.skill-import-selection ul {
+  max-height: 140px;
+  overflow: auto;
+  margin: 8px 0;
+  padding-left: 20px;
+  font-size: var(--text-sm);
+  overflow-wrap: anywhere;
+}
+.composer-skill-preset {
+  padding: 8px 12px 0;
+}
+.composer-skill-preset > span {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px;
+  border-radius: 8px;
+  background: var(--color-surface);
+  color: var(--color-primary);
+  font-size: var(--text-sm);
+}
+.composer-skill-preset button {
+  display: inline-flex;
+  min-height: 24px;
+  padding: 2px;
+}
+
+.modal.skill-import {
+  width: 560px;
+}
+.skill-import input[type="file"][hidden] {
+  display: none;
+}

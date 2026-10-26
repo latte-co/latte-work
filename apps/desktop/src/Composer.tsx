@@ -8,6 +8,7 @@ import {
 } from "react";
 import {
   ArrowLeft,
+  Box,
   ChevronRight,
   FileText,
   FileVideo,
@@ -40,10 +41,13 @@ import {
   storePastedFile,
   type ComposerReference,
 } from "./pasteAttachments";
+import { skillCreatorPrompt } from "./skillCreator";
 import { AttachmentImage } from "./AttachmentImage";
 import { referenceKind } from "./referenceMessage";
 
 interface Props {
+  skillCreator?: boolean;
+  onRemoveSkillCreator?: () => void;
   focusRequest?: number;
   referenceState?: { scope: string; entries: ComposerReference[] };
   onReferencesChange?: (value: {
@@ -652,7 +656,10 @@ export function Composer(props: Props) {
         openAppCommand(uiAction);
         return;
       }
-      const prompt = referencePrompt(value, attached);
+      const prompt = referencePrompt(
+        props.skillCreator ? skillCreatorPrompt(value) : value,
+        attached,
+      );
       if (await onSubmit(prompt)) {
         if (!props.referenceState && currentScope.current === owner)
           setReferences({ scope: owner, entries: [] });
@@ -1066,6 +1073,24 @@ export function Composer(props: Props) {
               <span>esc 关闭</span>
             </div>
           )}
+        </div>
+      )}
+      {props.skillCreator && (
+        <div className="composer-skill-preset" aria-label="已选择技能">
+          <span title="Latte Work 内置的技能创建指引；发送需求后创建全局技能">
+            <Box size={16} />
+            Skill Creator
+            <button
+              disabled={sending || pasting}
+              aria-label="移除 Skill Creator"
+              onClick={() => {
+                props.onRemoveSkillCreator?.();
+                input.current?.focus();
+              }}
+            >
+              <X size={13} />
+            </button>
+          </span>
         </div>
       )}
       {!!attached.length && (

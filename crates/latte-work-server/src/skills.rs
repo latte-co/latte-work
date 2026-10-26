@@ -396,6 +396,99 @@ impl Skills {
         }
         Ok(())
     }
+    /// Import selected content without interpreting client-side absolute paths.
+    pub fn import_files(
+        &self,
+        name: &str,
+        files: &[latte_work_protocol::SkillImportFile],
+    ) -> Result<()> {
+        use std::io::{Read, Write};
+        use std::os::unix::fs::OpenOptionsExt;
+        self.check_budget()?;
+        if !component(name) || files.is_empty() || files.len() > LIMIT {
+            bail!("技能目录名无效或文件数量超过 512 项");
+        }
+        let uploads = crate::attachments::Attachments::new(&self.directory)?;
+        let mut names = HashSet::new();
+        let mut directories = HashSet::new();
+        for item in files {
+            let parts: Vec<_> = item.path.split('/').collect();
+            if item.path.len() > 1024
+                || parts.len() > 9
+                || parts.iter().any(|p| {
+                    p.is_empty()
+                        || *p == "."
+                        || *p == ".."
+                        || p.len() > 255
+                        || p.contains('\\')
+                        || p.chars().any(char::is_control)
+                })
+                || !names.insert(item.path.as_str())
+            {
+                bail!(
+                    "技能文件路径无效或重复：{}",
+                    item.path.chars().take(128).collect::<String>()
+                );
+            }
+            for n in 1..parts.len() {
+                directories.insert(parts[..n].join("/"));
+            }
+            if !uploads.is_completed(Path::new(&item.attachment)) {
+                bail!("技能文件必须来自当前主机已完成的上传");
+            }
+        }
+        if names.len() + directories.len() > LIMIT
+            || directories.iter().any(|p| names.contains(p.as_str()))
+        {
+            bail!("技能最多 512 项，文件和目录不能重名");
+        }
+        if !names.contains("SKILL.md") {
+            bail!("技能中缺少 SKILL.md");
+        }
+        let staging = tempfile::Builder::new()
+            .prefix("skill-upload-")
+            .tempdir_in(&self.directory)?;
+        let source = staging.path().join(name);
+        std::fs::create_dir(&source)?;
+        let mut total = 0u64;
+        for item in files {
+            self.check_budget()?;
+            let mut input = std::fs::OpenOptions::new()
+                .read(true)
+                .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_NONBLOCK)
+                .open(&item.attachment)?;
+            let metadata = input.metadata()?;
+            total = total.saturating_add(metadata.len());
+            if !metadata.is_file()
+                || total > 16 * 1024 * 1024
+                || (item.path == "SKILL.md" && metadata.len() > FILE_LIMIT)
+            {
+                bail!("技能上传超出读取范围（总量 16 MiB，SKILL.md 64 KiB）");
+            }
+            let target = source.join(&item.path);
+            std::fs::create_dir_all(target.parent().context("技能路径无效")?)?;
+            let mut output = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(target)?;
+            let mut remaining = metadata.len();
+            while remaining > 0 {
+                self.check_budget()?;
+                let mut buffer = [0; 65536];
+                let count = input.read(&mut buffer[..usize::try_from(remaining.min(65536))?])?;
+                if count == 0 {
+                    bail!("技能上传文件在读取期间发生变化");
+                }
+                output.write_all(&buffer[..count])?;
+                remaining -= count as u64;
+            }
+            if input.read(&mut [0])? != 0 {
+                bail!("技能上传文件在读取期间发生变化");
+            }
+        }
+        self.install(None, SkillScope::System, &source)
+    }
     pub fn install(&self, project: Option<&Path>, scope: SkillScope, source: &Path) -> Result<()> {
         require_global(project)?;
         self.check_budget()?;
@@ -1063,6 +1156,82 @@ mod tests {
         assert!(catalog.warnings.iter().any(|w| w.contains("5 条扫描诊断")));
         assert!(!catalog.skills.iter().any(|s| s.scope == SkillScope::System));
         assert!(catalog.warnings.iter().all(|w| w.chars().count() <= 1024));
+    }
+    fn uploaded(manager: &Skills, path: &str, body: &[u8]) -> latte_work_protocol::SkillImportFile {
+        let mut attachments = crate::attachments::Attachments::new(&manager.directory).unwrap();
+        let id = attachments
+            .begin("selected-file".into(), body.len() as u64)
+            .unwrap();
+        for (n, chunk) in body.chunks(65536).enumerate() {
+            attachments.chunk(&id, (n * 65536) as u64, chunk).unwrap();
+        }
+        latte_work_protocol::SkillImportFile {
+            path: path.into(),
+            attachment: attachments.finish(&id).unwrap().path,
+        }
+    }
+    #[test]
+    fn uploaded_skill_files_preserve_contents_and_cannot_overwrite_an_installation() {
+        let (_temp, manager, home) = setup();
+        let files = vec![
+            uploaded(&manager, "SKILL.md", b"---\nname: uploaded\n---\nBody"),
+            uploaded(&manager, "references/readme.txt", b"resource"),
+        ];
+        manager.import_files("uploaded", &files).unwrap();
+        assert_eq!(
+            std::fs::read(home.join(".agents/skills/uploaded/references/readme.txt")).unwrap(),
+            b"resource"
+        );
+        assert!(manager.import_files("uploaded", &files).is_err());
+        assert!(files.iter().all(|f| Path::new(&f.attachment).is_file()));
+        assert!(!home.join(".claude/skills/uploaded").exists());
+    }
+    #[test]
+    fn uploaded_skills_reject_paths_foreign_files_and_symlinks_without_partial_installation() {
+        let (temp, manager, home) = setup();
+        let skill = uploaded(&manager, "SKILL.md", b"Body");
+        for path in [
+            "../escape",
+            "/escape",
+            "a/../escape",
+            "a//bad",
+            "a\\bad",
+            "SKILL.md",
+        ] {
+            let mut bad = skill.clone();
+            bad.path = path.into();
+            assert!(
+                manager
+                    .import_files("unsafe", &[skill.clone(), bad])
+                    .is_err()
+            );
+        }
+        let foreign = temp.path().join("foreign");
+        std::fs::write(&foreign, "preserve").unwrap();
+        let bad = latte_work_protocol::SkillImportFile {
+            path: "SKILL.md".into(),
+            attachment: foreign.to_str().unwrap().into(),
+        };
+        assert!(manager.import_files("foreign", &[bad]).is_err());
+        let link = uploaded(&manager, "SKILL.md", b"placeholder");
+        // Replace only this test's generated upload to exercise O_NOFOLLOW.
+        std::fs::remove_file(&link.attachment).unwrap();
+        std::os::unix::fs::symlink(&foreign, &link.attachment).unwrap();
+        assert!(manager.import_files("linked", &[link]).is_err());
+        assert_eq!(std::fs::read_to_string(foreign).unwrap(), "preserve");
+        assert!(!home.join(".agents/skills").exists());
+        let expired = manager.with_budget(Budget::new(std::time::Duration::ZERO));
+        assert!(expired.import_files("expired", &[skill]).is_err());
+    }
+    #[test]
+    fn uploaded_skills_bound_metadata_and_total_resources() {
+        let (_temp, manager, home) = setup();
+        let skill = uploaded(&manager, "SKILL.md", b"Body");
+        let huge = uploaded(&manager, "resource.bin", &vec![0; 16 * 1024 * 1024]);
+        assert!(manager.import_files("huge", &[skill, huge]).is_err());
+        let metadata = uploaded(&manager, "SKILL.md", &vec![b'x'; 65537]);
+        assert!(manager.import_files("metadata", &[metadata]).is_err());
+        assert!(!home.join(".agents/skills").exists());
     }
     #[test]
     fn stale_actions_cannot_restore_an_uninstalled_skill_but_receipts_can_reconcile() {

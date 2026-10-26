@@ -1,4 +1,5 @@
 // @vitest-environment jsdom
+import type { DraftStore } from "./drafts";
 import type { ReactNode } from "react";
 import {
   act,
@@ -12,7 +13,10 @@ import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import App from "./App";
 import type { Workbench } from "./useWorkbench";
 import type { SidebarPreview } from "./useSidebarPreview";
-const mocks = vi.hoisted(() => ({ state: {} as Workbench }));
+const mocks = vi.hoisted(() => ({
+  state: {} as Workbench,
+  drafts: undefined as DraftStore | undefined,
+}));
 vi.mock("./useWorkbench", () => ({ useWorkbench: () => mocks.state }));
 vi.mock("./appLifecycle", () => ({ useAppLifecycle: () => {} }));
 vi.mock("./useSubagents", () => ({
@@ -37,7 +41,12 @@ vi.mock("./Sidebar", () => ({
     </aside>
   ),
 }));
-vi.mock("./Conversation", () => ({ Conversation: () => null }));
+vi.mock("./Conversation", () => ({
+  Conversation: ({ drafts }: { drafts: DraftStore }) => {
+    mocks.drafts = drafts;
+    return null;
+  },
+}));
 vi.mock("./TaskOverview", () => ({ TaskOverview: () => null }));
 vi.mock("./Workspace", () => ({
   Workspace: ({
@@ -59,7 +68,9 @@ vi.mock("./SkillsPage", () => ({
     active,
     controls,
     onClose,
+    onCreate,
   }: {
+    onCreate: (hostId: string) => void;
     active: boolean;
     controls: ReactNode;
     onClose: () => void;
@@ -67,6 +78,7 @@ vi.mock("./SkillsPage", () => ({
     <main aria-label="技能管理" hidden={!active}>
       {controls}
       <button onClick={onClose}>返回对话</button>
+      <button onClick={() => onCreate("remote")}>创建技能</button>
     </main>
   ),
 }));
@@ -256,4 +268,22 @@ it("shows Skills in the main content area while preserving the sidebar and hidin
   view.rerender(<App />);
   expect(screen.queryByRole("main", { name: "技能管理" })).toBeNull();
   expect(document.getElementById("conversation-panel")?.hidden).toBe(false);
+});
+
+it("opens a creator draft on the requested host and preserves unsent text without sending", async () => {
+  mocks.state.modal = "skills";
+  mocks.state.createSession = vi.fn().mockResolvedValue(undefined);
+  mocks.state.selectProject = vi.fn();
+  render(<App />);
+  mocks.drafts!.update("new-task", { text: "保留已有草稿" });
+  fireEvent.click(screen.getByRole("button", { name: "创建技能" }));
+  await act(async () => {
+    await Promise.resolve();
+  });
+  expect(mocks.state.createSession).toHaveBeenCalledWith(undefined);
+  expect(mocks.state.selectProject).toHaveBeenCalledWith("remote", "");
+  expect(mocks.drafts!.get("new-task")).toMatchObject({
+    text: "保留已有草稿",
+    skillCreator: true,
+  });
 });

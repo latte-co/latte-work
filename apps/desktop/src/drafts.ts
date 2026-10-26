@@ -3,6 +3,7 @@ import type { ComposerReference } from "./pasteAttachments";
 
 export interface Draft {
   text: string;
+  skillCreator?: boolean;
   references: { scope: string; entries: ComposerReference[] };
 }
 const empty: Draft = { text: "", references: { scope: "", entries: [] } };

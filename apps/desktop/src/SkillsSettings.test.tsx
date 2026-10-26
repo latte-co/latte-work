@@ -28,6 +28,7 @@ const state = {
   isHostConnected: () => true,
   hostConnectionVersions: {},
   hostSupportsSkills: () => true,
+  hostSupportsSkillFiles: () => true,
 } as unknown as Workbench;
 const platform: ManagedSkill = {
   id: "platform:context",
@@ -255,26 +256,47 @@ it("explains an older remote server without exposing the wire parser error, then
   expect(request.mock.calls.length).toBe(count + 1);
   expect(screen.queryByRole("alert")).toBeNull();
 });
-it("imports a directory on the selected host, only into the global directory", async () => {
-  request.mockResolvedValue(catalog());
+it("selects a skill file and imports its contents to the selected host without a project", async () => {
+  request.mockImplementation(async (_host, action) => {
+    if (action.method === "begin_attachment")
+      return { kind: "attachment_upload", id: "upload-1" };
+    if (action.method === "finish_attachment")
+      return {
+        kind: "file_reference",
+        entry: {
+          path: "/host/paste-tmp/skill",
+          name: "SKILL.md",
+          directory: false,
+        },
+      };
+    if (action.method === "attachment_chunk") return { kind: "ok" };
+    return catalog();
+  });
   render(<SkillsSettings state={state} active onBusy={() => {}} />);
   await screen.findByRole("button", { name: /System Review/ });
   fireEvent.click(screen.getByRole("button", { name: "添加" }));
   const modal = screen.getByRole("dialog", { name: "添加技能" });
   expect(within(modal).queryByRole("combobox")).toBeNull();
   expect(within(modal).getByText(/~\/.agents\/skills/)).toBeTruthy();
-  fireEvent.change(within(modal).getByRole("textbox"), {
-    target: { value: "/import/my-skill" },
+  fireEvent.change(within(modal).getByLabelText("选择 SKILL.md"), {
+    target: {
+      files: [new File(["---\nname: imported\n---\nBody"], "SKILL.md")],
+    },
   });
-  fireEvent.click(within(modal).getByRole("button", { name: "添加" }));
+  await within(modal).findByText("已选择 1 个文件");
+  fireEvent.click(within(modal).getByRole("button", { name: "安装" }));
   await waitFor(() =>
     expect(request).toHaveBeenCalledWith("local", {
-      method: "install_skill",
-      project_id: null,
-      scope: "system",
-      path: "/import/my-skill",
+      method: "import_skill_files",
+      name: "imported",
+      files: [{ path: "SKILL.md", attachment: "/host/paste-tmp/skill" }],
     }),
   );
+  expect(
+    request.mock.calls.every(
+      ([, action]) => !["create_session", "send"].includes(action.method),
+    ),
+  ).toBe(true);
 });
 
 it.each(["enabled", "disabled"] as const)(
@@ -414,9 +436,9 @@ it("associates import instructions and limits with the dialog and wraps category
     .split(" ")
     .map((id) => document.getElementById(id)?.textContent)
     .join(" ");
-  expect(description).toContain("现有目录导入完整技能");
+  expect(description).toContain("从此电脑选择技能");
   expect(description).toContain("512");
-  expect(description).toContain("原目录保留");
+  expect(description).toContain("原文件保留");
 });
 
 it("describes skill details and copies a complete reusable SKILL.md including its metadata", async () => {
@@ -455,4 +477,46 @@ it("keeps a failed detail read out of a later import dialog and page-level error
       "alert",
     ),
   ).toBeNull();
+});
+
+it("opens Skill Creator for the selected host without performing any agent request", async () => {
+  request.mockResolvedValue(catalog());
+  const create = vi.fn();
+  render(
+    <SkillsSettings state={state} active onBusy={() => {}} onCreate={create} />,
+  );
+  await screen.findByRole("button", { name: /System Review/ });
+  fireEvent.click(screen.getByRole("combobox", { name: "技能所在主机" }));
+  fireEvent.click(screen.getByRole("option", { name: "devbox" }));
+  await waitFor(() =>
+    expect(request).toHaveBeenLastCalledWith("devbox", {
+      method: "skills",
+      project_id: null,
+    }),
+  );
+  fireEvent.click(screen.getByRole("button", { name: "创建技能" }));
+  expect(create).toHaveBeenCalledWith("devbox");
+  expect(
+    request.mock.calls.every(([, action]) => action.method === "skills"),
+  ).toBe(true);
+});
+it("gates file import on an explicit capability even when directory management is supported", async () => {
+  request.mockResolvedValue(catalog());
+  render(
+    <SkillsSettings
+      state={{ ...state, hostSupportsSkillFiles: () => false }}
+      active
+      onBusy={() => {}}
+    />,
+  );
+  await screen.findByRole("button", { name: /System Review/ });
+  fireEvent.click(screen.getByRole("button", { name: "添加" }));
+  expect(screen.getByText(/尚不支持文件导入/)).toBeTruthy();
+  expect(
+    (screen.getByRole("button", { name: "选择文件" }) as HTMLButtonElement)
+      .disabled,
+  ).toBe(true);
+  expect(
+    request.mock.calls.every(([, action]) => action.method === "skills"),
+  ).toBe(true);
 });
