@@ -377,6 +377,10 @@ Reopening reconciles events without replaying prompts.
 using `scripts/dmg-requirements.txt` (pinned versions). macOS, Python 3 with venv/pip,
 Command Line Tools and network access on first use are required. It never installs
 global Python packages; unchanged dependencies are reused offline.
+Before reuse, the wrapper checks that Python recognizes the checkout's private
+environment, recreating incomplete cached tools when necessary. Inherited
+Python search paths are ignored. `make test-native` covers both cases without
+installing packaging dependencies or creating a DMG.
 
 `scripts/package-dmg.py` owns the 600×400 white installation window, large app and
 Applications icons, and center arrow. All staging and alias paths are canonicalized
@@ -550,6 +554,14 @@ navigation does not create transports. A reconnect replaces all lanes and fences
 stale responses by connection identity and daemon ID. No Send is retried.
 
 Draft acknowledgement uses content versions in the in-memory DraftStore. Duplicate input updates and empty-reference scope initialization retain the submitted version; actual text, preset, reference or host/project/Agent scope edits advance it. A successful acknowledgement clears only its version, including after first-send session adoption. Failures and unknown transport outcomes retain the draft without replay. Deleting and retyping the same text is a new edit and survives an older acknowledgement.
+
+While acknowledgement is pending, only the unchanged submitted version is hidden
+from the composer's text, reference chips and Skill preset. Its canonical contents
+remain in DraftStore; failure or disconnection reveals them again. A different
+scope or newly edited version is never hidden. A polled running state alone does
+not confirm admission or enable Stop. Before native activity arrives, the active
+turn shows sending rather than waiting for a model response; reported progress,
+tools, approval, stopping and disconnect evidence take precedence.
 
 ## Native subagent presentation
 

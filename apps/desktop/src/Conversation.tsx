@@ -136,6 +136,11 @@ export function Conversation({
   answerQuestion,
 }: Props) {
   const draftKey = session ? JSON.stringify([hostId, session.id]) : "new-task";
+  const submissionScope = JSON.stringify([
+    hostId,
+    projectId,
+    session?.agent ?? agent?.id ?? "claude",
+  ]);
   const draft = useDraft(drafts, draftKey);
   const editingScope = useRef(draftKey);
   editingScope.current = draftKey;
@@ -153,6 +158,7 @@ export function Conversation({
   const migrated = useRef<string | null>(null);
   const submission = useRef<{
     key: string;
+    scope: string;
     draft: Draft;
     accepted?: boolean;
   } | null>(null);
@@ -172,6 +178,17 @@ export function Conversation({
     }
     previousDraftKey.current = draftKey;
   }, [draftKey, sending, drafts]);
+  const currentSubmission = submission.current;
+  const sendingInCurrentScope =
+    sending &&
+    !!currentSubmission &&
+    currentSubmission.scope === submissionScope &&
+    (currentSubmission.key === draftKey || migrated.current === draftKey);
+  const concealSubmitted =
+    sendingInCurrentScope &&
+    connected &&
+    !!currentSubmission &&
+    drafts.isCurrent(draftKey, currentSubmission.draft);
   const agentId = session?.agent ?? agent?.id ?? "claude";
   const agentName =
     agent?.id === agentId
@@ -271,7 +288,13 @@ export function Conversation({
     stopGeneration.current++;
     setStopping(false);
   }, [draftKey, active]);
-  const workingStatus = executionStatus(session, events, connected, stopping);
+  const workingStatus = executionStatus(
+    session,
+    events,
+    connected,
+    stopping,
+    sendingInCurrentScope,
+  );
   const repeatedOutput = useMemo(
     () =>
       !!session &&
@@ -390,6 +413,7 @@ export function Conversation({
     migrated.current = null;
     const submitted = {
       key: draftKey,
+      scope: submissionScope,
       draft,
       accepted: undefined as boolean | undefined,
     };
@@ -900,6 +924,7 @@ export function Conversation({
           hidden={settingsOpen}
           disabled={!projectName || !!session?.archived}
           sending={sending}
+          concealSubmitted={concealSubmitted}
           value={text}
           onChange={setText}
           onSubmit={submit}
@@ -909,19 +934,21 @@ export function Conversation({
             (modelPicker.current ? null : "无法打开模型设置。")
           }
           placeholder={
-            !connected
-              ? connecting || !connectionError
-                ? "正在准备…"
-                : "暂时无法连接"
-              : session?.archived
-                ? "会话已归档，请通过右键菜单取消归档后继续"
-                : projectName
-                  ? draft.skillCreator
-                    ? "描述你想创建的技能…"
-                    : "描述任务，@ 添加引用，/ 调用 Agent 命令…"
-                  : draft.skillCreator
-                    ? "先选择工作目录以创建技能"
-                    : "先添加或选择一个项目"
+            concealSubmitted
+              ? "正在发送任务…"
+              : !connected
+                ? connecting || !connectionError
+                  ? "正在准备…"
+                  : "暂时无法连接"
+                : session?.archived
+                  ? "会话已归档，请通过右键菜单取消归档后继续"
+                  : projectName
+                    ? draft.skillCreator
+                      ? "描述你想创建的技能…"
+                      : "描述任务，@ 添加引用，/ 调用 Agent 命令…"
+                    : draft.skillCreator
+                      ? "先选择工作目录以创建技能"
+                      : "先添加或选择一个项目"
           }
           toolbar={(submit, hasContent, localNavigation) => (
             <>

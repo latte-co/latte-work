@@ -46,13 +46,15 @@ export class DraftStore {
     this.drafts.set(key, draft);
     this.listeners.forEach((listener) => listener());
   }
-  clear(key: string, submitted: Draft) {
+  isCurrent(key: string, submitted: Draft) {
     const current = this.get(key);
-    if (
-      (this.versions.get(current) ?? current) !==
+    return (
+      (this.versions.get(current) ?? current) ===
       (this.versions.get(submitted) ?? submitted)
-    )
-      return;
+    );
+  }
+  clear(key: string, submitted: Draft) {
+    if (!this.isCurrent(key, submitted)) return;
     this.drafts.delete(key);
     this.listeners.forEach((listener) => listener());
   }

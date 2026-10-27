@@ -12,6 +12,7 @@ export function executionStatus(
   events: Event[],
   connected: boolean,
   stopping = false,
+  submitting = false,
 ): string | null {
   if (!session || !["running", "waiting"].includes(session.status)) return null;
   return reportedExecutionStatus(
@@ -20,6 +21,7 @@ export function executionStatus(
     events,
     connected,
     stopping,
+    submitting,
   );
 }
 
@@ -43,6 +45,7 @@ function reportedExecutionStatus(
   events: Event[],
   connected: boolean,
   stopping = false,
+  submitting = false,
 ) {
   if (!connected) return "连接已断开，状态待确认";
   if (stopping) return "正在停止…";
@@ -64,6 +67,7 @@ function reportedExecutionStatus(
     return questions.size ? "等待你的回答" : "等待你的确认";
   }
   let phase: ExecutionPhase = "waiting";
+  let reported = false;
   const pending = new Map<string, string>();
   for (const { event } of events.filter((e) => e.session_id === sessionId)) {
     // Events may arrive across a navigation boundary.
@@ -74,12 +78,19 @@ function reportedExecutionStatus(
     ) {
       pending.clear();
       phase = "waiting";
-    } else if (event.kind === "progress") phase = event.phase;
-    else if (event.kind === "text") phase = "replying";
-    else if (event.kind === "tool") {
+      reported = false;
+    } else if (event.kind === "progress") {
+      phase = event.phase;
+      reported = true;
+    } else if (event.kind === "text") {
+      phase = "replying";
+      reported = true;
+    } else if (event.kind === "tool") {
+      reported = true;
       pending.set(event.id, event.name.toLowerCase());
       phase = "waiting";
     } else if (event.kind === "tool_result") {
+      reported = true;
       pending.delete(event.id);
       phase = "waiting";
     }
@@ -102,5 +113,5 @@ function reportedExecutionStatus(
     };
     return labels[tools[0]] ?? "正在执行工具…";
   }
-  return "等待响应…";
+  return submitting && !reported ? "正在发送任务…" : "等待响应…";
 }
