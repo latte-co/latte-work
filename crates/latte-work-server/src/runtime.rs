@@ -533,12 +533,31 @@ impl TurnState {
                 Action::NativeName(title) => {
                     db(database, |s| s.sync_live_native_title(session_id, &title))?;
                 }
+                Action::GeneratedTitle {
+                    native_session_id,
+                    title,
+                } => {
+                    db(database, |s| {
+                        if s.session(session_id)?.native_id.as_deref() == Some(&native_session_id) {
+                            s.sync_native_title(session_id, &title, false)?;
+                        }
+                        Ok(())
+                    })?;
+                }
                 Action::TitleRenamed(_) => bail!("未处理的原生标题确认"),
                 Action::SourceUsed { id, name } => {
                     db(database, |s| s.observe_tool(session_id, &id, &name))?
                 }
                 Action::Commands(_) => bail!("执行中的 Agent 返回了意外的命令目录"),
                 Action::Write(bytes) => write(input, &bytes).await?,
+                Action::MetadataWrite(bytes) => {
+                    if let Err(error) = write(input, &bytes).await {
+                        eprintln!(
+                            "optional Agent metadata: {}",
+                            config.redact(&error.to_string())
+                        );
+                    }
+                }
                 Action::Ready => self.ready = true,
                 Action::Interrupted => {}
                 Action::InputsConsumed(ids) => {
@@ -1001,6 +1020,7 @@ async fn accept_turn(
     path: &str,
     turn: SendTurn,
     session_open: &Arc<AtomicBool>,
+    on_admitted: impl FnOnce(),
 ) -> Result<bool> {
     let config = turn.config.clone();
     if db(database, |s| {
@@ -1045,6 +1065,10 @@ async fn accept_turn(
             config.permission_mode.as_deref(),
         )
     })?;
+    // Admission is complete once the request and User/Running events are durable.
+    // Filesystem snapshots and Agent startup can take longer than the sender's
+    // confirmation deadline; they must not make accepted input look rejected.
+    on_admitted();
     // After durable admission, all failures become explicit terminal events. The
     // accepted request ID still reconciles a lost transport response without replay.
     let result = async {
@@ -1134,6 +1158,7 @@ async fn receive_turn(
     allow_queue: bool,
     pending_inputs: bool,
     configs: &mut HashMap<String, LaunchConfig>,
+    on_admitted: impl FnOnce(),
 ) -> Result<Response> {
     {
         if let Some(response) = db(database, |d| d.queued_duplicate(&session.id, &turn))? {
@@ -1179,7 +1204,17 @@ async fn receive_turn(
     if allow_queue {
         db(database, |d| d.pause_queue(&session.id, None))?;
     }
-    let new = accept_turn(process, database, binary, session, path, turn, session_open).await?;
+    let new = accept_turn(
+        process,
+        database,
+        binary,
+        session,
+        path,
+        turn,
+        session_open,
+        on_admitted,
+    )
+    .await?;
     Ok(Response::Accepted { duplicate: !new })
 }
 #[allow(clippy::too_many_arguments)]
@@ -1418,8 +1453,15 @@ async fn actor(
                 }
                 Some(Control::Send { turn, allow_queue, reply }) => {
                     safe_to_close.store(false, Ordering::SeqCst);
-                    let result = receive_turn(&mut process, &database, &binary, &session, &path, turn, &session_open, allow_queue, !forwarded.is_empty(), &mut queued_configs).await;
-                    let _ = reply.send(result.map_err(|e| e.to_string()));
+                    let mut reply = Some(reply);
+                    let result = receive_turn(&mut process, &database, &binary, &session, &path, turn, &session_open, allow_queue, !forwarded.is_empty(), &mut queued_configs, || {
+                        if let Some(reply) = reply.take() {
+                            let _ = reply.send(Ok(Response::Accepted { duplicate: false }));
+                        }
+                    }).await;
+                    if let Some(reply) = reply {
+                        let _ = reply.send(result.map_err(|e| e.to_string()));
+                    }
                     Ok(())
                 }
                 Some(Control::Cancel { reply, only_if_idle }) => {
@@ -1665,6 +1707,7 @@ async fn actor(
                         &path,
                         pending.turn,
                         &session_open,
+                        || {},
                     )
                     .await?;
                     queued_configs.retain(|id, _| {
@@ -1718,6 +1761,7 @@ async fn actor(
                         config,
                     },
                     &session_open,
+                    || {},
                 )
                 .await?;
                 if db(&database, |d| {
@@ -1821,6 +1865,190 @@ pub async fn commands(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn durable_admission_acknowledges_before_slow_snapshot_preparation() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .max_blocking_threads(1)
+            .start_paused(true)
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let dir = tempfile::tempdir().unwrap();
+            let root = tempfile::tempdir().unwrap();
+            let store = Store::open(&dir.path().join("state.sqlite")).unwrap();
+            let project = store.add_project(root.path()).unwrap();
+            let session = store.create_session(project.id, "claude".into()).unwrap();
+            let database = Arc::new(Mutex::new(store));
+            let runs = Arc::new(Mutex::new(HashMap::new()));
+            // Saturate Tokio's filesystem worker without sleeping or touching a
+            // real Agent. Snapshot preparation must wait until this is released.
+            let (release, blocked) = std::sync::mpsc::channel::<()>();
+            let blocker = tokio::task::spawn_blocking(move || {
+                let _ = blocked.recv();
+            });
+            let operation = tokio::spawn(submit(
+                database.clone(),
+                runs,
+                dir.path().join("missing-cli").to_string_lossy().into_owned(),
+                session.clone(),
+                root.path().to_string_lossy().into_owned(),
+                SendTurn {
+                    request_id: "slow-preparation".into(),
+                    text: "已提交的消息".into(),
+                    model: None,
+                    fingerprint: None,
+                    config: LaunchConfig {
+                        traex_model: None,
+                        provider: None,
+                        model: None,
+                        effort: None,
+                        permission_mode: None,
+                        settings_dir: dir.path().into(),
+                    },
+                },
+                true,
+            ));
+            for _ in 0..1000 {
+                if db(&database, |s| Ok(s.session(&session.id)?.status == Status::Running)).unwrap() {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+            let saved = db(&database, |s| s.events(&session.id, 0.0)).unwrap().0;
+            assert!(saved.iter().any(|e| matches!(&e.event, EventKind::User {request_id, ..} if request_id=="slow-preparation")));
+            assert!(db(&database, |s| s.baseline(&session.id)).unwrap().is_none());
+            tokio::time::advance(Duration::from_secs(11)).await;
+            let result = operation.await.unwrap();
+            drop(release);
+            blocker.await.unwrap();
+            assert!(
+                matches!(result, Ok(Response::Accepted {duplicate: false})),
+                "{result:?}"
+            );
+        });
+    }
+    #[tokio::test]
+    async fn admitted_startup_failure_is_terminal_and_duplicate_never_replays() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let store = Store::open(&dir.path().join("state.sqlite")).unwrap();
+        let project = store.add_project(root.path()).unwrap();
+        let session = store.create_session(project.id, "claude".into()).unwrap();
+        let database = Arc::new(Mutex::new(store));
+        let make_turn = || SendTurn {
+            request_id: "startup-failure".into(),
+            text: "accepted".into(),
+            model: None,
+            fingerprint: None,
+            config: LaunchConfig {
+                traex_model: None,
+                provider: None,
+                model: None,
+                effort: None,
+                permission_mode: None,
+                settings_dir: dir.path().into(),
+            },
+        };
+        let mut process = None;
+        let mut admitted = false;
+        let path = root.path().to_string_lossy();
+        let open = Arc::new(AtomicBool::new(false));
+        assert!(
+            accept_turn(
+                &mut process,
+                &database,
+                "/missing/claude",
+                &session,
+                &path,
+                make_turn(),
+                &open,
+                || admitted = true
+            )
+            .await
+            .unwrap()
+        );
+        assert!(admitted);
+        assert_eq!(
+            db(&database, |s| Ok(s.session(&session.id)?.status)).unwrap(),
+            Status::Failed
+        );
+        let before = db(&database, |s| s.events(&session.id, 0.0))
+            .unwrap()
+            .0
+            .len();
+        assert!(
+            !accept_turn(
+                &mut process,
+                &database,
+                "/missing/claude",
+                &session,
+                &path,
+                make_turn(),
+                &open,
+                || panic!("duplicate must not be newly admitted")
+            )
+            .await
+            .unwrap()
+        );
+        assert_eq!(
+            db(&database, |s| s.events(&session.id, 0.0))
+                .unwrap()
+                .0
+                .len(),
+            before
+        );
+        db(&database, |s| s.state(&session.id, Status::Running, None)).unwrap();
+        let mut next = make_turn();
+        next.request_id = "busy".into();
+        assert!(
+            accept_turn(
+                &mut process,
+                &database,
+                "/missing/claude",
+                &session,
+                &path,
+                next,
+                &open,
+                || panic!("rejected input must not be acknowledged")
+            )
+            .await
+            .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn optional_metadata_write_failure_preserves_successful_completion() {
+        let dir = tempfile::tempdir().unwrap();
+        let database = Arc::new(Mutex::new(
+            Store::open(&dir.path().join("state.sqlite")).unwrap(),
+        ));
+        let config = LaunchConfig {
+            traex_model: None,
+            provider: None,
+            model: None,
+            effort: None,
+            permission_mode: None,
+            settings_dir: dir.path().into(),
+        };
+        let (mut writer, reader) = tokio::io::duplex(1024);
+        drop(reader);
+        let actions = vec![
+            Action::MetadataWrite(b"metadata\n".to_vec()),
+            Action::Finished {
+                failed: false,
+                message: None,
+            },
+        ];
+        assert_eq!(
+            TurnState::default()
+                .apply(actions, &mut writer, &database, "unused", &config)
+                .await
+                .unwrap(),
+            Some((Status::Completed, None))
+        );
+    }
+
     #[tokio::test]
     async fn native_output_keeps_large_fragmented_unicode_records_and_line_boundaries() {
         let expected = "帧🙂x".repeat(2 * 1024 * 1024 + 1);

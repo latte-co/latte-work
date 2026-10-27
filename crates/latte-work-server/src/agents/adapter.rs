@@ -51,6 +51,11 @@ pub enum Input<'a> {
 pub enum Action {
     /// Authoritative native session name, including external manual renames.
     NativeName(String),
+    /// Optional generated metadata; never supersedes an explicit user name.
+    GeneratedTitle {
+        native_session_id: String,
+        title: String,
+    },
     TitleRenamed(Result<String, String>),
     SourceUsed {
         id: String,
@@ -59,6 +64,8 @@ pub enum Action {
     Commands(Vec<latte_work_protocol::AgentSlashCommand>),
     /// Already encoded bytes, including framing. Runtime only bounds and writes them.
     Write(Vec<u8>),
+    /// Best-effort metadata control. Failure must not fail the completed task.
+    MetadataWrite(Vec<u8>),
     /// Stop the startup deadline; this does not implicitly send any message.
     Ready,
     /// Native evidence that the main agent started an autonomous follow-up turn.

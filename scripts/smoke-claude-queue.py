@@ -63,6 +63,8 @@ sys.exit(process.wait())
     wrapper.chmod(0o700)
     expected_model = 'claude-sonnet-4-6'
     requests = []
+    title_requests = []
+    expected_title = 'Queue contract smoke'
     failures = []
     first_received = threading.Event()
     release = threading.Event()
@@ -89,13 +91,15 @@ sys.exit(process.wait())
                 failures.append({'path': path, 'model': body.get('model')})
                 self.send_error(400)
                 return
-            requests.append(body)
-            use_tool = len(requests) == 1
+            title_request = 'title' in body.get('output_config', {}).get('format', {}).get('schema', {}).get('properties', {})
+            (title_requests if title_request else requests).append(body)
+            use_tool = not title_request and len(requests) == 1
             if use_tool:
                 first_received.set()
                 assert release.wait(45), 'release HTTP fixture'
             arguments = {'file_path': str(target)}
-            content = [{'type': 'tool_use', 'id': 'call_fixture', 'name': 'Read', 'input': arguments}] if use_tool else [{'type': 'text', 'text': 'PROVIDER_OK'}]
+            text = json.dumps({'title': expected_title}) if title_request else 'PROVIDER_OK'
+            content = [{'type': 'tool_use', 'id': 'call_fixture', 'name': 'Read', 'input': arguments}] if use_tool else [{'type': 'text', 'text': text}]
             message = {'id': 'msg_fixture', 'type': 'message', 'role': 'assistant', 'model': expected_model, 'content': content, 'stop_reason': 'tool_use' if use_tool else 'end_turn', 'stop_sequence': None, 'usage': {'input_tokens': 100, 'output_tokens': 20}}
             self.send_response(200)
             if not body.get('stream'):
@@ -105,7 +109,7 @@ sys.exit(process.wait())
                 return
             self.send_header('Content-Type', 'text/event-stream')
             self.end_headers()
-            events = [{'type': 'message_start', 'message': {**message, 'content': [], 'stop_reason': None}}, {'type': 'content_block_start', 'index': 0, 'content_block': {**content[0], **({'input': {}} if use_tool else {'text': ''})}}, {'type': 'content_block_delta', 'index': 0, 'delta': {'type': 'input_json_delta', 'partial_json': json.dumps(arguments)} if use_tool else {'type': 'text_delta', 'text': 'PROVIDER_OK'}}, {'type': 'content_block_stop', 'index': 0}, {'type': 'message_delta', 'delta': {'stop_reason': message['stop_reason'], 'stop_sequence': None}, 'usage': message['usage']}, {'type': 'message_stop'}]
+            events = [{'type': 'message_start', 'message': {**message, 'content': [], 'stop_reason': None}}, {'type': 'content_block_start', 'index': 0, 'content_block': {**content[0], **({'input': {}} if use_tool else {'text': ''})}}, {'type': 'content_block_delta', 'index': 0, 'delta': {'type': 'input_json_delta', 'partial_json': json.dumps(arguments)} if use_tool else {'type': 'text_delta', 'text': text}}, {'type': 'content_block_stop', 'index': 0}, {'type': 'message_delta', 'delta': {'stop_reason': message['stop_reason'], 'stop_sequence': None}, 'usage': message['usage']}, {'type': 'message_stop'}]
             try:
                 for event in events:
                     self.wfile.write(('event: ' + event['type'] + '\ndata: ' + json.dumps(event) + '\n\n').encode())
@@ -173,6 +177,20 @@ sys.exit(process.wait())
         assert len(attributed | replayed) >= 2, native
         assert len(requests) == 2, len(requests)
         assert len([m for m in native if m.get('type') == 'result']) == 1, native
+        deadline = time.monotonic() + 30
+        while True:
+            result = rpc(method='poll', session_id=sid, after=0)
+            if result['session']['title'] == expected_title:
+                break
+            assert time.monotonic() < deadline, result['session']
+            time.sleep(.1)
+        assert not result['session']['custom_title'], result['session']
+        assert result['session']['status'] == 'completed', result['session']
+        assert len(title_requests) == 1, len(title_requests)
+        transcripts = list((root / 'claude/projects').glob('*/*.jsonl'))
+        assert any(json.loads(line).get('aiTitle') == expected_title for path in transcripts for line in path.read_text().splitlines()), 'native AI title was not persisted'
+        events = [e['event'] for e in result['events']]
+        assert len([e for e in events if e['kind'] == 'user']) == 1, events
         summary = {
             'source_revision': subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip(),
             'server_sha256': hashlib.sha256(Path(binary).read_bytes()).hexdigest(),
@@ -180,6 +198,8 @@ sys.exit(process.wait())
             'native_uuid_receipts': native,
             'claude': subprocess.check_output([claude, '--version'], text=True).strip(),
             'state': result['session']['status'],
+            'native_generated_title': result['session']['title'],
+            'native_title_requests': len(title_requests),
             'busy': result['session']['agent_session_busy'],
             'queue': rows,
             'local_upstream_requests': len(requests),

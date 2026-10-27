@@ -268,6 +268,10 @@ fn count(value: &Value, key: &str) -> Option<f64> {
 #[derive(Default)]
 pub struct Claude {
     initial_title: Option<String>,
+    title_description: Option<String>,
+    title_attempted: bool,
+    generating_title_for: Option<String>,
+    native_named: bool,
     native_session_id: Option<String>,
     renaming: Option<(String, String)>,
     rename_result_title: Option<String>,
@@ -320,6 +324,15 @@ fn model_usage<'a>(models: &'a Value, model: &str) -> Option<&'a Value> {
     matching.next().is_none().then_some(usage)
 }
 impl Claude {
+    fn remember_title_description(&mut self, prompt: &str) {
+        if self.title_description.is_none()
+            && !self.title_attempted
+            && !prompt.trim().is_empty()
+            && !prompt.trim_start().starts_with('/')
+        {
+            self.title_description = Some(prompt.chars().take(1024).collect());
+        }
+    }
     fn set_accounting_model(&mut self, model: Option<String>) {
         if self.accounting_model != model
             && let Some(context) = &mut self.context
@@ -412,6 +425,7 @@ fn write_action(value: Value) -> Result<Action> {
 
 impl AgentAdapter for Claude {
     fn set_initial_title(&mut self, title: Option<String>) {
+        self.native_named = title.is_some();
         self.initial_title = title;
     }
     fn has_background_work(&self) -> bool {
@@ -620,6 +634,7 @@ impl AgentAdapter for Claude {
             Input::Start { prompt } => {
                 if matches!(self.phase, Phase::BetweenTurns) {
                     self.check_command(prompt)?;
+                    self.remember_title_description(prompt);
                     self.reset_turn();
                     self.remember_skill_command(prompt);
                     self.phase = Phase::Running;
@@ -629,6 +644,7 @@ impl AgentAdapter for Claude {
                     bail!("Claude 本轮已经启动");
                 }
                 self.phase = Phase::Initializing(prompt.to_owned());
+                self.remember_title_description(prompt);
                 self.remember_skill_command(prompt);
                 Ok(vec![write_action(self.initialize())?])
             }
@@ -989,6 +1005,40 @@ impl Claude {
             self.phase = Phase::Running;
             output.push(Action::TurnStarted);
         }
+        if m["type"] == "control_response" && m["response"]["request_id"] == "latte-generate-title"
+        {
+            let Some(native_session_id) = self.generating_title_for.take() else {
+                return Ok(output);
+            };
+            if self.native_named || self.native_session_id.as_ref() != Some(&native_session_id) {
+                return Ok(output);
+            }
+            if m["response"]["subtype"] == "success" {
+                if let Some(title) = m["response"]["response"]["title"]
+                    .as_str()
+                    .map(str::trim)
+                    .filter(|title| {
+                        !title.is_empty()
+                            && title.chars().count() <= 200
+                            && !title.chars().any(char::is_control)
+                    })
+                {
+                    output.push(Action::GeneratedTitle {
+                        native_session_id,
+                        title: title.into(),
+                    });
+                }
+            } else {
+                output.push(Action::Event(EventKind::Notice {
+                    text: format!(
+                        "会话自动命名未完成，保留原名称：{}",
+                        bounded_field(&m["response"], "error", 300)
+                            .unwrap_or_else(|| "当前 Agent 不支持此操作".into())
+                    ),
+                }));
+            }
+            return Ok(output);
+        }
         if m["type"] == "control_response"
             && self
                 .renaming
@@ -997,6 +1047,7 @@ impl Claude {
         {
             let (_, requested) = self.renaming.take().expect("checked rename");
             let result = if m["response"]["subtype"] == "success" {
+                self.native_named = true;
                 Ok(self.rename_result_title.take().unwrap_or(requested))
             } else {
                 Err(format!(
@@ -1025,6 +1076,7 @@ impl Claude {
             // This event carries the explicit session name, not aiTitle. An
             // external native rename must supersede an earlier host rename.
             if let Some(title) = bounded_field(&m, "title", 800) {
+                self.native_named = true;
                 if self.renaming.is_some() {
                     self.rename_result_title = Some(title);
                 } else {
@@ -1521,6 +1573,25 @@ impl Claude {
                 {
                     output.push(Action::Event(EventKind::Text { text: text.into() }));
                 }
+                if !failed
+                    && !self.title_attempted
+                    && !self.native_named
+                    && let (Some(description), Some(native_session_id)) = (
+                        self.title_description.take(),
+                        self.native_session_id.clone(),
+                    )
+                {
+                    self.title_attempted = true;
+                    self.generating_title_for = Some(native_session_id);
+                    let Action::Write(bytes) = write_action(json!({
+                        "type": "control_request", "request_id": "latte-generate-title",
+                        "request": {"subtype": "generate_session_title", "description": description, "persist": true}
+                    }))?
+                    else {
+                        unreachable!()
+                    };
+                    output.push(Action::MetadataWrite(bytes));
+                }
                 output.push(Action::Finished { failed, message });
                 self.last_result = m["result"].as_str().map(str::to_owned);
             }
@@ -1967,6 +2038,147 @@ fn parse_commands(value: &Value) -> Result<Vec<latte_work_protocol::AgentSlashCo
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn generated_titles_are_optional_once_per_process_and_never_start_turns() {
+        use super::*;
+        let mut agent = Claude {
+            phase: Phase::Running,
+            native_session_id: Some("native-1".into()),
+            ..Default::default()
+        };
+        agent.remember_title_description("修复消息发送后的输入框");
+        let actions = agent
+            .decode(json!({"type":"result","is_error":false}))
+            .unwrap();
+        let wire = encoded(&actions);
+        assert_eq!(wire.len(), 1);
+        assert_eq!(
+            wire[0]["request"],
+            json!({"subtype":"generate_session_title","description":"修复消息发送后的输入框","persist":true})
+        );
+        assert!(matches!(
+            actions.last(),
+            Some(Action::Finished { failed: false, .. })
+        ));
+        assert!(
+            agent.can_start_turn(),
+            "metadata must not block another turn"
+        );
+        assert!(
+            agent
+                .decode(json!({"type":"result","is_error":false}))
+                .unwrap()
+                .is_empty()
+        );
+        let response = json!({"type":"control_response","response":{"request_id":"latte-generate-title","subtype":"success","response":{"title":"输入框发送状态修复"}}});
+        let title = agent.decode(response.clone()).unwrap();
+        assert!(
+            matches!(&title[..], [Action::GeneratedTitle {native_session_id, title}] if native_session_id=="native-1" && title=="输入框发送状态修复")
+        );
+        assert!(
+            agent.decode(response).unwrap().is_empty(),
+            "duplicate metadata is inert"
+        );
+        agent.advance(Input::Start { prompt: "继续" }).unwrap();
+        assert!(
+            encoded(
+                &agent
+                    .decode(json!({"type":"result","is_error":false}))
+                    .unwrap()
+            )
+            .is_empty()
+        );
+    }
+
+    #[test]
+    fn title_generation_rejects_stale_invalid_and_unsupported_metadata() {
+        use super::*;
+        let reply = |title: Value| json!({"type":"control_response","response":{"request_id":"latte-generate-title","subtype":"success","response":{"title":title}}});
+        for title in [
+            json!(""),
+            json!("bad\nname"),
+            json!("x".repeat(201)),
+            Value::Null,
+        ] {
+            let mut agent = Claude {
+                phase: Phase::BetweenTurns,
+                native_session_id: Some("current".into()),
+                generating_title_for: Some("current".into()),
+                ..Default::default()
+            };
+            assert!(agent.decode(reply(title)).unwrap().is_empty());
+            assert!(agent.can_start_turn());
+        }
+        for (id, named) in [("old", false), ("current", true)] {
+            let mut agent = Claude {
+                phase: Phase::BetweenTurns,
+                native_session_id: Some("current".into()),
+                generating_title_for: Some(id.into()),
+                native_named: named,
+                ..Default::default()
+            };
+            assert!(
+                agent
+                    .decode(reply(json!("stale title")))
+                    .unwrap()
+                    .is_empty()
+            );
+        }
+        let mut agent = Claude {
+            phase: Phase::BetweenTurns,
+            native_session_id: Some("current".into()),
+            generating_title_for: Some("current".into()),
+            ..Default::default()
+        };
+        let actions = agent.decode(json!({"type":"control_response","response":{"request_id":"latte-generate-title","subtype":"error","error":"unsupported"}})).unwrap();
+        assert!(
+            matches!(&actions[..], [Action::Event(EventKind::Notice {text})] if text.contains("unsupported"))
+        );
+        assert!(agent.can_start_turn());
+    }
+
+    #[test]
+    fn titles_are_not_generated_for_manual_names_commands_children_or_failed_turns() {
+        use super::*;
+        for (prompt, named, result) in [
+            ("hello", true, json!({"type":"result","is_error":false})),
+            ("/compact", false, json!({"type":"result","is_error":false})),
+            ("hello", false, json!({"type":"result","is_error":true})),
+            (
+                "hello",
+                false,
+                json!({"type":"result","parent_tool_use_id":"child","is_error":false}),
+            ),
+        ] {
+            let mut agent = Claude {
+                phase: Phase::Running,
+                native_session_id: Some("native".into()),
+                native_named: named,
+                ..Default::default()
+            };
+            agent.remember_title_description(prompt);
+            assert!(encoded(&agent.decode(result).unwrap()).is_empty());
+        }
+        let mut agent = Claude {
+            phase: Phase::Running,
+            native_session_id: Some("native".into()),
+            ..Default::default()
+        };
+        agent.remember_title_description(&"中🙂".repeat(1024));
+        let wire = encoded(
+            &agent
+                .decode(json!({"type":"result","is_error":false}))
+                .unwrap(),
+        );
+        assert_eq!(
+            wire[0]["request"]["description"]
+                .as_str()
+                .unwrap()
+                .chars()
+                .count(),
+            1024
+        );
+    }
     fn handoff(agent: &mut super::Claude, request_id: &str) -> String {
         use super::*;
         let actions = agent
@@ -3293,7 +3505,7 @@ mod tests {
         actions
             .iter()
             .filter_map(|action| match action {
-                Action::Write(bytes) => {
+                Action::Write(bytes) | Action::MetadataWrite(bytes) => {
                     assert_eq!(bytes.last(), Some(&b'\n'));
                     Some(serde_json::from_slice(bytes).unwrap())
                 }

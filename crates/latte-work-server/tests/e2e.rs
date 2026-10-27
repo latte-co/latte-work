@@ -1070,6 +1070,124 @@ async fn models_select_per_turn_validate_and_persist_without_changing_provider()
 }
 
 #[tokio::test]
+async fn automatic_native_title_is_persisted_once_without_an_extra_turn() {
+    let host = Host::start().await;
+    let mut client = host.client().await;
+    let project = tempfile::tempdir().unwrap();
+    let id = session(&mut client, project.path()).await;
+    assert!(matches!(
+        send(&mut client, &id, "auto-title", "native-auto-title").await,
+        Response::Accepted { duplicate: false }
+    ));
+    wait(&mut client, &id, Status::Completed).await;
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if matches!(ask(&mut client, Request::Session { session_id:id.clone() }).await, Response::Session { session } if session.title=="Friendly generated title" && !session.custom_title && session.status==Status::Completed)
+        {
+            break;
+        }
+        assert!(Instant::now() < deadline, "generated title did not arrive");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let mut reconnect = host.client().await;
+    assert!(
+        matches!(ask(&mut reconnect, Request::Session {session_id:id.clone()}).await, Response::Session {session} if session.title=="Friendly generated title" && !session.custom_title)
+    );
+    send(&mut reconnect, &id, "auto-title-followup", "followup").await;
+    let events = wait(&mut reconnect, &id, Status::Completed).await;
+    assert_eq!(
+        events
+            .iter()
+            .filter(|e| matches!(e.event, EventKind::User { .. }))
+            .count(),
+        2
+    );
+    let text: String = events
+        .iter()
+        .filter_map(|e| match &e.event {
+            EventKind::Text { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(text, "fresh:你好resumed:你好");
+    assert_eq!(
+        std::fs::read_to_string(project.path().join("fixture-title-requests")).unwrap(),
+        "native-auto-title\n"
+    );
+}
+
+#[tokio::test]
+async fn delayed_automatic_title_preserves_manual_name_and_unsupported_is_nonfatal() {
+    for unsupported in [false, true] {
+        let host = Host::start().await;
+        let mut client = host.client().await;
+        let project = tempfile::tempdir().unwrap();
+        let id = session(&mut client, project.path()).await;
+        let prompt = if unsupported {
+            "native-auto-title-unsupported"
+        } else {
+            "native-auto-title-held"
+        };
+        send(&mut client, &id, "auto-title", prompt).await;
+        wait(&mut client, &id, Status::Completed).await;
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !project.path().join("fixture-title-requests").exists() {
+            assert!(Instant::now() < deadline);
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        if !unsupported {
+            assert!(
+                matches!(ask(&mut client, Request::RenameSession {session_id:id.clone(),title:"My manual name".into()}).await, Response::Session {session} if session.custom_title)
+            );
+            std::fs::write(project.path().join("title-release"), "").unwrap();
+        }
+        loop {
+            let Response::Events {
+                session, events, ..
+            } = ask(
+                &mut client,
+                Request::Poll {
+                    session_id: id.clone(),
+                    after: 0.0,
+                },
+            )
+            .await
+            else {
+                panic!("events")
+            };
+            assert_eq!(session.status, Status::Completed);
+            assert_eq!(
+                events
+                    .iter()
+                    .filter(|e| matches!(e.event, EventKind::User { .. }))
+                    .count(),
+                1
+            );
+            if unsupported {
+                if events.iter().any(|e|matches!(&e.event,EventKind::Notice{text} if text.contains("unsupported generate_session_title"))) {
+                    assert!(!session.custom_title);
+                    assert_eq!(session.title, prompt);
+                    break;
+                }
+            } else if project.path().join("fixture-title-response").exists() {
+                assert_eq!(session.title, "My manual name");
+                assert!(session.custom_title);
+                break;
+            }
+            assert!(Instant::now() < deadline, "title metadata did not settle");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        send(&mut client, &id, "title-followup", "followup").await;
+        wait(&mut client, &id, Status::Completed).await;
+        if !unsupported {
+            assert!(
+                matches!(ask(&mut client, Request::Session {session_id:id.clone()}).await, Response::Session {session} if session.title=="My manual name" && session.custom_title)
+            );
+        }
+    }
+}
+
+#[tokio::test]
 async fn generated_native_titles_refresh_without_closing_the_agent() {
     let host = Host::start().await;
     let mut client = host.client().await;

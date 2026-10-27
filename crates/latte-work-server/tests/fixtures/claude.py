@@ -34,6 +34,24 @@ resumed=any(arg.startswith('--resume=') for arg in sys.argv)
 for line in sys.stdin:
     value=json.loads(line)
     if value['type']=='control_request':
+        if value['request']['subtype']=='generate_session_title':
+            description=value['request']['description']
+            if description.startswith('native-auto-title'):
+                with pathlib.Path('fixture-title-requests').open('a') as record: record.write(description+'\n')
+            def finish_title(request=value,description=description):
+                if description=='native-auto-title-held':
+                    deadline=time.monotonic()+20
+                    while not pathlib.Path('title-release').exists() and time.monotonic()<deadline: time.sleep(.02)
+                if description=='native-auto-title-unsupported':
+                    emit({'type':'control_response','response':{'subtype':'error','request_id':request['request_id'],'error':'unsupported generate_session_title'}})
+                    return
+                title='Friendly generated title' if description.startswith('native-auto-title') else None
+                if title and request['request'].get('persist'):
+                    metadata({'type':'ai-title','aiTitle':title,'sessionId':native_id})
+                emit({'type':'control_response','response':{'subtype':'success','request_id':request['request_id'],'response':{'title':title}}})
+                if description.startswith('native-auto-title'): pathlib.Path('fixture-title-response').write_text('sent')
+            threading.Thread(target=finish_title,daemon=True).start()
+            continue
         if value['request']['subtype']=='rename_session':
             title=value['request']['title']
             if title=='FAIL_TITLE':

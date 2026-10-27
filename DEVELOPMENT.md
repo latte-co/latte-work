@@ -768,9 +768,15 @@ execution-host Server is required; older Servers report unsupported preview.
 No filesystem grants, Agent execution, or remote daemon restart are introduced.
 
 Before the first accepted agent request spawns, the server stores a durable file
-baseline in the task database. The request is persisted first. Git-visible files
-(including tracked and untracked dirty files) are read without changing the index,
-refs or user files. Non-Git projects use a recursive file inventory, skipping
+baseline in the task database. The request is persisted first.
+Direct-send acceptance is returned immediately after the request and User/Running
+events commit, before snapshot capture or Agent startup. A slow snapshot must not
+outlast the caller's confirmation deadline and restore an already submitted draft.
+Preparation failures after acceptance remain explicit failed-task events; they
+never reject or replay the admitted request.
+
+Git-visible files (including tracked and untracked dirty files) are read without
+changing the index, refs or user files. Non-Git projects use a recursive file inventory, skipping
 `.git`, `node_modules`, `target` and `.DS_Store` and refusing symlink traversal.
 Snapshots have no fixed file-count, directory-entry, per-file or total-byte caps.
 File reads use 64 KiB asynchronous chunks and fallible allocation; the 12-second
@@ -987,7 +993,18 @@ Native UI checks and the data-store test are recorded separately in
 ## Native session titles
 
 Agent-generated titles are host metadata, not UI-generated summaries. Claude's
-`session_title_changed` reports an explicit native session name (not an AI title).
+headless stream mode does not create AI titles automatically. After the first
+successful ordinary turn in each process, Latte sends the native
+`generate_session_title` control with `persist: true` and a bounded description.
+The CLI reuses an existing native name or generates and persists its AI title.
+This optional metadata exchange never creates a chat turn or requires a title
+acknowledgement before subsequent input. Unsupported controls preserve the
+fallback name and emit a notice.
+Responses are bound to the native identity, and generated names cannot overwrite
+a manual name. Opening a session, discovery, slash commands, failed turns and
+child results do not trigger generation.
+
+Claude's `session_title_changed` reports an explicit native session name (not an AI title).
 It updates the saved custom name without creating a turn, including a native-side
 rename after an earlier Latte rename.
 Manual Rename uses the running session's native `rename_session` control request
@@ -1132,7 +1149,8 @@ Reproduce the real CLI queue contract without a model service or login:
 The local fixture provides only Anthropic API responses. The installed CLI must
 accept `--replay-user-messages` and generate its own replay/UUID receipts; the
 script captures those fields, checks two delivered inputs settle together with
-one native result and no duplicate execution-start event, and closes its isolated
+one native result and no duplicate execution-start event, verifies one native
+title request persists AI metadata without adding a turn, and closes its isolated
 Server. CLI version, binary/source hashes and the observed UUID fields are saved
 separately from Python-CLI E2E evidence. This smoke is optional and outside CI.
 
