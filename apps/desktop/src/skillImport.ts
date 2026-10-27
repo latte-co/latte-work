@@ -33,7 +33,7 @@ export function validateSkillFiles(files: SkillFile[]) {
       ) ||
       paths.has(path)
     )
-      throw new Error("技能文件路径无效、重复或超过 8 层");
+      throw new Error("技能文件路径无效、重复或超过 8 层子目录");
     paths.add(path);
     for (let i = 1; i < parts.length; i++)
       directories.add(parts.slice(0, i).join("/"));
@@ -103,7 +103,7 @@ export async function droppedSkillFiles(
     depth: number,
   ): Promise<void> {
     if (++entries > 513 || depth > 9)
-      throw new Error("技能最多 512 项、8 层目录");
+      throw new Error("技能最多 512 项，技能根目录下最多 8 层子目录");
     if (entry.isFile) {
       const file = await new Promise<File>((resolve, reject) =>
         (entry as FileSystemFileEntry).file(resolve, reject),

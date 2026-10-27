@@ -1153,6 +1153,8 @@ pub enum Response {
         skill_management: bool,
         #[serde(default)]
         skill_file_import: bool,
+        #[serde(default)]
+        change_preview: bool,
     },
     Projects {
         projects: Vec<Project>,
@@ -1237,17 +1239,20 @@ mod tests {
             Response::Hello {
                 skill_management: false,
                 skill_file_import: false,
+                change_preview: false,
                 ..
             }
         ));
         let mut current = legacy;
         current["skill_management"] = serde_json::json!(true);
         current["skill_file_import"] = serde_json::json!(true);
+        current["change_preview"] = serde_json::json!(true);
         assert!(matches!(
             serde_json::from_value::<Response>(current).unwrap(),
             Response::Hello {
                 skill_management: true,
                 skill_file_import: true,
+                change_preview: true,
                 ..
             }
         ));

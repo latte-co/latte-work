@@ -808,8 +808,9 @@ impl Process {
         session_open: Arc<AtomicBool>,
     ) -> Result<Self> {
         let mut adapter = agents::create(&session.agent)?;
-        adapter.set_initial_title(
-            (session.custom_title && session.native_id.is_none()).then(|| session.title.clone()),
+        adapter.set_session_title(
+            session.custom_title.then(|| session.title.clone()),
+            session.native_id.is_some(),
         );
         let prepared = adapter.command(binary, path, session.native_id.as_deref(), &config)?;
         let mut command = prepared.command;

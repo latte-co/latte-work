@@ -728,8 +728,8 @@ impl AgentAdapter for Traex {
     fn knows_subagent(&self, _: &str) -> bool {
         false
     }
-    fn set_initial_title(&mut self, title: Option<String>) {
-        self.title = title;
+    fn set_session_title(&mut self, title: Option<String>, resuming: bool) {
+        self.title = if resuming { None } else { title };
     }
     fn command(
         &mut self,

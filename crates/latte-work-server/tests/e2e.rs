@@ -1183,7 +1183,67 @@ async fn delayed_automatic_title_preserves_manual_name_and_unsupported_is_nonfat
             assert!(
                 matches!(ask(&mut client, Request::Session {session_id:id.clone()}).await, Response::Session {session} if session.title=="My manual name" && session.custom_title)
             );
+            assert!(matches!(
+                ask(
+                    &mut client,
+                    Request::CloseAgentSession {
+                        session_id: id.clone(),
+                        only_if_idle: Some(true)
+                    }
+                )
+                .await,
+                Response::Ok
+            ));
+            send(&mut client, &id, "manual-title-resume", "native-auto-title").await;
+            wait(&mut client, &id, Status::Completed).await;
+            assert_eq!(
+                std::fs::read_to_string(project.path().join("fixture-title-requests")).unwrap(),
+                "native-auto-title-held\n"
+            );
         }
+    }
+}
+
+#[tokio::test]
+async fn invalid_successful_native_title_response_keeps_fallback_and_reports_metadata_failure() {
+    let host = Host::start().await;
+    let mut client = host.client().await;
+    let project = tempfile::tempdir().unwrap();
+    let id = session(&mut client, project.path()).await;
+    send(&mut client, &id, "empty-title", "native-auto-title-empty").await;
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let Response::Events {
+            session, events, ..
+        } = ask(
+            &mut client,
+            Request::Poll {
+                session_id: id.clone(),
+                after: 0.0,
+            },
+        )
+        .await
+        else {
+            panic!("events")
+        };
+        if events
+            .iter()
+            .any(|e| matches!(&e.event,EventKind::Notice{text} if text.contains("未返回有效标题")))
+        {
+            assert_eq!(session.status, Status::Completed);
+            assert_eq!(session.title, "native-auto-title-empty");
+            assert!(!session.custom_title);
+            assert_eq!(
+                events
+                    .iter()
+                    .filter(|e| matches!(e.event, EventKind::User { .. }))
+                    .count(),
+                1
+            );
+            break;
+        }
+        assert!(Instant::now() < deadline, "missing metadata failure notice");
+        tokio::time::sleep(Duration::from_millis(20)).await;
     }
 }
 
@@ -4971,6 +5031,13 @@ async fn image_outputs_and_frozen_previews_survive_bridge_reconnect_without_live
     use latte_work_protocol::ChangePreviewTarget;
     let host = Host::start().await;
     let mut client = host.client().await;
+    assert!(matches!(
+        ask(&mut client, Request::Hello { version: VERSION }).await,
+        Response::Hello {
+            change_preview: true,
+            ..
+        }
+    ));
     let root = tempfile::tempdir().unwrap();
     let old = b"\x89PNG\r\n\x1a\nold\0";
     std::fs::write(root.path().join("fixture.png"), old).unwrap();

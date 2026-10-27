@@ -117,7 +117,9 @@ pub trait AgentAdapter: Send {
     fn has_background_work(&self) -> bool;
     /// Only children observed by this process share its credential redaction context.
     fn knows_subagent(&self, native_id: &str) -> bool;
-    fn set_initial_title(&mut self, title: Option<String>);
+    /// Persisted manual name, including resumed sessions. Creation arguments
+    /// must not implicitly rename an existing native session.
+    fn set_session_title(&mut self, title: Option<String>, resuming: bool);
     /// Prepare launch resources; may retain resume/config context for later protocol steps.
     fn command(
         &mut self,

@@ -312,6 +312,7 @@ async fn connection(stream: UnixStream, service: Service) -> Result<()> {
                             history_window: true,
                             skill_management: true,
                             skill_file_import: true,
+                            change_preview: true,
                         }
                     } else {
                         Response::Error {

@@ -45,7 +45,7 @@ for line in sys.stdin:
                 if description=='native-auto-title-unsupported':
                     emit({'type':'control_response','response':{'subtype':'error','request_id':request['request_id'],'error':'unsupported generate_session_title'}})
                     return
-                title='Friendly generated title' if description.startswith('native-auto-title') else None
+                title='Friendly generated title' if description.startswith('native-auto-title') and description!='native-auto-title-empty' else None
                 if title and request['request'].get('persist'):
                     metadata({'type':'ai-title','aiTitle':title,'sessionId':native_id})
                 emit({'type':'control_response','response':{'subtype':'success','request_id':request['request_id'],'response':{'title':title}}})

@@ -1292,6 +1292,173 @@ it("can queue a follow-up while the current turn runs with a single composer act
   expect(screen.queryByRole("button", { name: "加入队列" })).toBeNull();
 });
 
+it.each([true, false])(
+  "blocks queue editing while send confirmation is pending (accepted=%s)",
+  async (accepted) => {
+    const p = props();
+    const entry = {
+      request_id: "queued",
+      text: "Queued instruction",
+      model: null,
+      effort: null,
+      permission_mode: null,
+      revision: 0,
+      created_at: 1,
+    };
+    let finish!: (value: boolean) => void;
+    p.send.mockImplementation(
+      () =>
+        new Promise<boolean>((resolve) => {
+          finish = resolve;
+        }),
+    );
+    mocks.request.mockImplementation(async (_, command) =>
+      command.method === "message_queue"
+        ? {
+            kind: "message_queue",
+            entries: [entry],
+            paused: false,
+            reason: null,
+          }
+        : { kind: "queued_message_taken", entry },
+    );
+    render(<Conversation {...p} session={session("pending-edit")} />);
+    fireEvent.change(input(), { target: { value: "Submitted text" } });
+    fireEvent.click(
+      await screen.findByRole("button", {
+        name: "排队消息更多操作：Queued instruction",
+      }),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "发送任务" }));
+    expect(
+      (screen.getByRole("menuitem", { name: "编辑消息" }) as HTMLButtonElement)
+        .disabled,
+    ).toBe(true);
+    fireEvent.click(screen.getByRole("menuitem", { name: "编辑消息" }));
+    expect(
+      mocks.request.mock.calls.some(
+        ([, r]) => r.method === "take_queued_message",
+      ),
+    ).toBe(false);
+    await act(async () => finish(accepted));
+    expect(input().value).toBe(accepted ? "" : "Submitted text");
+    expect(
+      (screen.getByRole("menuitem", { name: "编辑消息" }) as HTMLButtonElement)
+        .disabled,
+    ).toBe(false);
+  },
+);
+
+it.each([true, false])(
+  "waits for an earlier queue take before submitting and leaves another session available (taken=%s)",
+  async (taken) => {
+    const p = props();
+    const entry = {
+      request_id: "queued",
+      text: "Queued instruction",
+      model: null,
+      effort: null,
+      permission_mode: null,
+      revision: 0,
+      created_at: 1,
+    };
+    let finish!: (response: unknown) => void;
+    mocks.request.mockImplementation(async (_, command) =>
+      command.method === "take_queued_message"
+        ? new Promise((resolve) => {
+            finish = resolve;
+          })
+        : {
+            kind: "message_queue",
+            entries: command.session_id === "taking" ? [entry] : [],
+            paused: false,
+            reason: null,
+          },
+    );
+    const view = render(<Conversation {...p} session={session("taking")} />);
+    fireEvent.change(input(), { target: { value: "Existing draft" } });
+    fireEvent.click(
+      await screen.findByRole("button", {
+        name: "排队消息更多操作：Queued instruction",
+      }),
+    );
+    fireEvent.click(screen.getByRole("menuitem", { name: "编辑消息" }));
+    expect(input().disabled).toBe(true);
+    expect(
+      (screen.getByRole("button", { name: "发送任务" }) as HTMLButtonElement)
+        .disabled,
+    ).toBe(true);
+    fireEvent.click(screen.getByRole("button", { name: "发送任务" }));
+    expect(p.send).not.toHaveBeenCalled();
+    view.rerender(<Conversation {...p} session={session("other")} />);
+    expect(input().disabled).toBe(false);
+    await act(async () =>
+      finish(
+        taken
+          ? { kind: "queued_message_taken", entry }
+          : { kind: "error", message: "未取回" },
+      ),
+    );
+    expect(input().value).toBe("");
+    view.rerender(<Conversation {...p} session={session("taking")} />);
+    expect(input().disabled).toBe(false);
+    expect(input().value).toBe(
+      taken ? "Existing draft\n\nQueued instruction" : "Existing draft",
+    );
+    fireEvent.click(screen.getByRole("button", { name: "发送任务" }));
+    await waitFor(() => expect(p.send).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(input().value).toBe(""));
+  },
+);
+
+it("keeps stop available while an empty composer waits for a queued message take", async () => {
+  const p = props();
+  const entry = {
+    request_id: "queued",
+    text: "Queued instruction",
+    model: null,
+    effort: null,
+    permission_mode: null,
+    revision: 0,
+    created_at: 1,
+  };
+  let finish!: (response: unknown) => void;
+  mocks.request.mockImplementation(async (_, command) =>
+    command.method === "take_queued_message"
+      ? new Promise((resolve) => {
+          finish = resolve;
+        })
+      : {
+          kind: "message_queue",
+          entries: [entry],
+          paused: false,
+          reason: null,
+        },
+  );
+  render(
+    <Conversation
+      {...p}
+      session={{ ...session("stop-take"), status: "running" }}
+    />,
+  );
+  fireEvent.click(
+    await screen.findByRole("button", {
+      name: "排队消息更多操作：Queued instruction",
+    }),
+  );
+  fireEvent.click(screen.getByRole("menuitem", { name: "编辑消息" }));
+  expect(input().disabled).toBe(true);
+  const stop = screen.getByRole("button", {
+    name: "停止任务",
+  }) as HTMLButtonElement;
+  expect(stop.disabled).toBe(false);
+  fireEvent.click(stop);
+  await waitFor(() => expect(p.cancel).toHaveBeenCalledTimes(1));
+  await act(async () => finish({ kind: "queued_message_taken", entry }));
+  expect(input().value).toBe("Queued instruction");
+  expect(p.send).not.toHaveBeenCalled();
+});
+
 it("takes a queued message into the composer, retains existing draft and references, and resubmits it as a new queued message", async () => {
   const p = props();
   const old = { name: "existing.txt", path: "existing.txt", directory: false };

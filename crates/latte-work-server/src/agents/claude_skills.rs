@@ -9,13 +9,6 @@ use std::{
 };
 const FILE_LIMIT: u64 = 64 * 1024;
 
-fn component(name: &str) -> bool {
-    !name.is_empty()
-        && name.len() <= 128
-        && name
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b"_-".contains(&b))
-}
 pub(crate) fn read(path: &Path, limit: u64) -> Result<String> {
     let file = std::fs::OpenOptions::new()
         .read(true)
@@ -119,7 +112,7 @@ pub fn find(project: &Path, name: &str) -> Result<Option<SkillInfo>> {
 }
 fn find_in(project: &Path, config: &Path, name: &str) -> Result<Option<SkillInfo>> {
     let parts: Vec<_> = name.split(':').collect();
-    if parts.len() > 2 || !parts.iter().all(|part| component(part)) {
+    if parts.len() > 2 || !parts.iter().all(|part| crate::skills::component(part)) {
         bail!("Skill 名称无效");
     }
     if parts.len() == 2 {
@@ -190,6 +183,32 @@ mod tests {
         std::fs::create_dir_all(directory).unwrap();
         std::fs::write(directory.join("SKILL.md"), contents).unwrap();
     }
+    #[test]
+    fn dotted_names_match_the_manager_without_loosening_path_boundaries() {
+        let directory = tempfile::tempdir().unwrap();
+        let config = directory.path().join("config");
+        let project = directory.path().join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        skill(
+            &config.join("skills/a.b"),
+            "---\nname: Dot skill\n---\nBody",
+        );
+        assert_eq!(
+            find_in(&project, &config, "a.b").unwrap().unwrap().name,
+            "Dot skill"
+        );
+        for invalid in [
+            ".hidden",
+            "..",
+            "../a.b",
+            "a.b/../other",
+            "a.b\\other",
+            "plugin:.hidden",
+        ] {
+            assert!(find_in(&project, &config, invalid).is_err(), "{invalid}");
+        }
+    }
+
     #[test]
     fn reads_real_frontmatter_and_personal_precedence_without_running_body() {
         let temp = tempfile::tempdir().unwrap();

@@ -719,6 +719,7 @@ export type Response =
       history_window: boolean;
       skill_management: boolean;
       skill_file_import: boolean;
+      change_preview: boolean;
     }
   | { kind: "projects"; projects: Array<Project> }
   | { kind: "project"; project: Project }

@@ -563,7 +563,7 @@ fn require_global(project: Option<&Path>) -> Result<()> {
     }
     Ok(())
 }
-fn component(s: &str) -> bool {
+pub(crate) fn component(s: &str) -> bool {
     !s.is_empty()
         && s.len() <= 128
         && s.bytes()
@@ -656,7 +656,7 @@ fn copy_tree(
         deadline.check()?;
     }
     if depth > 8 {
-        bail!("Skill 目录层数超过 8 层");
+        bail!("技能根目录下的子目录超过 8 层");
     }
     std::fs::create_dir(target)?;
     for item in std::fs::read_dir(source)? {

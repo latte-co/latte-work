@@ -992,6 +992,11 @@ Native UI checks and the data-store test are recorded separately in
 
 ## Native session titles
 
+Claude Code 2.1.302 is the tested CLI compatibility baseline. Earlier releases
+have not been validated; this is not a claim about when individual flags were
+introduced. Platform injection requires native `--append-system-prompt` support,
+and unsupported optional title controls degrade to a notice rather than fail a task.
+
 Agent-generated titles are host metadata, not UI-generated summaries. Claude's
 headless stream mode does not create AI titles automatically. After the first
 successful ordinary turn in each process, Latte sends the native
@@ -1000,6 +1005,9 @@ The CLI reuses an existing native name or generates and persists its AI title.
 This optional metadata exchange never creates a chat turn or requires a title
 acknowledgement before subsequent input. Unsupported controls preserve the
 fallback name and emit a notice.
+Successful responses without a valid title also report a notice. A persisted
+manual name suppresses generation on resume without passing `--name` or issuing
+an implicit rename to the existing native session.
 Responses are bound to the native identity, and generated names cannot overwrite
 a manual name. Opening a session, discovery, slash commands, failed turns and
 child results do not trigger generation.
@@ -1081,7 +1089,10 @@ including after editing. Transport reconnect never re-sends a prompt.
 
 Queue listing, revision-checked editing, removal, clearing and explicit resumption
 share the host protocol. Drag/keyboard reordering compares the complete pending
-request ID order and atomically persists its replacement. Stale, missing or duplicate
+request ID order and atomically persists its replacement. Editing into the
+composer is disabled during send confirmation; an already pending take blocks
+submission only for its owning draft until it settles, including across navigation.
+Stale, missing or duplicate
 IDs fail without mutation; a repeated identical order is idempotent. Dispatch always
 uses this saved order. The session actor serializes reorder/edits/cancellation against
 execution. Capacity is 16 pending messages / 512 KiB serialized content per session,
@@ -1227,6 +1238,11 @@ runtime retains partial records across cancelled read futures and continues to
 supervise cancellation, EOF, malformed messages and deadlines. Restored turns are
 control metadata, not new public events or replayed prompts. Public protocol paging
 and metadata-only probe limits are independent and unchanged.
+Unterminated or extremely large native records can still exhaust host memory
+before decoding. The absence of a per-record cap is an explicit product constraint;
+public paging is not an ingestion memory bound. Bounded-memory streaming or an
+isolated decoder remains separate work. The sixth-review dispositions are recorded
+in `docs/validation/pr18-review-six-disposition.md`.
 Completion-only assistant items share the bounded per-turn text deduplication set.
 A completion that precedes both forms of start evidence is buffered (at most 32
 turn IDs) and applied only after the start response/notification confirms its ID.
@@ -1386,8 +1402,9 @@ newly uninstalled skill. Identical acknowledged target states reconcile safely.
 
 Add imports a complete directory already on the chosen host into that host's global
 `~/.agents/skills`, preserving resources and source files. Imports are staged, reject
-nested symlinks/special files, and allow 512 entries, 16 MiB total and eight directory
-levels. No download, shell expansion, package manager or skill body is executed.
+nested symlinks/special files, and allow 512 entries, 16 MiB total and eight child
+directory levels below the skill root (at most nine components in a relative file
+path). No download, shell expansion, package manager or skill body is executed.
 The Add dialog accepts a local `SKILL.md`, folder selection or an HTML5 file/folder
 drop, previews the complete file list and an editable installation name, and waits
 for explicit Install. It never interprets a local selection as an SSH-host path.

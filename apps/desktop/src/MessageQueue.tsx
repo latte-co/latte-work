@@ -35,6 +35,8 @@ export function MessageQueue({
   revision,
   running,
   onEdit,
+  editingBlocked = false,
+  onEditPending,
 }: {
   hostId: string;
   sessionId?: string;
@@ -43,6 +45,8 @@ export function MessageQueue({
   revision: string;
   running: boolean;
   onEdit?: (entry: QueuedMessage) => void;
+  editingBlocked?: boolean;
+  onEditPending?: (pending: boolean) => void;
 }) {
   const scope = JSON.stringify([hostId, sessionId]);
   const context = JSON.stringify([scope, active, connected]);
@@ -154,7 +158,10 @@ export function MessageQueue({
   }, [busy, state.data]);
   async function act(command: Request, focusId?: string) {
     if (acting.current === version || !connected || !active) return;
+    const taking = command.method === "take_queued_message";
+    if (taking && editingBlocked) return;
     acting.current = version;
+    if (taking) onEditPending?.(true);
     setBusy(true);
     if (command.method === "dispatch_queued_message")
       setFeedback({
@@ -213,6 +220,7 @@ export function MessageQueue({
         setReload((v) => v + 1);
       }
     } finally {
+      if (taking) onEditPending?.(false);
       if (valid()) {
         acting.current = null;
         setBusy(false);
@@ -490,7 +498,7 @@ export function MessageQueue({
                 </button>
                 <QueueMessageMenu
                   disabled={disabled}
-                  canEdit={!!onEdit}
+                  canEdit={!!onEdit && !editingBlocked}
                   stopAndSend={() =>
                     void act({
                       method: "dispatch_queued_message",

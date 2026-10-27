@@ -424,9 +424,9 @@ fn write_action(value: Value) -> Result<Action> {
 }
 
 impl AgentAdapter for Claude {
-    fn set_initial_title(&mut self, title: Option<String>) {
+    fn set_session_title(&mut self, title: Option<String>, resuming: bool) {
         self.native_named = title.is_some();
-        self.initial_title = title;
+        self.initial_title = if resuming { None } else { title };
     }
     fn has_background_work(&self) -> bool {
         !self.tasks.is_empty() || !self.foreground_agents.is_empty()
@@ -466,7 +466,9 @@ impl AgentAdapter for Claude {
             command.arg("--append-system-prompt").arg(instructions);
         }
 
-        if let Some(title) = &self.initial_title {
+        if resume.is_none()
+            && let Some(title) = &self.initial_title
+        {
             command.arg(format!("--name={title}"));
         }
         command.args([
@@ -1027,6 +1029,10 @@ impl Claude {
                         native_session_id,
                         title: title.into(),
                     });
+                } else {
+                    output.push(Action::Event(EventKind::Notice {
+                        text: "会话自动命名未返回有效标题，保留原名称。".into(),
+                    }));
                 }
             } else {
                 output.push(Action::Event(EventKind::Notice {
@@ -2106,7 +2112,10 @@ mod tests {
                 generating_title_for: Some("current".into()),
                 ..Default::default()
             };
-            assert!(agent.decode(reply(title)).unwrap().is_empty());
+            let actions = agent.decode(reply(title)).unwrap();
+            assert!(
+                matches!(&actions[..], [Action::Event(EventKind::Notice {text})] if text.contains("未返回有效标题"))
+            );
             assert!(agent.can_start_turn());
         }
         for (id, named) in [("old", false), ("current", true)] {
@@ -2135,6 +2144,45 @@ mod tests {
             matches!(&actions[..], [Action::Event(EventKind::Notice {text})] if text.contains("unsupported"))
         );
         assert!(agent.can_start_turn());
+    }
+
+    #[test]
+    fn resumed_manual_titles_skip_generation_without_renaming_the_native_session() {
+        use super::*;
+        let directory = tempfile::tempdir().unwrap();
+        let config = LaunchConfig {
+            traex_model: None,
+            provider: None,
+            model: None,
+            effort: None,
+            permission_mode: None,
+            settings_dir: directory.path().into(),
+        };
+        for resuming in [false, true] {
+            let mut agent = Claude::default();
+            agent.set_session_title(Some("My name".into()), resuming);
+            let command = agent
+                .command("claude", "/tmp", resuming.then_some("native"), &config)
+                .unwrap();
+            let args: Vec<_> = command
+                .command
+                .as_std()
+                .get_args()
+                .map(|a| a.to_string_lossy().into_owned())
+                .collect();
+            assert_eq!(args.iter().any(|arg| arg == "--name=My name"), !resuming);
+            agent.phase = Phase::Running;
+            agent.native_session_id = Some("native".into());
+            agent.remember_title_description("followup");
+            assert!(
+                encoded(
+                    &agent
+                        .decode(json!({"type":"result","is_error":false}))
+                        .unwrap()
+                )
+                .is_empty()
+            );
+        }
     }
 
     #[test]

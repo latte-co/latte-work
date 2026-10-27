@@ -149,6 +149,10 @@ export function Conversation({
   const root = useRef<HTMLElement>(null);
   const modelPicker = useRef<ModelPickerHandle>(null);
   const [sending, setSending] = useState(false);
+  const [queueEdits, setQueueEdits] = useState<ReadonlyMap<string, number>>(
+    () => new Map(),
+  );
+  const queueEditing = (queueEdits.get(draftKey) ?? 0) > 0;
   const [composerFocus, setComposerFocus] = useState(0);
   useEffect(() => {
     if (draft.skillCreator && projectName && !settingsOpen)
@@ -400,6 +404,7 @@ export function Conversation({
     if (
       !prompt.trim() ||
       sending ||
+      queueEditing ||
       !connected ||
       !available ||
       !modelReady ||
@@ -876,6 +881,16 @@ export function Conversation({
           active={!settingsOpen}
           revision={String(sending)}
           running={!!active}
+          editingBlocked={sending}
+          onEditPending={(pending) =>
+            setQueueEdits((previous) => {
+              const next = new Map(previous);
+              const count = (next.get(draftKey) ?? 0) + (pending ? 1 : -1);
+              if (count > 0) next.set(draftKey, count);
+              else next.delete(draftKey);
+              return next;
+            })
+          }
           onEdit={(entry) => {
             const current = drafts.get(draftKey);
             const restored = referenceMessage(entry.text);
@@ -922,7 +937,7 @@ export function Conversation({
           sessionId={session?.id}
           connected={connected}
           hidden={settingsOpen}
-          disabled={!projectName || !!session?.archived}
+          disabled={!projectName || !!session?.archived || queueEditing}
           sending={sending}
           concealSubmitted={concealSubmitted}
           value={text}
@@ -1002,7 +1017,9 @@ export function Conversation({
                 }
                 sending={sending}
                 disabled={
-                  localNavigation
+                  (queueEditing &&
+                    (!active || hasContent || !!localNavigation)) ||
+                  (localNavigation
                     ? !!session?.archived || !projectName || sending
                     : active
                       ? !connected ||
@@ -1018,7 +1035,7 @@ export function Conversation({
                         !projectName ||
                         !connected ||
                         !available ||
-                        sending
+                        sending)
                 }
                 onClick={
                   active && !hasContent && !localNavigation ? stop : submit
