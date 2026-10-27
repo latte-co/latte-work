@@ -27,8 +27,9 @@ export type ActivityItem =
       tools: ToolActivity[];
     };
 
-/** Only execution records are safe to hide. Plain assistant text has no phase. */
+/** Candidates for a confirmed completed process, never a live-turn classifier. */
 export function isProcessActivity(item: ActivityItem): boolean {
+  if (item.type === "assistant") return true;
   if (item.type === "tool" || item.type === "tools") return true;
   if (item.type !== "event") return false;
   if (item.value.kind === "progress" || item.value.kind === "usage")
@@ -38,7 +39,22 @@ export function isProcessActivity(item: ActivityItem): boolean {
   );
 }
 
-/** Keep original order and stable group identities around visible replies. */
+/** Metadata can split an answer into several rows after the last execution. */
+export function finalReplyItems(items: ActivityItem[]) {
+  let barrier = -1;
+  items.forEach((item, index) => {
+    if (
+      item.type === "user" ||
+      item.type === "tool" ||
+      item.type === "tools" ||
+      (item.type === "event" && !!item.approvalTool)
+    )
+      barrier = index;
+  });
+  return items.slice(barrier + 1).filter((item) => item.type === "assistant");
+}
+
+/** Keep original order and stable group identities around visible boundaries. */
 export function activitySegments(
   items: ActivityItem[],
   fold: (item: ActivityItem, index: number) => boolean,

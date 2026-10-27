@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
-import { afterEach, expect, it } from "vitest";
+import { afterEach, expect, it, vi } from "vitest";
 import type { Event, EventKind, Status } from "./protocol";
 import {
   TurnTranscript,
@@ -9,7 +9,14 @@ import {
 } from "./TurnTranscript";
 import { MessageContent } from "./MessageContent";
 import { UserMessage } from "./UserMessage";
-afterEach(cleanup);
+import { copyText } from "./clipboard";
+vi.mock("./clipboard", () => ({
+  copyText: vi.fn().mockResolvedValue(undefined),
+}));
+afterEach(() => {
+  cleanup();
+  vi.clearAllMocks();
+});
 const user = (text: string): EventKind => ({
   kind: "user",
   text,
@@ -30,7 +37,7 @@ const result: EventKind = {
 };
 const events = (...values: EventKind[]): Event[] =>
   values.map((event, seq) => ({ seq, session_id: "s", at: seq, event }));
-it("keeps a review report visible before follow-up tools and a short completion receipt", () => {
+it("labels and preserves unphased earlier reports in one expandable process", () => {
   const rows = events(
     user("review"),
     tool,
@@ -55,23 +62,20 @@ it("keeps a review report visible before follow-up tools and a short completion 
     </TurnTranscript>
   );
   const view = render(content(rows));
-  const report = screen.getByText("完整评审报告：发现与依据");
   const receipt = screen.getByText("评审已完成，记忆已同步");
-  expect(report.closest("details")).toBeNull();
+  expect(screen.queryByText("完整评审报告：发现与依据")).toBeNull();
+  expect(screen.getByText("· 1 段较早回复")).toBeTruthy();
   const parts = view.container.querySelectorAll("details");
-  expect(parts).toHaveLength(2);
+  expect(parts).toHaveLength(1);
   expect(
-    parts[0].compareDocumentPosition(report) & Node.DOCUMENT_POSITION_FOLLOWING,
-  ).toBeTruthy();
-  expect(
-    report.compareDocumentPosition(parts[1]) & Node.DOCUMENT_POSITION_FOLLOWING,
-  ).toBeTruthy();
-  expect(
-    parts[1].compareDocumentPosition(receipt) &
+    parts[0].compareDocumentPosition(receipt) &
       Node.DOCUMENT_POSITION_FOLLOWING,
   ).toBeTruthy();
   parts[0].open = true;
   fireEvent(parts[0], new window.Event("toggle"));
+  const report = screen.getByText("完整评审报告：发现与依据");
+  expect(report.closest("details")).toBe(parts[0]);
+  expect(parts[0].textContent).toContain("Read完整评审报告：发现与依据Write");
   const extra = events(
     { ...tool, id: "late", name: "Read" },
     { ...result, id: "late" },
@@ -81,7 +85,106 @@ it("keeps a review report visible before follow-up tools and a short completion 
   view.rerender(content([...rows, ...extra]));
   expect(screen.getByText("完整评审报告：发现与依据")).toBe(report);
   expect(parts[0].isConnected && parts[0].open).toBe(true);
+  expect(view.container.querySelectorAll("details")).toHaveLength(1);
+  expect(screen.getByText("· 2 段较早回复")).toBeTruthy();
   expect(screen.getByText("补充验证完成").closest("details")).toBeNull();
+});
+it("keeps and copies the complete terminal reply across metadata instead of only its last paragraph", async () => {
+  const rows = events(
+    user("review"),
+    text("我会开始检查"),
+    tool,
+    result,
+    text("完整报告与发现"),
+    { kind: "notice", text: "后台记录已更新" },
+    text("交付补充说明"),
+    state("completed"),
+  );
+  const turn = turnTranscript(rows)[0];
+  expect(turn.finalText).toBe("完整报告与发现\n\n交付补充说明");
+  expect(turn.processCount).toBe(1);
+  render(
+    <TurnTranscript events={rows}>
+      {(item) => <p>{item.type === "assistant" ? item.text : "记录"}</p>}
+    </TurnTranscript>,
+  );
+  expect(screen.queryByText("我会开始检查")).toBeNull();
+  expect(screen.getByText("完整报告与发现").closest("details")).toBeNull();
+  expect(screen.getByText("交付补充说明").closest("details")).toBeNull();
+  fireEvent.click(screen.getByRole("button", { name: "复制回复" }));
+  await screen.findByRole("button", { name: "已复制" });
+  expect(copyText).toHaveBeenCalledWith("完整报告与发现\n\n交付补充说明");
+});
+it("collapses all interim prose and tools into one process across background continuations", () => {
+  const rows = events(
+    user("review"),
+    text("准备分派检查"),
+    tool,
+    result,
+    text("后台检查仍在进行"),
+    state("completed"),
+    state("running"),
+    { ...tool, id: "next" },
+    { ...result, id: "next" },
+    text("最终评审结论"),
+    state("completed"),
+  );
+  const view = render(
+    <TurnTranscript events={rows}>
+      {(item) => <p>{item.type === "assistant" ? item.text : "工具记录"}</p>}
+    </TurnTranscript>,
+  );
+  const details = view.container.querySelectorAll("details");
+  expect(details).toHaveLength(1);
+  expect(details[0].open).toBe(false);
+  expect(screen.queryByText("准备分派检查")).toBeNull();
+  expect(screen.queryByText("后台检查仍在进行")).toBeNull();
+  expect(screen.getByText("最终评审结论").closest("details")).toBeNull();
+  details[0].open = true;
+  fireEvent(details[0], new window.Event("toggle"));
+  expect(screen.getByText("准备分派检查").closest("details")).toBe(details[0]);
+  expect(screen.getByText("后台检查仍在进行").closest("details")).toBe(
+    details[0],
+  );
+});
+it("restores manual expansion after a background continuation temporarily returns to running", () => {
+  const initial = events(
+    user("q"),
+    text("progress"),
+    tool,
+    result,
+    text("done"),
+    state("completed"),
+  );
+  const content = (rows: Event[]) => (
+    <TurnTranscript events={rows}>
+      {(item) => <p>{item.type === "assistant" ? item.text : "record"}</p>}
+    </TurnTranscript>
+  );
+  const view = render(content(initial));
+  const first = view.container.querySelector("details")!;
+  first.open = true;
+  fireEvent(first, new window.Event("toggle"));
+  const extra = events(
+    state("running"),
+    { ...tool, id: "next" },
+    { ...result, id: "next" },
+    text("new final"),
+  ).map((event, i) => ({ ...event, seq: initial.length + i }));
+  view.rerender(content([...initial, ...extra]));
+  expect(view.container.querySelector("details")).toBeNull();
+  expect(screen.getByText("progress")).toBeTruthy();
+  view.rerender(
+    content([
+      ...initial,
+      ...extra,
+      { ...initial.at(-1)!, seq: initial.length + extra.length },
+    ]),
+  );
+  const restored = view.container.querySelector("details")!;
+  expect(restored.open).toBe(true);
+  expect(screen.getByText("progress").closest("details")).toBe(restored);
+  expect(screen.getByText("new final").closest("details")).toBeNull();
 });
 it.each(["running", "completed", "failed", "stopped"] as Status[])(
   "keeps confirmed Skill loads visible outside folded process in %s turns",
@@ -225,8 +328,8 @@ it("folds process on both sides of a handoff independently while keeping the bub
   expect(screen.getAllByRole("button", { name: "复制回复" })).toHaveLength(1);
   parts[0].open = true;
   fireEvent(parts[0], new window.Event("toggle"));
-  expect(screen.getByText("before handoff").closest("details")).toBeNull();
-  expect(screen.getByText("after handoff").closest("details")).toBeNull();
+  expect(screen.getByText("before handoff").closest("details")).toBe(parts[0]);
+  expect(screen.queryByText("after handoff")).toBeNull();
   const firstTool = turnTranscript(rows)[0].process.find(
     (item) => item.type === "tool",
   );
@@ -236,7 +339,7 @@ it("folds process on both sides of a handoff independently while keeping the bub
   expect(parts[1].open).toBe(false);
   parts[1].open = true;
   fireEvent(parts[1], new window.Event("toggle"));
-  expect(screen.getByText("after handoff").closest("details")).toBeNull();
+  expect(screen.getByText("after handoff").closest("details")).toBe(parts[1]);
   expect(screen.getAllByText("忽略 GLM")).toHaveLength(1);
   view.rerender(
     content([...rows, { ...rows.at(-1)!, seq: rows.length, at: rows.length }]),
@@ -260,8 +363,9 @@ it("preserves repeated and consecutive handoffs without empty process sections",
     state("completed"),
   );
   const turn = turnTranscript(rows)[0];
-  expect(turn.processCount).toBe(1);
+  expect(turn.processCount).toBe(2);
   expect(turn.segments.map((part) => part.process)).toEqual([
+    true,
     false,
     true,
     false,
@@ -312,7 +416,7 @@ it("does not promote pre-handoff text to a final answer without a later reply", 
   expect(turn.finalKey).toBeUndefined();
   expect(turn.processCount).toBe(0);
 });
-it("folds only execution records of a completed turn and keeps every reply outside", () => {
+it("folds commentary and tools together on completion while retaining the final reply", () => {
   const rows = events(
     user("first"),
     text("progress"),
@@ -326,9 +430,8 @@ it("folds only execution records of a completed turn and keeps every reply outsi
   );
   const turns = turnTranscript(rows);
   expect(turns).toHaveLength(2);
-  expect(turns[0].process.map((i) => i.type)).toEqual(["tool"]);
+  expect(turns[0].process.map((i) => i.type)).toEqual(["assistant", "tool"]);
   expect(turns[0].visible).toEqual([
-    expect.objectContaining({ text: "progress" }),
     expect.objectContaining({ text: "final" }),
   ]);
   expect(turns[1].process).toEqual([]);
@@ -345,12 +448,12 @@ it("folds only execution records of a completed turn and keeps every reply outsi
   );
   const details = screen.getByText("用时 0秒").closest("details")!;
   expect(details.open).toBe(false);
-  expect(screen.getByText("progress").closest("details")).toBeNull();
+  expect(screen.queryByText("progress")).toBeNull();
   expect(details.contains(screen.getByText("final"))).toBe(false);
   details.open = true;
   fireEvent(details, new window.Event("toggle"));
   expect(details.open).toBe(true);
-  expect(details.contains(screen.getByText("progress"))).toBe(false);
+  expect(details.contains(screen.getByText("progress"))).toBe(true);
   expect(details.contains(screen.getByText("tool"))).toBe(true);
 });
 it.each(["running", "waiting", "failed", "unknown"] as Status[])(
@@ -363,7 +466,7 @@ it.each(["running", "waiting", "failed", "unknown"] as Status[])(
     ).toEqual([]);
   },
 );
-it("keeps streamed prose visible when a turn completes", () => {
+it("moves streamed commentary into one collapsed process only after completion", () => {
   const rows = events(user("q"), text("progress"), tool, result, text("final"));
   const content = (rows: Event[]) => (
     <TurnTranscript events={rows}>
@@ -380,7 +483,7 @@ it("keeps streamed prose visible when a turn completes", () => {
       ...events(state("completed")).map((e) => ({ ...e, seq: rows.length })),
     ]),
   );
-  expect(screen.getByText("progress").closest("details")).toBeNull();
+  expect(screen.queryByText("progress")).toBeNull();
   expect(screen.getByText("final").closest("details")).toBeNull();
   expect(screen.getByText("用时 0秒").closest("details")!.open).toBe(false);
 });
@@ -427,7 +530,9 @@ it.each(["completion", "session"])(
     expect(screen.getByText("用时 0秒").closest("details")!.open).toBe(
       change === "completion",
     );
-    expect(screen.getByText("progress").closest("details")).toBeNull();
+    if (change === "completion")
+      expect(screen.getByText("progress").closest("details")).toBe(details);
+    else expect(screen.queryByText("progress")).toBeNull();
     expect(screen.getByText("final").closest("details")).toBeNull();
   },
 );

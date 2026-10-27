@@ -27,10 +27,10 @@ const events = rows(
     is_error: false,
   },
 );
-it("keeps a child review report visible around later tools and a delivery receipt", () => {
+it("keeps the native delivered child report outside later tools and a receipt", () => {
   render(
     <SubagentTranscript
-      task={{ ...task, status: "completed", summary: "交付完成" }}
+      task={{ ...task, status: "completed", summary: "完整子评审报告" }}
       elapsed="3s"
       events={rows(
         { kind: "text", text: "完整子评审报告" },
@@ -44,13 +44,14 @@ it("keeps a child review report visible around later tools and a delivery receip
   expect(report.closest("details")).toBeNull();
   const process = screen.getByText("用时 3s").closest("details")!;
   expect(process.open).toBe(false);
+  expect(screen.queryByText("交付完成")).toBeNull();
   expect(
-    report.compareDocumentPosition(process) & Node.DOCUMENT_POSITION_FOLLOWING,
+    process.compareDocumentPosition(report) & Node.DOCUMENT_POSITION_FOLLOWING,
   ).toBeTruthy();
-  expect(
-    process.compareDocumentPosition(screen.getByText("交付完成")) &
-      Node.DOCUMENT_POSITION_FOLLOWING,
-  ).toBeTruthy();
+  process.open = true;
+  fireEvent(process, new window.Event("toggle"));
+  expect(screen.getByText("交付完成").closest("details")).toBe(process);
+  expect(screen.getAllByText("完整子评审报告")).toHaveLength(1);
 });
 it("shows a delivered report only once when the summary repeats prose before a trailing tool", () => {
   render(
@@ -69,7 +70,28 @@ it("shows a delivered report only once when the summary repeats prose before a t
   expect(screen.queryByText("未收到最终输出")).toBeNull();
   expect(screen.getAllByRole("button", { name: "复制回复" })).toHaveLength(1);
 });
-it("keeps child prose visible and folds only native tool records on completion", () => {
+it("keeps all terminal child reply paragraphs across metadata", () => {
+  render(
+    <SubagentTranscript
+      task={{ ...task, status: "completed", summary: "native receipt" }}
+      elapsed="3s"
+      events={[
+        ...events,
+        ...rows(
+          { kind: "text", text: "完整子报告" },
+          { kind: "notice", text: "后台更新" },
+          { kind: "text", text: "附加结论" },
+        ).map((row) => ({ ...row, seq: row.seq + events.length })),
+      ]}
+    />,
+  );
+  expect(screen.queryByText("child progress")).toBeNull();
+  expect(screen.getByText(/完整子报告/).closest("details")).toBeNull();
+  expect(screen.getByText(/附加结论/).closest("details")).toBeNull();
+  expect(screen.queryByText("native receipt")).toBeNull();
+  expect(screen.getAllByRole("button", { name: "复制回复" })).toHaveLength(1);
+});
+it("folds child commentary together with tools after completion", () => {
   const view = render(
     <SubagentTranscript task={task} events={events} elapsed="1s" />,
   );
@@ -84,7 +106,7 @@ it("keeps child prose visible and folds only native tool records on completion",
       elapsed="3s"
     />,
   );
-  expect(screen.getByText("child progress").closest("details")).toBeNull();
+  expect(screen.queryByText("child progress")).toBeNull();
   expect(screen.getByText("child final").closest("details")).toBeNull();
   expect(view.container.querySelector("time")!.dateTime).toBe(
     new Date(task.updated_at).toISOString(),
@@ -94,7 +116,7 @@ it("keeps child prose visible and folds only native tool records on completion",
   expect(details.open).toBe(false);
   details.open = true;
   fireEvent(details, new window.Event("toggle"));
-  expect(screen.getByText("child progress").closest("details")).toBeNull();
+  expect(screen.getByText("child progress").closest("details")).toBe(details);
   expect(screen.getByText("native read output").closest(".turn-process")).toBe(
     details,
   );
@@ -201,6 +223,29 @@ it("reads all pages before claiming a final answer or folding the process", () =
   expect(screen.getByText("用时 3s").closest("details")!.open).toBe(false);
   expect(screen.queryByText(/显示上限/)).toBeNull();
 });
+it("restores manual child expansion after a temporary history refresh", () => {
+  const content = (readingMore: boolean) => (
+    <SubagentTranscript
+      task={{ ...task, status: "completed", summary: "final" }}
+      events={events}
+      elapsed="3s"
+      readingMore={readingMore}
+    />
+  );
+  const view = render(content(false));
+  const first =
+    view.container.querySelector<HTMLDetailsElement>(".turn-process")!;
+  first.open = true;
+  fireEvent(first, new window.Event("toggle"));
+  view.rerender(content(true));
+  expect(view.container.querySelector(".turn-process")).toBeNull();
+  expect(screen.getByText("child progress")).toBeTruthy();
+  view.rerender(content(false));
+  const restored =
+    view.container.querySelector<HTMLDetailsElement>(".turn-process")!;
+  expect(restored.open).toBe(true);
+  expect(screen.getByText("child progress").closest("details")).toBe(restored);
+});
 
 it("keeps the original delegated prompt available above the folded process and final answer", () => {
   render(
@@ -219,7 +264,7 @@ it("keeps the original delegated prompt available above the folded process and f
   );
   expect(screen.getByText("Final report").closest("details")).toBeNull();
 });
-it("preserves independently expanded child tool segments when later output and metadata arrive", () => {
+it("preserves the expanded whole child process when later output and metadata arrive", () => {
   const initial = rows(
     { kind: "text", text: "review one" },
     { kind: "tool", id: "save", name: "Write", input: {} },
@@ -248,7 +293,7 @@ it("preserves independently expanded child tool segments when later output and m
   );
   const view = render(content(initial));
   const parts = view.container.querySelectorAll(".turn-process");
-  expect(parts).toHaveLength(2);
+  expect(parts).toHaveLength(1);
   const first = parts[0] as HTMLDetailsElement;
   first.open = true;
   fireEvent(first, new window.Event("toggle"));
@@ -267,9 +312,9 @@ it("preserves independently expanded child tool segments when later output and m
     ),
   );
   expect(first.isConnected && first.open).toBe(true);
-  expect((parts[1] as HTMLDetailsElement).open).toBe(false);
-  expect(screen.getByText("review one").closest("details")).toBeNull();
-  expect(screen.getByText("review two").closest("details")).toBeNull();
+  expect(view.container.querySelectorAll(".turn-process")).toHaveLength(1);
+  expect(screen.getByText("review one").closest("details")).toBe(first);
+  expect(screen.getByText("review two").closest("details")).toBe(first);
   expect(
     screen.getByText("done; verification saved").closest("details"),
   ).toBeNull();

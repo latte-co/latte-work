@@ -493,15 +493,26 @@ pending reveal work so a stale session cannot reveal the new conversation.
 
 ## Conversation lifetime and reading position
 
-Completed main and child transcripts fold only explicit execution records (tools,
-progress/usage metadata and ordinary notices). Assistant text has no public phase
-metadata and always remains visible, including reports followed by tools and a
-short delivery receipt. Approvals, images, Skill-load notices and change results
-stay outside the folded process. Segments preserve original order, including
-stopped turns. Disclosure identity uses the owning host/session and the segment
-start rather than the latest completion event, preserving user expansion through
-metadata refreshes and later prose; new segments start collapsed. This changes
-presentation only and applies to old history without rewriting stored events.
+Completed main and child transcripts fold earlier assistant prose, tools and
+ordinary notices together. A normal completed turn has one process disclosure;
+user handoffs, approvals, images, Skill-load notices and change results remain
+visible boundaries. The entire terminal reply after the last execution/input
+boundary stays visible, including paragraphs split by metadata; copying and the
+navigation preview use that complete reply. The wire text has no semantic phase:
+we do not infer report importance from length, Markdown or keywords. Earlier
+unphased reports remain intact in the process, whose summary explicitly counts
+earlier reply segments. A completed child's native summary matching recorded prose
+is shown once as the delivered report, ahead of a later receipt in precedence.
+Running, waiting, failed, unknown and incomplete histories retain visible evidence;
+stopped turns preserve prose order and fold tools only. Disclosure identity uses
+the owning host/session and segment start, preserving expansion through metadata
+refreshes and later prose. This changes presentation only, with no stored-event
+rewrite or remote-server upgrade requirement.
+
+Each transcript keeps at most 256 in-memory disclosure choices, scoped by its
+host/session owner and stable group identity. Temporarily revealing a running
+continuation or a child history read does not discard the user's choice when the
+completed process returns; a new group still starts collapsed.
 
 Opening an unarchived conversation also opens its native Agent session, even without
 sending a message. Switching conversations preserves all opened sessions. The

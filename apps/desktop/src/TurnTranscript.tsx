@@ -1,4 +1,4 @@
-import { Fragment, useMemo, useState, type ReactNode } from "react";
+import { Fragment, useMemo, useRef, useState, type ReactNode } from "react";
 import { ChevronRight } from "lucide-react";
 import { ReplyActions } from "./ReplyActions";
 import type { Event } from "./protocol";
@@ -6,6 +6,7 @@ import {
   activityTranscript,
   activitySegments,
   isProcessActivity,
+  finalReplyItems,
   type ActivityItem,
 } from "./activity";
 import { queuedInputReceipts } from "./transcript";
@@ -53,25 +54,15 @@ export function turnTranscript(events: Event[]) {
       : duration != null
         ? formatElapsed(duration)
         : "执行过程";
-    const lastAssistant = [...items]
-      .reverse()
-      .find((item) => item.type === "assistant");
-    const finalIndex = lastAssistant ? items.indexOf(lastAssistant) : -1;
-    // This identifies the trailing copy/timestamp action, not which prose is
-    // important. Earlier replies may contain the actual report or deliverable.
+    const reply = finalReplyItems(items);
+    const lastAssistant = reply.at(-1);
+    const finalIndex = reply.length ? items.indexOf(reply[0]) : -1;
+    // Plain text has no semantic phase. Keep the whole terminal reply, and
+    // retain earlier prose in the explicitly labelled, expandable process.
     const hasFinal =
       !!user &&
       completed &&
       finalIndex >= 0 &&
-      !items
-        .slice(finalIndex + 1)
-        .some(
-          (item) =>
-            item.type === "user" ||
-            item.type === "tool" ||
-            item.type === "tools" ||
-            (item.type === "event" && !!item.approvalTool),
-        ) &&
       !items.some(
         (item) =>
           item.type === "event" &&
@@ -88,6 +79,9 @@ export function turnTranscript(events: Event[]) {
       user,
       status: end?.event.kind === "state" ? end.event.status : undefined,
       finalKey: hasFinal ? lastAssistant?.key : undefined,
+      finalText: hasFinal
+        ? reply.map((item) => item.text).join("\n\n")
+        : undefined,
       finalAt: hasFinal ? end?.at : undefined,
       stopped,
       elapsed,
@@ -114,6 +108,7 @@ export function TurnTranscript({
   turns?: TranscriptTurn[];
   children: (item: ActivityItem) => ReactNode;
 }) {
+  const processMemory = useRef(new Map<string, boolean>());
   const turns = useMemo(
     () => suppliedTurns ?? turnTranscript(events),
     [events, suppliedTurns],
@@ -132,13 +127,16 @@ export function TurnTranscript({
       )}
       {turn.segments.map((segment) =>
         segment.process ? (
-          <ProcessDisclosure key={`process:${segment.items[0].key}`}>
-            <summary
+          <ProcessDisclosure
+            key={`process:${segment.items[0].key}`}
+            identity={`${turn.key}:${segment.items[0].key}`}
+            memory={processMemory.current}
+          >
+            <ProcessSummary
+              items={segment.items}
+              label={turn.processCount > 1 ? "执行过程" : turn.elapsed}
               title={turn.stopped ? "已执行的文件改动不会撤销。" : undefined}
-            >
-              <span>{turn.processCount > 1 ? "执行过程" : turn.elapsed}</span>
-              <ChevronRight size={14} aria-hidden="true" />
-            </summary>
+            />
             {() => (
               <div className="turn-process-content">
                 {segment.items.map((item) => (
@@ -153,7 +151,7 @@ export function TurnTranscript({
               <Fragment key={item.key}>
                 {children(item)}
                 {item.key === turn.finalKey && item.type === "assistant" && (
-                  <ReplyActions text={item.text} at={turn.finalAt} />
+                  <ReplyActions text={turn.finalText!} at={turn.finalAt} />
                 )}
               </Fragment>
             ))}
@@ -164,16 +162,48 @@ export function TurnTranscript({
   ));
 }
 
+export function ProcessSummary({
+  label,
+  items,
+  title,
+}: {
+  label: string;
+  items: ActivityItem[];
+  title?: string;
+}) {
+  const replies = items.filter((item) => item.type === "assistant").length;
+  return (
+    <summary title={title ?? "展开查看完整过程和较早回复。"}>
+      <span>{label}</span>
+      {replies > 0 && <span> · {replies} 段较早回复</span>}
+      <ChevronRight size={14} aria-hidden="true" />
+    </summary>
+  );
+}
+
 export function ProcessDisclosure({
   children,
+  identity,
+  memory,
 }: {
   children: [ReactNode, () => ReactNode];
+  identity: string;
+  memory: Map<string, boolean>;
 }) {
-  const [open, setOpen] = useState(false);
+  const [open, setOpen] = useState(() => memory.get(identity) ?? false);
   return (
     <details
       className="turn-process"
-      onToggle={(e) => setOpen(e.currentTarget.open)}
+      open={open}
+      onToggle={(e) => {
+        const next = e.currentTarget.open;
+        setOpen(next);
+        // The owner survives live/complete transitions; its host/session key
+        // isolates this bounded, in-memory history from other conversations.
+        memory.delete(identity);
+        memory.set(identity, next);
+        if (memory.size > 256) memory.delete(memory.keys().next().value!);
+      }}
     >
       {children[0]}
       {open && children[1]()}

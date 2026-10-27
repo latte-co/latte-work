@@ -258,7 +258,7 @@ it("does not expand a completed process when navigating", () => {
   );
   mount({ events });
   fireEvent.click(marker("question"));
-  expect(screen.getByText("progress").closest("details")).toBeNull();
+  expect(screen.queryByText("progress")).toBeNull();
   expect(screen.getByText(/用时/).closest("details")!.open).toBe(false);
 });
 
