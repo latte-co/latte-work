@@ -1370,22 +1370,29 @@ async fn traex_model_change_resumes_large_history_after_stop_without_replaying_i
     assert_eq!(inputs[1]["prompt"], "new-model");
     assert_eq!(inputs[1]["params"]["model"], "gpt-test");
 
-    // Keep an explicit bound: over-limit recovery fails without starting the new prompt.
+    // Resume control responses are not subject to a separate native line cap.
     std::fs::write(
         root.path().join("traex-resume-bytes"),
         (16 * 1024 * 1024 + 1).to_string(),
     )
     .unwrap();
-    send(&mut client, &id, "oversized", "must-not-replay").await;
-    let (failed, events) = until(&mut client, &id, Status::Failed).await;
-    assert_eq!(failed.native_id, completed.native_id);
-    assert!(events.iter().any(|event| matches!(&event.event, EventKind::State { status:Status::Failed,message:Some(message)} if message.contains("16 MiB") && message.contains("会话历史已保留"))));
+    send(&mut client, &id, "large-history", "after-large-history").await;
+    let (resumed, events) = until(&mut client, &id, Status::Completed).await;
+    assert_eq!(resumed.native_id, completed.native_id);
+    assert!(events.iter().any(
+        |event| matches!(&event.event, EventKind::Text {text} if text=="TRAE:after-large-history")
+    ));
+    assert!(
+        !serde_json::to_string(&events)
+            .unwrap()
+            .contains("HISTORY_ONLY_MARKER")
+    );
     assert_eq!(
         std::fs::read_to_string(root.path().join("traex-inputs"))
             .unwrap()
             .lines()
             .count(),
-        2
+        3
     );
 }
 #[tokio::test]

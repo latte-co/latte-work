@@ -1199,11 +1199,13 @@ structured user questions, and live title changes. Approval responses use
 server requests return explicit unsupported errors. EOF or a successful process
 exit cannot complete a turn. Native thread/turn identities fence unrelated or
 stale notifications; hidden reasoning text is not stored.
-Traex native stdout allows a bounded 16 MiB per frame because `thread/resume`
-returns persisted turns in one response. Restored turns are control metadata,
-not new public events or replayed prompts. Other Agent streams retain the 1 MiB
-limit; public protocol and metadata-probe limits are unchanged. Oversized native
-frames fail explicitly with the configured limit while preserving session history.
+Native Agent stdout is read as complete UTF-8 lines without an application-imposed
+per-record length limit. Claude can return many tool results in one message, and
+Traex `thread/resume` can return persisted turns in one control response. The
+runtime retains partial records across cancelled read futures and continues to
+supervise cancellation, EOF, malformed messages and deadlines. Restored turns are
+control metadata, not new public events or replayed prompts. Public protocol paging
+and metadata-only probe limits are independent and unchanged.
 Completion-only assistant items share the bounded per-turn text deduplication set.
 A completion that precedes both forms of start evidence is buffered (at most 32
 turn IDs) and applied only after the start response/notification confirms its ID.

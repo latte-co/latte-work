@@ -1,4 +1,4 @@
-//! Internal contract for a persistent agent session over bounded line-framed stdio.
+//! Internal contract for a persistent agent session over line-framed stdio.
 //! Adapters own wire encoding and protocol order, never process supervision or storage.
 use crate::providers::LaunchConfig;
 use anyhow::Result;
@@ -99,10 +99,6 @@ pub enum Action {
 }
 
 pub trait AgentAdapter: Send {
-    /// Bound native stdout independently of the public protocol's frame limit.
-    fn max_output_frame_length(&self) -> usize {
-        1024 * 1024
-    }
     /// Only true between turns when replacing the process cannot discard live work.
     fn can_reconfigure(&self) -> bool;
     /// A new turn may reuse a process that still owns background work. This

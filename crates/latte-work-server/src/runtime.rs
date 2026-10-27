@@ -737,6 +737,11 @@ impl Drop for Group {
     }
 }
 type Output = FramedRead<tokio::process::ChildStdout, LinesCodec>;
+fn native_output<R: tokio::io::AsyncRead>(reader: R) -> FramedRead<R, LinesCodec> {
+    // Native CLIs choose their own record size (tool results and resumed history
+    // can be large). Public response paging is a separate transport concern.
+    FramedRead::new(reader, LinesCodec::new())
+}
 struct Process {
     adapter: Box<dyn agents::AgentAdapter>,
     rename_reply: Option<oneshot::Sender<Result<String, String>>>,
@@ -804,10 +809,7 @@ impl Process {
         let pid = child.id().context("Agent PID missing")? as i32;
         let mut group = Group { child, pid };
         let input = group.child.stdin.take().context("Agent stdin missing")?;
-        let output = FramedRead::new(
-            group.child.stdout.take().context("Agent stdout missing")?,
-            LinesCodec::new_with_max_length(adapter.max_output_frame_length()),
-        );
+        let output = native_output(group.child.stdout.take().context("Agent stdout missing")?);
         let mut stderr = group.child.stderr.take().context("Agent stderr missing")?;
         let drain = tokio::spawn(async move {
             let mut buf = [0; 4096];
@@ -1534,7 +1536,7 @@ async fn actor(
             line = async { match process.as_mut() { Some(p) => p.output.next().await, None => std::future::pending().await } } => {
                 async {
                     let p = process.as_mut().context("Agent process missing")?;
-                    let line = line.context("Agent 进程意外退出；会话历史已保留，后台任务状态无法恢复")?.map_err(|error|anyhow::anyhow!("读取 {} 原生消息失败（单条上限 {} MiB）：{error}；会话历史已保留",session.agent,p.adapter.max_output_frame_length() / (1024 * 1024)))?;
+                    let line = line.context("Agent 进程意外退出；会话历史已保留，后台任务状态无法恢复")?.map_err(|error|anyhow::anyhow!("读取 {} 原生消息失败：{error}；会话历史已保留",session.agent))?;
                     let actions = p.adapter.advance(Input::Message(&line))?;
                     let consumed: Vec<_> = actions.iter().filter_map(|action| match action {
                         Action::InputsConsumed(ids) => Some(ids.as_slice()), _ => None,
@@ -1820,34 +1822,55 @@ pub async fn commands(
 mod tests {
     use super::*;
     #[tokio::test]
-    async fn native_output_limits_allow_traex_history_and_reject_oversized_frames() {
-        for (agent, size, accepted) in [
-            ("claude", 1024 * 1024, true),
-            ("claude", 1024 * 1024 + 1, false),
-            ("traex", 16 * 1024 * 1024, true),
-            ("traex", 16 * 1024 * 1024 + 1, false),
-        ] {
-            let (mut writer, reader) = tokio::io::duplex(65536);
-            let task = tokio::spawn(async move {
-                let mut bytes = vec![b'x'; size];
-                bytes.push(b'\n');
-                let _ = writer.write_all(&bytes).await;
-            });
-            let adapter = agents::create(agent).unwrap();
-            let mut output = FramedRead::new(
-                reader,
-                LinesCodec::new_with_max_length(adapter.max_output_frame_length()),
-            );
-            let line = tokio::time::timeout(Duration::from_secs(5), output.next())
-                .await
-                .unwrap()
-                .unwrap();
-            assert_eq!(line.is_ok(), accepted, "{agent} size {size}");
-            if accepted {
-                assert_eq!(line.unwrap().len(), size);
+    async fn native_output_keeps_large_fragmented_unicode_records_and_line_boundaries() {
+        let expected = "帧🙂x".repeat(2 * 1024 * 1024 + 1);
+        assert!(expected.len() > 16 * 1024 * 1024);
+        let bytes = expected.clone().into_bytes();
+        let (mut writer, reader) = tokio::io::duplex(65536);
+        let task = tokio::spawn(async move {
+            for part in bytes.chunks(4093) {
+                writer.write_all(part).await.unwrap();
             }
-            task.abort();
+            writer.write_all(b"\r\nnext\nfinal").await.unwrap();
+        });
+        let mut output = native_output(reader);
+        let line = tokio::time::timeout(Duration::from_secs(10), output.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(line, expected);
+        assert_eq!(output.next().await.unwrap().unwrap(), "next");
+        assert_eq!(output.next().await.unwrap().unwrap(), "final");
+        assert!(output.next().await.is_none());
+        task.await.unwrap();
+    }
+    #[tokio::test]
+    async fn native_output_retains_partial_records_across_cancelled_reads_and_rejects_invalid_utf8()
+    {
+        let (mut writer, reader) = tokio::io::duplex(65536);
+        let (release, resume) = tokio::sync::oneshot::channel();
+        let (written, partial) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn(async move {
+            writer
+                .write_all(&vec![b'x'; 1024 * 1024 + 1])
+                .await
+                .unwrap();
+            written.send(()).unwrap();
+            resume.await.unwrap();
+            writer.write_all(b"end\n\xff\n").await.unwrap();
+        });
+        let mut output = native_output(reader);
+        // Poll a large incomplete record, then cancel only the read future.
+        tokio::select! {
+            _ = output.next() => panic!("incomplete record was emitted"),
+            _ = partial => {}
         }
+        release.send(()).unwrap();
+        let line = output.next().await.unwrap().unwrap();
+        assert_eq!(line, format!("{}end", "x".repeat(1024 * 1024 + 1)));
+        assert!(output.next().await.unwrap().is_err());
+        task.await.unwrap();
     }
     #[tokio::test(start_paused = true)]
     async fn late_handoffs_get_a_full_window_without_extending_earlier_inputs() {

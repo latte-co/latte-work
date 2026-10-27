@@ -96,6 +96,14 @@ for line in sys.stdin:
             emit({'type':'result','subtype':'success','is_error':False})
             continue
 
+        if text=='large-native-frame':
+            emit({'type':'assistant','message':{'content':[{'type':'tool_use','id':f'large-{n}','name':'Read','input':{'file_path':f'{n}.txt'}} for n in range(72)]}})
+            message={'type':'user','message':{'content':[{'type':'tool_result','tool_use_id':f'large-{n}','content':f'payload-{n}:'+'x'*(256*1024)+'终'} for n in range(72)]}}
+            pathlib.Path('native-large-frame-bytes').write_text(str(len(json.dumps(message).encode())))
+            emit(message)
+            emit({'type':'assistant','message':{'content':[{'type':'text','text':'LARGE_NATIVE_FRAME_OK'}]}})
+            emit({'type':'result','subtype':'success','is_error':False})
+            continue
         if text=='image-output':
             import base64
             image=b'\x89PNG\r\n\x1a\n'+b'fixture\0'

@@ -4767,6 +4767,88 @@ async fn task_baselines_and_sources_integrate_with_real_process_reconnect_and_bo
 }
 
 #[tokio::test]
+async fn native_stdout_large_claude_messages_preserve_outputs_reconnect_and_followups() {
+    let host = Host::start().await;
+    let root = tempfile::tempdir().unwrap();
+    let mut client = host.client().await;
+    let id = session(&mut client, root.path()).await;
+    send(&mut client, &id, "large-native", "large-native-frame").await;
+    wait(&mut client, &id, Status::Completed).await;
+    let bytes: usize = std::fs::read_to_string(root.path().join("native-large-frame-bytes"))
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert!(bytes > 16 * 1024 * 1024);
+
+    // Native frames and public pages are independent: reconnect, then consume
+    // every normalized result across bounded pages without clipping content.
+    client = host.client().await;
+    let mut after = 0.0;
+    let mut results = std::collections::HashMap::new();
+    let mut replied = false;
+    loop {
+        let response = ask(
+            &mut client,
+            Request::Poll {
+                session_id: id.clone(),
+                after,
+            },
+        )
+        .await;
+        assert!(serde_json::to_vec(&response).unwrap().len() < latte_work_protocol::MAX_FRAME);
+        let Response::Events {
+            events, has_more, ..
+        } = response
+        else {
+            panic!("{response:?}")
+        };
+        assert!(!has_more || !events.is_empty(), "poll cursor must advance");
+        for event in events {
+            assert!(event.seq > after);
+            after = event.seq;
+            match event.event {
+                EventKind::ToolResult { id, content, .. } => {
+                    assert!(results.insert(id, content).is_none());
+                }
+                EventKind::Text { text } if text == "LARGE_NATIVE_FRAME_OK" => replied = true,
+                EventKind::Notice { text } => assert!(!text.contains("过大"), "{text}"),
+                _ => {}
+            }
+        }
+        if !has_more {
+            break;
+        }
+    }
+    assert!(replied);
+    assert_eq!(results.len(), 72);
+    for n in 0..72 {
+        assert_eq!(
+            results[&format!("large-{n}")],
+            format!("payload-{n}:{}终", "x".repeat(256 * 1024))
+        );
+    }
+    let pid = std::fs::read_to_string(root.path().join("fixture-agent-pid")).unwrap();
+    send(&mut client, &id, "after-large", "identity").await;
+    wait(&mut client, &id, Status::Completed).await;
+    assert_eq!(
+        std::fs::read_to_string(root.path().join("fixture-agent-pid")).unwrap(),
+        pid
+    );
+    send(&mut client, &id, "cancel-after-large", "hang").await;
+    wait(&mut client, &id, Status::Running).await;
+    assert!(matches!(
+        ask(
+            &mut client,
+            Request::Cancel {
+                session_id: id.clone()
+            }
+        )
+        .await,
+        Response::Ok
+    ));
+    wait(&mut client, &id, Status::Stopped).await;
+}
+#[tokio::test]
 async fn image_outputs_and_frozen_previews_survive_bridge_reconnect_without_live_fallback() {
     use latte_work_protocol::ChangePreviewTarget;
     let host = Host::start().await;

@@ -713,11 +713,6 @@ impl Traex {
     }
 }
 impl AgentAdapter for Traex {
-    fn max_output_frame_length(&self) -> usize {
-        // thread/resume returns persisted turns in a single control response.
-        // That history is not emitted as a public event or replayed to the model.
-        16 * 1024 * 1024
-    }
     fn can_reconfigure(&self) -> bool {
         self.phase == Phase::Ready && !self.has_background_work() && self.pending.is_empty()
     }
