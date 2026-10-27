@@ -1,10 +1,10 @@
 // @vitest-environment jsdom
 import { cleanup, fireEvent, screen, waitFor } from "@testing-library/react";
 import { afterEach, expect, it, vi } from "vitest";
-import type { TurnChanges } from "./protocol";
+import type { EventKind, TurnChanges } from "./protocol";
 import { renderWithStatus as render } from "./test/renderWithStatus";
 import { TurnChangesCard } from "./TurnChangesCard";
-import { turnTranscript } from "./TurnTranscript";
+import { TurnTranscript, turnTranscript } from "./TurnTranscript";
 import { openTurnChanges, readWorkspace } from "./workspaceState";
 const mocks = vi.hoisted(() => ({ request: vi.fn() }));
 vi.mock("./api", () => ({ request: mocks.request, message: String }));
@@ -34,6 +34,137 @@ const props = {
   canUndo: true,
   open: vi.fn(),
 };
+it.each([
+  { truncated: false, unavailable: null },
+  { truncated: true, unavailable: null },
+  { truncated: false, unavailable: "不是 Git 仓库" },
+])(
+  "does not split one process at an invisible empty snapshot (%j)",
+  (patch) => {
+    const snapshot: TurnChanges = {
+      ...changes,
+      background_pending: true,
+      summary: { ...changes.summary, entries: [], ...patch },
+    };
+    const values: EventKind[] = [
+      { kind: "user", text: "继续评审", request_id: "r1" },
+      { kind: "text", text: "检查开始" },
+      { kind: "tool", id: "first", name: "Read", input: {} },
+      {
+        kind: "tool_result",
+        id: "first",
+        content: "first output",
+        is_error: false,
+      },
+      { kind: "text", text: "后台分支已启动" },
+      { kind: "turn_changes", changes: snapshot },
+      { kind: "state", status: "completed", message: null },
+      { kind: "state", status: "running", message: null },
+      { kind: "text", text: "分支返回，继续核对" },
+      { kind: "tool", id: "second", name: "Read", input: {} },
+      {
+        kind: "tool_result",
+        id: "second",
+        content: "second output",
+        is_error: false,
+      },
+      { kind: "text", text: "最终评审结论" },
+      { kind: "turn_changes", changes: { ...snapshot, request_id: "late" } },
+      { kind: "text", text: "交付补充说明" },
+      { kind: "state", status: "completed", message: null },
+    ];
+    const rows = values.map((event, seq) => ({
+      event,
+      seq,
+      at: seq,
+      session_id: "s1",
+    }));
+    const body = (events: typeof rows) => (
+      <TurnTranscript events={events}>
+        {(item) =>
+          item.type === "event" && item.value.kind === "turn_changes" ? (
+            <TurnChangesCard {...props} changes={item.value.changes} />
+          ) : (
+            <p>
+              {item.type === "assistant" || item.type === "user"
+                ? item.text
+                : "工具记录"}
+            </p>
+          )
+        }
+      </TurnTranscript>
+    );
+    const view = render(body(rows));
+    const turn = turnTranscript(rows)[0];
+    expect(turn.processCount).toBe(1);
+    expect(turn.finalText).toBe("最终评审结论\n\n交付补充说明");
+    expect(
+      view.container.querySelectorAll("details.turn-process"),
+    ).toHaveLength(1);
+    expect(screen.queryByRole("region", { name: "本轮文件变更" })).toBeNull();
+    expect(screen.getByText("最终评审结论").closest("details")).toBeNull();
+    expect(screen.getByText("交付补充说明").closest("details")).toBeNull();
+    const process = view.container.querySelector<HTMLDetailsElement>(
+      "details.turn-process",
+    )!;
+    process.open = true;
+    fireEvent(process, new window.Event("toggle"));
+    expect(screen.getByText("后台分支已启动").closest("details")).toBe(process);
+    expect(screen.getByText("分支返回，继续核对").closest("details")).toBe(
+      process,
+    );
+    view.rerender(body([...rows, { ...rows[5], seq: rows.length }]));
+    expect(view.container.querySelector("details.turn-process")).toBe(process);
+    expect(process.open).toBe(true);
+  },
+);
+it("keeps a real file-change card between independent process sections", () => {
+  const values: EventKind[] = [
+    { kind: "user", text: "修改并检查", request_id: "r1" },
+    { kind: "text", text: "修改说明" },
+    { kind: "tool", id: "first", name: "Edit", input: {} },
+    { kind: "tool_result", id: "first", content: "changed", is_error: false },
+    { kind: "turn_changes", changes },
+    { kind: "text", text: "继续检查" },
+    { kind: "tool", id: "second", name: "Read", input: {} },
+    { kind: "tool_result", id: "second", content: "checked", is_error: false },
+    { kind: "text", text: "最终答复" },
+    { kind: "state", status: "completed", message: null },
+  ];
+  const rows = values.map((event, seq) => ({
+    event,
+    seq,
+    at: seq,
+    session_id: "s1",
+  }));
+  const view = render(
+    <TurnTranscript events={rows}>
+      {(item) =>
+        item.type === "event" && item.value.kind === "turn_changes" ? (
+          <TurnChangesCard {...props} changes={item.value.changes} />
+        ) : (
+          <p>
+            {item.type === "assistant" || item.type === "user"
+              ? item.text
+              : "工具记录"}
+          </p>
+        )
+      }
+    </TurnTranscript>,
+  );
+  const sections = view.container.querySelectorAll("details.turn-process");
+  expect(sections).toHaveLength(2);
+  const card = screen.getByRole("region", { name: "本轮文件变更" });
+  expect(card.closest("details")).toBeNull();
+  expect(
+    sections[0].compareDocumentPosition(card) &
+      Node.DOCUMENT_POSITION_FOLLOWING,
+  ).toBeTruthy();
+  expect(
+    card.compareDocumentPosition(sections[1]) &
+      Node.DOCUMENT_POSITION_FOLLOWING,
+  ).toBeTruthy();
+});
 const manyChanges: TurnChanges = {
   ...changes,
   summary: {

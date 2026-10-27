@@ -500,7 +500,10 @@ pending reveal work so a stale session cannot reveal the new conversation.
 Completed main and child transcripts fold earlier assistant prose, tools and
 ordinary notices together. A normal completed turn has one process disclosure;
 user handoffs, approvals, images, Skill-load notices and change results remain
-visible boundaries. The entire terminal reply after the last execution/input
+visible boundaries. Empty file-change snapshots share the card's visibility rule
+and never split a process into adjacent disclosures. Projection preserves prose
+row breaks and retains the raw snapshots for change selection and undo state.
+The entire terminal reply after the last execution/input
 boundary stays visible, including paragraphs split by metadata; copying and the
 navigation preview use that complete reply. The wire text has no semantic phase:
 we do not infer report importance from length, Markdown or keywords. Earlier

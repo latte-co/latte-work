@@ -7,6 +7,55 @@ const e = (seq: number, event: EventKind): Event => ({
   at: 0,
   session_id: "s",
 });
+const emptyChanges: TurnChanges = {
+  request_id: "r",
+  undo: "ready",
+  interrupted: false,
+  background_pending: true,
+  summary: {
+    entries: [],
+    added: 0,
+    removed: 0,
+    binary_files: 0,
+    truncated: false,
+    baseline_at: 1,
+    unavailable: null,
+  },
+};
+it("omits an invisible snapshot without concatenating distinct prose or discarding stored changes", () => {
+  const rows = [
+    e(1, { kind: "text", text: "第一段" }),
+    e(2, { kind: "turn_changes", changes: emptyChanges }),
+    e(3, { kind: "text", text: "第二段" }),
+  ];
+  expect(transcript(rows)).toMatchObject([
+    { key: 1, type: "assistant", text: "第一段" },
+    { key: 3, type: "assistant", text: "第二段" },
+  ]);
+  expect(transcript(rows)).toHaveLength(2);
+  expect(latestTurnChanges(rows)).toBe(emptyChanges);
+  expect(rows[1].event).toEqual({
+    kind: "turn_changes",
+    changes: emptyChanges,
+  });
+});
+it("uses the latest snapshot visibility at its stable first-record position", () => {
+  const visible: TurnChanges = {
+    ...emptyChanges,
+    summary: {
+      ...emptyChanges.summary,
+      entries: [{ path: "a.txt", status: "M", added: 1, removed: 0 }],
+    },
+  };
+  const initial = e(1, { kind: "turn_changes", changes: emptyChanges });
+  const update = e(2, { kind: "turn_changes", changes: visible });
+  expect(transcript([initial, update])).toEqual([
+    { key: 1, type: "event", value: update.event },
+  ]);
+  const hidden = e(3, { kind: "turn_changes", changes: emptyChanges });
+  expect(transcript([initial, update, hidden])).toEqual([]);
+  expect(latestTurnChanges([initial, update, hidden])).toBe(emptyChanges);
+});
 it("keeps the latest turn when an older turn's undo event arrives later", () => {
   const change = (id: string, baseline: number | null): TurnChanges => ({
     request_id: id,

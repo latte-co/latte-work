@@ -1,4 +1,9 @@
 import type { Event, TurnChanges, QuestionAnswer } from "./protocol";
+
+/** Match the change card's visibility before creating transcript boundaries. */
+export function hasTurnChangeFiles(changes: TurnChanges): boolean {
+  return changes.summary.entries.length > 0;
+}
 /** Undo/status events for older turns must not replace the latest turn. */
 export function latestTurnChanges(events: Event[]): TurnChanges | undefined {
   type RecordedTurn = { changes: TurnChanges; at: number; seq: number };
@@ -169,5 +174,12 @@ export function transcript(
     )
       items.push({ key: seq, type: "event", value: event });
   }
-  return items;
+  // Keep the row breaks created during projection: removing invisible metadata
+  // must not concatenate distinct assistant paragraphs or mutate saved events.
+  return items.filter(
+    (item) =>
+      item.type !== "event" ||
+      item.value.kind !== "turn_changes" ||
+      hasTurnChangeFiles(item.value.changes),
+  );
 }
