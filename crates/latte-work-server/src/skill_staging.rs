@@ -154,9 +154,38 @@ mod tests {
         }
         let abandoned = directory.keep();
         drop(lease);
-        assert!(Staging::new(parent.path(), "stage-", None).is_err());
+        // A lease can remain temporarily busy (for example, across a concurrent
+        // process spawn). Skipping that lease is valid; deleting all 517 items
+        // without reaching the recovery bound is not.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let error = loop {
+            match Staging::new(parent.path(), "stage-", None) {
+                Err(error) => break error,
+                Ok(fresh) => {
+                    assert!(abandoned.exists(), "recovery exceeded its item bound");
+                    drop(fresh);
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "lease never became recoverable"
+                    );
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+            }
+        };
+        assert!(error.to_string().contains("目录项数异常"), "{error:#}");
         assert!(abandoned.join(LEASE).exists());
-        assert!(Staging::new(parent.path(), "stage-", None).is_ok());
+        assert_eq!(std::fs::read_dir(&abandoned).unwrap().count(), 2);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while abandoned.exists() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "recovery never resumed"
+            );
+            drop(Staging::new(parent.path(), "stage-", None).unwrap());
+            if abandoned.exists() {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+        }
         assert!(!abandoned.exists());
     }
     #[test]
