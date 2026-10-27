@@ -6,6 +6,7 @@ import { useProjectReorder } from "./useProjectReorder";
 import { projectOrderKey } from "./projectOrder";
 import {
   Plus,
+  Boxes,
   Folder,
   FolderOpen,
   CirclePause,
@@ -392,7 +393,7 @@ export function Sidebar({
         agentState={liveState}
       >
         <button
-          className={`session-row ${list === "pinned" ? "pinned-session" : list === "recent" ? "recent-session" : ""} ${s.id === sessionId && s.hostId === hostId ? "active" : ""}`}
+          className={`session-row ${list === "pinned" ? "pinned-session" : list === "recent" ? "recent-session" : ""} ${state.modal !== "skills" && s.id === sessionId && s.hostId === hostId ? "active" : ""}`}
           aria-label={s.title}
           aria-description={`${sourceProject?.name ?? "项目"} · ${sourceHost?.name ?? s.hostId} · ${statusNames[s.status]}${liveState === "closed" ? "" : ` · ${liveLabel}`}${list === "pinned" ? " · 拖动调整顺序，或按 Option + 上下方向键" : ""}`}
           onPointerDown={
@@ -612,6 +613,18 @@ export function Sidebar({
       >
         <SquarePen size={16} />
         新任务<span>⌘ N</span>
+      </button>
+      <button
+        id="sidebar-skills"
+        className="new-task sidebar-skills"
+        aria-current={state.modal === "skills" ? "page" : undefined}
+        onClick={() => {
+          state.setSettingsReturnToProject(false);
+          setModal("skills");
+        }}
+      >
+        <Boxes size={16} />
+        技能
       </button>
       <div className="sidebar-navigation">
         {state.pinned.length > 0 && (

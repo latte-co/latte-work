@@ -4,10 +4,14 @@ mod agents;
 mod attachments;
 mod files;
 mod git_review;
+mod image_preview;
 mod message_queue;
 mod providers;
 mod questions;
 mod runtime;
+mod skill_staging;
+mod skill_worker;
+mod skills;
 mod snapshot_migration;
 mod snapshot_storage;
 mod sources;
@@ -38,6 +42,8 @@ use tokio_util::codec::{FramedRead, LinesCodec};
 #[derive(Clone)]
 struct Service {
     attachments: Arc<Mutex<attachments::Attachments>>,
+    skills: Arc<skills::Skills>,
+    skill_worker: skill_worker::Worker,
     lifecycle: Arc<upgrade::Lifecycle>,
     terminals: terminal::SharedTerminals,
     database: Database,
@@ -210,6 +216,8 @@ async fn serve(dir: &Path) -> Result<()> {
         }
     }
     let service = Service {
+        skills: Arc::new(skills::Skills::new(dir)?),
+        skill_worker: skill_worker::Worker::new(),
         attachments: Arc::new(Mutex::new(attachments::Attachments::new(dir)?)),
         lifecycle: Arc::new(upgrade::Lifecycle::new()?),
         terminals: Arc::new(Mutex::new(terminal::Terminals::default())),
@@ -302,6 +310,9 @@ async fn connection(stream: UnixStream, service: Service) -> Result<()> {
                                 .collect(),
                             permission_settings: true,
                             history_window: true,
+                            skill_management: true,
+                            skill_file_import: true,
+                            change_preview: true,
                         }
                     } else {
                         Response::Error {
@@ -1260,6 +1271,58 @@ async fn dispatch(s: &Service, request: Request) -> Result<Response> {
             }
             Response::Ok
         }
+        action @ (Request::Skills { .. }
+        | Request::SkillDetail { .. }
+        | Request::SetSkillState { .. }
+        | Request::InstallSkill { .. }
+        | Request::ImportSkillFiles { .. }) => {
+            let project_id = match &action {
+                Request::Skills { project_id }
+                | Request::SkillDetail { project_id, .. }
+                | Request::SetSkillState { project_id, .. }
+                | Request::InstallSkill { project_id, .. } => project_id.as_deref(),
+                Request::ImportSkillFiles { .. } => None,
+                _ => unreachable!(),
+            };
+            if project_id.is_some() {
+                bail!("技能管理仅支持当前主机的全局技能，不支持项目级管理");
+            }
+            let manager = s.skills.clone();
+            s.skill_worker
+                .run(move |budget| {
+                    let manager = manager.with_budget(budget);
+                    match action {
+                        Request::SkillDetail { id, .. } => {
+                            let (skill, markdown) = manager.detail(None, &id)?;
+                            Ok(Response::SkillDetail { skill, markdown })
+                        }
+                        action => {
+                            match action {
+                                Request::SetSkillState {
+                                    id,
+                                    state,
+                                    expected_state,
+                                    ..
+                                } => manager.set_state_checked(None, &id, expected_state, state)?,
+                                Request::InstallSkill { scope, path, .. } => {
+                                    manager.install(None, scope, Path::new(&path))?
+                                }
+                                Request::ImportSkillFiles { name, files } => {
+                                    manager.import_files(&name, &files)?
+                                }
+                                _ => {}
+                            }
+                            let catalog = manager.list(None)?;
+                            Ok(Response::Skills {
+                                skills: catalog.skills,
+                                warnings: catalog.warnings,
+                                truncated: catalog.truncated,
+                            })
+                        }
+                    }
+                })
+                .await?
+        }
         Request::SkillInfo { session_id, name } => {
             let session = db(&s.database, |d| d.session(&session_id))?;
             let project = db(&s.database, |d| d.project(&session.project_id))?;
@@ -1407,6 +1470,77 @@ async fn dispatch(s: &Service, request: Request) -> Result<Response> {
             let (text, truncated) = baseline.patch(Path::new(&project.path), &path).await?;
             Response::Content { text, truncated }
         }
+        Request::PreviewChange {
+            target,
+            path,
+            before,
+            offset,
+        } => {
+            let _permit = image_preview::permit()?;
+            let chunk = tokio::time::timeout(Duration::from_secs(20), async {
+                use latte_work_protocol::ChangePreviewTarget;
+                match target {
+                    ChangePreviewTarget::Turn {
+                        session_id,
+                        request_id,
+                    } => {
+                        let turn = db(&s.database, |d| d.turn_changes(&session_id, &request_id))?;
+                        turn.image_chunk(&path, before, offset).await
+                    }
+                    ChangePreviewTarget::Task { session_id } => {
+                        let session = db(&s.database, |d| d.session(&session_id))?;
+                        let project = db(&s.database, |d| d.project(&session.project_id))?;
+                        let baseline = db(&s.database, |d| d.baseline(&session_id))?
+                            .context("此任务没有记录文件基线")?;
+                        if before {
+                            baseline.image_chunk(&path, offset).await
+                        } else {
+                            task_changes::validate_path(&path)?;
+                            let root = Path::new(&project.path);
+                            let mut target = root.to_path_buf();
+                            for component in Path::new(&path).components() {
+                                target.push(component);
+                                let metadata = match target.symlink_metadata() {
+                                    Ok(metadata) => metadata,
+                                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                                        return Ok(None);
+                                    }
+                                    Err(error) => return Err(error.into()),
+                                };
+                                anyhow::ensure!(
+                                    !metadata.file_type().is_symlink(),
+                                    "符号链接不支持图片预览"
+                                );
+                            }
+                            image_preview::file(&files::resolve(root, &path)?, offset, None, None)
+                                .await
+                                .map(Some)
+                        }
+                    }
+                    ChangePreviewTarget::Git {
+                        project_id,
+                        scope,
+                        base,
+                        head,
+                    } => {
+                        let project = db(&s.database, |d| d.project(&project_id))?;
+                        git_review::image_chunk(
+                            Path::new(&project.path),
+                            scope,
+                            base.as_deref(),
+                            head.as_deref(),
+                            &path,
+                            before,
+                            offset,
+                        )
+                        .await
+                    }
+                }
+            })
+            .await
+            .context("读取图片预览超时")??;
+            Response::ChangePreview { chunk }
+        }
         Request::PreviewSource {
             project_id,
             session_id,
@@ -1541,4 +1675,69 @@ async fn dispatch(s: &Service, request: Request) -> Result<Response> {
     runtime::refresh_titles(&s.database, &s.runs, &s.title_refresh, &mut response).await?;
     runtime::project_session_state(&s.runs, &mut response)?;
     Ok(response)
+}
+
+#[cfg(test)]
+mod skill_admission_tests {
+    use super::*;
+    #[tokio::test]
+    async fn busy_skill_worker_keeps_agent_probe_capacity_available() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path();
+        let service = Service {
+            attachments: Arc::new(Mutex::new(attachments::Attachments::new(dir).unwrap())),
+            skills: Arc::new(skills::Skills::new(dir).unwrap()),
+            skill_worker: skill_worker::Worker::new(),
+            lifecycle: Arc::new(upgrade::Lifecycle::new().unwrap()),
+            terminals: Arc::new(Mutex::new(terminal::Terminals::default())),
+            database: Arc::new(Mutex::new(
+                store::Store::open(&dir.join("state.sqlite")).unwrap(),
+            )),
+            runs: Arc::new(Mutex::new(HashMap::new())),
+            title_refresh: Arc::new(Mutex::new(runtime::TitleRefreshCache::default())),
+            command_probes: Arc::new(tokio::sync::Semaphore::new(2)),
+            file_admission: Arc::new(tokio::sync::RwLock::new(())),
+            agents: vec![(
+                PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .join("tests/fixtures/claude.py")
+                    .to_string_lossy()
+                    .into(),
+                AgentInfo {
+                    id: "claude".into(),
+                    name: "Fixture".into(),
+                    available: true,
+                    provider_protocols: vec![],
+                    detail: "fixture".into(),
+                },
+            )],
+            server_id: "fixture".into(),
+            providers: Arc::new(Mutex::new(providers::ProviderStore::open(dir).unwrap())),
+        };
+        let (started, start) = tokio::sync::oneshot::channel();
+        let (release, wait) = tokio::sync::oneshot::channel();
+        let worker = service.skill_worker.clone();
+        let job = tokio::spawn(async move {
+            worker
+                .run(move |_| {
+                    started.send(()).unwrap();
+                    let _ = wait.blocking_recv();
+                    Ok(())
+                })
+                .await
+        });
+        start.await.unwrap();
+        assert!(
+            dispatch(&service, Request::Skills { project_id: None })
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("仍在进行")
+        );
+        let _other_probe = service.command_probes.try_acquire().unwrap();
+        assert!(
+            matches!(dispatch(&service,Request::AgentPermissions{agent:"claude".into()}).await.unwrap(),Response::AgentPermissions{modes}if !modes.is_empty())
+        );
+        release.send(()).unwrap();
+        job.await.unwrap().unwrap();
+    }
 }

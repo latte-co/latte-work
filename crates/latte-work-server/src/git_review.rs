@@ -526,9 +526,241 @@ pub async fn diff(
     .await
     .context("读取 diff 超时")?
 }
+/// Read a blob range without text conversion or external diff commands.
+pub async fn image_chunk(
+    root: &Path,
+    scope: GitReviewScope,
+    base: Option<&str>,
+    head: Option<&str>,
+    path: &str,
+    before: bool,
+    offset: u64,
+) -> Result<Option<latte_work_protocol::ImagePreviewChunk>> {
+    valid_path(path)?;
+    if matches!(scope, GitReviewScope::Worktree | GitReviewScope::Staged)
+        && commit(root, "HEAD").await.ok().as_deref() != head
+    {
+        bail!("分支提交已变化，请刷新变更后重试");
+    }
+    let args = arguments(scope, base, head)?;
+    let (entries, _) = listing(root, &args).await?;
+    let entry = entries.iter().find(|entry| entry.path == path);
+    let untracked = if entry.is_none()
+        && matches!(scope, GitReviewScope::Worktree | GitReviewScope::Unstaged)
+    {
+        files::changes(root)
+            .await?
+            .0
+            .iter()
+            .any(|e| e.path == path && e.section == ChangeSection::Untracked)
+    } else {
+        false
+    };
+    anyhow::ensure!(
+        entry.is_some() || untracked,
+        "文件不属于当前比较范围，请刷新"
+    );
+    if (before && (untracked || entry.is_some_and(|e| e.status == "A")))
+        || (!before && entry.is_some_and(|e| e.status == "D"))
+    {
+        return Ok(None);
+    }
+    let path = if before {
+        entry
+            .and_then(|e| e.previous_path.as_deref())
+            .unwrap_or(path)
+    } else {
+        path
+    };
+    valid_path(path)?;
+    if !before && matches!(scope, GitReviewScope::Worktree | GitReviewScope::Unstaged) {
+        // Refuse links in every path component, including links contained in root.
+        let mut target = root.to_path_buf();
+        for part in Path::new(path).components() {
+            target.push(part);
+            anyhow::ensure!(
+                !target.symlink_metadata()?.file_type().is_symlink(),
+                "符号链接不支持图片预览"
+            );
+        }
+        return crate::image_preview::file(&files::resolve(root, path)?, offset, None, None)
+            .await
+            .map(Some);
+    }
+    let index =
+        before && scope == GitReviewScope::Unstaged || !before && scope == GitReviewScope::Staged;
+    let record = if index {
+        command(root, &["ls-files", "--stage", "-z", "--", path]).await?
+    } else {
+        let reference = if before {
+            if matches!(scope, GitReviewScope::Branch | GitReviewScope::Commit) {
+                base
+            } else {
+                head
+            }
+        } else {
+            head
+        };
+        let Some(reference) = reference else {
+            return Ok(None);
+        };
+        anyhow::ensure!(valid_oid(reference), "无效的提交");
+        command(root, &["ls-tree", "-z", reference, "--", path]).await?
+    };
+    let mut records = record.split('\0').filter(|r| !r.is_empty());
+    let record = records.next().context("此版本的文件不存在，请刷新")?;
+    anyhow::ensure!(records.next().is_none(), "图片路径匹配不唯一");
+    let metadata = record.split_once('\t').context("Git 文件元数据无效")?.0;
+    let parts: Vec<_> = metadata.split_whitespace().collect();
+    anyhow::ensure!(
+        parts.len() == 3 && matches!(parts[0], "100644" | "100755"),
+        "此版本不是普通图片文件"
+    );
+    if index {
+        anyhow::ensure!(parts[2] == "0", "冲突文件没有可预览的暂存版本");
+    }
+    let oid = parts[if index { 1 } else { 2 }];
+    anyhow::ensure!(valid_oid(oid), "Git 对象无效");
+    let size: u64 = command(root, &["cat-file", "-s", oid]).await?.parse()?;
+    anyhow::ensure!(
+        size <= crate::image_preview::LIMIT && offset <= size,
+        "图片过大或预览偏移无效"
+    );
+    let mut child = tokio::process::Command::new("git")
+        .env("GIT_LITERAL_PATHSPECS", "1")
+        .args(["cat-file", "blob", oid])
+        .current_dir(root)
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()?;
+    let mut output = child.stdout.take().context("Git 图片输出缺失")?;
+    let mut header = vec![0; size.min(512) as usize];
+    output.read_exact(&mut header).await?;
+    let mut data = Vec::new();
+    if offset < header.len() as u64 {
+        data.extend_from_slice(&header[offset as usize..]);
+    } else {
+        let skip = offset - header.len() as u64;
+        anyhow::ensure!(
+            tokio::io::copy(&mut (&mut output).take(skip), &mut tokio::io::sink()).await? == skip,
+            "Git 图片内容不完整"
+        );
+    }
+    (&mut output)
+        .take(65536 - data.len() as u64)
+        .read_to_end(&mut data)
+        .await?;
+    let next = offset + data.len() as u64;
+    if next < size {
+        child.kill().await?;
+    } else {
+        anyhow::ensure!(child.wait().await?.success(), "Git 图片读取失败");
+    }
+    crate::image_preview::chunk(data, &header, size, offset, oid.into(), None).map(Some)
+}
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn image_versions_follow_index_commits_renames_and_reject_links() {
+        let root = fixture();
+        let sub = root.path().join("project");
+        let image = |n: u8| {
+            let mut bytes = b"\x89PNG\r\n\x1a\n".to_vec();
+            bytes.resize(70000, n);
+            bytes
+        };
+        std::fs::write(sub.join("old.png"), image(1)).unwrap();
+        run(root.path(), &["add", "project/old.png"]);
+        run(root.path(), &["commit", "-qm", "image"]);
+        let base = commit(root.path(), "HEAD").await.unwrap();
+        run(root.path(), &["mv", "project/old.png", "project/new.png"]);
+        run(root.path(), &["commit", "-qm", "rename"]);
+        let head = commit(root.path(), "HEAD").await.unwrap();
+        let first = image_chunk(
+            &sub,
+            GitReviewScope::Commit,
+            Some(&base),
+            Some(&head),
+            "new.png",
+            true,
+            0,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(first.data.len(), 65536);
+        assert!(first.has_more);
+        let tail = image_chunk(
+            &sub,
+            GitReviewScope::Commit,
+            Some(&base),
+            Some(&head),
+            "new.png",
+            false,
+            first.next,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(tail.data, image(1)[65536..]);
+        assert_eq!(first.version, tail.version);
+        std::fs::write(sub.join("new.png"), image(2)).unwrap();
+        run(root.path(), &["add", "project/new.png"]);
+        std::fs::write(sub.join("new.png"), image(3)).unwrap();
+        for (scope, before, expected) in [
+            (GitReviewScope::Staged, true, 1),
+            (GitReviewScope::Staged, false, 2),
+            (GitReviewScope::Unstaged, true, 2),
+            (GitReviewScope::Unstaged, false, 3),
+            (GitReviewScope::Worktree, true, 1),
+            (GitReviewScope::Worktree, false, 3),
+        ] {
+            let data = image_chunk(&sub, scope, None, Some(&head), "new.png", before, 0)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(data.data[20], expected);
+        }
+        std::fs::write(sub.join("add.png"), image(4)).unwrap();
+        assert!(
+            image_chunk(
+                &sub,
+                GitReviewScope::Unstaged,
+                None,
+                None,
+                "add.png",
+                true,
+                0
+            )
+            .await
+            .unwrap()
+            .is_none()
+        );
+        std::os::unix::fs::symlink(sub.join("new.png"), sub.join("link.png")).unwrap();
+        for path in ["link.png", "../outside.png", "/etc/passwd"] {
+            assert!(
+                image_chunk(&sub, GitReviewScope::Unstaged, None, None, path, false, 0)
+                    .await
+                    .is_err()
+            );
+        }
+        assert!(
+            image_chunk(
+                &sub,
+                GitReviewScope::Staged,
+                None,
+                Some(&head),
+                "new.png",
+                true,
+                70001
+            )
+            .await
+            .is_err()
+        );
+    }
     use super::*;
     use std::process::Command;
     fn run(root: &Path, args: &[&str]) {

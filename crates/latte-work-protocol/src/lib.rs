@@ -372,6 +372,39 @@ pub struct SkillInfo {
     pub description: String,
     pub directory: String,
 }
+/// Host-local skill installations. Platform skills are scoped to Work launches.
+/// One selected file, already uploaded to this host's private attachment store.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+pub struct SkillImportFile {
+    pub path: String,
+    pub attachment: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+pub enum SkillScope {
+    Platform,
+    System,
+    /// Legacy wire value; global skill management rejects project scope.
+    Project,
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+pub enum SkillState {
+    Enabled,
+    Disabled,
+    Uninstalled,
+}
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+pub struct ManagedSkill {
+    pub id: String,
+    pub name: String,
+    pub description: String,
+    pub scope: SkillScope,
+    pub state: SkillState,
+    pub directory: Option<String>,
+    pub origin: String,
+}
 /// A command reported by the selected native Agent in the project context.
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 pub struct QueuedMessage {
@@ -750,6 +783,29 @@ pub enum Request {
         session_id: String,
         path: String,
     },
+    /// Global skill management. Legacy project_id values must be absent/null.
+    Skills {
+        project_id: Option<String>,
+    },
+    SkillDetail {
+        project_id: Option<String>,
+        id: String,
+    },
+    SetSkillState {
+        project_id: Option<String>,
+        id: String,
+        state: SkillState,
+        expected_state: SkillState,
+    },
+    InstallSkill {
+        project_id: Option<String>,
+        scope: SkillScope,
+        path: String,
+    },
+    ImportSkillFiles {
+        name: String,
+        files: Vec<SkillImportFile>,
+    },
     SkillInfo {
         session_id: String,
         name: String,
@@ -761,6 +817,14 @@ pub enum Request {
         project_id: String,
         session_id: Option<String>,
         path: String,
+        #[ts(type = "number")]
+        offset: u64,
+    },
+    /// Read one raster-image version from the same comparison as the diff.
+    PreviewChange {
+        target: ChangePreviewTarget,
+        path: String,
+        before: bool,
         #[ts(type = "number")]
         offset: u64,
     },
@@ -776,6 +840,48 @@ pub enum ChangeSection {
     Unstaged,
     Staged,
     Untracked,
+}
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ChangePreviewTarget {
+    Git {
+        project_id: String,
+        scope: GitReviewScope,
+        base: Option<String>,
+        head: Option<String>,
+    },
+    Task {
+        session_id: String,
+    },
+    Turn {
+        session_id: String,
+        request_id: String,
+    },
+}
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+pub struct ImagePreviewChunk {
+    pub data: Vec<u8>,
+    pub mime_type: String,
+    #[ts(type = "number")]
+    pub size: u64,
+    #[ts(type = "number")]
+    pub next: u64,
+    pub has_more: bool,
+    /// Changes across live-file edits, stable for immutable objects.
+    pub version: String,
+    pub sha256: Option<String>,
+}
+/// Agent-neutral blocks inside ToolResult.content arrays. Native adapters own conversion.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ToolOutputBlock {
+    Text {
+        text: String,
+    },
+    Image {
+        mime_type: String,
+        data_base64: String,
+    },
 }
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 pub struct QuestionOption {
@@ -927,6 +1033,15 @@ pub enum Response {
     ChangeSummary {
         summary: ChangeSummary,
     },
+    Skills {
+        skills: Vec<ManagedSkill>,
+        warnings: Vec<String>,
+        truncated: bool,
+    },
+    SkillDetail {
+        skill: ManagedSkill,
+        markdown: String,
+    },
     SkillInfo {
         skill: Option<SkillInfo>,
     },
@@ -946,6 +1061,10 @@ pub enum Response {
     SourceDirectory {
         entries: Vec<FileEntry>,
         truncated: bool,
+    },
+    ChangePreview {
+        /// None means this side does not exist (added/deleted file).
+        chunk: Option<ImagePreviewChunk>,
     },
     Subagents {
         tasks: Vec<Subagent>,
@@ -1030,6 +1149,12 @@ pub enum Response {
         permission_settings: bool,
         #[serde(default)]
         history_window: bool,
+        #[serde(default)]
+        skill_management: bool,
+        #[serde(default)]
+        skill_file_import: bool,
+        #[serde(default)]
+        change_preview: bool,
     },
     Projects {
         projects: Vec<Project>,
@@ -1105,6 +1230,34 @@ pub enum Response {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn skill_capability_is_explicit_and_defaults_to_unsupported_for_older_servers() {
+        let legacy =
+            serde_json::json!({"kind":"hello","version":1,"server_id":"legacy","agents":[]});
+        assert!(matches!(
+            serde_json::from_value::<Response>(legacy.clone()).unwrap(),
+            Response::Hello {
+                skill_management: false,
+                skill_file_import: false,
+                change_preview: false,
+                ..
+            }
+        ));
+        let mut current = legacy;
+        current["skill_management"] = serde_json::json!(true);
+        current["skill_file_import"] = serde_json::json!(true);
+        current["change_preview"] = serde_json::json!(true);
+        assert!(matches!(
+            serde_json::from_value::<Response>(current).unwrap(),
+            Response::Hello {
+                skill_management: true,
+                skill_file_import: true,
+                change_preview: true,
+                ..
+            }
+        ));
+    }
+
     #[test]
     fn subagent_roles_are_optional_for_old_history_and_preserved_on_the_wire() {
         let old = serde_json::json!({

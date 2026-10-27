@@ -662,7 +662,7 @@ impl Store {
                 seq: row.get(0)?,
                 session_id: session_id.into(),
                 at: row.get(1)?,
-                event: serde_json::from_str(&data)?,
+                event: self.presentation_event(session_id, &data)?,
             });
         }
         let after = events.last().map(|e| e.seq).or(after);
@@ -738,7 +738,7 @@ impl Store {
                 seq: row.get::<_, i64>(0)? as f64,
                 session_id: session_id.into(),
                 at: row.get(1)?,
-                event: serde_json::from_str(&data)?,
+                event: self.presentation_event(session_id, &data)?,
             });
         }
         events.reverse();
@@ -1229,6 +1229,16 @@ impl Store {
         tx.commit()?;
         Ok(true)
     }
+    fn presentation_event(&self, id: &str, data: &str) -> Result<EventKind> {
+        let event: EventKind = serde_json::from_str(data)?;
+        if matches!(event, EventKind::ToolResult { .. }) && data.contains("\"source\"") {
+            return Ok(crate::agents::normalize_history_event(
+                &self.session(id)?.agent,
+                event,
+            ));
+        }
+        Ok(event)
+    }
     /// Reverse pages avoid replaying every historical tool output to show the latest reply.
     pub fn history(
         &self,
@@ -1252,7 +1262,7 @@ impl Store {
         let mut split_text = false;
         while let Some(row) = rows.next()? {
             let data: String = row.get(2)?;
-            let event: EventKind = serde_json::from_str(&data)?;
+            let event = self.presentation_event(id, &data)?;
             let text = match &event {
                 EventKind::Text { text } => Some(text),
                 _ => None,
@@ -1345,7 +1355,7 @@ impl Store {
                 seq: row.get::<_, i64>(0)? as f64,
                 session_id: id.into(),
                 at: row.get(1)?,
-                event: serde_json::from_str(&data)?,
+                event: self.presentation_event(id, &data)?,
             });
         }
         Ok((events, false))
@@ -2671,6 +2681,39 @@ mod tests {
 #[cfg(test)]
 mod source_tests {
     use super::*;
+    #[test]
+    fn legacy_claude_image_results_are_projected_without_rewriting_saved_events() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(&dir.path().join("db")).unwrap();
+        let project = store.add_project(dir.path()).unwrap();
+        let session = store.create_session(project.id, "claude".into()).unwrap();
+        let native = serde_json::json!([{"type":"text","text":"image follows"},{"type":"image","source":{"type":"base64","media_type":"image/png","data":"iVBORw0KGgo="}}]);
+        store
+            .event(
+                &session.id,
+                EventKind::ToolResult {
+                    id: "read".into(),
+                    content: native.clone(),
+                    is_error: false,
+                },
+            )
+            .unwrap();
+        for events in [
+            store.events(&session.id, 0.0).unwrap().0,
+            store.history(&session.id, None).unwrap().0,
+        ] {
+            assert!(events.iter().any(|event| matches!(&event.event,EventKind::ToolResult{content,..} if content[1]["data_base64"] == "iVBORw0KGgo=" && content[1].get("source").is_none())));
+        }
+        let raw: String = store
+            .db
+            .query_row(
+                "SELECT data FROM events WHERE session_id=?1 ORDER BY seq DESC LIMIT 1",
+                [&session.id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(raw.contains("source"));
+    }
     #[tokio::test]
     async fn last_saved_turn_is_session_scoped_and_ignores_old_undo_updates_and_pending_turns() {
         let dir = tempfile::tempdir().unwrap();

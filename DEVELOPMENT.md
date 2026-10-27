@@ -28,8 +28,13 @@ on Linux and macOS. Frontend UT/build runs on Linux, macOS, and Windows;
 Windows also checks, lints, and tests the portable Rust protocol and client.
 The server uses Unix sockets and process groups, so Windows CI does not claim
 server or native desktop support. A separate macOS job runs `make test-native`
-with a three-minute step deadline before building the native app. A failed native
-test fails that job and therefore `PR Gate`; successful compilation alone is not
+with a three-minute step deadline before building the native app. The same job
+runs `make package`, verifies the ad-hoc signed release bundle and remounted drag-install DMG, and uploads the image
+and checksum as CI artifacts. A Linux job runs `make test-ssh-skills` through a
+disposable, host-key-pinned loopback sshd; it exercises the production SSH client,
+capability handshake, independent host inventories, state changes, package import,
+and reconnect. Test configuration paths are quoted; its disposable HOME child deliberately contains spaces. CI compiles the final test binary in a separate cold-cache step before the bounded SSH run. The wrong-key case must fail. It does not connect to a configured
+remote host or use a model. A failed native test fails that job and therefore `PR Gate`; successful compilation alone is not
 treated as native behavioral coverage.
 `PR Gate` fails when any dependent job fails, is cancelled, or is skipped.
 The repository ruleset must require `PR Gate` on `main` for this to block a
@@ -372,6 +377,10 @@ Reopening reconciles events without replaying prompts.
 using `scripts/dmg-requirements.txt` (pinned versions). macOS, Python 3 with venv/pip,
 Command Line Tools and network access on first use are required. It never installs
 global Python packages; unchanged dependencies are reused offline.
+Before reuse, the wrapper checks that Python recognizes the checkout's private
+environment, recreating incomplete cached tools when necessary. Inherited
+Python search paths are ignored. `make test-native` covers both cases without
+installing packaging dependencies or creating a DMG.
 
 `scripts/package-dmg.py` owns the 600×400 white installation window, large app and
 Applications icons, and center arrow. All staging and alias paths are canonicalized
@@ -488,6 +497,30 @@ pending reveal work so a stale session cannot reveal the new conversation.
 
 ## Conversation lifetime and reading position
 
+Completed main and child transcripts fold earlier assistant prose, tools and
+ordinary notices together. A normal completed turn has one process disclosure;
+user handoffs, approvals, images, Skill-load notices and change results remain
+visible boundaries. Empty file-change snapshots share the card's visibility rule
+and never split a process into adjacent disclosures. Projection preserves prose
+row breaks and retains the raw snapshots for change selection and undo state.
+The entire terminal reply after the last execution/input
+boundary stays visible, including paragraphs split by metadata; copying and the
+navigation preview use that complete reply. The wire text has no semantic phase:
+we do not infer report importance from length, Markdown or keywords. Earlier
+unphased reports remain intact in the process, whose summary explicitly counts
+earlier reply segments. A completed child's native summary matching recorded prose
+is shown once as the delivered report, ahead of a later receipt in precedence.
+Running, waiting, failed, unknown and incomplete histories retain visible evidence;
+stopped turns preserve prose order and fold tools only. Disclosure identity uses
+the owning host/session and segment start, preserving expansion through metadata
+refreshes and later prose. This changes presentation only, with no stored-event
+rewrite or remote-server upgrade requirement.
+
+Each transcript keeps at most 256 in-memory disclosure choices, scoped by its
+host/session owner and stable group identity. Temporarily revealing a running
+continuation or a child history read does not discard the user's choice when the
+completed process returns; a new group still starts collapsed.
+
 Opening an unarchived conversation also opens its native Agent session, even without
 sending a message. Switching conversations preserves all opened sessions. The
 conversation menu's Close releases the native runtime and returns the selected
@@ -522,6 +555,16 @@ control and slower CLI metadata. Local and SSH use identical routing. Additional
 lanes attach to the existing daemon during initial connection and are coalesced;
 navigation does not create transports. A reconnect replaces all lanes and fences
 stale responses by connection identity and daemon ID. No Send is retried.
+
+Draft acknowledgement uses content versions in the in-memory DraftStore. Duplicate input updates and empty-reference scope initialization retain the submitted version; actual text, preset, reference or host/project/Agent scope edits advance it. A successful acknowledgement clears only its version, including after first-send session adoption. Failures and unknown transport outcomes retain the draft without replay. Deleting and retyping the same text is a new edit and survives an older acknowledgement.
+
+While acknowledgement is pending, only the unchanged submitted version is hidden
+from the composer's text, reference chips and Skill preset. Its canonical contents
+remain in DraftStore; failure or disconnection reveals them again. A different
+scope or newly edited version is never hidden. A polled running state alone does
+not confirm admission or enable Stop. Before native activity arrives, the active
+turn shows sending rather than waiting for a model response; reported progress,
+tools, approval, stopping and disconnect evidence take precedence.
 
 ## Native subagent presentation
 
@@ -706,10 +749,34 @@ SDK lifecycle reference: [native task types](https://github.com/anthropics/claud
 
 ### Task changes and source previews
 
+Claude tool-result images are converted in the adapter to agent-neutral
+`ToolOutputBlock` arrays (text or inline raster MIME/base64). Image bytes are bounded
+to four blocks and 384 KiB encoded per result. URL and SVG image sources are not
+loaded. Existing saved Claude results are projected on read without rewriting the
+original events. Transcript image rows remain visible outside folded tools and
+completed execution details; click opens the shared modal image view.
+
+The additive `preview_change` request reads the exact before/after version of a
+turn, task or Git comparison. It returns at most 64 KiB per chunk, rejects images
+over 16 MiB, uses byte-sniffed PNG/JPEG/GIF/WebP MIME, and permits two host readers
+with a 20-second per-request deadline. Frozen turns never fall back to live files;
+snapshot SHA-256 is checked before rendering. Git blob IDs and live-file metadata
+fence versions across chunks; index, commit, rename and untracked scopes follow
+the same comparison as the textual diff. Missing sides are explicit. Desktop
+reads stop after a 30-second overall deadline or when hidden/replaced. A matching
+execution-host Server is required; older Servers report unsupported preview.
+No filesystem grants, Agent execution, or remote daemon restart are introduced.
+
 Before the first accepted agent request spawns, the server stores a durable file
-baseline in the task database. The request is persisted first. Git-visible files
-(including tracked and untracked dirty files) are read without changing the index,
-refs or user files. Non-Git projects use a recursive file inventory, skipping
+baseline in the task database. The request is persisted first.
+Direct-send acceptance is returned immediately after the request and User/Running
+events commit, before snapshot capture or Agent startup. A slow snapshot must not
+outlast the caller's confirmation deadline and restore an already submitted draft.
+Preparation failures after acceptance remain explicit failed-task events; they
+never reject or replay the admitted request.
+
+Git-visible files (including tracked and untracked dirty files) are read without
+changing the index, refs or user files. Non-Git projects use a recursive file inventory, skipping
 `.git`, `node_modules`, `target` and `.DS_Store` and refusing symlink traversal.
 Snapshots have no fixed file-count, directory-entry, per-file or total-byte caps.
 File reads use 64 KiB asynchronous chunks and fallible allocation; the 12-second
@@ -925,8 +992,27 @@ Native UI checks and the data-store test are recorded separately in
 
 ## Native session titles
 
+Claude Code 2.1.302 is the tested CLI compatibility baseline. Earlier releases
+have not been validated; this is not a claim about when individual flags were
+introduced. Platform injection requires native `--append-system-prompt` support,
+and unsupported optional title controls degrade to a notice rather than fail a task.
+
 Agent-generated titles are host metadata, not UI-generated summaries. Claude's
-`session_title_changed` reports an explicit native session name (not an AI title).
+headless stream mode does not create AI titles automatically. After the first
+successful ordinary turn in each process, Latte sends the native
+`generate_session_title` control with `persist: true` and a bounded description.
+The CLI reuses an existing native name or generates and persists its AI title.
+This optional metadata exchange never creates a chat turn or requires a title
+acknowledgement before subsequent input. Unsupported controls preserve the
+fallback name and emit a notice.
+Successful responses without a valid title also report a notice. A persisted
+manual name suppresses generation on resume without passing `--name` or issuing
+an implicit rename to the existing native session.
+Responses are bound to the native identity, and generated names cannot overwrite
+a manual name. Opening a session, discovery, slash commands, failed turns and
+child results do not trigger generation.
+
+Claude's `session_title_changed` reports an explicit native session name (not an AI title).
 It updates the saved custom name without creating a turn, including a native-side
 rename after an earlier Latte rename.
 Manual Rename uses the running session's native `rename_session` control request
@@ -1003,7 +1089,10 @@ including after editing. Transport reconnect never re-sends a prompt.
 
 Queue listing, revision-checked editing, removal, clearing and explicit resumption
 share the host protocol. Drag/keyboard reordering compares the complete pending
-request ID order and atomically persists its replacement. Stale, missing or duplicate
+request ID order and atomically persists its replacement. Editing into the
+composer is disabled during send confirmation; an already pending take blocks
+submission only for its owning draft until it settles, including across navigation.
+Stale, missing or duplicate
 IDs fail without mutation; a repeated identical order is idempotent. Dispatch always
 uses this saved order. The session actor serializes reorder/edits/cancellation against
 execution. Capacity is 16 pending messages / 512 KiB serialized content per session,
@@ -1071,7 +1160,8 @@ Reproduce the real CLI queue contract without a model service or login:
 The local fixture provides only Anthropic API responses. The installed CLI must
 accept `--replay-user-messages` and generate its own replay/UUID receipts; the
 script captures those fields, checks two delivered inputs settle together with
-one native result and no duplicate execution-start event, and closes its isolated
+one native result and no duplicate execution-start event, verifies one native
+title request persists AI metadata without adding a turn, and closes its isolated
 Server. CLI version, binary/source hashes and the observed UUID fields are saved
 separately from Python-CLI E2E evidence. This smoke is optional and outside CI.
 
@@ -1141,11 +1231,18 @@ structured user questions, and live title changes. Approval responses use
 server requests return explicit unsupported errors. EOF or a successful process
 exit cannot complete a turn. Native thread/turn identities fence unrelated or
 stale notifications; hidden reasoning text is not stored.
-Traex native stdout allows a bounded 16 MiB per frame because `thread/resume`
-returns persisted turns in one response. Restored turns are control metadata,
-not new public events or replayed prompts. Other Agent streams retain the 1 MiB
-limit; public protocol and metadata-probe limits are unchanged. Oversized native
-frames fail explicitly with the configured limit while preserving session history.
+Native Agent stdout is read as complete UTF-8 lines without an application-imposed
+per-record length limit. Claude can return many tool results in one message, and
+Traex `thread/resume` can return persisted turns in one control response. The
+runtime retains partial records across cancelled read futures and continues to
+supervise cancellation, EOF, malformed messages and deadlines. Restored turns are
+control metadata, not new public events or replayed prompts. Public protocol paging
+and metadata-only probe limits are independent and unchanged.
+Unterminated or extremely large native records can still exhaust host memory
+before decoding. The absence of a per-record cap is an explicit product constraint;
+public paging is not an ingestion memory bound. Bounded-memory streaming or an
+isolated decoder remains separate work. The sixth-review dispositions are recorded
+in `docs/validation/pr18-review-six-disposition.md`.
 Completion-only assistant items share the bounded per-turn text deduplication set.
 A completion that precedes both forms of start evidence is buffered (at most 32
 turn IDs) and applied only after the start response/notification confirms its ID.
@@ -1217,3 +1314,134 @@ turns and close/resume verification; this uses the CLI account's model service.
 `--model <native-id>` checks explicit selection, and `--live-tools` verifies a
 real file write in the disposable project.
 Native UI and actual SSH execution remain separate acceptance evidence.
+
+## Skill management
+
+The main sidebar’s Skills entry below New task reads the selected local/SSH host without starting an Agent.
+`skills`, `skill_detail`, `set_skill_state` and `install_skill` are additive host
+requests. Hello advertises `skill_management`; an absent/false flag keeps the client
+from sending these requests and shows an upgrade instruction. Older remote Servers
+must be updated before using the page.
+Management is global to the selected host: only platform and system skills are
+listed. Project selection never affects this page. Legacy non-null `project_id`
+arguments and project-scope installs fail explicitly before project resolution;
+the fields remain in the wire schema for compatibility. Project skill directories
+are never scanned or modified by management. Native Agent project skill discovery
+and conversation skill references remain independent of this global inventory.
+The desktop keeps host identities separate and discards late responses.
+The host menu has its own minimum width. Capability checks avoid unsupported wire
+requests on legacy Servers; import stays disabled until inventory loads.
+Reconnecting the selected host reloads inventory.
+Details offer Install for uninstalled skills and a disabled Installed status for
+enabled/disabled installations, alongside the enable switch, uninstall and copy
+actions. The toolbar's single Add dropdown offers Create skill and Import skill;
+its menu uses the shared action-menu styles and restores trigger focus on Escape
+or import cancellation. The Create skill action opens a new unsaved task on the selected host with
+a removable **Skill Creator** preset. It preserves existing unsent text and does
+not send, create a persisted session, or start an Agent. On explicit submission,
+the App-provided authoring instructions accompany the user request and direct the
+Agent to the host-global `~/.agents/skills` directory. This is an authoring task,
+independent of project-level skill management. If the chosen host has no project, the unsaved task stays on that host and offers an explicit working-directory action; adding/selecting a directory does not send a message. Copy preserves the complete SKILL.md, including its frontmatter, so the
+result remains a reusable skill; the rendered preview and injected prompt contain
+only the Markdown body. The detail description is associated with the dialog for
+assistive technology. There is no skill trial or trial-project selection.
+
+Platform skills ship in `skills/`, are embedded in the standalone Server, and are
+enabled by default. Corrupt, oversized or symlinked preferences skip platform
+injection without blocking Agent startup or command discovery. Inventory still
+shows native skills and a diagnostic with the preferences path; the damaged file
+is preserved rather than silently reset.
+The initial `latte-work-context` skill explains host paths and attached references.
+Enabled platform content is passed only to Work's Claude child through
+`--append-system-prompt`, and to Traex thread start/resume through the native
+`developerInstructions` field, appended to the native configured developer instructions.
+Only the Markdown body is injected. With platform skills enabled Traex reads its
+native configuration before opening/resuming a thread, including when an App
+Provider is selected. This adds a metadata round trip; if the configuration request
+fails, native session opening fails explicitly. Missing or malformed native
+instruction fields omit the override with a diagnostic, preserving CLI defaults;
+explicit null means no configured instructions. No native configuration or global
+skill directory is written.
+
+The checked CLI is Traex 0.210.1-alpha.3. Reproduce its schema and metadata-only
+sentinel check with `make smoke-traex-skill-contract` (`TRAEX` selects the
+installed executable, `TRAEX_CONTRACT_OUTPUT` selects the JSON report). It creates no
+thread and sends no model prompt. The sanitized, version-bound sample under
+`docs/evidence/traex-skill-contract-0.210.1-alpha.3.json` records the executable/schema
+hashes and observed metadata contract; it is historical evidence, not a claim about
+another installed CLI. The manually dispatched **Traex skill contract** GitHub
+workflow accepts an explicit trusted Linux executable HTTPS URL, SHA256 and exact
+version, checks all three, and retains its fresh report as an artifact. This is
+separate from the mandatory fixture E2E and needs no model/account credentials. The smoke uses production initialize parameters (no experimental capability) and supplies a disposable `cwd` to `config/read`; the report records both parameter shapes.
+The deterministic fixture asserts preservation on both start and resume and tests that disabling platform skills removes the override.
+Host preferences are atomically saved in the private state directory's `skills.json`.
+Changes apply to new Agent sessions; running processes and native conversation
+history may retain previously loaded instructions. No session is stopped or replayed.
+
+System roots include the shell-resolved `CLAUDE_CONFIG_DIR/skills` (otherwise
+`~/.claude/skills`), `~/.agents/skills`, `~/.codex/skills` and its `.system` subfolder,
+`~/.trae/skills`, and `~/.traex/skills`. Project roots, installed plugin caches
+and ancestor projects are outside this inventory. System roots are trusted
+user-owned configuration: native root symlinks may resolve outside HOME.
+Import resolves aliases of the trusted HOME
+base first, then refuses symlinks inside its destination. Conflicting installations
+and invalid names are reported with names/paths. Showing a skill does not assert that every Agent supports that root;
+native discovery and eligibility remain Agent-specific.
+
+Native enable/disable moves the complete top-level directory or symlink between
+`skills` and its sibling `skills.latte-work-disabled`; uninstall moves it to the
+sibling `skills.latte-work-uninstalled`, retaining a recoverable copy. Codex `.system`
+archives live outside `skills`, in `.codex/skills-system.latte-work-*`.
+The UI confirms the host/path and effect on other Agent launches using that root.
+The server never recursively deletes native skills, follows the top-level skill
+link for mutation, or overwrites a conflicting destination. Relative links that
+would break after moving are rejected. Reinstall restores the archived directory;
+external removal or conflicting state copies require explicit reconciliation.
+State updates compare the displayed prior state; stale actions cannot restore a
+newly uninstalled skill. Identical acknowledged target states reconcile safely.
+
+Add imports a complete directory already on the chosen host into that host's global
+`~/.agents/skills`, preserving resources and source files. Imports are staged, reject
+nested symlinks/special files, and allow 512 entries, 16 MiB total and eight child
+directory levels below the skill root (at most nine components in a relative file
+path). No download, shell expansion, package manager or skill body is executed.
+The Add dialog accepts a local `SKILL.md`, folder selection or an HTML5 file/folder
+drop, previews the complete file list and an editable installation name, and waits
+for explicit Install. It never interprets a local selection as an SSH-host path.
+Directory entry readers are drained across batches with bounded count/depth; files
+are limited before content reads. Regular file contents are transferred through the
+existing 64-KiB attachment protocol directly to the selected host. Uploads do not
+preserve original Unix executable metadata; native host-path imports retain their
+existing file-mode behavior. Completed staging follows the existing attachment
+cache policy and quota; incomplete uploads are aborted on cancellation/error. Completed attachments may be referenced by saved prompts and are not deleted by skill scratch cleanup.
+The additive `import_skill_files` request accepts only completed upload paths from
+this host's private store, rejects traversal/duplicates/symlinks/special files and
+path conflicts, then stages and installs atomically through the same skill worker.
+Both files and directories count toward 512 entries; depth, 16-MiB aggregate,
+64-KiB metadata and deadline limits apply. Import scratch directories carry a marker and a held file lock. Each staging allocation recovers at most eight marked, unlocked leftovers while scanning at most 512 parent entries, with bounded depth/count and cancellation checks. Active imports, symlink roots, unmarked legacy directories and completed attachments are preserved. The marker remains until payload cleanup succeeds. Existing installations are never replaced.
+Hello advertises `skill_file_import` separately; absent/false keeps the client from
+uploading and explains that this host needs a Server update. The existing global
+inventory and native path-install request remain compatible with older clients.
+
+Inventory reads at most 512 entries per directory, returns at most 512 skills and
+half a wire frame of metadata. Copy-conflict and scan diagnostics have independent
+16-message wire budgets (15 examples plus an omitted-count summary), so one class
+cannot hide the other; each message is bounded to 1024 characters. Inventory bounds
+SKILL.md to 64 KiB and scanning to three seconds between filesystem operations. A dedicated one-slot skill worker is
+independent of Agent probe capacity; provider model reads use the metadata lane.
+Requests have a 15-second response deadline. Cancellation and deadline checks run
+between filesystem steps, copy chunks and before committing a move/import. A
+blocking OS syscall cannot be forcibly cancelled: the worker retains its slot
+until it exits, preventing abandoned threads from accumulating, while Agent probes
+remain available. A timeout is unconfirmed, never auto-replayed; refresh reconciles
+the actual installation state.
+
+Focused checks: `skills::`, `skill_worker::`, `skill_admission_tests::` and
+`platform_skills_` server unit tests; `skill_` final-binary tests cover inventory,
+import, damaged preferences and Traex start/resume preservation. UI regressions
+live in `SkillsSettings.test.tsx` and `Modal.test.tsx`. Page presentation, host
+request/mutation lifecycle, and operation dialogs are separated into
+`SkillsSettings`, `useSkills`, and `SkillOperationDialogs`. Catalog, detail and
+operation errors have distinct state. The shared Modal falls back to a surviving
+parent dialog or the trigger's nearest live region when the trigger disappears.
+CLI fixtures, browser layout, native UI and actual SSH execution are separate evidence scopes.

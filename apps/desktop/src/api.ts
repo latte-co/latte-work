@@ -22,6 +22,7 @@ export const localHost: Host = {
 };
 export const native = "__TAURI_INTERNALS__" in window;
 const connectionGenerations = new Map<string, number>();
+const changePreviewSupport = new Map<string, boolean>();
 const connections = new Map<
   string,
   { signature: string; promise: Promise<Response> }
@@ -36,7 +37,18 @@ export function connect(host: Host, password?: string): Promise<Response> {
       host.id,
       (connectionGenerations.get(host.id) ?? 0) + 1,
     );
-    return invoke<Response>("connect_host", { host, password });
+    const generation = connectionGenerations.get(host.id);
+    changePreviewSupport.delete(host.id);
+    return invoke<Response>("connect_host", { host, password }).then(
+      (response) => {
+        if (
+          generation === connectionGenerations.get(host.id) &&
+          response.kind === "hello"
+        )
+          changePreviewSupport.set(host.id, response.change_preview === true);
+        return response;
+      },
+    );
   };
   const promise = (
     pending
@@ -50,6 +62,7 @@ export function connect(host: Host, password?: string): Promise<Response> {
   return promise;
 }
 export function disconnect(hostId: string): Promise<void> {
+  changePreviewSupport.delete(hostId);
   connectionGenerations.set(
     hostId,
     (connectionGenerations.get(hostId) ?? 0) + 1,
@@ -80,6 +93,14 @@ export async function request(
   hostId: string,
   request: Request,
 ): Promise<Response> {
+  if (
+    request.method === "preview_change" &&
+    changePreviewSupport.get(hostId) !== true
+  )
+    throw new ServerRequestError(
+      "unsupported",
+      "Server 不支持变更图片预览，请更新后重试",
+    );
   const generation = connectionGenerations.get(hostId);
   let response: Response;
   try {
@@ -91,10 +112,12 @@ export async function request(
       hostId,
       detail.slice(HOST_CONNECTION_PREFIX.length),
     );
-    if (generation === connectionGenerations.get(hostId))
+    if (generation === connectionGenerations.get(hostId)) {
+      changePreviewSupport.delete(hostId);
       window.dispatchEvent(
         new CustomEvent(HOST_DISCONNECTED_EVENT, { detail: error }),
       );
+    }
     throw error;
   }
   if (response.kind === "error")

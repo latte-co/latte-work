@@ -26,7 +26,11 @@ export function turnNavigationEntries(turns: TranscriptTurn[]) {
             content.references.map((reference) => reference.name).join("、"),
           240,
         ),
-        reply: reply?.type === "assistant" ? excerpt(reply.text, 600) : "",
+        reply: turn.finalText
+          ? excerpt(turn.finalText, 600)
+          : reply?.type === "assistant"
+            ? excerpt(reply.text, 600)
+            : "",
         status:
           turn.finalKey !== undefined
             ? ""

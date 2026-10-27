@@ -269,6 +269,24 @@ pub struct Snapshot {
     pub unavailable: Option<String>,
 }
 impl Snapshot {
+    pub async fn image_chunk(
+        &self,
+        path: &str,
+        offset: u64,
+    ) -> Result<Option<latte_work_protocol::ImagePreviewChunk>> {
+        validate_path(path)?;
+        let snapshot = self.clone();
+        let snapshot = tokio::task::spawn_blocking(move || snapshot.materialized()).await??;
+        if let Some(error) = &snapshot.unavailable {
+            bail!("{error}");
+        }
+        match snapshot.files.get(path) {
+            Some(Some(contents)) => contents.image_chunk(offset).await.map(Some),
+            Some(None) => bail!("此文件的快照内容不可用"),
+            None if snapshot.truncated => bail!("快照不完整，无法确认此文件版本"),
+            None => Ok(None),
+        }
+    }
     pub fn unavailable(message: String) -> Self {
         Self {
             at: now(),
@@ -625,7 +643,7 @@ impl Snapshot {
         ))
     }
 }
-fn validate_path(path: &str) -> Result<()> {
+pub(crate) fn validate_path(path: &str) -> Result<()> {
     if path.is_empty()
         || Path::new(path).is_absolute()
         || Path::new(path)
@@ -698,6 +716,26 @@ pub fn summary_page(summary: &ChangeSummary, offset: u32) -> Result<ChangeSummar
     Ok(result)
 }
 impl FrozenTurn {
+    pub async fn image_chunk(
+        &self,
+        path: &str,
+        before: bool,
+        offset: u64,
+    ) -> Result<Option<latte_work_protocol::ImagePreviewChunk>> {
+        validate_path(path)?;
+        let page = self.page_for_async(None, Some(path)).await?;
+        let entry = page
+            .entries
+            .iter()
+            .find(|entry| entry.path == path)
+            .context("文件不属于此轮已记录的变更")?;
+        if (before && entry.status == "A") || (!before && entry.status == "D") {
+            return Ok(None);
+        }
+        // Frozen snapshots retain only changed paths. Never fall back to live files.
+        let snapshot = if before { &self.before } else { &self.after };
+        snapshot.image_chunk(path, offset).await
+    }
     pub async fn freeze(
         request_id: String,
         before: Snapshot,
@@ -1166,6 +1204,59 @@ pub async fn workspace_summary(root: &Path) -> Result<ChangeSummary> {
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn frozen_image_versions_use_saved_objects_after_live_changes_and_reopen() {
+        let root = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        let storage = snapshot_storage::prepare(&state.path().join("objects")).unwrap();
+        let old = b"\x89PNG\r\n\x1a\nold\0";
+        let new = b"\x89PNG\r\n\x1a\nnew\0";
+        std::fs::write(root.path().join("edit.png"), old).unwrap();
+        std::fs::write(root.path().join("delete.png"), old).unwrap();
+        let before = Snapshot::capture_stored(root.path(), &storage)
+            .await
+            .unwrap();
+        std::fs::write(root.path().join("edit.png"), new).unwrap();
+        std::fs::write(root.path().join("add.png"), new).unwrap();
+        std::fs::remove_file(root.path().join("delete.png")).unwrap();
+        let after = Snapshot::capture_stored(root.path(), &storage)
+            .await
+            .unwrap();
+        let turn = FrozenTurn::freeze("request".into(), before, after, false, true)
+            .await
+            .unwrap();
+        let mut turn: FrozenTurn =
+            serde_json::from_str(&serde_json::to_string(&turn).unwrap()).unwrap();
+        turn.attach(&storage);
+        std::fs::write(root.path().join("edit.png"), "later live changes").unwrap();
+        std::fs::remove_file(root.path().join("add.png")).unwrap();
+        for (before, expected) in [(true, old), (false, new)] {
+            let image = turn
+                .image_chunk("edit.png", before, 0)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(image.data, expected);
+            assert_eq!(image.mime_type, "image/png");
+            assert_eq!(image.sha256.as_deref(), Some(image.version.as_str()));
+        }
+        assert!(
+            turn.image_chunk("add.png", true, 0)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            turn.image_chunk("delete.png", false, 0)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        for path in ["../edit.png", "unknown.png"] {
+            assert!(turn.image_chunk(path, false, 0).await.is_err());
+        }
+        assert!(turn.image_chunk("edit.png", false, 1000).await.is_err());
+    }
     use super::*;
     fn git(root: &Path, args: &[&str]) {
         assert!(

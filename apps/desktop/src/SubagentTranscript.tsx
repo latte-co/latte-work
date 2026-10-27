@@ -1,14 +1,22 @@
-import { Fragment } from "react";
+import { Fragment, useRef } from "react";
 import { ChevronRight } from "lucide-react";
-import { activityTranscript, type ActivityItem } from "./activity";
+import {
+  activityTranscript,
+  activitySegments,
+  isProcessActivity,
+  finalReplyItems,
+  type ActivityItem,
+} from "./activity";
 import { MessageContent } from "./MessageContent";
 import { WorkingStatus } from "./WorkingStatus";
 import { ReplyActions } from "./ReplyActions";
 import { ToolRow, ToolGroup } from "./ToolActivity";
-import { ProcessDisclosure } from "./TurnTranscript";
+import { ToolImages } from "./ToolImages";
+import { ProcessDisclosure, ProcessSummary } from "./TurnTranscript";
 import type { Event, Subagent } from "./protocol";
 
 function renderItem(item: ActivityItem) {
+  if (item.type === "tool_images") return <ToolImages images={item.images} />;
   if (item.type === "assistant")
     return (
       <article className="markdown">
@@ -37,6 +45,7 @@ export function SubagentTranscript({
   readingMore?: boolean;
   prompt?: string | null;
 }) {
+  const processMemory = useRef(new Map<string, boolean>());
   const allItems = activityTranscript(events);
   const instruction =
     prompt || allItems.find((item) => item.type === "user")?.text;
@@ -50,22 +59,30 @@ export function SubagentTranscript({
     }
   }
   const completed = task.status === "completed" && !readingMore;
-  const lastAssistant = [...items]
-    .reverse()
-    .find((item) => item.type === "assistant");
-  const finalIndex = lastAssistant ? items.indexOf(lastAssistant) : -1;
-  const hasFinalText =
-    completed &&
-    finalIndex >= 0 &&
-    !items
-      .slice(finalIndex + 1)
-      .some((item) => item.type === "tool" || item.type === "tools");
+  // A native delivered summary that matches recorded prose is authoritative,
+  // even if the child subsequently writes state and emits a short receipt.
+  const summaryItem =
+    completed && task.summary
+      ? [...items]
+          .reverse()
+          .filter((item) => item.type === "assistant")
+          .find((item) => item.text === task.summary)
+      : undefined;
+  const reply = completed
+    ? summaryItem
+      ? [summaryItem]
+      : finalReplyItems(items)
+    : [];
   const final = completed
-    ? hasFinalText && lastAssistant?.type === "assistant"
-      ? lastAssistant.text
-      : task.summary
+    ? reply.map((item) => item.text).join("\n\n") || task.summary
     : null;
-  const process = hasFinalText ? items.slice(0, finalIndex) : items;
+  const replyKeys = new Set(reply.map((item) => item.key));
+  const body = items.filter((item) => !replyKeys.has(item.key));
+  const segments = activitySegments(
+    body,
+    (item) => completed && isProcessActivity(item),
+  );
+  const processCount = segments.filter((segment) => segment.process).length;
   return (
     <div className="subagent-transcript">
       {instruction && (
@@ -79,26 +96,35 @@ export function SubagentTranscript({
           </div>
         </details>
       )}
-      {process.length > 0 &&
-        (completed ? (
-          <ProcessDisclosure key={`${task.id}:${task.status}`}>
-            <summary>
-              <span>{elapsed ? `用时 ${elapsed}` : "执行过程"}</span>
-              <ChevronRight size={14} aria-hidden="true" />
-            </summary>
+      {segments.map((segment) =>
+        segment.process ? (
+          <ProcessDisclosure
+            key={`${task.id}:process:${segment.items[0].key}`}
+            identity={`${task.id}:${segment.items[0].key}`}
+            memory={processMemory.current}
+          >
+            <ProcessSummary
+              items={segment.items}
+              label={
+                processCount === 1 && elapsed ? `用时 ${elapsed}` : "执行过程"
+              }
+            />
             {() => (
               <div className="turn-process-content">
-                {process.map((item) => (
+                {segment.items.map((item) => (
                   <Fragment key={item.key}>{renderItem(item)}</Fragment>
                 ))}
               </div>
             )}
           </ProcessDisclosure>
         ) : (
-          process.map((item) => (
-            <Fragment key={item.key}>{renderItem(item)}</Fragment>
-          ))
-        ))}
+          <Fragment key={`${task.id}:visible:${segment.items[0].key}`}>
+            {segment.items.map((item) => (
+              <Fragment key={item.key}>{renderItem(item)}</Fragment>
+            ))}
+          </Fragment>
+        ),
+      )}
       {final ? (
         <>
           <article className="markdown subagent-result">

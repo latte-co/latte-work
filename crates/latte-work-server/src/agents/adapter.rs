@@ -1,4 +1,4 @@
-//! Internal contract for a persistent agent session over bounded line-framed stdio.
+//! Internal contract for a persistent agent session over line-framed stdio.
 //! Adapters own wire encoding and protocol order, never process supervision or storage.
 use crate::providers::LaunchConfig;
 use anyhow::Result;
@@ -51,6 +51,11 @@ pub enum Input<'a> {
 pub enum Action {
     /// Authoritative native session name, including external manual renames.
     NativeName(String),
+    /// Optional generated metadata; never supersedes an explicit user name.
+    GeneratedTitle {
+        native_session_id: String,
+        title: String,
+    },
     TitleRenamed(Result<String, String>),
     SourceUsed {
         id: String,
@@ -59,6 +64,8 @@ pub enum Action {
     Commands(Vec<latte_work_protocol::AgentSlashCommand>),
     /// Already encoded bytes, including framing. Runtime only bounds and writes them.
     Write(Vec<u8>),
+    /// Best-effort metadata control. Failure must not fail the completed task.
+    MetadataWrite(Vec<u8>),
     /// Stop the startup deadline; this does not implicitly send any message.
     Ready,
     /// Native evidence that the main agent started an autonomous follow-up turn.
@@ -99,10 +106,6 @@ pub enum Action {
 }
 
 pub trait AgentAdapter: Send {
-    /// Bound native stdout independently of the public protocol's frame limit.
-    fn max_output_frame_length(&self) -> usize {
-        1024 * 1024
-    }
     /// Only true between turns when replacing the process cannot discard live work.
     fn can_reconfigure(&self) -> bool;
     /// A new turn may reuse a process that still owns background work. This
@@ -114,7 +117,9 @@ pub trait AgentAdapter: Send {
     fn has_background_work(&self) -> bool;
     /// Only children observed by this process share its credential redaction context.
     fn knows_subagent(&self, native_id: &str) -> bool;
-    fn set_initial_title(&mut self, title: Option<String>);
+    /// Persisted manual name, including resumed sessions. Creation arguments
+    /// must not implicitly rename an existing native session.
+    fn set_session_title(&mut self, title: Option<String>, resuming: bool);
     /// Prepare launch resources; may retain resume/config context for later protocol steps.
     fn command(
         &mut self,

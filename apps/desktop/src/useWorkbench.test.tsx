@@ -396,6 +396,32 @@ it("marks a new unsaved task disconnected after metadata transport failure and r
     mocks.request.mock.calls.filter(([, r]) => r.method === "send_queued"),
   ).toHaveLength(0);
 });
+it("starts an unsaved creator task on a host without projects and opens its directory picker on that host", async () => {
+  const remote = { id: "remote", name: "Remote", ssh: "fixture-host" };
+  mocks.loadHosts.mockResolvedValue([{ id: "local", name: "Local" }, remote]);
+  const base = mocks.request.getMockImplementation()!;
+  mocks.request.mockImplementation(async (host: string, request: Request) =>
+    host === "remote" && request.method === "projects"
+      ? { kind: "projects", projects: [] }
+      : base(host, request),
+  );
+  const hook = renderHook(useWorkbench);
+  await act(async () => {});
+  await act(async () => hook.result.current.createSession(undefined, "remote"));
+  expect(hook.result.current.hostId).toBe("remote");
+  expect(hook.result.current.projectId).toBe("");
+  expect(hook.result.current.sessionId).toBe("");
+  act(() => hook.result.current.openProject());
+  expect(hook.result.current.modal).toBe("project");
+  expect(hook.result.current.projectHostId).toBe("remote");
+  expect(
+    mocks.request.mock.calls.some(([, request]) =>
+      ["create_session", "send_queued", "open_agent_session"].includes(
+        request.method,
+      ),
+    ),
+  ).toBe(false);
+});
 it("a background host's failure does not disconnect the selected host", async () => {
   const hook = renderHook(useWorkbench);
   await act(async () => {});
@@ -1399,4 +1425,52 @@ it("persists pinned ordering through native refresh, disconnect/reconnect and re
     "pin-b",
     "pin-a",
   ]);
+});
+
+it("keeps the selected conversation unread while Skills is visible and returns on task navigation", async () => {
+  const hook = renderHook(useWorkbench);
+  await act(async () => {});
+  await act(async () =>
+    hook.result.current.openSession({ ...session(), hostId: "local" }),
+  );
+  const original = hook.result.current.sessionId;
+  focused = true;
+  mocks.request.mockClear();
+  act(() => hook.result.current.setModal("skills"));
+  await act(async () => vi.advanceTimersByTimeAsync(1500));
+  expect(hook.result.current.sessionId).toBe(original);
+  expect(
+    mocks.request.mock.calls.filter(
+      ([, request]) => request.method === "mark_session_unread",
+    ),
+  ).toHaveLength(0);
+  act(() => hook.result.current.openSession({ ...session(), hostId: "local" }));
+  expect(hook.result.current.modal).toBeNull();
+  expect(hook.result.current.sessionId).toBe(original);
+  act(() => hook.result.current.setModal("skills"));
+  await act(async () => hook.result.current.createSession());
+  expect(hook.result.current.modal).toBeNull();
+  expect(hook.result.current.sessionId).toBe("");
+});
+
+it("reads skill support independently from each connected host hello", async () => {
+  mocks.loadHosts.mockResolvedValue([
+    { id: "local", name: "Local" },
+    { id: "remote", name: "Remote", ssh: "fixture-host", server_path: null },
+  ]);
+  mocks.connect.mockImplementation(async (host: { id: string }) => ({
+    kind: "hello",
+    server_id: `server-${host.id}`,
+    agents: [],
+    skill_management: host.id === "local",
+    skill_file_import: host.id === "local",
+  }));
+  const hook = renderHook(useWorkbench);
+  await act(async () => {});
+  expect(hook.result.current.hostSupportsSkills("local")).toBe(true);
+  expect(hook.result.current.hostSupportsSkills("remote")).toBe(false);
+  expect(hook.result.current.hostSupportsSkills("missing")).toBe(false);
+  expect(hook.result.current.hostSupportsSkillFiles("local")).toBe(true);
+  expect(hook.result.current.hostSupportsSkillFiles("remote")).toBe(false);
+  expect(hook.result.current.hostSupportsSkillFiles("missing")).toBe(false);
 });

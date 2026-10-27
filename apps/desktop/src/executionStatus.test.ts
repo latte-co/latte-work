@@ -5,6 +5,59 @@ import type { Event, EventKind, Session, Subagent } from "./protocol";
 const session = { id: "s", status: "running" } as Session;
 const events = (...values: EventKind[]): Event[] =>
   values.map((event, i) => ({ seq: i, at: 0, session_id: "s", event }));
+it("distinguishes pending admission from waiting for a native response without inventing thinking", () => {
+  const initial = events(
+    { kind: "user", text: "request", request_id: "r" },
+    { kind: "notice", text: "Provider：local · 模型：model" },
+  );
+  expect(executionStatus(session, initial, true, false, true)).toBe(
+    "正在发送任务…",
+  );
+  expect(executionStatus(session, initial, true)).toBe("等待响应…");
+  expect(
+    executionStatus(
+      session,
+      [...initial, ...events({ kind: "progress", phase: "waiting" })],
+      true,
+      false,
+      true,
+    ),
+  ).toBe("等待响应…");
+  expect(
+    executionStatus(
+      session,
+      events(
+        { kind: "progress", phase: "thinking" },
+        { kind: "user", text: "new request", request_id: "next" },
+      ),
+      true,
+      false,
+      true,
+    ),
+  ).toBe("正在发送任务…");
+});
+it("keeps native tool, approval, stop and disconnect evidence ahead of pending admission", () => {
+  const read = events({ kind: "tool", id: "t", name: "Read", input: {} });
+  expect(executionStatus(session, read, true, false, true)).toBe(
+    "正在读取文件…",
+  );
+  expect(
+    executionStatus({ ...session, status: "waiting" }, read, true, false, true),
+  ).toBe("等待你的确认");
+  expect(executionStatus(session, read, true, true, true)).toBe("正在停止…");
+  expect(executionStatus(session, read, false, false, true)).toBe(
+    "连接已断开，状态待确认",
+  );
+  expect(
+    executionStatus(
+      { ...session, status: "completed" },
+      read,
+      true,
+      false,
+      true,
+    ),
+  ).toBeNull();
+});
 it("requires actual thinking evidence and keeps telemetry out of prose", () => {
   expect(executionStatus(session, [], true)).toBe("等待响应…");
   const thinking = { kind: "progress", phase: "thinking" } as const;

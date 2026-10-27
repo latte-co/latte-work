@@ -321,7 +321,10 @@ it.each([true, false])(
     fireEvent.change(input(), { target: { value: "first send" } });
     fireEvent.click(screen.getByRole("button", { name: "发送任务" }));
     view.rerender(<Conversation {...p} session={session("created")} />);
-    expect(input().value).toBe("first send");
+    expect(input().value).toBe("");
+    expect(p.drafts.get(JSON.stringify(["local", "created"])).text).toBe(
+      "first send",
+    );
     await act(async () => finish(accepted));
     await waitFor(() =>
       expect(input().value).toBe(accepted ? "" : "first send"),
@@ -346,6 +349,54 @@ it("a late accepted send cannot clear a new draft written after navigation", asy
   fireEvent.change(input(), { target: { value: "new draft" } });
   await act(async () => finish(true));
   expect(input().value).toBe("new draft");
+});
+it.each([true, false])(
+  "clears only an accepted message after reference-scope synchronization (accepted=%s)",
+  async (accepted) => {
+    const p = props();
+    let finish!: (value: boolean) => void;
+    p.send.mockImplementation(
+      () =>
+        new Promise<boolean>((resolve) => {
+          finish = resolve;
+        }),
+    );
+    render(<Conversation {...p} session={session("scope-sync")} />);
+    fireEvent.change(input(), { target: { value: "已发送的消息" } });
+    fireEvent.click(screen.getByRole("button", { name: "发送任务" }));
+    act(() =>
+      p.drafts.update(JSON.stringify(["local", "scope-sync"]), {
+        references: {
+          scope: p.drafts.get(JSON.stringify(["local", "scope-sync"]))
+            .references.scope,
+          entries: [],
+        },
+      }),
+    );
+    await act(async () => finish(accepted));
+    expect(input().value).toBe(accepted ? "" : "已发送的消息");
+  },
+);
+it("preserves a newly retyped identical message while an earlier send is awaiting confirmation", async () => {
+  const p = props();
+  let finish!: (value: boolean) => void;
+  p.send.mockImplementation(
+    () =>
+      new Promise<boolean>((resolve) => {
+        finish = resolve;
+      }),
+  );
+  const key = JSON.stringify(["local", "retyped"]);
+  render(<Conversation {...p} session={session("retyped")} />);
+  fireEvent.change(input(), { target: { value: "相同的文字" } });
+  fireEvent.click(screen.getByRole("button", { name: "发送任务" }));
+  act(() => {
+    p.drafts.update(key, { text: "" });
+    p.drafts.update(key, { text: "相同的文字" });
+  });
+  expect(input().value).toBe("相同的文字");
+  await act(async () => finish(true));
+  expect(input().value).toBe("相同的文字");
 });
 it.each([true, false])(
   "reconciles a session render that arrives after a fast send response (accepted=%s)",
@@ -911,6 +962,190 @@ it("opens the local panel even without a connected available agent", () => {
   expect(state.cancel).not.toHaveBeenCalled();
 });
 
+it.each([true, false])(
+  "pending submission hides only its presentation and restores unaccepted content (accepted=%s)",
+  async (accepted) => {
+    const p = props();
+    const key = JSON.stringify(["local", "pending"]);
+    let finish!: (value: boolean) => void;
+    p.send.mockImplementationOnce(
+      () =>
+        new Promise<boolean>((resolve) => {
+          finish = resolve;
+        }),
+    );
+    const view = render(<Conversation {...p} session={session("pending")} />);
+    fireEvent.change(input(), { target: { value: "待确认的消息" } });
+    fireEvent.click(screen.getByRole("button", { name: "发送任务" }));
+    view.rerender(
+      <Conversation
+        {...p}
+        session={{ ...session("pending"), status: "running" }}
+        events={[
+          {
+            seq: 1,
+            at: 0,
+            session_id: "pending",
+            event: {
+              kind: "user",
+              request_id: "request",
+              text: "待确认的消息",
+            },
+          },
+        ]}
+      />,
+    );
+    expect(input().value).toBe("");
+    expect(p.drafts.get(key).text).toBe("待确认的消息");
+    await waitFor(() =>
+      expect(screen.getByRole("status").textContent).toBe("正在发送任务"),
+    );
+    expect(screen.queryByText("等待响应")).toBeNull();
+    expect(
+      screen
+        .getByRole("button", { name: "正在发送任务" })
+        .hasAttribute("disabled"),
+    ).toBe(true);
+    expect(screen.queryByRole("button", { name: "停止任务" })).toBeNull();
+    await act(async () => finish(accepted));
+    expect(input().value).toBe(accepted ? "" : "待确认的消息");
+    expect(p.drafts.get(key).text).toBe(accepted ? "" : "待确认的消息");
+  },
+);
+it("restores submitted references and the skill preset after an unaccepted submission", async () => {
+  const p = props();
+  const key = JSON.stringify(["local", "pending-references"]);
+  p.drafts.update(key, {
+    text: "创建技能",
+    skillCreator: true,
+    references: {
+      scope: "local:p:claude",
+      entries: [{ name: "note.md", path: "note.md", directory: false }],
+    },
+  });
+  let finish!: (value: boolean) => void;
+  p.send.mockImplementationOnce(
+    () =>
+      new Promise<boolean>((resolve) => {
+        finish = resolve;
+      }),
+  );
+  render(<Conversation {...p} session={session("pending-references")} />);
+  fireEvent.click(screen.getByRole("button", { name: "发送任务" }));
+  expect(input().value).toBe("");
+  expect(screen.queryByRole("button", { name: "移除引用 note.md" })).toBeNull();
+  expect(screen.queryByRole("group", { name: "已选择技能" })).toBeNull();
+  expect(p.drafts.get(key).references.entries).toHaveLength(1);
+  expect(p.drafts.get(key).skillCreator).toBe(true);
+  await act(async () => finish(false));
+  expect(input().value).toBe("创建技能");
+  expect(screen.getByRole("button", { name: "移除引用 note.md" })).toBeTruthy();
+  expect(screen.getByRole("group", { name: "已选择技能" })).toBeTruthy();
+});
+it("retains real reported thinking while the submission response is pending", async () => {
+  const p = props();
+  let finish!: (value: boolean) => void;
+  p.send.mockImplementationOnce(
+    () =>
+      new Promise<boolean>((resolve) => {
+        finish = resolve;
+      }),
+  );
+  const view = render(
+    <Conversation {...p} session={session("pending-thinking")} />,
+  );
+  fireEvent.change(input(), { target: { value: "检查项目" } });
+  fireEvent.click(screen.getByRole("button", { name: "发送任务" }));
+  view.rerender(
+    <Conversation
+      {...p}
+      session={{ ...session("pending-thinking"), status: "running" }}
+      events={[
+        {
+          seq: 1,
+          at: 0,
+          session_id: "pending-thinking",
+          event: { kind: "user", request_id: "r", text: "检查项目" },
+        },
+        {
+          seq: 2,
+          at: 1,
+          session_id: "pending-thinking",
+          event: { kind: "progress", phase: "thinking" },
+        },
+      ]}
+    />,
+  );
+  await waitFor(() =>
+    expect(screen.getByRole("status").textContent).toBe("正在思考"),
+  );
+  expect(input().value).toBe("");
+  await act(async () => finish(true));
+});
+it("does not conceal another scope's draft during an earlier pending submission", async () => {
+  const p = props();
+  const nextKey = JSON.stringify(["remote", "b"]);
+  p.drafts.update(nextKey, { text: "另一份草稿" });
+  let finish!: (value: boolean) => void;
+  p.send.mockImplementationOnce(
+    () =>
+      new Promise<boolean>((resolve) => {
+        finish = resolve;
+      }),
+  );
+  const view = render(<Conversation {...p} session={session("a")} />);
+  fireEvent.change(input(), { target: { value: "已提交的草稿" } });
+  fireEvent.click(screen.getByRole("button", { name: "发送任务" }));
+  view.rerender(<Conversation {...p} hostId="remote" session={session("b")} />);
+  expect(input().value).toBe("另一份草稿");
+  await act(async () => finish(true));
+  expect(input().value).toBe("另一份草稿");
+});
+it("reveals the retained draft on disconnect without replaying an unconfirmed submission", async () => {
+  const p = props();
+  let finish!: (value: boolean) => void;
+  p.send.mockImplementationOnce(
+    () =>
+      new Promise<boolean>((resolve) => {
+        finish = resolve;
+      }),
+  );
+  const view = render(<Conversation {...p} session={session("disconnect")} />);
+  fireEvent.change(input(), { target: { value: "保留待核对的消息" } });
+  fireEvent.click(screen.getByRole("button", { name: "发送任务" }));
+  expect(input().value).toBe("");
+  view.rerender(
+    <Conversation
+      {...p}
+      session={session("disconnect")}
+      connected={false}
+      connectionError="offline"
+    />,
+  );
+  expect(input().value).toBe("保留待核对的消息");
+  expect(p.send).toHaveBeenCalledTimes(1);
+  await act(async () => finish(false));
+  expect(input().value).toBe("保留待核对的消息");
+});
+it("does not hide a retargeted new-task draft behind a submission to another host and project", async () => {
+  const p = props();
+  let finish!: (value: boolean) => void;
+  p.send.mockImplementationOnce(
+    () =>
+      new Promise<boolean>((resolve) => {
+        finish = resolve;
+      }),
+  );
+  const view = render(<Conversation {...p} />);
+  fireEvent.change(input(), { target: { value: "切换目标后保留的草稿" } });
+  fireEvent.click(screen.getByRole("button", { name: "发送任务" }));
+  expect(input().value).toBe("");
+  view.rerender(<Conversation {...p} hostId="remote" projectId="other" />);
+  expect(input().value).toBe("切换目标后保留的草稿");
+  await act(async () => finish(true));
+  expect(input().value).toBe("切换目标后保留的草稿");
+});
+
 it("keeps a pending send disabled when polling reports running, then sends the next turn once", async () => {
   const p = props();
   let finish!: (value: boolean) => void;
@@ -1057,6 +1292,173 @@ it("can queue a follow-up while the current turn runs with a single composer act
   expect(screen.queryByRole("button", { name: "加入队列" })).toBeNull();
 });
 
+it.each([true, false])(
+  "blocks queue editing while send confirmation is pending (accepted=%s)",
+  async (accepted) => {
+    const p = props();
+    const entry = {
+      request_id: "queued",
+      text: "Queued instruction",
+      model: null,
+      effort: null,
+      permission_mode: null,
+      revision: 0,
+      created_at: 1,
+    };
+    let finish!: (value: boolean) => void;
+    p.send.mockImplementation(
+      () =>
+        new Promise<boolean>((resolve) => {
+          finish = resolve;
+        }),
+    );
+    mocks.request.mockImplementation(async (_, command) =>
+      command.method === "message_queue"
+        ? {
+            kind: "message_queue",
+            entries: [entry],
+            paused: false,
+            reason: null,
+          }
+        : { kind: "queued_message_taken", entry },
+    );
+    render(<Conversation {...p} session={session("pending-edit")} />);
+    fireEvent.change(input(), { target: { value: "Submitted text" } });
+    fireEvent.click(
+      await screen.findByRole("button", {
+        name: "排队消息更多操作：Queued instruction",
+      }),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "发送任务" }));
+    expect(
+      (screen.getByRole("menuitem", { name: "编辑消息" }) as HTMLButtonElement)
+        .disabled,
+    ).toBe(true);
+    fireEvent.click(screen.getByRole("menuitem", { name: "编辑消息" }));
+    expect(
+      mocks.request.mock.calls.some(
+        ([, r]) => r.method === "take_queued_message",
+      ),
+    ).toBe(false);
+    await act(async () => finish(accepted));
+    expect(input().value).toBe(accepted ? "" : "Submitted text");
+    expect(
+      (screen.getByRole("menuitem", { name: "编辑消息" }) as HTMLButtonElement)
+        .disabled,
+    ).toBe(false);
+  },
+);
+
+it.each([true, false])(
+  "waits for an earlier queue take before submitting and leaves another session available (taken=%s)",
+  async (taken) => {
+    const p = props();
+    const entry = {
+      request_id: "queued",
+      text: "Queued instruction",
+      model: null,
+      effort: null,
+      permission_mode: null,
+      revision: 0,
+      created_at: 1,
+    };
+    let finish!: (response: unknown) => void;
+    mocks.request.mockImplementation(async (_, command) =>
+      command.method === "take_queued_message"
+        ? new Promise((resolve) => {
+            finish = resolve;
+          })
+        : {
+            kind: "message_queue",
+            entries: command.session_id === "taking" ? [entry] : [],
+            paused: false,
+            reason: null,
+          },
+    );
+    const view = render(<Conversation {...p} session={session("taking")} />);
+    fireEvent.change(input(), { target: { value: "Existing draft" } });
+    fireEvent.click(
+      await screen.findByRole("button", {
+        name: "排队消息更多操作：Queued instruction",
+      }),
+    );
+    fireEvent.click(screen.getByRole("menuitem", { name: "编辑消息" }));
+    expect(input().disabled).toBe(true);
+    expect(
+      (screen.getByRole("button", { name: "发送任务" }) as HTMLButtonElement)
+        .disabled,
+    ).toBe(true);
+    fireEvent.click(screen.getByRole("button", { name: "发送任务" }));
+    expect(p.send).not.toHaveBeenCalled();
+    view.rerender(<Conversation {...p} session={session("other")} />);
+    expect(input().disabled).toBe(false);
+    await act(async () =>
+      finish(
+        taken
+          ? { kind: "queued_message_taken", entry }
+          : { kind: "error", message: "未取回" },
+      ),
+    );
+    expect(input().value).toBe("");
+    view.rerender(<Conversation {...p} session={session("taking")} />);
+    expect(input().disabled).toBe(false);
+    expect(input().value).toBe(
+      taken ? "Existing draft\n\nQueued instruction" : "Existing draft",
+    );
+    fireEvent.click(screen.getByRole("button", { name: "发送任务" }));
+    await waitFor(() => expect(p.send).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(input().value).toBe(""));
+  },
+);
+
+it("keeps stop available while an empty composer waits for a queued message take", async () => {
+  const p = props();
+  const entry = {
+    request_id: "queued",
+    text: "Queued instruction",
+    model: null,
+    effort: null,
+    permission_mode: null,
+    revision: 0,
+    created_at: 1,
+  };
+  let finish!: (response: unknown) => void;
+  mocks.request.mockImplementation(async (_, command) =>
+    command.method === "take_queued_message"
+      ? new Promise((resolve) => {
+          finish = resolve;
+        })
+      : {
+          kind: "message_queue",
+          entries: [entry],
+          paused: false,
+          reason: null,
+        },
+  );
+  render(
+    <Conversation
+      {...p}
+      session={{ ...session("stop-take"), status: "running" }}
+    />,
+  );
+  fireEvent.click(
+    await screen.findByRole("button", {
+      name: "排队消息更多操作：Queued instruction",
+    }),
+  );
+  fireEvent.click(screen.getByRole("menuitem", { name: "编辑消息" }));
+  expect(input().disabled).toBe(true);
+  const stop = screen.getByRole("button", {
+    name: "停止任务",
+  }) as HTMLButtonElement;
+  expect(stop.disabled).toBe(false);
+  fireEvent.click(stop);
+  await waitFor(() => expect(p.cancel).toHaveBeenCalledTimes(1));
+  await act(async () => finish({ kind: "queued_message_taken", entry }));
+  expect(input().value).toBe("Queued instruction");
+  expect(p.send).not.toHaveBeenCalled();
+});
+
 it("takes a queued message into the composer, retains existing draft and references, and resubmits it as a new queued message", async () => {
   const p = props();
   const old = { name: "existing.txt", path: "existing.txt", directory: false };
@@ -1178,4 +1580,54 @@ it("offers Agent selection only for drafts and preserves draft text", () => {
   );
   expect(screen.queryByRole("combobox", { name: "Code Agent" })).toBeNull();
   expect(screen.getByTitle("Traex")).toBeTruthy();
+});
+
+it("preselects a removable Skill Creator preset without sending, and includes it only on explicit submission", async () => {
+  const p = props();
+  p.drafts.update("new-task", { skillCreator: true });
+  render(<Conversation {...p} />);
+  expect(screen.getByText("Skill Creator")).toBeTruthy();
+  expect(document.activeElement).toBe(input());
+  expect(p.send).not.toHaveBeenCalled();
+  fireEvent.change(input(), { target: { value: "创建一个代码评审技能" } });
+  fireEvent.keyDown(input(), { key: "Enter" });
+  await waitFor(() => expect(p.send).toHaveBeenCalled());
+  expect(p.send.mock.calls[0][0]).toContain("~/.agents/skills/<skill-name>/");
+  expect(p.send.mock.calls[0][0]).toContain("创建一个代码评审技能");
+  expect(p.send.mock.calls[0][0]).toContain("不要写入项目级技能目录");
+  await waitFor(() => expect(input().value).toBe(""));
+  expect(screen.queryByRole("group", { name: "已选择技能" })).toBeNull();
+});
+it("provides an explicit working-directory action for a creator draft without a project", () => {
+  const p = props();
+  p.drafts.update("new-task", { skillCreator: true, text: "已有需求" });
+  const view = render(
+    <Conversation
+      {...p}
+      projectName={undefined}
+      projectId={undefined}
+      hostId="remote"
+    />,
+  );
+  expect(screen.getByRole("group", { name: "已选择技能" })).toBeTruthy();
+  fireEvent.click(screen.getByRole("button", { name: "选择工作目录" }));
+  expect(p.openProject).toHaveBeenCalledTimes(1);
+  expect(p.send).not.toHaveBeenCalled();
+  expect(input().value).toBe("已有需求");
+  view.rerender(<Conversation {...p} hostId="remote" />);
+  expect(screen.queryByRole("button", { name: "选择工作目录" })).toBeNull();
+  expect(input().value).toBe("已有需求");
+  expect(document.activeElement).toBe(input());
+});
+it("removing Skill Creator preserves the user's draft and normal send behavior", async () => {
+  const p = props();
+  p.drafts.update("new-task", { skillCreator: true, text: "已有草稿" });
+  render(<Conversation {...p} />);
+  fireEvent.click(screen.getByRole("button", { name: "移除 Skill Creator" }));
+  expect(screen.queryByText("Skill Creator")).toBeNull();
+  expect(input().value).toBe("已有草稿");
+  expect(document.activeElement).toBe(input());
+  fireEvent.keyDown(input(), { key: "Enter" });
+  await waitFor(() => expect(p.send).toHaveBeenCalled());
+  expect(p.send.mock.calls[0][0]).toBe("已有草稿");
 });

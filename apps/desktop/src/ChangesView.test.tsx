@@ -69,6 +69,74 @@ beforeEach(() => {
   );
 });
 afterEach(cleanup);
+it("routes image previews to the saved turn on the selected remote host without reading textual diff or live sources", async () => {
+  URL.createObjectURL = vi.fn(() => "blob:saved-image");
+  URL.revokeObjectURL = vi.fn();
+  mocks.request.mockImplementation(async (_host: string, req: Request) => {
+    if (req.method === "turn_change_summary")
+      return {
+        kind: "turn_changes",
+        changes: {
+          request_id: "saved-r",
+          undo: "ready",
+          interrupted: false,
+          background_pending: false,
+          summary: {
+            entries: [
+              { path: "qr.png", status: "M", added: null, removed: null },
+            ],
+            added: 0,
+            removed: 0,
+            binary_files: 1,
+            truncated: false,
+            baseline_at: 1000,
+            unavailable: null,
+          },
+        },
+      };
+    if (req.method === "preview_change")
+      return {
+        kind: "change_preview",
+        chunk: {
+          data: [137, 80, 78, 71],
+          mime_type: "image/png",
+          size: 4,
+          next: 4,
+          has_more: false,
+          version: "saved",
+          sha256: null,
+        },
+      };
+    throw new Error(`unexpected ${req.method}`);
+  });
+  render(
+    <ChangesView
+      {...props}
+      hostId="devbox"
+      sessionId="saved-session"
+      requestId="saved-r"
+    />,
+  );
+  expect(
+    await screen.findByRole("img", { name: "qr.png · 修改后" }),
+  ).toBeTruthy();
+  expect(mocks.request).toHaveBeenCalledWith("devbox", {
+    method: "preview_change",
+    target: {
+      kind: "turn",
+      session_id: "saved-session",
+      request_id: "saved-r",
+    },
+    path: "qr.png",
+    before: false,
+    offset: 0,
+  });
+  expect(
+    mocks.request.mock.calls.every(([, req]) =>
+      ["turn_change_summary", "preview_change"].includes(req.method),
+    ),
+  ).toBe(true);
+});
 async function scope(label: string) {
   fireEvent.click(screen.getByRole("combobox", { name: "变更范围" }));
   fireEvent.click(screen.getByRole("option", { name: label }));

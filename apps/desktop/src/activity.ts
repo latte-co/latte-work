@@ -1,5 +1,6 @@
 import type { Event, JsonValue } from "./protocol";
 import { transcript, queuedInputReceipts, type Item } from "./transcript";
+import { toolOutput, type ToolImage } from "./toolOutput";
 
 export interface ToolActivity {
   key: number;
@@ -17,6 +18,7 @@ export interface ToolActivity {
     | "unconfirmed";
 }
 export type ActivityItem =
+  | { key: number; type: "tool_images"; images: ToolImage[] }
   | (Item & { approvalTool?: ToolActivity })
   | ToolActivity
   | {
@@ -24,6 +26,48 @@ export type ActivityItem =
       type: "tools";
       tools: ToolActivity[];
     };
+
+/** Candidates for a confirmed completed process, never a live-turn classifier. */
+export function isProcessActivity(item: ActivityItem): boolean {
+  if (item.type === "assistant") return true;
+  if (item.type === "tool" || item.type === "tools") return true;
+  if (item.type !== "event") return false;
+  if (item.value.kind === "progress" || item.value.kind === "usage")
+    return true;
+  return (
+    item.value.kind === "notice" && !/^已加载 Skill：\S+$/.test(item.value.text)
+  );
+}
+
+/** Metadata can split an answer into several rows after the last execution. */
+export function finalReplyItems(items: ActivityItem[]) {
+  let barrier = -1;
+  items.forEach((item, index) => {
+    if (
+      item.type === "user" ||
+      item.type === "tool" ||
+      item.type === "tools" ||
+      (item.type === "event" && !!item.approvalTool)
+    )
+      barrier = index;
+  });
+  return items.slice(barrier + 1).filter((item) => item.type === "assistant");
+}
+
+/** Keep original order and stable group identities around visible boundaries. */
+export function activitySegments(
+  items: ActivityItem[],
+  fold: (item: ActivityItem, index: number) => boolean,
+) {
+  const segments: { process: boolean; items: ActivityItem[] }[] = [];
+  items.forEach((item, index) => {
+    const process = fold(item, index);
+    const last = segments.at(-1);
+    if (last?.process === process) last.items.push(item);
+    else segments.push({ process, items: [item] });
+  });
+  return segments;
+}
 
 /** Pair by tool ID within a user turn, never by result arrival order. */
 export function activityTranscript(
@@ -77,9 +121,10 @@ export function activityTranscript(
       unfinished.add(tool);
       if (value.id) pending.set(value.id, tool);
     } else if (value.kind === "tool_result") {
+      const output = toolOutput(value.content);
       const tool = value.id ? pending.get(value.id) : undefined;
       if (tool) {
-        tool.output = value.content;
+        tool.output = output.content;
         if (tool.status !== "denied")
           tool.status = value.is_error ? "failed" : "completed";
         pending.delete(value.id);
@@ -90,10 +135,16 @@ export function activityTranscript(
           key: item.key,
           type: "tool",
           name: "工具输出",
-          output: value.content,
+          output: output.content,
           status: value.is_error ? "failed" : "completed",
         });
       }
+      if (output.images.length)
+        rows.push({
+          key: item.key + 0.5,
+          type: "tool_images",
+          images: output.images,
+        });
     } else {
       if (
         (value.kind === "approval" || value.kind === "question") &&

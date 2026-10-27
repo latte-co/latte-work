@@ -228,6 +228,28 @@ impl PartialEq for Contents {
     }
 }
 impl Contents {
+    pub async fn image_chunk(&self, offset: u64) -> Result<latte_work_protocol::ImagePreviewChunk> {
+        let hash = self.digest();
+        match self {
+            Self::Object(object) => {
+                crate::image_preview::file(&object.path()?, offset, Some(hash.clone()), Some(hash))
+                    .await
+            }
+            Self::Legacy(bytes) => {
+                ensure!(offset <= bytes.len() as u64, "图片预览偏移无效");
+                let start = offset as usize;
+                let end = start.saturating_add(65536).min(bytes.len());
+                crate::image_preview::chunk(
+                    bytes[start..end].to_vec(),
+                    &bytes[..bytes.len().min(512)],
+                    bytes.len() as u64,
+                    offset,
+                    hash.clone(),
+                    Some(hash),
+                )
+            }
+        }
+    }
     pub fn object(&self) -> Option<&Object> {
         if let Self::Object(object) = self {
             Some(object)

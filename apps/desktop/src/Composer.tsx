@@ -8,6 +8,7 @@ import {
 } from "react";
 import {
   ArrowLeft,
+  Box,
   ChevronRight,
   FileText,
   FileVideo,
@@ -40,10 +41,13 @@ import {
   storePastedFile,
   type ComposerReference,
 } from "./pasteAttachments";
+import { skillCreatorPrompt } from "./skillCreator";
 import { AttachmentImage } from "./AttachmentImage";
 import { referenceKind } from "./referenceMessage";
 
 interface Props {
+  skillCreator?: boolean;
+  onRemoveSkillCreator?: () => void;
   focusRequest?: number;
   referenceState?: { scope: string; entries: ComposerReference[] };
   onReferencesChange?: (value: {
@@ -57,6 +61,8 @@ interface Props {
   connected: boolean;
   disabled: boolean;
   sending: boolean;
+  /** Presentation only: keep the submitted content until acknowledgement. */
+  concealSubmitted?: boolean;
   hidden: boolean;
   value: string;
   onChange: (text: string) => void;
@@ -86,6 +92,7 @@ export function Composer(props: Props) {
     connected,
     disabled,
     sending,
+    concealSubmitted = false,
     hidden,
     value,
     onChange,
@@ -122,7 +129,7 @@ export function Composer(props: Props) {
     });
     observer.observe(element);
     return () => observer.disconnect();
-  }, [value, hidden]);
+  }, [value, hidden, concealSubmitted]);
   const composing = useRef(false);
   const submitting = useRef(false);
   const scope = `${hostId}:${projectId}:${agent}`;
@@ -652,7 +659,10 @@ export function Composer(props: Props) {
         openAppCommand(uiAction);
         return;
       }
-      const prompt = referencePrompt(value, attached);
+      const prompt = referencePrompt(
+        props.skillCreator ? skillCreatorPrompt(value) : value,
+        attached,
+      );
       if (await onSubmit(prompt)) {
         if (!props.referenceState && currentScope.current === owner)
           setReferences({ scope: owner, entries: [] });
@@ -1068,7 +1078,29 @@ export function Composer(props: Props) {
           )}
         </div>
       )}
-      {!!attached.length && (
+      {props.skillCreator && !concealSubmitted && (
+        <div
+          className="composer-skill-preset"
+          role="group"
+          aria-label="已选择技能"
+        >
+          <span title="Latte Work 内置的技能创建指引；发送需求后创建全局技能">
+            <Box size={16} />
+            Skill Creator
+            <button
+              disabled={sending || pasting}
+              aria-label="移除 Skill Creator"
+              onClick={() => {
+                props.onRemoveSkillCreator?.();
+                input.current?.focus();
+              }}
+            >
+              <X size={13} />
+            </button>
+          </span>
+        </div>
+      )}
+      {!!attached.length && !concealSubmitted && (
         <div className="composer-references" aria-label="已添加附件和引用">
           {attached.map((entry) => (
             <span key={entry.path} title={entry.path}>
@@ -1131,7 +1163,7 @@ export function Composer(props: Props) {
           menu && !addMenu && options.length ? `${listId}-${index}` : undefined
         }
         placeholder={placeholder}
-        value={value}
+        value={concealSubmitted ? "" : value}
         disabled={disabled || sending || pasting}
         onPaste={(event) => void paste(event)}
         onChange={(event) => {

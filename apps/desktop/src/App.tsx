@@ -14,6 +14,7 @@ import { Sidebar } from "./Sidebar";
 import { SidebarToggle } from "./SidebarToggle";
 import { SessionMenuButton } from "./SessionMenuButton";
 import { useSidebarPreview } from "./useSidebarPreview";
+import { SkillsPage } from "./SkillsPage";
 import { SettingsPage } from "./SettingsPage";
 import { HostDialogs } from "./HostDialogs";
 import { SshPasswordDialog } from "./SshPasswordDialog";
@@ -31,6 +32,8 @@ import {
 export default function App() {
   useAppLifecycle();
   const workbench = useWorkbench();
+  const skillsOpen = workbench.modal === "skills";
+  const [skillsBusy, setSkillsBusy] = useState(false);
   const drafts = useRef(new DraftStore()).current;
   const historyScope = JSON.stringify([
     workbench.hostId,
@@ -74,7 +77,7 @@ export default function App() {
   const [statusOpen, setStatusOpen] = useState(false);
   const sidebarPreview = useSidebarPreview({
     open: sidebarOpen,
-    enabled: !workbench.modal && !workbench.passwordPrompt,
+    enabled: (!workbench.modal || skillsOpen) && !workbench.passwordPrompt,
     interactionLocked: sidebarInteraction || statusOpen,
     toggle: toggleSidebar,
   });
@@ -108,7 +111,7 @@ export default function App() {
       ])
     : undefined;
   const showSubagents = () => openSubagents(workbench.workspaceId);
-  const merged = panel && workbench.workspace.expanded;
+  const merged = panel && workbench.workspace.expanded && !skillsOpen;
   const statusNotices = workbench.hosts.flatMap<StatusNotice>((target) => {
     const detail = workbench.hostErrors[target.id];
     if (detail)
@@ -178,7 +181,7 @@ export default function App() {
   useStatusNotices(statusNotices);
   const sidebarVisible = sidebarOpen || sidebarPreview.visible;
   const statusCenter =
-    !workbench.modal && !workbench.passwordPrompt ? (
+    (!workbench.modal || skillsOpen) && !workbench.passwordPrompt ? (
       <StatusCenter onOpenChange={setStatusOpen} />
     ) : null;
   const collapsedStatusCenter = sidebarPreview.visible ? (
@@ -207,7 +210,7 @@ export default function App() {
     <LinkHandling workspaceId={workbench.workspaceId}>
       <div
         hidden={workbench.modal === "settings"}
-        className={`app ${sidebarOpen ? "" : "sidebar-collapsed"}${panel ? " workspace-visible" : ""}${merged ? " workspace-merged" : ""}`}
+        className={`app ${sidebarOpen ? "" : "sidebar-collapsed"}${panel && !skillsOpen ? " workspace-visible" : ""}${merged ? " workspace-merged" : ""}`}
         style={
           {
             "--sidebar-width": `${leftWidth}px`,
@@ -232,11 +235,12 @@ export default function App() {
         />
         <main
           id="conversation-panel"
+          hidden={skillsOpen}
           className={`main${conversationHidden ? " conversation-hidden" : ""}`}
           role={merged ? "tabpanel" : undefined}
           aria-labelledby={merged ? "conversation-workspace-tab" : undefined}
-          aria-hidden={conversationHidden || undefined}
-          inert={conversationHidden}
+          aria-hidden={conversationHidden || skillsOpen || undefined}
+          inert={conversationHidden || skillsOpen}
         >
           <header
             className="topbar"
@@ -325,7 +329,9 @@ export default function App() {
             onModelReady={() =>
               setError((old) => (old.startsWith("模型不在当前") ? "" : old))
             }
-            settingsOpen={workbench.modal === "settings" || conversationHidden}
+            settingsOpen={
+              workbench.modal === "settings" || skillsOpen || conversationHidden
+            }
             events={events}
             historyLoading={workbench.historyLoading}
             hasEarlierHistory={workbench.hasEarlierHistory}
@@ -397,7 +403,7 @@ export default function App() {
         </main>
         <div
           className="resize-handle workspace-resize"
-          hidden={!panel || merged}
+          hidden={!panel || merged || skillsOpen}
           role="separator"
           aria-label="调整工作区宽度"
           onPointerDown={(e) => resize(e, "right")}
@@ -418,6 +424,7 @@ export default function App() {
                   workbench.workspace.conversationActive
                 ) &&
                 workbench.modal !== "settings" &&
+                !skillsOpen &&
                 !workbench.passwordPrompt
               }
               running={
@@ -446,10 +453,58 @@ export default function App() {
           hostId={hostId}
           hostName={host.name}
           project={project}
-          visible={panel && workbench.modal !== "settings"}
+          visible={panel && workbench.modal !== "settings" && !skillsOpen}
           connected={connected}
           close={() =>
             merged ? workbench.restoreWorkspace() : setPanel(false)
+          }
+        />
+        <SkillsPage
+          state={workbench}
+          active={skillsOpen}
+          busy={skillsBusy}
+          onBusy={setSkillsBusy}
+          onCreate={(targetHostId) => {
+            if (!workbench.hosts.some((host) => host.id === targetHostId)) {
+              setError("技能所在主机已移除");
+              return;
+            }
+            const target =
+              workbench.projects.find(
+                (p) =>
+                  p.hostId === targetHostId && p.id === workbench.projectId,
+              ) ?? workbench.projects.find((p) => p.hostId === targetHostId);
+            void workbench
+              .createSession(target, targetHostId)
+              .then(() => {
+                drafts.update("new-task", { skillCreator: true });
+              })
+              .catch((cause) => setError(message(cause)));
+          }}
+          onClose={() => {
+            workbench.setModal(null);
+            requestAnimationFrame(() => {
+              (sidebarOpen
+                ? document.getElementById("sidebar-skills")
+                : document.querySelector<HTMLElement>(
+                    ".topbar-controls [data-sidebar-trigger]",
+                  )
+              )?.focus();
+            });
+          }}
+          controls={
+            !sidebarOpen ? (
+              <>
+                <span className="topbar-controls">
+                  {collapsedStatusCenter}
+                  <SidebarToggle
+                    toggle={toggleSidebar}
+                    preview={sidebarPreview}
+                  />
+                </span>
+                <span className="titlebar-divider" aria-hidden="true" />
+              </>
+            ) : null
           }
         />
         <HostDialogs state={workbench} />

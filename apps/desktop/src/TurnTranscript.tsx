@@ -1,14 +1,15 @@
-import { Fragment, useMemo, useState, type ReactNode } from "react";
+import { Fragment, useMemo, useRef, useState, type ReactNode } from "react";
 import { ChevronRight } from "lucide-react";
 import { ReplyActions } from "./ReplyActions";
 import type { Event } from "./protocol";
-import { activityTranscript, type ActivityItem } from "./activity";
+import {
+  activityTranscript,
+  activitySegments,
+  isProcessActivity,
+  finalReplyItems,
+  type ActivityItem,
+} from "./activity";
 import { queuedInputReceipts } from "./transcript";
-
-const isSkillLoadNotice = (item: ActivityItem) =>
-  item.type === "event" &&
-  item.value.kind === "notice" &&
-  /^已加载 Skill：\S+$/.test(item.value.text);
 
 /** Fold confirmed outcomes only; stopped turns retain their prose and approvals. */
 export function turnTranscript(events: Event[]) {
@@ -53,60 +54,34 @@ export function turnTranscript(events: Event[]) {
       : duration != null
         ? formatElapsed(duration)
         : "执行过程";
-    const lastAssistant = [...items]
-      .reverse()
-      .find((item) => item.type === "assistant");
-    const finalIndex = lastAssistant ? items.indexOf(lastAssistant) : -1;
-    // Text before a later tool is progress, not a final answer. Incomplete histories
-    // and failed/interrupted turns keep all evidence visible.
+    const reply = finalReplyItems(items);
+    const lastAssistant = reply.at(-1);
+    const finalIndex = reply.length ? items.indexOf(reply[0]) : -1;
+    // Plain text has no semantic phase. Keep the whole terminal reply, and
+    // retain earlier prose in the explicitly labelled, expandable process.
     const hasFinal =
       !!user &&
       completed &&
       finalIndex >= 0 &&
-      !items
-        .slice(finalIndex + 1)
-        .some(
-          (item) =>
-            item.type === "user" ||
-            item.type === "tool" ||
-            item.type === "tools" ||
-            (item.type === "event" && !!item.approvalTool),
-        ) &&
       !items.some(
         (item) =>
           item.type === "event" &&
           (item.value.kind === "approval" || item.value.kind === "question") &&
           !item.resolved,
       );
-    // Split at visible handoffs rather than disabling folding for the whole turn.
-    // Pair tools before splitting so results stay with their original invocation.
-    const segments: { process: boolean; items: ActivityItem[] }[] = [];
-    function append(item: ActivityItem, process: boolean) {
-      const last = segments.at(-1);
-      if (last?.process === process) last.items.push(item);
-      else segments.push({ process, items: [item] });
-    }
-    if (stopped) {
-      for (const item of items.filter(isTool)) append(item, true);
-      for (const item of items.filter((item) => !isTool(item)))
-        append(item, false);
-    } else {
-      items.forEach((item, index) =>
-        append(
-          item,
-          hasFinal &&
-            index < finalIndex &&
-            item.type !== "user" &&
-            !isSkillLoadNotice(item),
-        ),
-      );
-    }
+    const segments = activitySegments(items, (item, index) =>
+      stopped
+        ? isTool(item)
+        : hasFinal && index < finalIndex && isProcessActivity(item),
+    );
     return {
       key: `${events[0].session_id}:${events[0].seq}`,
-      outcomeKey: end?.seq,
       user,
       status: end?.event.kind === "state" ? end.event.status : undefined,
       finalKey: hasFinal ? lastAssistant?.key : undefined,
+      finalText: hasFinal
+        ? reply.map((item) => item.text).join("\n\n")
+        : undefined,
       finalAt: hasFinal ? end?.at : undefined,
       stopped,
       elapsed,
@@ -133,6 +108,7 @@ export function TurnTranscript({
   turns?: TranscriptTurn[];
   children: (item: ActivityItem) => ReactNode;
 }) {
+  const processMemory = useRef(new Map<string, boolean>());
   const turns = useMemo(
     () => suppliedTurns ?? turnTranscript(events),
     [events, suppliedTurns],
@@ -144,20 +120,23 @@ export function TurnTranscript({
       data-turn-key={turn.user ? turn.key : undefined}
     >
       {turn.user && !turn.user.hidden && children(turn.user)}
-      {turn.stopped && turn.process.length === 0 && (
+      {turn.stopped && turn.processCount !== 1 && (
         <div className="turn-stop-summary" title="已执行的文件改动不会撤销。">
           {turn.elapsed}
         </div>
       )}
       {turn.segments.map((segment) =>
         segment.process ? (
-          <ProcessDisclosure key={`${turn.outcomeKey}:${segment.items[0].key}`}>
-            <summary
+          <ProcessDisclosure
+            key={`process:${segment.items[0].key}`}
+            identity={`${turn.key}:${segment.items[0].key}`}
+            memory={processMemory.current}
+          >
+            <ProcessSummary
+              items={segment.items}
+              label={turn.processCount > 1 ? "执行过程" : turn.elapsed}
               title={turn.stopped ? "已执行的文件改动不会撤销。" : undefined}
-            >
-              <span>{turn.processCount > 1 ? "执行过程" : turn.elapsed}</span>
-              <ChevronRight size={14} aria-hidden="true" />
-            </summary>
+            />
             {() => (
               <div className="turn-process-content">
                 {segment.items.map((item) => (
@@ -172,7 +151,7 @@ export function TurnTranscript({
               <Fragment key={item.key}>
                 {children(item)}
                 {item.key === turn.finalKey && item.type === "assistant" && (
-                  <ReplyActions text={item.text} at={turn.finalAt} />
+                  <ReplyActions text={turn.finalText!} at={turn.finalAt} />
                 )}
               </Fragment>
             ))}
@@ -183,16 +162,48 @@ export function TurnTranscript({
   ));
 }
 
+export function ProcessSummary({
+  label,
+  items,
+  title,
+}: {
+  label: string;
+  items: ActivityItem[];
+  title?: string;
+}) {
+  const replies = items.filter((item) => item.type === "assistant").length;
+  return (
+    <summary title={title ?? "展开查看完整过程和较早回复。"}>
+      <span>{label}</span>
+      {replies > 0 && <span> · {replies} 段较早回复</span>}
+      <ChevronRight size={14} aria-hidden="true" />
+    </summary>
+  );
+}
+
 export function ProcessDisclosure({
   children,
+  identity,
+  memory,
 }: {
   children: [ReactNode, () => ReactNode];
+  identity: string;
+  memory: Map<string, boolean>;
 }) {
-  const [open, setOpen] = useState(false);
+  const [open, setOpen] = useState(() => memory.get(identity) ?? false);
   return (
     <details
       className="turn-process"
-      onToggle={(e) => setOpen(e.currentTarget.open)}
+      open={open}
+      onToggle={(e) => {
+        const next = e.currentTarget.open;
+        setOpen(next);
+        // The owner survives live/complete transitions; its host/session key
+        // isolates this bounded, in-memory history from other conversations.
+        memory.delete(identity);
+        memory.set(identity, next);
+        if (memory.size > 256) memory.delete(memory.keys().next().value!);
+      }}
     >
       {children[0]}
       {open && children[1]()}

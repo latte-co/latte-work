@@ -9,6 +9,7 @@ import {
 } from "lucide-react";
 import type { TurnChanges } from "./protocol";
 import { useStatusIssues } from "./statusNotices";
+import { hasTurnChangeFiles } from "./transcript";
 
 export function TurnChangesCard({
   changes: saved,
@@ -173,7 +174,7 @@ export function TurnChangesCard({
       if (mounted.current) setBusy(false);
     }
   }
-  if (!summary.entries.length) return null;
+  if (!hasTurnChangeFiles(changes)) return null;
   return (
     <section className="turn-changes-card" aria-label="本轮文件变更">
       <header>

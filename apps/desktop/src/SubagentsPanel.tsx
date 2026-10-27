@@ -180,6 +180,7 @@ export function SubagentsPanel({
             <div className="messages">
               {sessionId ? (
                 <SubagentTranscript
+                  key={readingScope}
                   task={selected}
                   events={transcript.events}
                   prompt={transcript.prompt}

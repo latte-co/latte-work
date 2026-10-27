@@ -101,6 +101,27 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo test -p latte-work-server --test e2e --locked -- --test-threads=1
 
+  ssh-skills:
+    name: Skills over real OpenSSH
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.97.0
+      - uses: Swatinem/rust-cache@v2
+      - name: Prepare isolated OpenSSH test prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y openssh-server
+          sudo mkdir -p /run/sshd
+      - name: Build SSH test binary with a separate cold-cache budget
+        run: cargo test -p latte-work-server --test e2e --locked --no-run
+        timeout-minutes: 15
+      - run: make test-ssh-skills
+        timeout-minutes: 10
+
   portable-windows:
     name: Portable Rust (Windows)
     runs-on: windows-latest
@@ -168,7 +189,7 @@ jobs:
   desktop-native:
     name: macOS native desktop
     runs-on: macos-latest
-    timeout-minutes: 40
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -184,6 +205,16 @@ jobs:
         run: make test-native
         timeout-minutes: 3
       - run: make build
+      - name: Package and verify drag-install DMG
+        run: make package
+        timeout-minutes: 20
+      - uses: actions/upload-artifact@v4
+        with:
+          name: latte-work-dmg-${{ runner.arch }}
+          path: |
+            target/release/bundle/dmg/*.dmg
+            target/release/bundle/dmg/*.sha256
+          if-no-files-found: error
 
   pr-gate:
     name: PR Gate
@@ -195,6 +226,7 @@ jobs:
       - host-check
       - unit-tests
       - e2e-host
+      - ssh-skills
       - portable-windows
       - frontend
       - release-server
@@ -207,13 +239,14 @@ jobs:
           HOST_CHECK: ${{ needs.host-check.result }}
           UNIT: ${{ needs.unit-tests.result }}
           E2E: ${{ needs.e2e-host.result }}
+          SSH_SKILLS: ${{ needs.ssh-skills.result }}
           PORTABLE_WINDOWS: ${{ needs.portable-windows.result }}
           FRONTEND: ${{ needs.frontend.result }}
           RELEASE_SERVER: ${{ needs.release-server.result }}
           DESKTOP_NATIVE: ${{ needs.desktop-native.result }}
         run: |
           failed=0
-          for name in QUALITY HOST_CHECK UNIT E2E PORTABLE_WINDOWS FRONTEND RELEASE_SERVER DESKTOP_NATIVE; do
+          for name in QUALITY HOST_CHECK UNIT E2E SSH_SKILLS PORTABLE_WINDOWS FRONTEND RELEASE_SERVER DESKTOP_NATIVE; do
             result="${!name}"
             if [[ "$result" != success ]]; then
               echo "::error::$name was $result; every PR Gate dependency must succeed"

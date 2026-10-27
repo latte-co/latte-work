@@ -1,4 +1,6 @@
 //! Final-binary tests: real daemon, real socket/bridge, deterministic native processes.
+#[path = "support/ssh.rs"]
+mod ssh_e2e;
 #[path = "support/traex.rs"]
 mod traex_e2e;
 use latte_work_client::Client;
@@ -1065,6 +1067,184 @@ async fn models_select_per_turn_validate_and_persist_without_changing_provider()
             |e| matches!(&e.event, EventKind::Text { text } if text == "resumed:first:api_key")
         )
     );
+}
+
+#[tokio::test]
+async fn automatic_native_title_is_persisted_once_without_an_extra_turn() {
+    let host = Host::start().await;
+    let mut client = host.client().await;
+    let project = tempfile::tempdir().unwrap();
+    let id = session(&mut client, project.path()).await;
+    assert!(matches!(
+        send(&mut client, &id, "auto-title", "native-auto-title").await,
+        Response::Accepted { duplicate: false }
+    ));
+    wait(&mut client, &id, Status::Completed).await;
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if matches!(ask(&mut client, Request::Session { session_id:id.clone() }).await, Response::Session { session } if session.title=="Friendly generated title" && !session.custom_title && session.status==Status::Completed)
+        {
+            break;
+        }
+        assert!(Instant::now() < deadline, "generated title did not arrive");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let mut reconnect = host.client().await;
+    assert!(
+        matches!(ask(&mut reconnect, Request::Session {session_id:id.clone()}).await, Response::Session {session} if session.title=="Friendly generated title" && !session.custom_title)
+    );
+    send(&mut reconnect, &id, "auto-title-followup", "followup").await;
+    let events = wait(&mut reconnect, &id, Status::Completed).await;
+    assert_eq!(
+        events
+            .iter()
+            .filter(|e| matches!(e.event, EventKind::User { .. }))
+            .count(),
+        2
+    );
+    let text: String = events
+        .iter()
+        .filter_map(|e| match &e.event {
+            EventKind::Text { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(text, "fresh:你好resumed:你好");
+    assert_eq!(
+        std::fs::read_to_string(project.path().join("fixture-title-requests")).unwrap(),
+        "native-auto-title\n"
+    );
+}
+
+#[tokio::test]
+async fn delayed_automatic_title_preserves_manual_name_and_unsupported_is_nonfatal() {
+    for unsupported in [false, true] {
+        let host = Host::start().await;
+        let mut client = host.client().await;
+        let project = tempfile::tempdir().unwrap();
+        let id = session(&mut client, project.path()).await;
+        let prompt = if unsupported {
+            "native-auto-title-unsupported"
+        } else {
+            "native-auto-title-held"
+        };
+        send(&mut client, &id, "auto-title", prompt).await;
+        wait(&mut client, &id, Status::Completed).await;
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !project.path().join("fixture-title-requests").exists() {
+            assert!(Instant::now() < deadline);
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        if !unsupported {
+            assert!(
+                matches!(ask(&mut client, Request::RenameSession {session_id:id.clone(),title:"My manual name".into()}).await, Response::Session {session} if session.custom_title)
+            );
+            std::fs::write(project.path().join("title-release"), "").unwrap();
+        }
+        loop {
+            let Response::Events {
+                session, events, ..
+            } = ask(
+                &mut client,
+                Request::Poll {
+                    session_id: id.clone(),
+                    after: 0.0,
+                },
+            )
+            .await
+            else {
+                panic!("events")
+            };
+            assert_eq!(session.status, Status::Completed);
+            assert_eq!(
+                events
+                    .iter()
+                    .filter(|e| matches!(e.event, EventKind::User { .. }))
+                    .count(),
+                1
+            );
+            if unsupported {
+                if events.iter().any(|e|matches!(&e.event,EventKind::Notice{text} if text.contains("unsupported generate_session_title"))) {
+                    assert!(!session.custom_title);
+                    assert_eq!(session.title, prompt);
+                    break;
+                }
+            } else if project.path().join("fixture-title-response").exists() {
+                assert_eq!(session.title, "My manual name");
+                assert!(session.custom_title);
+                break;
+            }
+            assert!(Instant::now() < deadline, "title metadata did not settle");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        send(&mut client, &id, "title-followup", "followup").await;
+        wait(&mut client, &id, Status::Completed).await;
+        if !unsupported {
+            assert!(
+                matches!(ask(&mut client, Request::Session {session_id:id.clone()}).await, Response::Session {session} if session.title=="My manual name" && session.custom_title)
+            );
+            assert!(matches!(
+                ask(
+                    &mut client,
+                    Request::CloseAgentSession {
+                        session_id: id.clone(),
+                        only_if_idle: Some(true)
+                    }
+                )
+                .await,
+                Response::Ok
+            ));
+            send(&mut client, &id, "manual-title-resume", "native-auto-title").await;
+            wait(&mut client, &id, Status::Completed).await;
+            assert_eq!(
+                std::fs::read_to_string(project.path().join("fixture-title-requests")).unwrap(),
+                "native-auto-title-held\n"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn invalid_successful_native_title_response_keeps_fallback_and_reports_metadata_failure() {
+    let host = Host::start().await;
+    let mut client = host.client().await;
+    let project = tempfile::tempdir().unwrap();
+    let id = session(&mut client, project.path()).await;
+    send(&mut client, &id, "empty-title", "native-auto-title-empty").await;
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let Response::Events {
+            session, events, ..
+        } = ask(
+            &mut client,
+            Request::Poll {
+                session_id: id.clone(),
+                after: 0.0,
+            },
+        )
+        .await
+        else {
+            panic!("events")
+        };
+        if events
+            .iter()
+            .any(|e| matches!(&e.event,EventKind::Notice{text} if text.contains("未返回有效标题")))
+        {
+            assert_eq!(session.status, Status::Completed);
+            assert_eq!(session.title, "native-auto-title-empty");
+            assert!(!session.custom_title);
+            assert_eq!(
+                events
+                    .iter()
+                    .filter(|e| matches!(e.event, EventKind::User { .. }))
+                    .count(),
+                1
+            );
+            break;
+        }
+        assert!(Instant::now() < deadline, "missing metadata failure notice");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
 }
 
 #[tokio::test]
@@ -4765,6 +4945,165 @@ async fn task_baselines_and_sources_integrate_with_real_process_reconnect_and_bo
 }
 
 #[tokio::test]
+async fn native_stdout_large_claude_messages_preserve_outputs_reconnect_and_followups() {
+    let host = Host::start().await;
+    let root = tempfile::tempdir().unwrap();
+    let mut client = host.client().await;
+    let id = session(&mut client, root.path()).await;
+    send(&mut client, &id, "large-native", "large-native-frame").await;
+    wait(&mut client, &id, Status::Completed).await;
+    let bytes: usize = std::fs::read_to_string(root.path().join("native-large-frame-bytes"))
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert!(bytes > 16 * 1024 * 1024);
+
+    // Native frames and public pages are independent: reconnect, then consume
+    // every normalized result across bounded pages without clipping content.
+    client = host.client().await;
+    let mut after = 0.0;
+    let mut results = std::collections::HashMap::new();
+    let mut replied = false;
+    loop {
+        let response = ask(
+            &mut client,
+            Request::Poll {
+                session_id: id.clone(),
+                after,
+            },
+        )
+        .await;
+        assert!(serde_json::to_vec(&response).unwrap().len() < latte_work_protocol::MAX_FRAME);
+        let Response::Events {
+            events, has_more, ..
+        } = response
+        else {
+            panic!("{response:?}")
+        };
+        assert!(!has_more || !events.is_empty(), "poll cursor must advance");
+        for event in events {
+            assert!(event.seq > after);
+            after = event.seq;
+            match event.event {
+                EventKind::ToolResult { id, content, .. } => {
+                    assert!(results.insert(id, content).is_none());
+                }
+                EventKind::Text { text } if text == "LARGE_NATIVE_FRAME_OK" => replied = true,
+                EventKind::Notice { text } => assert!(!text.contains("过大"), "{text}"),
+                _ => {}
+            }
+        }
+        if !has_more {
+            break;
+        }
+    }
+    assert!(replied);
+    assert_eq!(results.len(), 72);
+    for n in 0..72 {
+        assert_eq!(
+            results[&format!("large-{n}")],
+            format!("payload-{n}:{}终", "x".repeat(256 * 1024))
+        );
+    }
+    let pid = std::fs::read_to_string(root.path().join("fixture-agent-pid")).unwrap();
+    send(&mut client, &id, "after-large", "identity").await;
+    wait(&mut client, &id, Status::Completed).await;
+    assert_eq!(
+        std::fs::read_to_string(root.path().join("fixture-agent-pid")).unwrap(),
+        pid
+    );
+    send(&mut client, &id, "cancel-after-large", "hang").await;
+    wait(&mut client, &id, Status::Running).await;
+    assert!(matches!(
+        ask(
+            &mut client,
+            Request::Cancel {
+                session_id: id.clone()
+            }
+        )
+        .await,
+        Response::Ok
+    ));
+    wait(&mut client, &id, Status::Stopped).await;
+}
+#[tokio::test]
+async fn image_outputs_and_frozen_previews_survive_bridge_reconnect_without_live_fallback() {
+    use latte_work_protocol::ChangePreviewTarget;
+    let host = Host::start().await;
+    let mut client = host.client().await;
+    assert!(matches!(
+        ask(&mut client, Request::Hello { version: VERSION }).await,
+        Response::Hello {
+            change_preview: true,
+            ..
+        }
+    ));
+    let root = tempfile::tempdir().unwrap();
+    let old = b"\x89PNG\r\n\x1a\nold\0";
+    std::fs::write(root.path().join("fixture.png"), old).unwrap();
+    let id = session(&mut client, root.path()).await;
+    send(&mut client, &id, "image-r1", "image-output").await;
+    let events = wait(&mut client, &id, Status::Completed).await;
+    assert!(events.iter().any(|e|matches!(&e.event,EventKind::ToolResult{content,..} if content[1]["mime_type"]=="image/png" && content[1]["data_base64"].is_string() && content[1].get("source").is_none())));
+    std::fs::write(root.path().join("fixture.png"), "later live change").unwrap();
+    client = host.client().await;
+    for (before, expected) in [
+        (true, old.as_slice()),
+        (false, b"\x89PNG\r\n\x1a\nfixture\0".as_slice()),
+    ] {
+        let response = ask(
+            &mut client,
+            Request::PreviewChange {
+                target: ChangePreviewTarget::Turn {
+                    session_id: id.clone(),
+                    request_id: "image-r1".into(),
+                },
+                path: "fixture.png".into(),
+                before,
+                offset: 0,
+            },
+        )
+        .await;
+        let Response::ChangePreview { chunk: Some(chunk) } = response else {
+            panic!("{response:?}")
+        };
+        assert_eq!(chunk.data, expected);
+        assert_eq!(chunk.mime_type, "image/png");
+        assert!(!chunk.has_more);
+        assert!(chunk.sha256.is_some());
+    }
+    for path in ["../fixture.png", "unknown.png"] {
+        assert!(matches!(
+            ask(
+                &mut client,
+                Request::PreviewChange {
+                    target: ChangePreviewTarget::Turn {
+                        session_id: id.clone(),
+                        request_id: "image-r1".into()
+                    },
+                    path: path.into(),
+                    before: false,
+                    offset: 0
+                }
+            )
+            .await,
+            Response::Error { .. }
+        ));
+    }
+    let Response::History { events, .. } = ask(
+        &mut client,
+        Request::History {
+            session_id: id,
+            before: None,
+        },
+    )
+    .await
+    else {
+        panic!()
+    };
+    assert!(events.iter().any(|e|matches!(&e.event,EventKind::ToolResult{content,..} if content[1]["data_base64"].is_string())));
+}
+#[tokio::test]
 async fn ordinary_directory_turn_changes_survive_followup_and_reconnect() {
     let host = Host::start().await;
     let mut client = host.client().await;
@@ -7742,4 +8081,452 @@ async fn snapshot_legacy_oversized_events_advance_cursor_and_leave_other_session
         Response::Accepted { .. }
     ));
     wait(&mut client, &other, Status::Completed).await;
+}
+
+#[tokio::test]
+async fn skill_management_is_host_local_reversible_and_prompt_free() {
+    use latte_work_protocol::{SkillScope, SkillState};
+    let home = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let config = home.path().join(".claude");
+    let host = Host::start_with_environment(&[
+        ("HOME", home.path().as_os_str()),
+        ("CLAUDE_CONFIG_DIR", config.as_os_str()),
+    ])
+    .await;
+    let mut client = host.client().await;
+    let system = home.path().join(".agents/skills/shared");
+    let project_skill = root.path().join(".claude/skills/shared");
+    for path in [&system, &project_skill] {
+        std::fs::create_dir_all(path).unwrap();
+        std::fs::write(path.join("SKILL.md"), "---\nname: Shared\ndescription: Host-local installed skill\n---\n!`touch SHOULD_NOT_EXECUTE`\n").unwrap();
+        std::fs::write(path.join("resource.txt"), "keep").unwrap();
+    }
+    let Response::Project { project } = ask(
+        &mut client,
+        Request::AddProject {
+            path: root.path().to_string_lossy().into(),
+            name: None,
+        },
+    )
+    .await
+    else {
+        panic!("project")
+    };
+    let project_id = Some(project.id.clone());
+    let Response::Skills {
+        skills,
+        warnings,
+        truncated,
+    } = ask(&mut client, Request::Skills { project_id: None }).await
+    else {
+        panic!("catalog")
+    };
+    assert!(warnings.is_empty());
+    assert!(!truncated);
+    assert_eq!(skills.len(), 2);
+    let system_id = skills
+        .iter()
+        .find(|s| s.scope == SkillScope::System)
+        .unwrap()
+        .id
+        .clone();
+    assert!(skills.iter().all(|s| s.scope != SkillScope::Project));
+    // Legacy project requests must fail before resolving a project or touching its files.
+    for request in [
+        Request::Skills {
+            project_id: project_id.clone(),
+        },
+        Request::SkillDetail {
+            project_id: project_id.clone(),
+            id: system_id.clone(),
+        },
+        Request::SetSkillState {
+            project_id: project_id.clone(),
+            id: system_id.clone(),
+            state: SkillState::Disabled,
+            expected_state: SkillState::Enabled,
+        },
+        Request::InstallSkill {
+            project_id: project_id.clone(),
+            scope: SkillScope::System,
+            path: system.to_string_lossy().into(),
+        },
+        Request::InstallSkill {
+            project_id: None,
+            scope: SkillScope::Project,
+            path: system.to_string_lossy().into(),
+        },
+    ] {
+        let response = ask(&mut client, request).await;
+        assert!(matches!(response, Response::Error { message, .. } if message.contains("全局")));
+    }
+    let mut expected_state = SkillState::Enabled;
+    for state in [
+        SkillState::Disabled,
+        SkillState::Uninstalled,
+        SkillState::Enabled,
+    ] {
+        let Response::Skills { skills, .. } = ask(
+            &mut client,
+            Request::SetSkillState {
+                project_id: None,
+                id: system_id.clone(),
+                state,
+                expected_state,
+            },
+        )
+        .await
+        else {
+            panic!("state")
+        };
+        assert_eq!(
+            skills.iter().find(|s| s.id == system_id).unwrap().state,
+            state
+        );
+        expected_state = state;
+        assert!(project_skill.join("SKILL.md").exists());
+        let Response::SkillDetail { skill, markdown } = ask(
+            &mut client,
+            Request::SkillDetail {
+                project_id: None,
+                id: system_id.clone(),
+            },
+        )
+        .await
+        else {
+            panic!("detail")
+        };
+        assert!(markdown.contains("SHOULD_NOT_EXECUTE"));
+        assert_eq!(
+            std::fs::read_to_string(Path::new(&skill.directory.unwrap()).join("resource.txt"))
+                .unwrap(),
+            "keep"
+        );
+    }
+    assert!(matches!(
+        ask(
+            &mut client,
+            Request::SetSkillState {
+                project_id: None,
+                id: "file:project-only".into(),
+                state: SkillState::Disabled,
+                expected_state: SkillState::Enabled,
+            }
+        )
+        .await,
+        Response::Error { .. }
+    ));
+    let builtin = skills
+        .iter()
+        .find(|s| s.scope == SkillScope::Platform)
+        .unwrap();
+    ask(
+        &mut client,
+        Request::SetSkillState {
+            project_id: None,
+            id: builtin.id.clone(),
+            state: SkillState::Disabled,
+            expected_state: SkillState::Enabled,
+        },
+    )
+    .await;
+    let mut reconnect = host.client().await;
+    let Response::Skills { skills, .. } =
+        ask(&mut reconnect, Request::Skills { project_id: None }).await
+    else {
+        panic!("reconnect")
+    };
+    assert_eq!(
+        skills
+            .iter()
+            .find(|s| s.scope == SkillScope::Platform)
+            .unwrap()
+            .state,
+        SkillState::Disabled
+    );
+    assert!(home.path().join(".agents/skills/shared/SKILL.md").exists());
+    assert!(
+        !home
+            .path()
+            .join(".agents/skills/latte-work-context")
+            .exists()
+    );
+    assert!(!config.join("skills/latte-work-context").exists());
+    assert!(!root.path().join("SHOULD_NOT_EXECUTE").exists());
+    assert!(
+        matches!(ask(&mut client, Request::Sessions { project_id: project.id }).await, Response::Sessions { sessions } if sessions.is_empty())
+    );
+    // A second server with the same HOME does not inherit Work's state-dir preference.
+    let other = Host::start_with_environment(&[
+        ("HOME", home.path().as_os_str()),
+        ("CLAUDE_CONFIG_DIR", config.as_os_str()),
+    ])
+    .await;
+    let mut other_client = other.client().await;
+    let Response::Skills { skills, .. } =
+        ask(&mut other_client, Request::Skills { project_id: None }).await
+    else {
+        panic!("other host")
+    };
+    assert_eq!(
+        skills
+            .iter()
+            .find(|s| s.scope == SkillScope::Platform)
+            .unwrap()
+            .state,
+        SkillState::Enabled
+    );
+}
+
+#[tokio::test]
+async fn skill_import_copies_full_packages_and_rejects_unsafe_content_without_prompts() {
+    use latte_work_protocol::SkillScope;
+    let home = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let packages = tempfile::tempdir().unwrap();
+    let host = Host::start_with_environment(&[("HOME", home.path().as_os_str())]).await;
+    let mut client = host.client().await;
+    assert!(matches!(
+        ask(&mut client, Request::Hello { version: VERSION }).await,
+        Response::Hello {
+            skill_management: true,
+            ..
+        }
+    ));
+    let Response::Project { project } = ask(
+        &mut client,
+        Request::AddProject {
+            path: root.path().to_string_lossy().into(),
+            name: None,
+        },
+    )
+    .await
+    else {
+        panic!("project")
+    };
+    let source = packages.path().join("imported");
+    std::fs::create_dir_all(source.join("scripts")).unwrap();
+    std::fs::write(
+        source.join("SKILL.md"),
+        "---\nname: Imported\ndescription: Fixture\n---\n!`touch MUST_NOT_EXECUTE`\n",
+    )
+    .unwrap();
+    std::fs::write(source.join("scripts/check.sh"), "touch MUST_NOT_EXECUTE").unwrap();
+    let scope = SkillScope::System;
+    let response = ask(
+        &mut client,
+        Request::InstallSkill {
+            project_id: None,
+            scope,
+            path: source.to_string_lossy().into(),
+        },
+    )
+    .await;
+    let Response::Skills { skills, .. } = response else {
+        panic!("{response:?}")
+    };
+    let installed = skills
+        .iter()
+        .find(|s| s.scope == scope && s.name == "Imported")
+        .unwrap();
+    assert_eq!(
+        std::fs::read_to_string(
+            Path::new(installed.directory.as_ref().unwrap()).join("scripts/check.sh")
+        )
+        .unwrap(),
+        "touch MUST_NOT_EXECUTE"
+    );
+    let unsafe_package = packages.path().join("unsafe-package");
+    std::fs::create_dir(&unsafe_package).unwrap();
+    std::fs::copy(source.join("SKILL.md"), unsafe_package.join("SKILL.md")).unwrap();
+    std::os::unix::fs::symlink(source.join("SKILL.md"), unsafe_package.join("linked")).unwrap();
+    assert!(matches!(
+        ask(
+            &mut client,
+            Request::InstallSkill {
+                project_id: None,
+                scope: SkillScope::System,
+                path: unsafe_package.to_string_lossy().into()
+            }
+        )
+        .await,
+        Response::Error { .. }
+    ));
+    assert!(!home.path().join(".agents/skills/unsafe-package").exists());
+    assert!(!root.path().join(".agents").exists());
+    assert!(source.join("SKILL.md").exists());
+    assert!(!root.path().join("MUST_NOT_EXECUTE").exists());
+    assert!(
+        matches!(ask(&mut client,Request::Sessions{project_id:project.id}).await,Response::Sessions{sessions}if sessions.is_empty())
+    );
+}
+#[tokio::test]
+async fn damaged_skill_preferences_do_not_block_agent_sessions_or_command_discovery() {
+    for damage in ["json", "oversize", "symlink"] {
+        let host = Host::start().await;
+        let mut client = host.client().await;
+        let root = tempfile::tempdir().unwrap();
+        let prefs = host.directory.path().join("skills.json");
+        match damage {
+            "json" => std::fs::write(&prefs, "not-json").unwrap(),
+            "oversize" => std::fs::write(&prefs, " ".repeat(64 * 1024 + 1)).unwrap(),
+            _ => {
+                let external = root.path().join("external.json");
+                std::fs::write(&external, "{}").unwrap();
+                std::os::unix::fs::symlink(external, &prefs).unwrap();
+            }
+        }
+        let id = session(&mut client, root.path()).await;
+        let Response::Session { session: current } = ask(
+            &mut client,
+            Request::Session {
+                session_id: id.clone(),
+            },
+        )
+        .await
+        else {
+            panic!("session")
+        };
+        for agent in ["claude", "traex"] {
+            assert!(matches!(
+                ask(
+                    &mut client,
+                    Request::AgentCommands {
+                        project_id: current.project_id.clone(),
+                        agent: agent.into()
+                    }
+                )
+                .await,
+                Response::AgentCommands { .. }
+            ));
+            let id = if agent == "claude" {
+                id.clone()
+            } else {
+                let Response::Session { session } = ask(
+                    &mut client,
+                    Request::CreateSession {
+                        project_id: current.project_id.clone(),
+                        agent: agent.into(),
+                    },
+                )
+                .await
+                else {
+                    panic!("session")
+                };
+                session.id
+            };
+            let reply = send(&mut client, &id, &format!("damaged-prefs-{agent}"), "hello").await;
+            assert!(
+                matches!(reply, Response::Accepted { .. }),
+                "{damage}/{agent}: {reply:?}"
+            );
+            wait(&mut client, &id, Status::Completed).await;
+        }
+        assert!(prefs.symlink_metadata().is_ok());
+    }
+}
+
+#[tokio::test]
+async fn skill_file_upload_installs_globally_and_rejects_foreign_attachment_paths() {
+    use latte_work_protocol::SkillImportFile;
+    let home = tempfile::tempdir().unwrap();
+    let host = Host::start_with_environment(&[("HOME", home.path().as_os_str())]).await;
+    let mut client = host.client().await;
+    assert!(matches!(
+        ask(&mut client, Request::Hello { version: VERSION }).await,
+        Response::Hello {
+            skill_file_import: true,
+            ..
+        }
+    ));
+    let mut files = Vec::new();
+    for (path, body) in [
+        ("SKILL.md", b"---\nname: upload-e2e\n---\nBody".as_slice()),
+        ("references/note.txt", b"complete resource".as_slice()),
+    ] {
+        let Response::AttachmentUpload { id } = ask(
+            &mut client,
+            Request::BeginAttachment {
+                name: path.rsplit('/').next().unwrap().into(),
+                size: body.len() as u64,
+            },
+        )
+        .await
+        else {
+            panic!("begin upload")
+        };
+        assert!(matches!(
+            ask(
+                &mut client,
+                Request::AttachmentChunk {
+                    id: id.clone(),
+                    offset: 0,
+                    data: body.to_vec()
+                }
+            )
+            .await,
+            Response::Ok
+        ));
+        let Response::FileReference { entry } =
+            ask(&mut client, Request::FinishAttachment { id }).await
+        else {
+            panic!("complete upload")
+        };
+        files.push(SkillImportFile {
+            path: path.into(),
+            attachment: entry.path,
+        });
+    }
+    let bad = SkillImportFile {
+        path: "SKILL.md".into(),
+        attachment: "/etc/passwd".into(),
+    };
+    assert!(matches!(
+        ask(
+            &mut client,
+            Request::ImportSkillFiles {
+                name: "foreign".into(),
+                files: vec![bad]
+            }
+        )
+        .await,
+        Response::Error { .. }
+    ));
+    let Response::Skills { skills, .. } = ask(
+        &mut client,
+        Request::ImportSkillFiles {
+            name: "upload-e2e".into(),
+            files: files.clone(),
+        },
+    )
+    .await
+    else {
+        panic!("global upload")
+    };
+    let entry = skills.iter().find(|s| s.name == "upload-e2e").unwrap();
+    assert_eq!(entry.scope, latte_work_protocol::SkillScope::System);
+    assert_eq!(
+        std::fs::read(
+            home.path()
+                .join(".agents/skills/upload-e2e/references/note.txt")
+        )
+        .unwrap(),
+        b"complete resource"
+    );
+    assert!(matches!(
+        ask(
+            &mut client,
+            Request::ImportSkillFiles {
+                name: "upload-e2e".into(),
+                files
+            }
+        )
+        .await,
+        Response::Error { .. }
+    ));
+    assert!(
+        matches!(ask(&mut client, Request::RecentSessions { before: None }).await, Response::RecentSessions { sessions, .. } if sessions.is_empty())
+    );
+    assert!(!home.path().join(".claude/skills/upload-e2e").exists());
 }

@@ -34,6 +34,24 @@ resumed=any(arg.startswith('--resume=') for arg in sys.argv)
 for line in sys.stdin:
     value=json.loads(line)
     if value['type']=='control_request':
+        if value['request']['subtype']=='generate_session_title':
+            description=value['request']['description']
+            if description.startswith('native-auto-title'):
+                with pathlib.Path('fixture-title-requests').open('a') as record: record.write(description+'\n')
+            def finish_title(request=value,description=description):
+                if description=='native-auto-title-held':
+                    deadline=time.monotonic()+20
+                    while not pathlib.Path('title-release').exists() and time.monotonic()<deadline: time.sleep(.02)
+                if description=='native-auto-title-unsupported':
+                    emit({'type':'control_response','response':{'subtype':'error','request_id':request['request_id'],'error':'unsupported generate_session_title'}})
+                    return
+                title='Friendly generated title' if description.startswith('native-auto-title') and description!='native-auto-title-empty' else None
+                if title and request['request'].get('persist'):
+                    metadata({'type':'ai-title','aiTitle':title,'sessionId':native_id})
+                emit({'type':'control_response','response':{'subtype':'success','request_id':request['request_id'],'response':{'title':title}}})
+                if description.startswith('native-auto-title'): pathlib.Path('fixture-title-response').write_text('sent')
+            threading.Thread(target=finish_title,daemon=True).start()
+            continue
         if value['request']['subtype']=='rename_session':
             title=value['request']['title']
             if title=='FAIL_TITLE':
@@ -96,6 +114,23 @@ for line in sys.stdin:
             emit({'type':'result','subtype':'success','is_error':False})
             continue
 
+        if text=='large-native-frame':
+            emit({'type':'assistant','message':{'content':[{'type':'tool_use','id':f'large-{n}','name':'Read','input':{'file_path':f'{n}.txt'}} for n in range(72)]}})
+            message={'type':'user','message':{'content':[{'type':'tool_result','tool_use_id':f'large-{n}','content':f'payload-{n}:'+'x'*(256*1024)+'终'} for n in range(72)]}}
+            pathlib.Path('native-large-frame-bytes').write_text(str(len(json.dumps(message).encode())))
+            emit(message)
+            emit({'type':'assistant','message':{'content':[{'type':'text','text':'LARGE_NATIVE_FRAME_OK'}]}})
+            emit({'type':'result','subtype':'success','is_error':False})
+            continue
+        if text=='image-output':
+            import base64
+            image=b'\x89PNG\r\n\x1a\n'+b'fixture\0'
+            pathlib.Path('fixture.png').write_bytes(image)
+            emit({'type':'assistant','message':{'content':[{'type':'tool_use','id':'image-read','name':'Read','input':{'file_path':'fixture.png'}}]}})
+            emit({'type':'user','message':{'content':[{'type':'tool_result','tool_use_id':'image-read','content':[{'type':'text','text':'fixture image'},{'type':'image','source':{'type':'base64','media_type':'image/png','data':base64.b64encode(image).decode()}}]}]}})
+            emit({'type':'assistant','message':{'content':[{'type':'text','text':'IMAGE_OK'}]}})
+            emit({'type':'result','subtype':'success','is_error':False})
+            continue
         if text.startswith('task-edit'):
             emit({'type':'system','subtype':'session_state_changed','state':'busy'})
             with open('task.txt','w') as f:f.write('third line\n' if text.startswith('task-edit-second') else 'agent change\nsecond line\n')

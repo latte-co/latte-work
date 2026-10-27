@@ -1155,6 +1155,53 @@ button.recent-notice {
   gap: var(--space-2);
   margin-bottom: var(--space-2);
 }
+.tool-images {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-3);
+  margin-block: var(--space-3);
+}
+.raster-image {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--space-2);
+  max-width: 100%;
+  min-height: 80px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-panel);
+  background: var(--color-input);
+  cursor: zoom-in;
+}
+.raster-image > img {
+  display: block;
+  max-width: 100%;
+  max-height: 360px;
+  object-fit: contain;
+}
+.tool-images .raster-image {
+  max-width: min(100%, 420px);
+}
+.review-image-diff {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--space-3);
+  padding: var(--space-3);
+}
+.review-image-diff > figure {
+  margin: 0;
+  min-width: 0;
+}
+.review-image-diff figcaption {
+  color: var(--color-text-muted);
+  font-size: var(--text-sm);
+  margin-bottom: var(--space-2);
+}
+@container (max-width: 480px) {
+  .review-image-diff {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
 .attachment-image-thumbnail {
   width: clamp(80px, 25cqw, 112px);
   height: clamp(80px, 25cqw, 112px);

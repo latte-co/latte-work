@@ -47,7 +47,7 @@ for line in sys.stdin:
     elif method == 'initialized':
         pass
     elif method == 'config/read':
-        reply(value, {'config': {'model_provider': 'fixture-native', 'model': 'seed-test'}})
+        reply(value, {'config': {'model_provider': 'fixture-native', 'model': 'seed-test', 'developer_instructions': 'FIXTURE_NATIVE_DEVELOPER_INSTRUCTIONS'}})
     elif method == 'model/list':
         reply(value, {'data': [{'id': 'seed-test', 'displayName': 'Seed Test', 'isDefault': True, 'supportedReasoningEfforts': [{'reasoningEffort': 'high'}]},
             {'id': 'gpt-test', 'displayName': 'GPT Test', 'supportedReasoningEfforts': [{'reasoningEffort': 'high'}],
@@ -56,6 +56,8 @@ for line in sys.stdin:
                 'standard_supported_reasoning_levels': [{'effort': 'high'}],
                 'max_supported_reasoning_levels': [{'effort': 'low'}]}}}], 'nextCursor': None})
     elif method in ('thread/start', 'thread/resume'):
+        if 'developerInstructions' in params:
+            assert params['developerInstructions'].startswith('FIXTURE_NATIVE_DEVELOPER_INSTRUCTIONS\n\nLatte Work'), params['developerInstructions']
         if method == 'thread/resume':
             assert params['threadId'] == thread
             if not pathlib.Path('traex-inputs').exists():

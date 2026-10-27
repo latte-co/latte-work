@@ -38,6 +38,7 @@ import { TaskProjectPicker } from "./TaskProjectPicker";
 import { TurnTranscript, turnTranscript } from "./TurnTranscript";
 import { TurnNavigator, turnNavigationEntries } from "./TurnNavigator";
 import { ToolGroup, ToolRow } from "./ToolActivity";
+import { ToolImages } from "./ToolImages";
 export const statusNames = {
   ready: "就绪",
   running: "执行中",
@@ -135,6 +136,11 @@ export function Conversation({
   answerQuestion,
 }: Props) {
   const draftKey = session ? JSON.stringify([hostId, session.id]) : "new-task";
+  const submissionScope = JSON.stringify([
+    hostId,
+    projectId,
+    session?.agent ?? agent?.id ?? "claude",
+  ]);
   const draft = useDraft(drafts, draftKey);
   const editingScope = useRef(draftKey);
   editingScope.current = draftKey;
@@ -143,11 +149,20 @@ export function Conversation({
   const root = useRef<HTMLElement>(null);
   const modelPicker = useRef<ModelPickerHandle>(null);
   const [sending, setSending] = useState(false);
+  const [queueEdits, setQueueEdits] = useState<ReadonlyMap<string, number>>(
+    () => new Map(),
+  );
+  const queueEditing = (queueEdits.get(draftKey) ?? 0) > 0;
   const [composerFocus, setComposerFocus] = useState(0);
+  useEffect(() => {
+    if (draft.skillCreator && projectName && !settingsOpen)
+      setComposerFocus((value) => value + 1);
+  }, [draft.skillCreator, projectName, settingsOpen]);
   const previousDraftKey = useRef(draftKey);
   const migrated = useRef<string | null>(null);
   const submission = useRef<{
     key: string;
+    scope: string;
     draft: Draft;
     accepted?: boolean;
   } | null>(null);
@@ -167,6 +182,17 @@ export function Conversation({
     }
     previousDraftKey.current = draftKey;
   }, [draftKey, sending, drafts]);
+  const currentSubmission = submission.current;
+  const sendingInCurrentScope =
+    sending &&
+    !!currentSubmission &&
+    currentSubmission.scope === submissionScope &&
+    (currentSubmission.key === draftKey || migrated.current === draftKey);
+  const concealSubmitted =
+    sendingInCurrentScope &&
+    connected &&
+    !!currentSubmission &&
+    drafts.isCurrent(draftKey, currentSubmission.draft);
   const agentId = session?.agent ?? agent?.id ?? "claude";
   const agentName =
     agent?.id === agentId
@@ -266,7 +292,13 @@ export function Conversation({
     stopGeneration.current++;
     setStopping(false);
   }, [draftKey, active]);
-  const workingStatus = executionStatus(session, events, connected, stopping);
+  const workingStatus = executionStatus(
+    session,
+    events,
+    connected,
+    stopping,
+    sendingInCurrentScope,
+  );
   const repeatedOutput = useMemo(
     () =>
       !!session &&
@@ -372,6 +404,7 @@ export function Conversation({
     if (
       !prompt.trim() ||
       sending ||
+      queueEditing ||
       !connected ||
       !available ||
       !modelReady ||
@@ -385,6 +418,7 @@ export function Conversation({
     migrated.current = null;
     const submitted = {
       key: draftKey,
+      scope: submissionScope,
       draft,
       accepted: undefined as boolean | undefined,
     };
@@ -573,7 +607,11 @@ export function Conversation({
                   </button>
                 </div>
               )}
-              <TurnTranscript events={events} turns={turns}>
+              <TurnTranscript
+                key={JSON.stringify([hostId, session?.id])}
+                events={events}
+                turns={turns}
+              >
                 {(item) =>
                   item.type === "user" ? (
                     <UserMessage
@@ -593,6 +631,12 @@ export function Conversation({
                     >
                       <MessageContent text={item.text} />
                     </article>
+                  ) : item.type === "tool_images" ? (
+                    <ToolImages
+                      key={item.key}
+                      images={item.images}
+                      active={!settingsOpen && !preparingHistory}
+                    />
                   ) : item.type === "tool" ? (
                     <ToolRow key={item.key} tool={item} />
                   ) : item.type === "tools" ? (
@@ -746,6 +790,14 @@ export function Conversation({
               onAddProject={openProject}
             />
           )}
+          {!session && draft.skillCreator && !projectName && (
+            <div className="skill-creator-context">
+              <span>先选择工作目录，再描述要创建的技能。</span>
+              <button disabled={sending} onClick={openProject}>
+                选择工作目录
+              </button>
+            </div>
+          )}
           {!session && selectAgent && agents.length > 1 ? (
             <div className="agent-picker">
               <Select
@@ -829,6 +881,16 @@ export function Conversation({
           active={!settingsOpen}
           revision={String(sending)}
           running={!!active}
+          editingBlocked={sending}
+          onEditPending={(pending) =>
+            setQueueEdits((previous) => {
+              const next = new Map(previous);
+              const count = (next.get(draftKey) ?? 0) + (pending ? 1 : -1);
+              if (count > 0) next.set(draftKey, count);
+              else next.delete(draftKey);
+              return next;
+            })
+          }
           onEdit={(entry) => {
             const current = drafts.get(draftKey);
             const restored = referenceMessage(entry.text);
@@ -861,6 +923,10 @@ export function Conversation({
         />
         <Composer
           focusRequest={composerFocus}
+          skillCreator={draft.skillCreator}
+          onRemoveSkillCreator={() =>
+            drafts.update(draftKey, { skillCreator: undefined })
+          }
           referenceState={draft.references}
           onReferencesChange={(references) =>
             drafts.update(draftKey, { references })
@@ -871,8 +937,9 @@ export function Conversation({
           sessionId={session?.id}
           connected={connected}
           hidden={settingsOpen}
-          disabled={!projectName || !!session?.archived}
+          disabled={!projectName || !!session?.archived || queueEditing}
           sending={sending}
+          concealSubmitted={concealSubmitted}
           value={text}
           onChange={setText}
           onSubmit={submit}
@@ -882,15 +949,21 @@ export function Conversation({
             (modelPicker.current ? null : "无法打开模型设置。")
           }
           placeholder={
-            !connected
-              ? connecting || !connectionError
-                ? "正在准备…"
-                : "暂时无法连接"
-              : session?.archived
-                ? "会话已归档，请通过右键菜单取消归档后继续"
-                : projectName
-                  ? "描述任务，@ 添加引用，/ 调用 Agent 命令…"
-                  : "先添加或选择一个项目"
+            concealSubmitted
+              ? "正在发送任务…"
+              : !connected
+                ? connecting || !connectionError
+                  ? "正在准备…"
+                  : "暂时无法连接"
+                : session?.archived
+                  ? "会话已归档，请通过右键菜单取消归档后继续"
+                  : projectName
+                    ? draft.skillCreator
+                      ? "描述你想创建的技能…"
+                      : "描述任务，@ 添加引用，/ 调用 Agent 命令…"
+                    : draft.skillCreator
+                      ? "先选择工作目录以创建技能"
+                      : "先添加或选择一个项目"
           }
           toolbar={(submit, hasContent, localNavigation) => (
             <>
@@ -944,7 +1017,9 @@ export function Conversation({
                 }
                 sending={sending}
                 disabled={
-                  localNavigation
+                  (queueEditing &&
+                    (!active || hasContent || !!localNavigation)) ||
+                  (localNavigation
                     ? !!session?.archived || !projectName || sending
                     : active
                       ? !connected ||
@@ -960,7 +1035,7 @@ export function Conversation({
                         !projectName ||
                         !connected ||
                         !available ||
-                        sending
+                        sending)
                 }
                 onClick={
                   active && !hasContent && !localNavigation ? stop : submit
