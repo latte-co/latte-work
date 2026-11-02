@@ -136,7 +136,9 @@ cleanup remains visible for explicit retry rather than automatically replaying i
 
 `crates/latte-work-server/src/agents/adapter.rs` defines the internal contract;
 `agents/mod.rs` registers implementations: `agents/claude.rs` owns Claude Code
-and `agents/traex.rs` owns Traex app-server v2. Keep protocol order and wire messages in the implementation.
+and `agents/app_server.rs` implements the shared Codex/Traex app-server v2 state
+machine. `agents/codex.rs` and `agents/traex.rs` own their native capabilities.
+Keep protocol order and wire messages in the implementation.
 Runtime consumes common actions and retains approval authorization, process
 supervision and persistence. Each opened conversation has a persistent actor and
 native process. The additive `open_agent_session` and `close_agent_session`
@@ -1445,3 +1447,62 @@ request/mutation lifecycle, and operation dialogs are separated into
 operation errors have distinct state. The shared Modal falls back to a surviving
 parent dialog or the trigger's nearest live region when the trigger disappears.
 CLI fixtures, browser layout, native UI and actual SSH execution are separate evidence scopes.
+
+
+## Codex integration
+
+New tasks offer Codex alongside Claude Code and Traex. Discovery uses the host's
+shell environment and PATH; `LATTE_WORK_CODEX` overrides its executable. Install
+and authenticate Codex on each execution host, or select an App Responses Provider.
+No account credentials are copied from the desktop to another host. Local and SSH
+requests share the existing protocol, actor, durable queue and request ledger.
+
+The shared app-server adapter launches a dedicated `codex app-server --stdio` child.
+It handles prompt-free open, thread resume, streamed text, shell/file/MCP tool
+records, single-use approvals, structured questions, live title edits, native
+`turn/steer` and `turn/interrupt`. EOF never confirms completion. Thread and turn
+IDs fence notifications; native reasoning text is discarded. The existing Traex
+background-work and no-replay rules also apply to Codex. Native stdout retains
+the ingestion limitation documented in the Traex section above.
+
+Codex models and efforts come from bounded, prompt-free `model/list` probes.
+Catalog `model` slugs, rather than opaque row IDs, are submitted to native turns.
+Codex never receives Traex backend-variant fields or its per-turn `modelProvider`
+extension. CLI `config/read` null Provider means Codex's native `openai` default;
+an explicit configured Provider/model takes precedence. If no CLI model is set,
+startup resolves the native catalog default before resuming a saved thread rather
+than retaining an old App Provider model. Resume requests exclude historical turns;
+Latte's own history remains authoritative for presentation. Platform instructions
+append to the native developer instructions using the existing preservation checks.
+
+Permission discovery verifies the installed CLI's sandbox/approval flags. Explicit
+`default` selects on-request/workspace-write with the user as reviewer;
+`bypass_permissions` selects never/danger-full-access. An omitted mode preserves
+native configuration. App Providers support OpenAI Responses with Bearer, API-key
+or no authentication. Keys use dedicated child environment variables; process-local
+config overrides use fresh Provider IDs. No native user configuration is rewritten.
+Custom Provider effort overrides remain unavailable without native capability evidence.
+Native slash commands, offline title edits and child transcript reads remain
+explicitly unsupported, as for Traex. Native child calls appear as tool activity. Codex `subAgentActivity` records also
+fence process replacement and undo; late completion must match the observed child
+and originating turn. This does not claim a dedicated Codex child transcript implementation.
+
+Contract baseline: codex-cli 0.162.0 and its generated JSON schema; see
+[official app-server documentation](https://learn.chatgpt.com/docs/app-server).
+Focused checks:
+
+```sh
+cargo test -p latte-work-server --bin latte-work-server --locked app_server
+cargo test -p latte-work-server --bin latte-work-server --locked codex
+cargo test -p latte-work-server --test e2e --locked codex_ -- --test-threads=1
+python3 scripts/smoke-codex.py
+python3 scripts/smoke-codex-providers.py
+```
+
+The first smoke uses the real installed CLI for metadata and prompt-free open.
+The Provider smoke uses the real CLI against a disposable localhost Responses
+fixture, covering auth, Provider/model switches, native resume and an actual shell
+tool execution in the disposable project without a paid
+model API. `smoke-codex.py --live` optionally sends two small actual model turns;
+`--live-tools` also requests a file write in its disposable project. Fixture,
+localhost-upstream, actual model, native desktop and real SSH evidence are separate.

@@ -1,9 +1,11 @@
 //! Protocol adapters translate native agent messages; they do not own storage or UI.
 mod adapter;
+mod app_server;
 mod claude;
 mod claude_models;
 mod claude_sessions;
 pub(crate) mod claude_skills;
+pub(crate) mod codex;
 pub(crate) mod traex;
 pub use adapter::{Action, AgentAdapter, AgentCommand, Input};
 use anyhow::{Result, bail};
@@ -136,26 +138,43 @@ pub fn create(agent: &str) -> Result<Box<dyn AgentAdapter>> {
     match agent {
         "claude" => Ok(Box::<claude::Claude>::default()),
         "traex" => Ok(Box::<traex::Traex>::default()),
+        "codex" => Ok(Box::new(app_server::AppServer::codex())),
         _ => bail!("此 Agent 尚未实现：{agent}"),
     }
 }
 
 /// Discovery and CLI identities stay implementation-owned.
 pub async fn discover() -> Vec<(String, latte_work_protocol::AgentInfo)> {
-    let (claude, traex) = tokio::join!(claude::discover(), traex::discover());
-    vec![claude, traex]
+    let (claude, traex, codex) =
+        tokio::join!(claude::discover(), traex::discover(), codex::discover());
+    vec![claude, traex, codex]
 }
 
 /// Protocol compatibility belongs to the adapter registry, never to presentation code.
 pub fn provider_protocols(agent: &str) -> Option<&'static [latte_work_protocol::ProviderProtocol]> {
     match agent {
         "claude" => Some(&[latte_work_protocol::ProviderProtocol::AnthropicMessages]),
+        "codex" => Some(&[latte_work_protocol::ProviderProtocol::OpenaiResponses]),
         "traex" => Some(&[
             latte_work_protocol::ProviderProtocol::AnthropicMessages,
             latte_work_protocol::ProviderProtocol::OpenaiChat,
             latte_work_protocol::ProviderProtocol::OpenaiResponses,
         ]),
         _ => None,
+    }
+}
+
+/// Prompt-free catalogs share probe bounds; each adapter owns its model semantics.
+pub async fn native_models(
+    agent: &str,
+    binary: &str,
+    path: Option<&str>,
+    selected: Option<&str>,
+) -> Result<latte_work_protocol::Response> {
+    match agent {
+        "codex" => codex::models(binary, path, selected).await,
+        "traex" => traex::models(binary, path, selected).await,
+        _ => bail!("此 Agent 尚未实现原生模型目录：{agent}"),
     }
 }
 
@@ -183,6 +202,7 @@ pub async fn permission_modes(
     match agent {
         "claude" => claude::permission_modes(binary).await,
         "traex" => traex::permission_modes(binary).await,
+        "codex" => codex::permission_modes(binary).await,
         _ => bail!("此 Agent 尚未实现权限设置：{agent}"),
     }
 }
@@ -261,7 +281,7 @@ pub fn rename_saved_session(
 mod tests {
     #[test]
     fn unimplemented_agents_do_not_inherit_claude_effort() {
-        for agent in ["codex", "opencode", "unknown", ""] {
+        for agent in ["opencode", "unknown", ""] {
             assert!(super::create(agent).is_err());
             assert!(super::effort_levels(agent, Some("opus")).is_empty());
             assert!(super::effort_levels(agent, None).is_empty());

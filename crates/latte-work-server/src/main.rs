@@ -56,19 +56,29 @@ struct Service {
     providers: Arc<Mutex<providers::ProviderStore>>,
 }
 impl Service {
-    async fn resolve_traex_model(
+    async fn resolve_native_model(
         &self,
         agent: &str,
         path: &str,
         config: &mut providers::LaunchConfig,
     ) -> Result<()> {
-        if agent != "traex" || config.provider.is_some() {
+        if !matches!(agent, "traex" | "codex") || config.provider.is_some() {
             return Ok(());
         }
         let _permit = self
             .command_probes
             .try_acquire()
             .context("模型能力正在加载，请稍后重试")?;
+        if agent == "codex" {
+            agents::codex::validate_selection(
+                self.agent_binary(agent)?,
+                Some(path),
+                config.model.as_deref(),
+                config.effort,
+            )
+            .await?;
+            return Ok(());
+        }
         config.traex_model = agents::traex::validate_selection(
             self.agent_binary(agent)?,
             Some(path),
@@ -106,7 +116,7 @@ async fn entry() -> Result<()> {
     let args: Vec<_> = std::env::args().skip(1).collect();
     if args.is_empty() || args[0] == "--help" {
         println!(
-            "latte-work-server 0.1.0\nUsage: latte-work-server <serve|connect|connect-local> [--state-dir PATH]\nOne daemon per host user; connect starts it if absent.\nLATTE_WORK_CLAUDE / LATTE_WORK_TRAEX: CLI path overrides (default auto-detected claude / traex)."
+            "latte-work-server 0.1.0\nUsage: latte-work-server <serve|connect|connect-local> [--state-dir PATH]\nOne daemon per host user; connect starts it if absent.\nLATTE_WORK_CLAUDE / LATTE_WORK_TRAEX / LATTE_WORK_CODEX: CLI path overrides (default auto-detected claude / traex / codex)."
         );
         return Ok(());
     }
@@ -461,20 +471,23 @@ async fn dispatch(s: &Service, request: Request) -> Result<Response> {
                 .lock()
                 .map_err(|_| anyhow::anyhow!("Provider 配置锁异常"))?
                 .models(&agent, model.as_deref())?;
-            if agent == "traex" && matches!(&response, Response::Models { provider: None, .. }) {
+            if matches!(agent.as_str(), "traex" | "codex")
+                && matches!(&response, Response::Models { provider: None, .. })
+            {
                 let binary = s.agent_binary(&agent)?;
                 let _permit = s
                     .command_probes
                     .try_acquire()
                     .context("模型列表正在加载，请稍后重试")?;
-                response = agents::traex::models(
+                response = agents::native_models(
+                    &agent,
                     binary,
                     project.as_ref().map(|p| p.path.as_str()),
                     model.as_deref(),
                 )
                 .await?;
             }
-            if agent != "traex"
+            if !matches!(agent.as_str(), "traex" | "codex")
                 && let Response::Models {
                     provider: None,
                     model_labels,
@@ -570,20 +583,23 @@ async fn dispatch(s: &Service, request: Request) -> Result<Response> {
                 .transpose()?;
             let mut response =
                 providers::ProviderStore::models_for_provider(&agent, model.as_deref(), provider)?;
-            if agent == "traex" && matches!(&response, Response::Models { provider: None, .. }) {
+            if matches!(agent.as_str(), "traex" | "codex")
+                && matches!(&response, Response::Models { provider: None, .. })
+            {
                 let binary = s.agent_binary(&agent)?;
                 let _permit = s
                     .command_probes
                     .try_acquire()
                     .context("模型列表正在加载，请稍后重试")?;
-                response = agents::traex::models(
+                response = agents::native_models(
+                    &agent,
                     binary,
                     project.as_ref().map(|p| p.path.as_str()),
                     model.as_deref(),
                 )
                 .await?;
             }
-            if agent != "traex"
+            if !matches!(agent.as_str(), "traex" | "codex")
                 && let Response::Models {
                     provider: None,
                     model_labels,
@@ -732,12 +748,12 @@ async fn dispatch(s: &Service, request: Request) -> Result<Response> {
                 .map_err(|_| anyhow::anyhow!("Provider 配置锁异常"))?
                 .open_config(&session.agent, session.model.as_deref(), provider)?;
             config.effort = session.effort.filter(|level| {
-                (session.agent == "traex" && config.provider.is_none())
+                (matches!(session.agent.as_str(), "traex" | "codex") && config.provider.is_none())
                     || agents::effort_levels(&session.agent, config.model.as_deref())
                         .contains(level)
             });
             config.permission_mode = session.permission_mode.clone();
-            s.resolve_traex_model(&session.agent, &path, &mut config)
+            s.resolve_native_model(&session.agent, &path, &mut config)
                 .await?;
             runtime::open(
                 s.database.clone(),
@@ -805,7 +821,7 @@ async fn dispatch(s: &Service, request: Request) -> Result<Response> {
                     .as_ref()
                     .map(|p| p.metadata.model.as_str())
             });
-            if (agent_id != "traex" || launch_config.provider.is_some())
+            if (!matches!(agent_id.as_str(), "traex" | "codex") || launch_config.provider.is_some())
                 && effort.is_some_and(|level| {
                     !agents::effort_levels(&agent_id, selected_model).contains(&level)
                 })
@@ -832,7 +848,7 @@ async fn dispatch(s: &Service, request: Request) -> Result<Response> {
                 let path = d.project(&session.project_id)?.path;
                 Ok((session, path))
             })?;
-            s.resolve_traex_model(&agent_id, &path, &mut launch_config)
+            s.resolve_native_model(&agent_id, &path, &mut launch_config)
                 .await?;
             runtime::submit(
                 s.database.clone(),
@@ -909,7 +925,7 @@ async fn dispatch(s: &Service, request: Request) -> Result<Response> {
                         .turn_config(&session.agent, entry.model.as_deref(), provider)?;
                     config.effort = entry.effort;
                     config.permission_mode = entry.permission_mode;
-                    s.resolve_traex_model(&session.agent, &path, &mut config)
+                    s.resolve_native_model(&session.agent, &path, &mut config)
                         .await?;
                     runtime::QueueAction::Dispatch {
                         interrupt,
@@ -972,7 +988,8 @@ async fn dispatch(s: &Service, request: Request) -> Result<Response> {
                         }
                     }
                     for config in configs.values_mut() {
-                        s.resolve_traex_model(&session.agent, &path, config).await?;
+                        s.resolve_native_model(&session.agent, &path, config)
+                            .await?;
                     }
                     runtime::QueueAction::Resume { configs }
                 }
