@@ -424,3 +424,51 @@ async fn codex_steering_stop_failures_and_eof_do_not_replay_input() {
         4
     );
 }
+
+#[tokio::test]
+async fn codex_interrupted_subagent_tool_is_stopped_not_failed() {
+    let host = Host::start().await;
+    let root = tempfile::tempdir().unwrap();
+    let mut client = host.client().await;
+    let id = session(&mut client, root.path()).await;
+    send(&mut client, &id, "subtask", "subtask").await;
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let Response::Events { events, .. } = ask(
+            &mut client,
+            Request::Poll {
+                session_id: id.clone(),
+                after: 0.0,
+            },
+        )
+        .await
+        else {
+            panic!()
+        };
+        if events
+            .iter()
+            .any(|e| matches!(&e.event, EventKind::Text { text } if text == "SUBTASK_RUNNING"))
+        {
+            break;
+        }
+        assert!(Instant::now() < deadline, "subtask did not start");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(matches!(
+        ask(
+            &mut client,
+            Request::Cancel {
+                session_id: id.clone()
+            }
+        )
+        .await,
+        Response::Ok
+    ));
+    let events = wait(&mut client, &id, Status::Stopped).await;
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(&e.event, EventKind::ToolResult { is_error: true, .. })),
+        "interrupted sub-agent tool must be reported as an error result"
+    );
+}

@@ -753,15 +753,17 @@ impl AppServer {
                     .insert(id, BackgroundCommand { turn, process });
                 return Ok(actions);
             }
-            if kind != "webSearch"
-                && !matches!(
-                    item["status"].as_str(),
-                    Some("completed" | "failed" | "declined")
-                )
-            {
+            let status = item["status"].as_str();
+            // Codex ends an in-flight sub-agent tool call with `interrupted`
+            // when the turn is stopped. It is a terminal snapshot, not a
+            // malformed one; letting it fail the actor would turn a user stop
+            // into a failed session.
+            let terminal = matches!(status, Some("completed" | "failed" | "declined"))
+                || (kind == "collabAgentToolCall" && status == Some("interrupted"));
+            if kind != "webSearch" && !terminal {
                 bail!("Agent 工具完成状态无效");
             }
-            let is_error = matches!(item["status"].as_str(), Some("failed" | "declined"))
+            let is_error = matches!(status, Some("failed" | "declined" | "interrupted"))
                 || item["success"] == false
                 || item["exitCode"].as_i64().is_some_and(|code| code != 0);
             let content = if kind == "commandExecution" {
@@ -1695,6 +1697,23 @@ mod tests {
                 )
                 .is_err()
         );
+    }
+    #[test]
+    fn interrupted_codex_collab_tool_is_a_terminal_error_result() {
+        let mut agent = running();
+        agent.codex = true;
+        let actions = message(
+            &mut agent,
+            json!({"method":"item/completed","params":{"threadId":"t","turnId":"turn","item":{"id":"agent-tool","type":"collabAgentToolCall","tool":"spawnAgent","receiverThreadIds":["child"],"agentsStates":{"child":{"status":"interrupted"}},"status":"interrupted"}}}),
+        );
+        assert!(
+            actions.iter().any(|action| matches!(
+                action,
+                Action::Event(EventKind::ToolResult { id, is_error: true, .. }) if id == "agent-tool"
+            )),
+            "interrupted collab tool must settle as an error result"
+        );
+        assert!(agent.has_background_work());
     }
     #[test]
     fn steer_is_turn_bound_and_only_completion_retires_the_input() {

@@ -16,6 +16,7 @@ thread = 'codex-native-thread'
 turn = None
 count = 0
 waiting = None
+turn_prompt = None
 
 
 def emit(value):
@@ -73,6 +74,7 @@ for line in sys.stdin:
         count += 1
         turn = 'turn-' + str(count)
         prompt = params['input'][0]['text']
+        turn_prompt = prompt
         with pathlib.Path('codex-inputs').open('a') as f:
             f.write(json.dumps({'prompt': prompt, 'params': params, 'pid': os.getpid()}) + '\n')
         notify('turn/started', {'turn': {'id': turn, 'status': 'inProgress'}})
@@ -83,6 +85,14 @@ for line in sys.stdin:
             complete('failed')
         elif prompt == 'wait':
             text('WAITING')
+        elif prompt == 'subtask':
+            notify('item/started', {'item': {'id': 'agent-activity', 'type': 'subAgentActivity',
+                                             'agentThreadId': 'child', 'kind': 'started'}})
+            notify('item/started', {'item': {'id': 'agent-tool', 'type': 'collabAgentToolCall', 'tool': 'spawnAgent',
+                                             'receiverThreadIds': ['child'],
+                                             'agentsStates': {'child': {'status': 'running'}},
+                                             'status': 'inProgress'}})
+            text('SUBTASK_RUNNING')
         elif prompt in ('approval', 'question'):
             waiting = prompt
             if waiting == 'approval':
@@ -105,6 +115,13 @@ for line in sys.stdin:
             complete()
     elif method == 'turn/interrupt':
         assert params['turnId'] == turn
+        if turn_prompt == 'subtask':
+            notify('item/completed', {'item': {'id': 'agent-activity', 'type': 'subAgentActivity',
+                                               'agentThreadId': 'child', 'kind': 'completed'}})
+            notify('item/completed', {'item': {'id': 'agent-tool', 'type': 'collabAgentToolCall', 'tool': 'spawnAgent',
+                                               'receiverThreadIds': ['child'],
+                                               'agentsStates': {'child': {'status': 'interrupted'}},
+                                               'status': 'interrupted'}})
         complete('interrupted')
         reply(value, {})
     elif method is None and waiting:
