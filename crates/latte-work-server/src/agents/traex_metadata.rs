@@ -256,7 +256,12 @@ pub(in crate::agents) async fn models_for_agent(
 }
 fn codex_catalog(mut entries: Vec<Value>, selected: Option<&str>) -> Result<Response> {
     // Catalog row IDs may differ from the model slug accepted by turn/start.
+    // Hidden rows never reach the picker; an incomplete hidden row must not
+    // take the whole visible catalog down with it.
     for entry in &mut entries {
+        if entry["hidden"] == true {
+            continue;
+        }
         let model = entry.get("model").cloned().context("Codex 模型 ID 缺失")?;
         let fields = entry.as_object_mut().context("Codex 模型条目无效")?;
         fields.insert("id".into(), model);
@@ -438,6 +443,7 @@ mod tests {
         ] {
             assert!(codex_catalog(vec![malformed], None).is_err());
         }
+        assert!(codex_catalog(vec![json!({"id":"hidden-row","hidden":true})], None).is_ok());
     }
     #[test]
     fn native_catalog_preserves_ids_and_per_model_efforts_without_claude_fallback() {

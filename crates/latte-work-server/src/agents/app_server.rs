@@ -684,9 +684,13 @@ impl AppServer {
             }
             if let Some(states) = item["agentsStates"].as_object() {
                 for (child, state) in states {
+                    // `interrupted` entered the native enum for a child whose
+                    // current run was stopped. Keep it terminal here: the
+                    // receiver IDs above must not resurrect a child that a
+                    // preceding activity snapshot already released.
                     if matches!(
                         state["status"].as_str(),
-                        Some("completed" | "errored" | "shutdown" | "notFound")
+                        Some("completed" | "errored" | "shutdown" | "notFound" | "interrupted")
                     ) {
                         self.children.remove(child);
                         self.child_activity_turns.remove(child);
@@ -1699,9 +1703,20 @@ mod tests {
         );
     }
     #[test]
-    fn interrupted_codex_collab_tool_is_a_terminal_error_result() {
+    fn interrupted_codex_collab_tool_is_a_terminal_error_result_without_leaking_the_child() {
         let mut agent = running();
         agent.codex = true;
+        // A completed activity snapshot releases the child from both maps.
+        message(
+            &mut agent,
+            json!({"method":"item/completed","params":{"threadId":"t","turnId":"turn","item":{"id":"activity-start","type":"subAgentActivity","agentThreadId":"child","kind":"started"}}}),
+        );
+        message(
+            &mut agent,
+            json!({"method":"item/completed","params":{"threadId":"t","turnId":"turn","item":{"id":"activity-done","type":"subAgentActivity","agentThreadId":"child","kind":"completed"}}}),
+        );
+        assert!(!agent.has_background_work());
+        // The interrupted collab snapshot must not resurrect what it released.
         let actions = message(
             &mut agent,
             json!({"method":"item/completed","params":{"threadId":"t","turnId":"turn","item":{"id":"agent-tool","type":"collabAgentToolCall","tool":"spawnAgent","receiverThreadIds":["child"],"agentsStates":{"child":{"status":"interrupted"}},"status":"interrupted"}}}),
@@ -1713,7 +1728,10 @@ mod tests {
             )),
             "interrupted collab tool must settle as an error result"
         );
-        assert!(agent.has_background_work());
+        assert!(
+            !agent.has_background_work(),
+            "interrupted child must not stay busy"
+        );
     }
     #[test]
     fn steer_is_turn_bound_and_only_completion_retires_the_input() {

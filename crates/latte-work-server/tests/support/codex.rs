@@ -471,4 +471,18 @@ async fn codex_interrupted_subagent_tool_is_stopped_not_failed() {
             .any(|e| matches!(&e.event, EventKind::ToolResult { is_error: true, .. })),
         "interrupted sub-agent tool must be reported as an error result"
     );
+    assert!(
+        matches!(
+            ask(
+                &mut client,
+                Request::CloseAgentSession {
+                    session_id: id.clone(),
+                    only_if_idle: Some(true)
+                }
+            )
+            .await,
+            Response::Ok
+        ),
+        "an interrupted sub-agent tool must not leave background work that blocks idle close"
+    );
 }
