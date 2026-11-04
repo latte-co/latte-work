@@ -922,10 +922,7 @@ fn is_executable(path: &std::path::Path) -> bool {
         .map(|meta| meta.permissions().mode() & 0o111 != 0)
         .unwrap_or(false)
 }
-async fn run_bounded(
-    mut command: tokio::process::Command,
-    failure: &str,
-) -> Result<(), String> {
+async fn run_bounded(mut command: tokio::process::Command, failure: &str) -> Result<(), String> {
     let status = tokio::time::timeout(
         std::time::Duration::from_secs(10),
         command.kill_on_drop(true).status(),
@@ -992,9 +989,7 @@ async fn save_local_file_as(
     if bound > 512 * 1024 * 1024 {
         return Err("文件超出 512MB，不支持另存".into());
     }
-    let Some(destination) =
-        browser_downloads::choose_save(&app, &name, None).await?
-    else {
+    let Some(destination) = browser_downloads::choose_save(&app, &name, None).await? else {
         return Ok(None);
     };
     let copied = tokio::fs::copy(&source, &destination)
@@ -1016,9 +1011,7 @@ async fn save_file_as(
     if data.len() > 32 * 1024 * 1024 {
         return Err("内容超出 32MB，不支持另存".into());
     }
-    let Some(destination) =
-        browser_downloads::choose_save(&app, &name, None).await?
-    else {
+    let Some(destination) = browser_downloads::choose_save(&app, &name, None).await? else {
         return Ok(None);
     };
     tokio::fs::write(&destination, &data)
