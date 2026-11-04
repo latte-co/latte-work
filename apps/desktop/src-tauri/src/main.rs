@@ -851,6 +851,98 @@ async fn reveal_project(
     }
     Ok(())
 }
+/// Expand `~/` and require a bounded absolute path before any file-manager call.
+fn resolve_reveal_path(raw: &str, home: &std::path::Path) -> Result<PathBuf, String> {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return Err("路径为空".into());
+    }
+    if raw.len() > 1024 {
+        return Err("路径超出限制".into());
+    }
+    let expanded = if let Some(rest) = raw.strip_prefix("~/") {
+        if rest.is_empty() {
+            return Err("路径无效".into());
+        }
+        home.join(rest)
+    } else if raw.starts_with('~') {
+        // `~` and `~user` forms have no meaning on this host.
+        return Err("路径无效".into());
+    } else {
+        PathBuf::from(raw)
+    };
+    if !expanded.is_absolute() {
+        return Err("仅支持绝对路径".into());
+    }
+    if expanded.as_os_str().as_encoded_bytes().contains(&0) {
+        return Err("路径无效".into());
+    }
+    Ok(expanded)
+}
+/// Reveal one local absolute path in the platform file manager, never executing it.
+#[tauri::command]
+async fn reveal_path(path: String) -> Result<(), String> {
+    let home = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .filter(|home| home.is_absolute())
+        .ok_or("无法确定主目录")?;
+    let path = resolve_reveal_path(&path, &home)?;
+    if !path.exists() {
+        return Err("文件不存在或已移动".into());
+    }
+    #[cfg(target_os = "macos")]
+    let mut command = {
+        let mut command = tokio::process::Command::new("/usr/bin/open");
+        command.arg("-R");
+        command
+    };
+    #[cfg(not(target_os = "macos"))]
+    let mut command = tokio::process::Command::new("xdg-open");
+    let status = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        command.arg(path).kill_on_drop(true).status(),
+    )
+    .await
+    .map_err(|_| "打开文件位置超时")?
+    .map_err(|e| e.to_string())?;
+    if !status.success() {
+        return Err("无法在文件管理器中显示该路径".into());
+    }
+    Ok(())
+}
+#[cfg(test)]
+mod reveal_path_tests {
+    use super::resolve_reveal_path;
+    use std::path::PathBuf;
+    #[test]
+    fn expands_home_and_keeps_absolute_paths() {
+        let home = std::path::Path::new("/Users/dev");
+        assert_eq!(
+            resolve_reveal_path("~/Downloads/a.dmg", home).unwrap(),
+            PathBuf::from("/Users/dev/Downloads/a.dmg")
+        );
+        assert_eq!(
+            resolve_reveal_path(" /tmp/x/y.bin ", home).unwrap(),
+            PathBuf::from("/tmp/x/y.bin")
+        );
+    }
+    #[test]
+    fn rejects_relative_tilde_and_hostile_paths() {
+        let home = std::path::Path::new("/Users/dev");
+        for raw in [
+            "",
+            "relative/path.txt",
+            "~",
+            "~carol/notes.md",
+            "~/",
+            "/tmp/\0hidden",
+            &format!("/tmp/{}", "x".repeat(1024)),
+            "./local",
+        ] {
+            assert!(resolve_reveal_path(raw, home).is_err(), "{raw} 被放行");
+        }
+    }
+}
 fn main() {
     if std::env::var("LATTE_WORK_SSH_ASKPASS").as_deref() == Ok("1") {
         let result = std::env::var_os("LATTE_WORK_SSH_ASKPASS_SOCKET")
@@ -968,7 +1060,8 @@ fn main() {
             paste::finish_paste_upload,
             paste::import_clipboard_file,
             choose_identity_file,
-            reveal_project
+            reveal_project,
+            reveal_path
         ])
         .build(tauri::generate_context!())
         .expect("failed to build Latte Work desktop")

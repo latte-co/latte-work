@@ -568,6 +568,20 @@ not confirm admission or enable Stop. Before native activity arrives, the active
 turn shows sending rather than waiting for a model response; reported progress,
 tools, approval, stopping and disconnect evidence take precedence.
 
+Inline code spans in assistant and subagent messages gain bounded interactivity
+when the conversation provides workspace actions. A span that parses as a bare
+http(s) URL opens through the shared link handling (internal tab or system
+browser per the stored link target). A project-relative path with an extension,
+dotfile or trailing slash opens in the workspace file browser; a `file.ts:12`
+line hint is stripped rather than treated as part of the path. An absolute or
+`~/` path on the local host is revealed in the file manager through a new
+`reveal_path` desktop command that expands `~/`, requires a bounded absolute
+path and never executes the target; non-local hosts and views without workspace
+actions keep plain code. Ordinary code, branch names, commit hashes and shell
+snippets never become interactive; classification stays heuristic and misses
+are harmless. Focused tests: `inlineReferences`, `MessageContent` and
+`latte-work-desktop reveal_path`.
+
 ## Native subagent presentation
 
 The additive `subagent` event and `subagents` request use the same local/SSH protocol.
