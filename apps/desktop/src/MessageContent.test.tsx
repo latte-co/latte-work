@@ -1,5 +1,11 @@
 // @vitest-environment jsdom
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import {
+  act,
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+} from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { MessageActionsProvider, MessageContent } from "./MessageContent";
 import type { SourceData } from "./sourceLoader";
@@ -239,5 +245,79 @@ describe("MessageContent inline references", () => {
     expect(
       screen.getByRole("button", { name: "在工作区中打开，右键查看更多操作" }),
     ).toBeTruthy();
+  });
+});
+
+describe("MessageContent hover tooltips", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("reveals the resolved full path with the line hint on hover", () => {
+    vi.useFakeTimers();
+    render(
+      <MessageActionsProvider
+        value={{ openFile: vi.fn(), localHost: true, projectRoot: "/repo" }}
+      >
+        <MessageContent
+          text={"见 `apps/desktop/src/MessageContent.tsx:62`。"}
+        />
+      </MessageActionsProvider>,
+    );
+    const chip = screen.getByRole("button", {
+      name: "在工作区中打开，右键查看更多操作",
+    });
+    expect(screen.queryByRole("tooltip")).toBeNull();
+    fireEvent.mouseOver(chip);
+    act(() => {
+      vi.advanceTimersByTime(350);
+    });
+    const tooltip = screen.getByRole("tooltip");
+    expect(tooltip.textContent).toContain(
+      "/repo/apps/desktop/src/MessageContent.tsx (line 62)",
+    );
+    expect(tooltip.textContent).toContain("左键在工作区打开 · 右键更多操作");
+    fireEvent.mouseOut(chip);
+    expect(screen.queryByRole("tooltip")).toBeNull();
+  });
+
+  it("keeps remote external tooltips to the raw path and copy hint", () => {
+    vi.useFakeTimers();
+    render(
+      <MessageActionsProvider value={{ localHost: false }}>
+        <MessageContent text={"产物在 `/home/dev/out.bin:12`。"} />
+      </MessageActionsProvider>,
+    );
+    fireEvent.mouseOver(screen.getByRole("button"));
+    act(() => {
+      vi.advanceTimersByTime(350);
+    });
+    const tooltip = screen.getByRole("tooltip");
+    expect(tooltip.textContent).toContain("/home/dev/out.bin (line 12)");
+    expect(tooltip.textContent).toContain("右键复制路径");
+  });
+
+  it("hides the tooltip on scroll and never opens it alongside the menu", () => {
+    vi.useFakeTimers();
+    render(
+      <MessageActionsProvider value={{ localHost: true }}>
+        <MessageContent text={"样本 `/tmp/data/notes.txt`。"} />
+      </MessageActionsProvider>,
+    );
+    const chip = screen.getByRole("button");
+    fireEvent.mouseOver(chip);
+    fireEvent.scroll(window);
+    act(() => {
+      vi.advanceTimersByTime(350);
+    });
+    expect(screen.queryByRole("tooltip")).toBeNull();
+    fireEvent.mouseOver(chip);
+    act(() => {
+      vi.advanceTimersByTime(350);
+    });
+    expect(screen.getByRole("tooltip")).toBeTruthy();
+    fireEvent.contextMenu(chip);
+    expect(screen.queryByRole("tooltip")).toBeNull();
+    expect(screen.getByRole("menu")).toBeTruthy();
   });
 });

@@ -4,45 +4,59 @@ import { classifyInlineCode, codeText } from "./inlineReferences";
 
 describe("classifyInlineCode", () => {
   it("detects project paths including line hints and directories", () => {
-    for (const [raw, path] of [
+    for (const [raw, path, line] of [
       [
         "apps/desktop/src/MessageContent.tsx",
         "apps/desktop/src/MessageContent.tsx",
+        undefined,
       ],
       [
         "apps/desktop/src/MessageContent.tsx:62",
         "apps/desktop/src/MessageContent.tsx",
+        "62",
       ],
       [
         "apps/desktop/src/MessageContent.tsx:62-70",
         "apps/desktop/src/MessageContent.tsx",
+        "62-70",
       ],
       [
         "docs/validation/codex-agent-2026-11-02.md",
         "docs/validation/codex-agent-2026-11-02.md",
+        undefined,
       ],
-      ["target/release/bundle/dmg/", "target/release/bundle/dmg/"],
-      ["package.json", "package.json"],
-      [".gitignore", ".gitignore"],
-      ["./scripts/package-dmg.sh", "./scripts/package-dmg.sh"],
+      ["target/release/bundle/dmg/", "target/release/bundle/dmg/", undefined],
+      ["package.json", "package.json", undefined],
+      [".gitignore", ".gitignore", undefined],
+      ["./scripts/package-dmg.sh", "./scripts/package-dmg.sh", undefined],
     ] as const) {
-      expect(classifyInlineCode(raw)).toEqual({ kind: "projectPath", path });
+      expect(classifyInlineCode(raw)).toEqual({
+        kind: "projectPath",
+        path,
+        line,
+      });
     }
   });
 
   it("detects external absolute and home-relative paths", () => {
-    for (const [raw, path] of [
+    for (const [raw, path, line] of [
       [
         "/Users/bytedance/Downloads/Latte-Work-0.1.0-arm64.dmg",
         "/Users/bytedance/Downloads/Latte-Work-0.1.0-arm64.dmg",
+        undefined,
       ],
       [
         "~/Downloads/Latte-Work-0.1.0-arm64.dmg",
         "~/Downloads/Latte-Work-0.1.0-arm64.dmg",
+        undefined,
       ],
-      ["/tmp/latte/state/control.sock:5", "/tmp/latte/state/control.sock"],
+      ["/tmp/latte/state/control.sock:5", "/tmp/latte/state/control.sock", "5"],
     ] as const) {
-      expect(classifyInlineCode(raw)).toEqual({ kind: "externalPath", path });
+      expect(classifyInlineCode(raw)).toEqual({
+        kind: "externalPath",
+        path,
+        line,
+      });
     }
   });
 

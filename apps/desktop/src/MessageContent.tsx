@@ -6,6 +6,8 @@ import {
   isValidElement,
   useContext,
   useEffect,
+  useId,
+  useRef,
   useState,
   type ReactNode,
 } from "react";
@@ -25,6 +27,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { message } from "./api";
 import { classifyInlineCode, codeText } from "./inlineReferences";
 import { InlineRefMenu, type InlineRefMenuItem } from "./InlineRefMenu";
+import { InlineRefTooltip } from "./InlineRefTooltip";
 import type { SourceData } from "./sourceLoader";
 
 export function CopyButton({
@@ -139,6 +142,43 @@ function InlineCodeRef({ children }: { children?: ReactNode }) {
   const raw = codeText(children);
   const reference = classifyInlineCode(raw);
   const [point, setPoint] = useState<{ x: number; y: number } | null>(null);
+  // Same hover contract as the sidebar hover cards: 350ms delay, dismissed by
+  // leaving, scrolling, resizing, Escape, and any menu or click.
+  const [hover, setHover] = useState<DOMRect | null>(null);
+  const hoverTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const tipId = useId();
+  function cancelHover() {
+    if (hoverTimer.current !== null) clearTimeout(hoverTimer.current);
+    hoverTimer.current = null;
+    setHover(null);
+  }
+  function scheduleHover(target: HTMLButtonElement) {
+    if (hoverTimer.current !== null) clearTimeout(hoverTimer.current);
+    hoverTimer.current = setTimeout(() => {
+      hoverTimer.current = null;
+      if (target.isConnected) setHover(target.getBoundingClientRect());
+    }, 350);
+  }
+  useEffect(() => () => cancelHover(), []);
+  useEffect(() => {
+    if (point) cancelHover();
+  }, [point]);
+  // Always-on dismissal: scrolling while the timer is still pending must not
+  // pop the tooltip at a stale anchor afterwards. setHover(null) on an
+  // already-null state bails out, so a scroll costs no render.
+  useEffect(() => {
+    const key = (event: KeyboardEvent) => {
+      if (event.key === "Escape") cancelHover();
+    };
+    window.addEventListener("keydown", key);
+    window.addEventListener("resize", cancelHover);
+    window.addEventListener("scroll", cancelHover, true);
+    return () => {
+      window.removeEventListener("keydown", key);
+      window.removeEventListener("resize", cancelHover);
+      window.removeEventListener("scroll", cancelHover, true);
+    };
+  }, []);
   if (reference.kind === "text") return <code>{children}</code>;
   if (reference.kind === "url")
     return (
@@ -176,6 +216,21 @@ function InlineCodeRef({ children }: { children?: ReactNode }) {
       report(message(e)),
     );
   };
+  // Codex-style hover: reveal the full path (resolved against the project
+  // root when known) plus a muted hint matching the available actions.
+  const tipPath =
+    reference.kind === "projectPath" && actions.projectRoot
+      ? absolutePath(actions.projectRoot, reference.path)
+      : reference.path;
+  const tipPrimary = reference.line
+    ? `${tipPath} (line ${reference.line})`
+    : tipPath;
+  const tipHint =
+    reference.kind === "projectPath"
+      ? "左键在工作区打开 · 右键更多操作"
+      : actions.localHost
+        ? "左键打开 · 右键更多操作"
+        : "右键复制路径";
   const items: InlineRefMenuItem[] = [];
   if (reference.kind === "projectPath") {
     items.push({
@@ -278,11 +333,19 @@ function InlineCodeRef({ children }: { children?: ReactNode }) {
     <code className="inline-code-ref">
       <button
         className="inline-ref-button"
-        title={title}
         aria-label={title}
-        onClick={open}
+        aria-describedby={hover && !point ? tipId : undefined}
+        onClick={() => {
+          cancelHover();
+          open();
+        }}
+        onMouseEnter={(event) => scheduleHover(event.currentTarget)}
+        onMouseLeave={cancelHover}
+        onFocus={(event) => scheduleHover(event.currentTarget)}
+        onBlur={cancelHover}
         onContextMenu={(event) => {
           event.preventDefault();
+          cancelHover();
           setPoint({ x: event.clientX, y: event.clientY });
         }}
       >
@@ -295,6 +358,14 @@ function InlineCodeRef({ children }: { children?: ReactNode }) {
           label={`文件操作：${baseName(reference.path)}`}
           items={items}
           close={() => setPoint(null)}
+        />
+      )}
+      {hover && !point && (
+        <InlineRefTooltip
+          anchor={hover}
+          id={tipId}
+          primary={tipPrimary}
+          secondary={tipHint}
         />
       )}
     </code>

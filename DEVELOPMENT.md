@@ -578,19 +578,23 @@ An absolute or `~/` path resolves on the execution host's terms: local paths
 open with the default app, while remote absolute paths stay copy-only because
 the server's canonical containment deliberately never reads outside a project.
 
-Chips expose a context menu modeled on the shared link menu. Project files use
-the bounded `preview_source` read for 另存为 and content copy on local and SSH
-hosts alike; local external paths use desktop commands that expand `~/`,
-require a bounded absolute path and never execute the target (`open_path`
-refuses executable bits, `reveal_path` only reveals, `save_local_file_as`
-streams a dialog-targeted copy, `read_local_text` caps at 2MB and refuses
-binary content, `save_file_as` caps dialog writes at 32MB, and VS Code opens
-only on the local host). Copy and save failures surface through the existing
-status-issue panel; a cancelled dialog is silent. Views without workspace
-actions keep plain code. Ordinary code, branch names, commit hashes and shell
-snippets never become interactive; classification stays heuristic and misses
-are harmless. Focused tests: `inlineReferences`, `MessageContent` and the
-`latte-work-desktop` reveal/open/save/read command suite.
+Chips expose a context menu modeled on the shared link menu. Hovering a chip
+shows the full path after a 350ms delay — resolved against the project root
+when known, with a line hint rendered Codex-style as `(line N)` — plus a muted
+hint matching the available actions; scrolling, resizing, Escape, clicks and
+menus dismiss it, including while the reveal timer is still pending. Project
+files use the bounded `preview_source` read for 另存为 and content copy on
+local and SSH hosts alike; local external paths use desktop commands that
+expand `~/`, require a bounded absolute path and never execute the target
+(`open_path` refuses executable bits, `reveal_path` only reveals,
+`save_local_file_as` streams a dialog-targeted copy, `read_local_text` caps at
+2MB and refuses binary content, `save_file_as` caps dialog writes at 32MB, and
+VS Code opens only on the local host). Copy and save failures surface through
+the existing status-issue panel; a cancelled dialog is silent. Views without
+workspace actions keep plain code. Ordinary code, branch names, commit hashes
+and shell snippets never become interactive; classification stays heuristic
+and misses are harmless. Focused tests: `inlineReferences`, `MessageContent`
+and the `latte-work-desktop` reveal/open/save/read command suite.
 
 ## Native subagent presentation
 
@@ -1471,7 +1475,6 @@ request/mutation lifecycle, and operation dialogs are separated into
 operation errors have distinct state. The shared Modal falls back to a surviving
 parent dialog or the trigger's nearest live region when the trigger disappears.
 CLI fixtures, browser layout, native UI and actual SSH execution are separate evidence scopes.
-
 
 ## Codex integration
 
