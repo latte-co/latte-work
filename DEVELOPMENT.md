@@ -572,15 +572,25 @@ Inline code spans in assistant and subagent messages gain bounded interactivity
 when the conversation provides workspace actions. A span that parses as a bare
 http(s) URL opens through the shared link handling (internal tab or system
 browser per the stored link target). A project-relative path with an extension,
-dotfile or trailing slash opens in the workspace file browser; a `file.ts:12`
-line hint is stripped rather than treated as part of the path. An absolute or
-`~/` path on the local host is revealed in the file manager through a new
-`reveal_path` desktop command that expands `~/`, requires a bounded absolute
-path and never executes the target; non-local hosts and views without workspace
+dotfile or trailing slash opens in the workspace file browser on every host;
+a `file.ts:12` line hint is stripped rather than treated as part of the path.
+An absolute or `~/` path resolves on the execution host's terms: local paths
+open with the default app, while remote absolute paths stay copy-only because
+the server's canonical containment deliberately never reads outside a project.
+
+Chips expose a context menu modeled on the shared link menu. Project files use
+the bounded `preview_source` read for 另存为 and content copy on local and SSH
+hosts alike; local external paths use desktop commands that expand `~/`,
+require a bounded absolute path and never execute the target (`open_path`
+refuses executable bits, `reveal_path` only reveals, `save_local_file_as`
+streams a dialog-targeted copy, `read_local_text` caps at 2MB and refuses
+binary content, `save_file_as` caps dialog writes at 32MB, and VS Code opens
+only on the local host). Copy and save failures surface through the existing
+status-issue panel; a cancelled dialog is silent. Views without workspace
 actions keep plain code. Ordinary code, branch names, commit hashes and shell
 snippets never become interactive; classification stays heuristic and misses
-are harmless. Focused tests: `inlineReferences`, `MessageContent` and
-`latte-work-desktop reveal_path`.
+are harmless. Focused tests: `inlineReferences`, `MessageContent` and the
+`latte-work-desktop` reveal/open/save/read command suite.
 
 ## Native subagent presentation
 

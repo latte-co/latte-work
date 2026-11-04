@@ -882,14 +882,7 @@ fn resolve_reveal_path(raw: &str, home: &std::path::Path) -> Result<PathBuf, Str
 /// Reveal one local absolute path in the platform file manager, never executing it.
 #[tauri::command]
 async fn reveal_path(path: String) -> Result<(), String> {
-    let home = std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .filter(|home| home.is_absolute())
-        .ok_or("无法确定主目录")?;
-    let path = resolve_reveal_path(&path, &home)?;
-    if !path.exists() {
-        return Err("文件不存在或已移动".into());
-    }
+    let path = local_target(&path)?;
     #[cfg(target_os = "macos")]
     let mut command = {
         let mut command = tokio::process::Command::new("/usr/bin/open");
@@ -910,10 +903,165 @@ async fn reveal_path(path: String) -> Result<(), String> {
     }
     Ok(())
 }
+fn reveal_home() -> Result<PathBuf, String> {
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .filter(|home| home.is_absolute())
+        .ok_or("无法确定主目录".into())
+}
+fn local_target(raw: &str) -> Result<PathBuf, String> {
+    let path = resolve_reveal_path(raw, &reveal_home()?)?;
+    if !path.exists() {
+        return Err("文件不存在或已移动".into());
+    }
+    Ok(path)
+}
+fn is_executable(path: &std::path::Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    path.metadata()
+        .map(|meta| meta.permissions().mode() & 0o111 != 0)
+        .unwrap_or(false)
+}
+async fn run_bounded(
+    mut command: tokio::process::Command,
+    failure: &str,
+) -> Result<(), String> {
+    let status = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        command.kill_on_drop(true).status(),
+    )
+    .await
+    .map_err(|_| format!("{failure}超时"))?
+    .map_err(|e| e.to_string())?;
+    if !status.success() {
+        return Err(failure.to_string());
+    }
+    Ok(())
+}
+/// Open one local path with its platform default application, never a bare executable.
+#[tauri::command]
+async fn open_path(path: String) -> Result<(), String> {
+    let path = local_target(&path)?;
+    if path.is_file() && is_executable(&path) {
+        return Err("可执行文件不支持直接打开，请在访达中操作".into());
+    }
+    #[cfg(target_os = "macos")]
+    let command = {
+        let mut command = tokio::process::Command::new("/usr/bin/open");
+        command.arg(&path);
+        command
+    };
+    #[cfg(not(target_os = "macos"))]
+    let command = {
+        let mut command = tokio::process::Command::new("xdg-open");
+        command.arg(&path);
+        command
+    };
+    run_bounded(command, "无法打开该文件").await
+}
+/// Open one local path in VS Code when it is installed.
+#[tauri::command]
+async fn open_in_vscode(path: String) -> Result<(), String> {
+    let path = local_target(&path)?;
+    #[cfg(target_os = "macos")]
+    let command = {
+        let mut command = tokio::process::Command::new("/usr/bin/open");
+        command.arg("-a").arg("Visual Studio Code").arg(&path);
+        command
+    };
+    #[cfg(not(target_os = "macos"))]
+    let command = {
+        let mut command = tokio::process::Command::new("code");
+        command.arg(&path);
+        command
+    };
+    run_bounded(command, "未找到 VS Code，请安装后重试").await
+}
+/// Copy one local file to a user-chosen destination through a save dialog.
+#[tauri::command]
+async fn save_local_file_as(
+    app: tauri::AppHandle,
+    path: String,
+    name: String,
+) -> Result<Option<String>, String> {
+    let source = local_target(&path)?;
+    if !source.is_file() {
+        return Err("仅支持保存文件".into());
+    }
+    let bound = source.metadata().map_err(|e| e.to_string())?.len();
+    if bound > 512 * 1024 * 1024 {
+        return Err("文件超出 512MB，不支持另存".into());
+    }
+    let Some(destination) =
+        browser_downloads::choose_save(&app, &name, None).await?
+    else {
+        return Ok(None);
+    };
+    let copied = tokio::fs::copy(&source, &destination)
+        .await
+        .map_err(|e| e.to_string())?;
+    if copied != bound {
+        let _ = tokio::fs::remove_file(&destination).await;
+        return Err("文件在复制期间发生变化，请重试".into());
+    }
+    Ok(Some(destination.to_string_lossy().into_owned()))
+}
+/// Write bounded bytes to a user-chosen destination through a save dialog.
+#[tauri::command]
+async fn save_file_as(
+    app: tauri::AppHandle,
+    name: String,
+    data: Vec<u8>,
+) -> Result<Option<String>, String> {
+    if data.len() > 32 * 1024 * 1024 {
+        return Err("内容超出 32MB，不支持另存".into());
+    }
+    let Some(destination) =
+        browser_downloads::choose_save(&app, &name, None).await?
+    else {
+        return Ok(None);
+    };
+    tokio::fs::write(&destination, &data)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(Some(destination.to_string_lossy().into_owned()))
+}
+/// Read a bounded plain-text local file for clipboard copy; binary content is refused.
+#[tauri::command]
+async fn read_local_text(path: String) -> Result<String, String> {
+    let path = local_target(&path)?;
+    if !path.is_file() {
+        return Err("仅支持复制文件内容".into());
+    }
+    let bound = path.metadata().map_err(|e| e.to_string())?.len();
+    if bound > 2 * 1024 * 1024 {
+        return Err("文件超过 2MB，不支持复制内容".into());
+    }
+    let data = tokio::fs::read(&path).await.map_err(|e| e.to_string())?;
+    let sniff = data.len().min(8192);
+    if data[..sniff].contains(&0) {
+        return Err("二进制文件不支持复制内容".into());
+    }
+    Ok(String::from_utf8_lossy(&data).into_owned())
+}
 #[cfg(test)]
 mod reveal_path_tests {
     use super::resolve_reveal_path;
     use std::path::PathBuf;
+    #[test]
+    fn detects_executable_bits_for_the_open_guard() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("latte-open-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("probe.bin");
+        std::fs::write(&file, b"x").unwrap();
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(!super::is_executable(&file));
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(super::is_executable(&file));
+        let _ = std::fs::remove_file(&file);
+        let _ = std::fs::remove_dir(dir);
+    }
     #[test]
     fn expands_home_and_keeps_absolute_paths() {
         let home = std::path::Path::new("/Users/dev");
@@ -1061,7 +1209,12 @@ fn main() {
             paste::import_clipboard_file,
             choose_identity_file,
             reveal_project,
-            reveal_path
+            reveal_path,
+            open_path,
+            open_in_vscode,
+            save_local_file_as,
+            save_file_as,
+            read_local_text
         ])
         .build(tauri::generate_context!())
         .expect("failed to build Latte Work desktop")

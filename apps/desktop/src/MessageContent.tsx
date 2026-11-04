@@ -11,10 +11,21 @@ import {
 } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { Check, Copy, ExternalLink, FileText, FolderOpen } from "lucide-react";
+import {
+  Check,
+  Code2,
+  Copy,
+  ExternalLink,
+  Eye,
+  FileText,
+  FolderOpen,
+  Save,
+} from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
 import { message } from "./api";
 import { classifyInlineCode, codeText } from "./inlineReferences";
+import { InlineRefMenu, type InlineRefMenuItem } from "./InlineRefMenu";
+import type { SourceData } from "./sourceLoader";
 
 export function CopyButton({
   text,
@@ -67,16 +78,67 @@ function CodeBlock({ children }: { children?: ReactNode }) {
 export interface MessageActions {
   /** Open a project-relative path in the workspace file browser. */
   openFile?: (path: string) => void;
-  /** Absolute paths belong to this host and may be revealed in the file manager. */
+  /** Absolute paths belong to this host and can leave the app locally. */
   localHost?: boolean;
+  /** Absolute project root, used to resolve local editor and file-manager calls. */
+  projectRoot?: string;
+  /** Bounded project-file read shared by save-as and content copy. */
+  readProjectFile?: (path: string) => Promise<SourceData>;
+  /** Menu actions report failures to a persistent status surface. */
+  reportError?: (text: string) => void;
 }
 const MessageActionsContext = createContext<MessageActions>({});
-
+const absolutePath = (root: string | undefined, relative: string) => {
+  if (!root) return relative;
+  return `${root.replace(/\/$/, "")}/${relative.replace(/^\.\//, "").replace(/^\//, "")}`;
+};
+const baseName = (path: string) =>
+  path.split("/").filter(Boolean).at(-1) ?? path.replace(/\/$/, "");
+function textual(data: SourceData) {
+  const sniff = data.bytes.subarray(0, Math.min(data.bytes.length, 8192));
+  if (sniff.includes(0)) throw new Error("二进制文件不支持复制内容");
+  return new TextDecoder().decode(data.bytes);
+}
+async function copyProjectContent(
+  actions: MessageActions,
+  path: string,
+  report: (text: string) => void,
+) {
+  if (!actions.readProjectFile) {
+    report("当前视图不支持读取文件内容");
+    return;
+  }
+  try {
+    const data = await actions.readProjectFile(path);
+    await copyText(textual(data));
+  } catch (e) {
+    report(message(e));
+  }
+}
+async function saveAs(
+  actions: MessageActions,
+  kind: "projectPath" | "externalPath",
+  path: string,
+  name: string,
+  report: (text: string) => void,
+) {
+  try {
+    if (kind === "projectPath") {
+      if (!actions.readProjectFile) return;
+      const data = await actions.readProjectFile(path);
+      await invoke("save_file_as", { name, data: Array.from(data.bytes) });
+      return;
+    }
+    await invoke("save_local_file_as", { path, name });
+  } catch (e) {
+    report(message(e));
+  }
+}
 function InlineCodeRef({ children }: { children?: ReactNode }) {
   const actions = useContext(MessageActionsContext);
   const raw = codeText(children);
   const reference = classifyInlineCode(raw);
-  const [error, setError] = useState("");
+  const [point, setPoint] = useState<{ x: number; y: number } | null>(null);
   if (reference.kind === "text") return <code>{children}</code>;
   if (reference.kind === "url")
     return (
@@ -95,28 +157,123 @@ function InlineCodeRef({ children }: { children?: ReactNode }) {
     return <code>{children}</code>;
   if (reference.kind === "externalPath" && !provided)
     return <code>{children}</code>;
-  const title =
-    reference.kind === "projectPath"
-      ? `在工作区中打开 ${reference.path}`
-      : actions.localHost
-        ? `在访达中显示 ${reference.path}`
-        : "仅本机路径可在访达中显示";
+  const report = actions.reportError ?? (() => undefined);
+  const directory = reference.path.endsWith("/");
+  const file = !directory;
+  const local = reference.kind === "externalPath";
+  const title = local
+    ? actions.localHost
+      ? "打开文件，右键查看更多操作"
+      : "文件操作菜单"
+    : "在工作区中打开，右键查看更多操作";
   const open = () => {
     if (reference.kind === "projectPath") {
-      setError("");
       actions.openFile?.(reference.path);
       return;
     }
-    if (!actions.localHost) {
-      setError("仅本机路径可在访达中显示");
-      return;
-    }
-    void invoke("reveal_path", { path: reference.path }).then(
-      () => setError(""),
-      (e) => setError(message(e)),
+    if (!actions.localHost) return;
+    void invoke("open_path", { path: reference.path }).catch((e) =>
+      report(message(e)),
     );
   };
-  const directory = reference.path.endsWith("/");
+  const items: InlineRefMenuItem[] = [];
+  if (reference.kind === "projectPath") {
+    items.push({
+      key: "open",
+      icon: directory ? <FolderOpen size={16} /> : <FileText size={16} />,
+      label: "打开文件",
+      run: () => actions.openFile?.(reference.path),
+    });
+  } else if (actions.localHost) {
+    items.push({
+      key: "open",
+      icon: directory ? <FolderOpen size={16} /> : <FileText size={16} />,
+      label: "打开文件",
+      run: () =>
+        void invoke("open_path", { path: reference.path }).catch((e) =>
+          report(message(e)),
+        ),
+    });
+  }
+  if (actions.localHost) {
+    const target =
+      reference.kind === "projectPath"
+        ? absolutePath(actions.projectRoot, reference.path)
+        : reference.path;
+    items.push({
+      key: "vscode",
+      icon: <Code2 size={16} />,
+      label: "在 VS Code 中打开",
+      run: () =>
+        void invoke("open_in_vscode", { path: target }).catch((e) =>
+          report(message(e)),
+        ),
+    });
+  }
+  const canSaveAs =
+    file &&
+    (reference.kind === "projectPath"
+      ? actions.readProjectFile !== undefined
+      : actions.localHost);
+  if (canSaveAs) {
+    items.push(
+      { key: "sep-1", separator: true },
+      {
+        key: "save-as",
+        icon: <Save size={16} />,
+        label: "另存为...",
+        run: () =>
+          void saveAs(
+            actions,
+            reference.kind,
+            reference.path,
+            baseName(reference.path),
+            report,
+          ),
+      },
+    );
+  }
+  items.push({
+    key: "copy-path",
+    icon: <Copy size={16} />,
+    label: "复制路径",
+    run: () => void copyText(reference.path).catch((e) => report(message(e))),
+  });
+  if (
+    file &&
+    (reference.kind === "projectPath"
+      ? actions.readProjectFile !== undefined
+      : actions.localHost)
+  ) {
+    items.push({
+      key: "copy-content",
+      icon: <FileText size={16} />,
+      label: "复制文件内容",
+      run: () => {
+        if (reference.kind === "projectPath") {
+          void copyProjectContent(actions, reference.path, report);
+          return;
+        }
+        void invoke<string>("read_local_text", { path: reference.path })
+          .then((text) => copyText(text))
+          .catch((e) => report(message(e)));
+      },
+    });
+  }
+  if (local && actions.localHost) {
+    items.push(
+      { key: "sep-2", separator: true },
+      {
+        key: "reveal",
+        icon: <Eye size={16} />,
+        label: "在访达中显示",
+        run: () =>
+          void invoke("reveal_path", { path: reference.path }).catch((e) =>
+            report(message(e)),
+          ),
+      },
+    );
+  }
   return (
     <code className="inline-code-ref">
       <button
@@ -124,11 +281,22 @@ function InlineCodeRef({ children }: { children?: ReactNode }) {
         title={title}
         aria-label={title}
         onClick={open}
+        onContextMenu={(event) => {
+          event.preventDefault();
+          setPoint({ x: event.clientX, y: event.clientY });
+        }}
       >
         {directory ? <FolderOpen size={12} /> : <FileText size={12} />}
         {raw}
       </button>
-      {error && <span role="alert">{error}</span>}
+      {point && (
+        <InlineRefMenu
+          point={point}
+          label={`文件操作：${baseName(reference.path)}`}
+          items={items}
+          close={() => setPoint(null)}
+        />
+      )}
     </code>
   );
 }

@@ -17,6 +17,7 @@ import { activityTranscript } from "./activity";
 import { ComposerAction } from "./ComposerAction";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { MessageActionsProvider, MessageContent } from "./MessageContent";
+import { loadSource } from "./sourceLoader";
 import { DraftStore, useDraft, type Draft } from "./drafts";
 import { useStatusIssues } from "./statusNotices";
 import { ArrowUp, ArrowDown, Bot } from "lucide-react";
@@ -258,6 +259,7 @@ export function Conversation({
     !preparingHistory &&
     (turnEntries.length > 1 || (hasEarlierHistory && turnEntries.length > 0));
   const [stopping, setStopping] = useState(false);
+  const [inlineRefError, setInlineRefError] = useState("");
   const stopGeneration = useRef(0);
   const active = session && ["running", "waiting"].includes(session.status);
   const pendingQuestions = useMemo(
@@ -529,6 +531,12 @@ export function Conversation({
       pending: stopping,
       action: { label: "停止当前任务", run: stop },
     },
+    {
+      id: `inline-refs:${hostId}`,
+      title: "文件操作未完成",
+      error: inlineRefError,
+      action: { label: "知道了", run: () => setInlineRefError("") },
+    },
   ]);
   return (
     <section
@@ -613,6 +621,19 @@ export function Conversation({
                 value={{
                   openFile,
                   localHost: hostId === "local",
+                  projectRoot: project?.path,
+                  readProjectFile: projectId
+                    ? (path) =>
+                        loadSource(
+                          hostId,
+                          projectId,
+                          undefined,
+                          path,
+                          () => true,
+                          true,
+                        )
+                    : undefined,
+                  reportError: setInlineRefError,
                 }}
               >
                 <TurnTranscript

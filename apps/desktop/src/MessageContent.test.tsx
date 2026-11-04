@@ -2,33 +2,60 @@
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { MessageActionsProvider, MessageContent } from "./MessageContent";
-const mocks = vi.hoisted(() => ({ invoke: vi.fn() }));
+import type { SourceData } from "./sourceLoader";
+const mocks = vi.hoisted(() => ({
+  invoke: vi.fn(),
+  load: vi.fn(),
+  write: vi.fn(),
+}));
 vi.mock("@tauri-apps/api/core", () => ({ invoke: mocks.invoke }));
+vi.mock("./sourceLoader", () => ({ loadSource: mocks.load }));
+const textData: SourceData = {
+  bytes: new TextEncoder().encode("fixture body"),
+  mime: "text/plain",
+  size: 13,
+  truncated: false,
+};
 beforeEach(() => {
   mocks.invoke.mockReset().mockResolvedValue(undefined);
+  mocks.load.mockReset().mockResolvedValue(textData);
+  mocks.write.mockReset().mockResolvedValue(undefined);
+  Object.defineProperty(navigator, "clipboard", {
+    value: { writeText: mocks.write },
+    configurable: true,
+  });
 });
 afterEach(() => cleanup());
+const menuLabels = () =>
+  screen.queryByRole("menu")
+    ? [...screen.queryByRole("menu")!.querySelectorAll("button")].map(
+        (button) => button.textContent,
+      )
+    : [];
 
 describe("MessageContent inline references", () => {
   it("opens project paths through the workspace hook with line hints stripped", () => {
     const openFile = vi.fn();
     render(
-      <MessageActionsProvider value={{ openFile, localHost: true }}>
+      <MessageActionsProvider
+        value={{ openFile, localHost: true, projectRoot: "/repo" }}
+      >
         <MessageContent
           text={"见 `apps/desktop/src/MessageContent.tsx:62` 的实现。"}
         />
       </MessageActionsProvider>,
     );
-    const chip = screen.getByRole("button", {
-      name: "在工作区中打开 apps/desktop/src/MessageContent.tsx",
-    });
-    fireEvent.click(chip);
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: "在工作区中打开，右键查看更多操作",
+      }),
+    );
     expect(openFile).toHaveBeenCalledWith(
       "apps/desktop/src/MessageContent.tsx",
     );
   });
 
-  it("reveals local external paths through the native command", () => {
+  it("opens local external files with the default app and keeps reveal in the menu", () => {
     render(
       <MessageActionsProvider value={{ localHost: true }}>
         <MessageContent
@@ -36,39 +63,137 @@ describe("MessageContent inline references", () => {
         />
       </MessageActionsProvider>,
     );
-    fireEvent.click(
-      screen.getByRole("button", {
-        name: "在访达中显示 ~/Downloads/Latte-Work-0.1.0-arm64.dmg",
-      }),
-    );
+    const chip = screen.getByRole("button", {
+      name: "打开文件，右键查看更多操作",
+    });
+    fireEvent.click(chip);
+    expect(mocks.invoke).toHaveBeenCalledWith("open_path", {
+      path: "~/Downloads/Latte-Work-0.1.0-arm64.dmg",
+    });
+    fireEvent.contextMenu(chip);
+    expect(menuLabels()).toContain("在访达中显示");
+    fireEvent.click(screen.getByRole("menuitem", { name: "在访达中显示" }));
     expect(mocks.invoke).toHaveBeenCalledWith("reveal_path", {
       path: "~/Downloads/Latte-Work-0.1.0-arm64.dmg",
     });
   });
 
-  it("refuses external paths on non-local hosts without invoking", () => {
+  it("offers local external files the extended menu actions", async () => {
+    mocks.invoke.mockResolvedValue("/tmp/copy.bin");
     render(
-      <MessageActionsProvider value={{ localHost: false }}>
-        <MessageContent text={"产物在 `/tmp/latte/out.bin`。"} />
+      <MessageActionsProvider value={{ localHost: true }}>
+        <MessageContent text={"样本 `/tmp/data/notes.txt`。"} />
       </MessageActionsProvider>,
     );
-    fireEvent.click(screen.getByRole("button"));
-    expect(mocks.invoke).not.toHaveBeenCalled();
-    expect(screen.getByRole("alert").textContent).toBe(
-      "仅本机路径可在访达中显示",
+    fireEvent.contextMenu(screen.getByRole("button"));
+    expect(menuLabels()).toEqual([
+      "打开文件",
+      "在 VS Code 中打开",
+      "另存为...",
+      "复制路径",
+      "复制文件内容",
+      "在访达中显示",
+    ]);
+    fireEvent.click(screen.getByRole("menuitem", { name: "另存为..." }));
+    await vi.waitFor(() =>
+      expect(mocks.invoke).toHaveBeenCalledWith("save_local_file_as", {
+        path: "/tmp/data/notes.txt",
+        name: "notes.txt",
+      }),
+    );
+    fireEvent.contextMenu(screen.getByRole("button"));
+    mocks.invoke.mockResolvedValue("file body");
+    fireEvent.click(screen.getByRole("menuitem", { name: "复制文件内容" }));
+    await vi.waitFor(() =>
+      expect(mocks.invoke).toHaveBeenCalledWith("read_local_text", {
+        path: "/tmp/data/notes.txt",
+      }),
+    );
+    await vi.waitFor(() =>
+      expect(mocks.write).toHaveBeenCalledWith("file body"),
     );
   });
 
-  it("reports a native reveal failure inline", async () => {
-    mocks.invoke.mockRejectedValue(new Error("文件不存在或已移动"));
+  it("keeps remote external paths to path copy only", () => {
     render(
-      <MessageActionsProvider value={{ localHost: true }}>
-        <MessageContent text={"见 `/tmp/gone.bin`。"} />
+      <MessageActionsProvider value={{ localHost: false }}>
+        <MessageContent text={"产物在 `/home/dev/out.bin`。"} />
       </MessageActionsProvider>,
     );
-    fireEvent.click(screen.getByRole("button"));
+    fireEvent.contextMenu(screen.getByRole("button"));
+    expect(menuLabels()).toEqual(["复制路径"]);
+  });
+
+  it("resolves project paths to the project root for the local editor", () => {
+    render(
+      <MessageActionsProvider
+        value={{ openFile: vi.fn(), localHost: true, projectRoot: "/repo" }}
+      >
+        <MessageContent text={"入口 `./scripts/package-dmg.sh`。"} />
+      </MessageActionsProvider>,
+    );
+    fireEvent.contextMenu(screen.getByRole("button"));
+    fireEvent.click(
+      screen.getByRole("menuitem", { name: "在 VS Code 中打开" }),
+    );
+    expect(mocks.invoke).toHaveBeenCalledWith("open_in_vscode", {
+      path: "/repo/scripts/package-dmg.sh",
+    });
+  });
+
+  it("saves remote project files through the bounded read and save dialog", async () => {
+    render(
+      <MessageActionsProvider
+        value={{
+          openFile: vi.fn(),
+          localHost: false,
+          readProjectFile: mocks.load,
+        }}
+      >
+        <MessageContent text={"清单 `docs/providers.md`。"} />
+      </MessageActionsProvider>,
+    );
+    fireEvent.contextMenu(screen.getByRole("button"));
+    expect(menuLabels()).toContain("另存为...");
+    fireEvent.click(screen.getByRole("menuitem", { name: "另存为..." }));
     await vi.waitFor(() =>
-      expect(screen.getByRole("alert").textContent).toBe("文件不存在或已移动"),
+      expect(mocks.load).toHaveBeenCalledWith("docs/providers.md"),
+    );
+    await vi.waitFor(() =>
+      expect(mocks.invoke).toHaveBeenCalledWith("save_file_as", {
+        name: "providers.md",
+        data: Array.from(textData.bytes),
+      }),
+    );
+  });
+
+  it("copies remote project file content as text and reports binary refusal", async () => {
+    const reportError = vi.fn();
+    render(
+      <MessageActionsProvider
+        value={{
+          openFile: vi.fn(),
+          localHost: false,
+          readProjectFile: mocks.load,
+          reportError,
+        }}
+      >
+        <MessageContent text={"清单 `docs/providers.md`。"} />
+      </MessageActionsProvider>,
+    );
+    fireEvent.contextMenu(screen.getByRole("button"));
+    fireEvent.click(screen.getByRole("menuitem", { name: "复制文件内容" }));
+    await vi.waitFor(() =>
+      expect(mocks.write).toHaveBeenCalledWith("fixture body"),
+    );
+    mocks.load.mockResolvedValue({
+      ...textData,
+      bytes: new Uint8Array([0x89, 0, 0x50]),
+    });
+    fireEvent.contextMenu(screen.getByRole("button"));
+    fireEvent.click(screen.getByRole("menuitem", { name: "复制文件内容" }));
+    await vi.waitFor(() =>
+      expect(reportError).toHaveBeenCalledWith("二进制文件不支持复制内容"),
     );
   });
 
@@ -112,7 +237,7 @@ describe("MessageContent inline references", () => {
       document.querySelectorAll(".code-block .inline-ref-button"),
     ).toHaveLength(0);
     expect(
-      screen.getByRole("button", { name: "在工作区中打开 log/build.out" }),
+      screen.getByRole("button", { name: "在工作区中打开，右键查看更多操作" }),
     ).toBeTruthy();
   });
 });
