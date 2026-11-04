@@ -44,6 +44,21 @@ Rust 单元/E2E/文档测试、前端测试/构建及 macOS native 边界检查�
 版本、二进制/源码/schema 哈希和真实 CLI 检查项保存在
 [Codex CLI contract evidence](../evidence/codex-cli-0.162.0-contract.json)。
 
+## 子智能体中断语义
+
+`codex app-server generate-json-schema`（0.162.0）中
+`CollabAgentToolCallStatus` 与 `CollabAgentStatus` 都包含 `interrupted`。实现据此把
+collab 工具的 `interrupted` 结算为 `is_error` 工具结果，并把 child 的 `interrupted`
+视为终态释放，避免同一快照里的 `receiverThreadIds` 把已释放的 child 重新置为后台工作。
+
+这一处理对 Traex 同样生效：中断的 collab 工具从“actor 失败、会话 Failed”变为
+“错误工具结果、turn 正常 Stopped”。该差异为有意为之，与 `turn/completed` 的
+`interrupted` 语义一致。
+
+上述结论来自 schema 与确定性 fixture；真实 CLI 下的中断事件顺序（`subAgentActivity`
+与 collab 快照的先后、`agentsStates` 实际取值）尚未采集，因此“中断后 child 是否仍
+在原生侧运行”仍是未验证前提。若真实语义不同，需要按真机事件序列调整释放条件。
+
 ## 复现
 
 ```sh
