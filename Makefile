@@ -36,6 +36,8 @@ test-native: ## macOS WebKit boundaries, desktop command guards and packaging-to
 	python3 scripts/test-site-data.py
 	python3 scripts/test-site-icons.py
 	python3 scripts/test-dmg-tools.py
+	# The desktop bin links the server sidecar at build time; prepare it first.
+	bash scripts/desktop.sh prepare
 	cargo test -p latte-work-desktop --bins --locked
 test: test-unit test-e2e test-doc ## Run every supported test layer (including native on macOS)
 ifeq ($(shell uname -s),Darwin)
