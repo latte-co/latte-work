@@ -120,14 +120,29 @@ describe("MessageContent inline references", () => {
     );
   });
 
-  it("keeps remote external paths to path copy only", () => {
+  it("keeps remote external paths to path copy only", async () => {
     render(
       <MessageActionsProvider value={{ localHost: false }}>
         <MessageContent text={"产物在 `/home/dev/out.bin`。"} />
       </MessageActionsProvider>,
     );
-    fireEvent.contextMenu(screen.getByRole("button"));
+    const chip = screen.getByRole("button");
+    fireEvent.click(chip);
+    await vi.waitFor(() =>
+      expect(mocks.write).toHaveBeenCalledWith("/home/dev/out.bin"),
+    );
+    fireEvent.contextMenu(chip);
     expect(menuLabels()).toEqual(["复制路径"]);
+  });
+
+  it("hides the editor item while the project root is unknown", () => {
+    render(
+      <MessageActionsProvider value={{ openFile: vi.fn(), localHost: true }}>
+        <MessageContent text={"入口 `./scripts/package-dmg.sh`。"} />
+      </MessageActionsProvider>,
+    );
+    fireEvent.contextMenu(screen.getByRole("button"));
+    expect(menuLabels()).toEqual(["打开文件", "复制路径"]);
   });
 
   it("resolves project paths to the project root for the local editor", () => {
@@ -294,7 +309,26 @@ describe("MessageContent hover tooltips", () => {
     });
     const tooltip = screen.getByRole("tooltip");
     expect(tooltip.textContent).toContain("/home/dev/out.bin (line 12)");
-    expect(tooltip.textContent).toContain("右键复制路径");
+    expect(tooltip.textContent).toContain("点击复制路径 · 右键更多操作");
+  });
+
+  it("shows the tooltip from keyboard focus and hides it on Escape", () => {
+    vi.useFakeTimers();
+    render(
+      <MessageActionsProvider value={{ localHost: true }}>
+        <MessageContent text={"样本 `/tmp/data/notes.txt`。"} />
+      </MessageActionsProvider>,
+    );
+    const chip = screen.getByRole("button");
+    fireEvent.focus(chip);
+    act(() => {
+      vi.advanceTimersByTime(350);
+    });
+    const tooltip = screen.getByRole("tooltip");
+    expect(chip.getAttribute("aria-describedby")).toBe(tooltip.id);
+    fireEvent.keyDown(window, { key: "Escape" });
+    expect(screen.queryByRole("tooltip")).toBeNull();
+    expect(chip.getAttribute("aria-describedby")).toBeNull();
   });
 
   it("hides the tooltip on scroll and never opens it alongside the menu", () => {

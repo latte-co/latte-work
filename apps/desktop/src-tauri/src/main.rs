@@ -879,29 +879,23 @@ fn resolve_reveal_path(raw: &str, home: &std::path::Path) -> Result<PathBuf, Str
     }
     Ok(expanded)
 }
-/// Reveal one local absolute path in the platform file manager, never executing it.
+/// Reveal one local absolute path in Finder, never executing it.
+/// Reveal-only semantics have no `xdg-open` equivalent that shows instead of
+/// opens, so non-macOS platforms decline like `reveal_project`.
 #[tauri::command]
 async fn reveal_path(path: String) -> Result<(), String> {
     let path = local_target(&path)?;
-    #[cfg(target_os = "macos")]
-    let mut command = {
-        let mut command = tokio::process::Command::new("/usr/bin/open");
-        command.arg("-R");
-        command
-    };
     #[cfg(not(target_os = "macos"))]
-    let mut command = tokio::process::Command::new("xdg-open");
-    let status = tokio::time::timeout(
-        std::time::Duration::from_secs(10),
-        command.arg(path).kill_on_drop(true).status(),
-    )
-    .await
-    .map_err(|_| "打开文件位置超时")?
-    .map_err(|e| e.to_string())?;
-    if !status.success() {
-        return Err("无法在文件管理器中显示该路径".into());
+    {
+        let _ = &path;
+        return Err("此平台暂不支持在文件管理器中显示".into());
     }
-    Ok(())
+    #[cfg(target_os = "macos")]
+    {
+        let mut command = tokio::process::Command::new("/usr/bin/open");
+        command.arg("-R").arg(&path);
+        run_bounded(command, "无法在访达中显示该路径").await
+    }
 }
 fn reveal_home() -> Result<PathBuf, String> {
     std::env::var_os("HOME")
@@ -922,6 +916,40 @@ fn is_executable(path: &std::path::Path) -> bool {
         .map(|meta| meta.permissions().mode() & 0o111 != 0)
         .unwrap_or(false)
 }
+/// Directory suffixes whose `open` target is an app bundle or system plugin:
+/// launching it, not showing it. `.app`/`.workflow` are directories, so the
+/// executable-bit guard never sees them.
+const OPEN_LAUNCH_BUNDLES: [&str; 12] = [
+    ".app",
+    ".appex",
+    ".bundle",
+    ".framework",
+    ".kext",
+    ".plugin",
+    ".prefPane",
+    ".qlgenerator",
+    ".service",
+    ".wdgt",
+    ".workflow",
+    ".xpc",
+];
+/// File suffixes whose default `open` handler installs or executes a script
+/// regardless of any executable bit.
+const OPEN_LAUNCH_FILES: [&str; 6] = [".command", ".desktop", ".dmg", ".mpkg", ".pkg", ".terminal"];
+/// Whether `open` would launch or install this target instead of showing it.
+fn open_launches_target(path: &std::path::Path) -> bool {
+    let Some(suffix) = path
+        .extension()
+        .map(|ext| format!(".{}", ext.to_string_lossy().to_lowercase()))
+    else {
+        return false;
+    };
+    if path.is_dir() {
+        OPEN_LAUNCH_BUNDLES.contains(&suffix.as_str())
+    } else {
+        OPEN_LAUNCH_FILES.contains(&suffix.as_str())
+    }
+}
 async fn run_bounded(mut command: tokio::process::Command, failure: &str) -> Result<(), String> {
     let status = tokio::time::timeout(
         std::time::Duration::from_secs(10),
@@ -935,12 +963,16 @@ async fn run_bounded(mut command: tokio::process::Command, failure: &str) -> Res
     }
     Ok(())
 }
-/// Open one local path with its platform default application, never a bare executable.
+/// Open one local path with its platform default application, never a bare
+/// executable, app bundle or installer.
 #[tauri::command]
 async fn open_path(path: String) -> Result<(), String> {
     let path = local_target(&path)?;
     if path.is_file() && is_executable(&path) {
         return Err("可执行文件不支持直接打开，请在访达中操作".into());
+    }
+    if open_launches_target(&path) {
+        return Err("应用包与安装包不支持直接打开，请在访达中显示".into());
     }
     #[cfg(target_os = "macos")]
     let command = {
@@ -1082,6 +1114,22 @@ mod reveal_path_tests {
         ] {
             assert!(resolve_reveal_path(raw, home).is_err(), "{raw} 被放行");
         }
+    }
+    #[test]
+    fn flags_launch_targets_for_the_open_guard() {
+        let dir = std::env::temp_dir().join(format!("latte-guard-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("Tool.app/Contents")).unwrap();
+        std::fs::write(dir.join("installer.pkg"), b"x").unwrap();
+        std::fs::write(dir.join("installer.PKG"), b"x").unwrap();
+        std::fs::write(dir.join("job.terminal"), b"x").unwrap();
+        std::fs::write(dir.join("notes.txt"), b"x").unwrap();
+        assert!(super::open_launches_target(&dir.join("Tool.app")));
+        assert!(super::open_launches_target(&dir.join("installer.pkg")));
+        assert!(super::open_launches_target(&dir.join("installer.PKG")));
+        assert!(super::open_launches_target(&dir.join("job.terminal")));
+        assert!(!super::open_launches_target(&dir.join("notes.txt")));
+        assert!(!super::open_launches_target(&dir));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
 fn main() {

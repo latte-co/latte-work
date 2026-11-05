@@ -32,10 +32,11 @@ test-e2e: ## Final server binary, socket bridge, and deterministic Claude fixtur
 	cargo test -p latte-work-server --test e2e --locked -- --test-threads=1
 test-doc: ## Rust documentation tests
 	cargo test --workspace --exclude latte-work-desktop --doc --locked
-test-native: ## macOS WebKit boundaries, favicon transport and packaging-tool isolation
+test-native: ## macOS WebKit boundaries, desktop command guards and packaging-tool isolation
 	python3 scripts/test-site-data.py
 	python3 scripts/test-site-icons.py
 	python3 scripts/test-dmg-tools.py
+	cargo test -p latte-work-desktop --bins --locked
 test: test-unit test-e2e test-doc ## Run every supported test layer (including native on macOS)
 ifeq ($(shell uname -s),Darwin)
 test: test-native

@@ -88,6 +88,8 @@ describe("classifyInlineCode", () => {
       'format!("{}")',
       "model_providers.{id}={{{}}}",
       "ftp://example.com/file",
+      "../secrets.env",
+      "src/../../etc/passwd",
       "",
     ]) {
       expect(classifyInlineCode(raw)).toEqual({ kind: "text" });

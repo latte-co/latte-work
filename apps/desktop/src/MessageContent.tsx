@@ -143,30 +143,37 @@ function InlineCodeRef({ children }: { children?: ReactNode }) {
   const reference = classifyInlineCode(raw);
   const [point, setPoint] = useState<{ x: number; y: number } | null>(null);
   // Same hover contract as the sidebar hover cards: 350ms delay, dismissed by
-  // leaving, scrolling, resizing, Escape, and any menu or click.
+  // leaving, scrolling, resizing, Escape, and any menu or click. `pending`
+  // gates the dismissal listeners so idle chips carry none of them.
   const [hover, setHover] = useState<DOMRect | null>(null);
+  const [pending, setPending] = useState(false);
   const hoverTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const tipId = useId();
   function cancelHover() {
     if (hoverTimer.current !== null) clearTimeout(hoverTimer.current);
     hoverTimer.current = null;
+    setPending(false);
     setHover(null);
   }
   function scheduleHover(target: HTMLButtonElement) {
+    if (point) return;
     if (hoverTimer.current !== null) clearTimeout(hoverTimer.current);
     hoverTimer.current = setTimeout(() => {
       hoverTimer.current = null;
+      setPending(false);
       if (target.isConnected) setHover(target.getBoundingClientRect());
     }, 350);
+    setPending(true);
   }
   useEffect(() => () => cancelHover(), []);
   useEffect(() => {
     if (point) cancelHover();
   }, [point]);
-  // Always-on dismissal: scrolling while the timer is still pending must not
-  // pop the tooltip at a stale anchor afterwards. setHover(null) on an
-  // already-null state bails out, so a scroll costs no render.
+  // Scrolling while the timer is still pending must not pop the tooltip at a
+  // stale anchor afterwards, so dismissal listeners stay mounted through the
+  // pending phase, not only while the tooltip is visible.
   useEffect(() => {
+    if (!hover && !pending) return;
     const key = (event: KeyboardEvent) => {
       if (event.key === "Escape") cancelHover();
     };
@@ -178,7 +185,7 @@ function InlineCodeRef({ children }: { children?: ReactNode }) {
       window.removeEventListener("resize", cancelHover);
       window.removeEventListener("scroll", cancelHover, true);
     };
-  }, []);
+  }, [hover, pending]);
   if (reference.kind === "text") return <code>{children}</code>;
   if (reference.kind === "url")
     return (
@@ -204,14 +211,19 @@ function InlineCodeRef({ children }: { children?: ReactNode }) {
   const title = local
     ? actions.localHost
       ? "打开文件，右键查看更多操作"
-      : "文件操作菜单"
+      : "点击复制路径，右键查看更多操作"
     : "在工作区中打开，右键查看更多操作";
   const open = () => {
     if (reference.kind === "projectPath") {
       actions.openFile?.(reference.path);
       return;
     }
-    if (!actions.localHost) return;
+    if (!actions.localHost) {
+      // Remote absolutes are copy-only; left click runs the only available
+      // action instead of dead-ending.
+      void copyText(reference.path).catch((e) => report(message(e)));
+      return;
+    }
     void invoke("open_path", { path: reference.path }).catch((e) =>
       report(message(e)),
     );
@@ -223,14 +235,14 @@ function InlineCodeRef({ children }: { children?: ReactNode }) {
       ? absolutePath(actions.projectRoot, reference.path)
       : reference.path;
   const tipPrimary = reference.line
-    ? `${tipPath} (line ${reference.line})`
+    ? `${tipPath} (${reference.line.includes("-") ? "lines" : "line"} ${reference.line})`
     : tipPath;
   const tipHint =
     reference.kind === "projectPath"
       ? "左键在工作区打开 · 右键更多操作"
       : actions.localHost
         ? "左键打开 · 右键更多操作"
-        : "右键复制路径";
+        : "点击复制路径 · 右键更多操作";
   const items: InlineRefMenuItem[] = [];
   if (reference.kind === "projectPath") {
     items.push({
@@ -251,19 +263,24 @@ function InlineCodeRef({ children }: { children?: ReactNode }) {
     });
   }
   if (actions.localHost) {
+    // Without a project root the resolved editor target would be the bare
+    // relative path and always fail, so hide the item instead.
+    const resolvable =
+      reference.kind === "externalPath" || actions.projectRoot !== undefined;
     const target =
       reference.kind === "projectPath"
         ? absolutePath(actions.projectRoot, reference.path)
         : reference.path;
-    items.push({
-      key: "vscode",
-      icon: <Code2 size={16} />,
-      label: "在 VS Code 中打开",
-      run: () =>
-        void invoke("open_in_vscode", { path: target }).catch((e) =>
-          report(message(e)),
-        ),
-    });
+    if (resolvable)
+      items.push({
+        key: "vscode",
+        icon: <Code2 size={16} />,
+        label: "在 VS Code 中打开",
+        run: () =>
+          void invoke("open_in_vscode", { path: target }).catch((e) =>
+            report(message(e)),
+          ),
+      });
   }
   const canSaveAs =
     file &&

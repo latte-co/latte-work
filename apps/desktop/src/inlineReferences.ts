@@ -29,7 +29,11 @@ function pathLike(text: string): {
   if (stripped.startsWith("/") || stripped.startsWith("~/"))
     return { kind: "externalPath", path: stripped, line };
   const directory = stripped.endsWith("/");
-  const last = stripped.split("/").at(-1) ?? "";
+  const segments = stripped.split("/").filter(Boolean);
+  // A `..` segment would resolve outside the project once the chip is joined
+  // with the project root, so such spans stay plain text.
+  if (segments.some((segment) => segment === "..")) return null;
+  const last = segments.at(-1) ?? "";
   if (!directory && (!last || /^\.{1,2}$/.test(last) || /^\.{3,}$/.test(last)))
     return null;
   const namedFile = EXTENSION.test(last) || last.startsWith(".");
