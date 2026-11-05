@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import shutil
 import signal
 import socket
 import subprocess
@@ -13,13 +14,15 @@ import time
 
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--binary', default='target/debug/latte-work-server')
-parser.add_argument('--codex', default=__import__('shutil').which('codex') or 'codex')
+parser.add_argument('--codex', default=shutil.which('codex') or 'codex')
 parser.add_argument('--output', default='target/codex-native-smoke.json')
 parser.add_argument('--live', action='store_true')
 parser.add_argument('--model')
 parser.add_argument('--live-tools', action='store_true', help='also verify an actual model file write in the disposable project')
 args = parser.parse_args()
 binary = str(Path(args.binary).resolve())
+if not Path(args.codex).exists():
+    raise SystemExit(f'codex CLI 不存在: {args.codex}（请安装后重试或用 --codex 指定路径）')
 codex = str(Path(args.codex).resolve())
 report = {'cli_version': subprocess.check_output([codex, '--version'], text=True, timeout=5).strip(),
           'binary_sha256': hashlib.sha256(Path(binary).read_bytes()).hexdigest(),
@@ -30,7 +33,7 @@ with tempfile.TemporaryDirectory(prefix='lw-codex-', dir='/tmp') as directory:
     project.mkdir()
     env = {**os.environ, 'LATTE_WORK_AGENT_ENV': 'inherit', 'LATTE_WORK_CODEX': codex}
     server = subprocess.Popen([binary, 'serve', '--state-dir', str(root / 'state')], env=env,
-                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
     connection = None
     try:
         deadline = time.monotonic() + 15
@@ -123,11 +126,13 @@ with tempfile.TemporaryDirectory(prefix='lw-codex-', dir='/tmp') as directory:
     finally:
         if connection:
             connection.close()
-        server.send_signal(signal.SIGINT)
+        # The Server owns child processes (a real `codex app-server` with
+        # --live); signal the whole group so a wedged Server cannot strand it.
+        os.killpg(server.pid, signal.SIGTERM)
         try:
-            server.wait(10)
+            server.wait(timeout=10)
         except subprocess.TimeoutExpired:
-            server.kill()
+            os.killpg(server.pid, signal.SIGKILL)
             server.wait()
 Path(args.output).parent.mkdir(parents=True, exist_ok=True)
 Path(args.output).write_text(json.dumps(report, ensure_ascii=False, indent=2) + '\n')

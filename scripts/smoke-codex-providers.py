@@ -9,6 +9,7 @@ import http.server
 import json
 import os
 from pathlib import Path
+import shutil
 import signal
 import socket
 import subprocess
@@ -18,10 +19,12 @@ import time
 
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--binary', default='target/debug/latte-work-server')
-parser.add_argument('--codex', default=__import__('shutil').which('codex') or 'codex')
+parser.add_argument('--codex', default=shutil.which('codex') or 'codex')
 parser.add_argument('--output', default='target/codex-provider-smoke.json')
 args = parser.parse_args()
 binary = str(Path(args.binary).resolve())
+if not Path(args.codex).exists():
+    raise SystemExit(f'codex CLI 不存在: {args.codex}（请安装后重试或用 --codex 指定路径）')
 codex = str(Path(args.codex).resolve())
 KEY = 'latte-codex-fixture-secret-91b4'
 seen = []
