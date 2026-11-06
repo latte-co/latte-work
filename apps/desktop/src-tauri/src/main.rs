@@ -950,6 +950,38 @@ fn open_launches_target(path: &std::path::Path) -> bool {
         OPEN_LAUNCH_FILES.contains(&suffix.as_str())
     }
 }
+/// Resolve symlinks and judge the open target on its real identity: a plain
+/// `report.txt` link pointing at `Tool.app` must not slip past the bundle
+/// guard through its link name. The resolved target is what gets opened.
+fn open_guard(path: &std::path::Path) -> Result<PathBuf, String> {
+    let resolved = path
+        .canonicalize()
+        .map_err(|_| "无法解析路径".to_string())?;
+    if resolved.is_file() && is_executable(&resolved) {
+        return Err("可执行文件不支持直接打开，请在访达中操作".into());
+    }
+    if open_launches_target(&resolved) {
+        return Err("应用包与安装包不支持直接打开，请在访达中显示".into());
+    }
+    Ok(resolved)
+}
+/// Refuse saving onto the source itself: `fs::copy` truncates same-inode
+/// targets (plain duplicates, hard links and symlinks alike), and a
+/// post-failure cleanup would then delete the original.
+fn guard_save_destination(
+    source: &std::path::Path,
+    destination: &std::path::Path,
+) -> Result<(), String> {
+    use std::os::unix::fs::MetadataExt;
+    let same = match (source.metadata(), destination.metadata()) {
+        (Ok(s), Ok(d)) => (s.dev(), s.ino()) == (d.dev(), d.ino()),
+        _ => false,
+    };
+    if same {
+        return Err("保存目标与源文件相同，已保留原文件".into());
+    }
+    Ok(())
+}
 async fn run_bounded(mut command: tokio::process::Command, failure: &str) -> Result<(), String> {
     let status = tokio::time::timeout(
         std::time::Duration::from_secs(10),
@@ -964,16 +996,10 @@ async fn run_bounded(mut command: tokio::process::Command, failure: &str) -> Res
     Ok(())
 }
 /// Open one local path with its platform default application, never a bare
-/// executable, app bundle or installer.
+/// executable, app bundle or installer, judged on the resolved target.
 #[tauri::command]
 async fn open_path(path: String) -> Result<(), String> {
-    let path = local_target(&path)?;
-    if path.is_file() && is_executable(&path) {
-        return Err("可执行文件不支持直接打开，请在访达中操作".into());
-    }
-    if open_launches_target(&path) {
-        return Err("应用包与安装包不支持直接打开，请在访达中显示".into());
-    }
+    let path = open_guard(&local_target(&path)?)?;
     #[cfg(target_os = "macos")]
     let command = {
         let mut command = tokio::process::Command::new("/usr/bin/open");
@@ -1024,11 +1050,17 @@ async fn save_local_file_as(
     let Some(destination) = browser_downloads::choose_save(&app, &name, None).await? else {
         return Ok(None);
     };
+    guard_save_destination(&source, &destination)?;
+    // Cleanup may only remove output this run created; a pre-existing file
+    // the copy merely failed to overwrite stays untouched.
+    let pre_existing = destination.exists();
     let copied = tokio::fs::copy(&source, &destination)
         .await
         .map_err(|e| e.to_string())?;
     if copied != bound {
-        let _ = tokio::fs::remove_file(&destination).await;
+        if !pre_existing {
+            let _ = tokio::fs::remove_file(&destination).await;
+        }
         return Err("文件在复制期间发生变化，请重试".into());
     }
     Ok(Some(destination.to_string_lossy().into_owned()))
@@ -1129,6 +1161,48 @@ mod reveal_path_tests {
         assert!(super::open_launches_target(&dir.join("job.terminal")));
         assert!(!super::open_launches_target(&dir.join("notes.txt")));
         assert!(!super::open_launches_target(&dir));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+    #[test]
+    fn guards_symlinked_bundles_behind_plain_names() {
+        let dir = std::env::temp_dir().join(format!("latte-link-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("Tool.app/Contents")).unwrap();
+        std::os::unix::fs::symlink(dir.join("Tool.app"), dir.join("report.txt")).unwrap();
+        assert!(
+            super::open_guard(&dir.join("report.txt")).is_err(),
+            "链接名 .txt 不得绕过已解析目标的应用包守卫"
+        );
+        std::os::unix::fs::symlink(dir.join("notes.txt"), dir.join("alias.txt")).unwrap();
+        std::fs::write(dir.join("notes.txt"), b"body").unwrap();
+        assert_eq!(
+            super::open_guard(&dir.join("alias.txt")).unwrap(),
+            dir.join("notes.txt").canonicalize().unwrap()
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+    #[test]
+    fn saves_refuse_the_source_identity() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("latte-save-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let source = dir.join("source.txt");
+        std::fs::write(&source, b"original").unwrap();
+        let hardlink = dir.join("hardlink.txt");
+        std::fs::hard_link(&source, &hardlink).unwrap();
+        let symlink = dir.join("symlink.txt");
+        std::os::unix::fs::symlink(&source, &symlink).unwrap();
+        let other = dir.join("other.txt");
+        std::fs::write(&other, b"other").unwrap();
+        for destination in [&source, &hardlink, &symlink] {
+            assert!(
+                super::guard_save_destination(&source, destination).is_err(),
+                "{} 与源同 inode 却被放行",
+                destination.display()
+            );
+        }
+        assert!(super::guard_save_destination(&source, &other).is_ok());
+        assert_eq!(std::fs::read(&source).unwrap(), b"original");
+        let _ = std::fs::set_permissions(&source, std::fs::Permissions::from_mode(0o644));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

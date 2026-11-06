@@ -486,3 +486,60 @@ async fn codex_interrupted_subagent_tool_is_stopped_not_failed() {
         "an interrupted sub-agent tool must not leave background work that blocks idle close"
     );
 }
+
+#[tokio::test]
+async fn codex_background_command_survives_the_turn_and_releases_on_native_exit() {
+    let host = Host::start().await;
+    let root = tempfile::tempdir().unwrap();
+    let mut client = host.client().await;
+    let id = session(&mut client, root.path()).await;
+    send(&mut client, &id, "bg-1", "background-command").await;
+    let events = wait(&mut client, &id, Status::Completed).await;
+    assert!(
+        events.iter().any(|e| matches!(&e.event,
+            EventKind::Notice { text, .. } if text.contains("转入后台")
+        )),
+        "a command that outlives its turn must be announced as background work"
+    );
+    assert!(
+        matches!(
+            ask(
+                &mut client,
+                Request::CloseAgentSession {
+                    session_id: id.clone(),
+                    only_if_idle: Some(true)
+                }
+            )
+            .await,
+            Response::Error { message, .. } if message.contains("确认后关闭")
+        ),
+        "a surviving background command must fence idle close"
+    );
+    // The unsolicited native exit arrives tied to the original turn id.
+    send(&mut client, &id, "bg-2", "release-background-command").await;
+    let events = wait(&mut client, &id, Status::Completed).await;
+    assert!(
+        events.iter().any(|e| matches!(
+            &e.event,
+            EventKind::ToolResult {
+                is_error: false,
+                ..
+            }
+        )),
+        "the released command's exit must surface as a successful tool result"
+    );
+    assert!(
+        matches!(
+            ask(
+                &mut client,
+                Request::CloseAgentSession {
+                    session_id: id.clone(),
+                    only_if_idle: Some(true)
+                }
+            )
+            .await,
+            Response::Ok
+        ),
+        "released background work must not block idle close"
+    );
+}

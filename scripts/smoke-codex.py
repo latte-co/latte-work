@@ -24,6 +24,24 @@ binary = str(Path(args.binary).resolve())
 if not Path(args.codex).exists():
     raise SystemExit(f'codex CLI 不存在: {args.codex}（请安装后重试或用 --codex 指定路径）')
 codex = str(Path(args.codex).resolve())
+
+def kill_agent_groups(server_pid):
+    """SIGKILL of the Server's own group cannot reach the agents: the runtime
+    puts every agent into a fresh process group (PGID = its own PID), and a
+    killed Server never runs its Group drop. Collect the Server's direct
+    children while it is still alive and kill each agent group explicitly."""
+    try:
+        children = subprocess.check_output(
+            ['pgrep', '-P', str(server_pid)], text=True
+        ).split()
+    except (subprocess.CalledProcessError, OSError):
+        return
+    for child in children:
+        try:
+            os.killpg(int(child), signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass
+
 report = {'cli_version': subprocess.check_output([codex, '--version'], text=True, timeout=5).strip(),
           'binary_sha256': hashlib.sha256(Path(binary).read_bytes()).hexdigest(),
           'live': args.live or args.live_tools, 'checks': []}
@@ -132,6 +150,9 @@ with tempfile.TemporaryDirectory(prefix='lw-codex-', dir='/tmp') as directory:
         try:
             server.wait(timeout=10)
         except subprocess.TimeoutExpired:
+            # Agents live in their own process groups; kill them while the
+            # Server is still alive and their PIDs are discoverable.
+            kill_agent_groups(server.pid)
             os.killpg(server.pid, signal.SIGKILL)
             server.wait()
 Path(args.output).parent.mkdir(parents=True, exist_ok=True)

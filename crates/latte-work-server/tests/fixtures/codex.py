@@ -93,6 +93,22 @@ for line in sys.stdin:
                                              'agentsStates': {'child': {'status': 'running'}},
                                              'status': 'inProgress'}})
             text('SUBTASK_RUNNING')
+        elif prompt == 'background-command':
+            # A resumable command: it keeps running natively after the turn
+            # ends. The real exit only arrives when a later turn solicits it.
+            notify('item/started', {'item': {'id': 'bg-cmd', 'type': 'commandExecution', 'command': 'sleep 300',
+                                             'cwd': os.getcwd(), 'status': 'inProgress', 'processId': '91'}})
+            text('LONG_COMMAND_RUNNING')
+            complete()
+        elif prompt == 'release-background-command':
+            # The unsolicited exit is tied to the ORIGINAL turn id; params
+            # override the notify() turn so the guarded idle channel accepts it.
+            notify('item/completed', {'turnId': 'turn-1',
+                                      'item': {'id': 'bg-cmd', 'type': 'commandExecution', 'command': 'sleep 300',
+                                               'cwd': os.getcwd(), 'status': 'completed', 'exitCode': 0,
+                                               'processId': '91', 'aggregatedOutput': 'bg-done'}})
+            text('BACKGROUND_RELEASED')
+            complete()
         elif prompt in ('approval', 'question'):
             waiting = prompt
             if waiting == 'approval':

@@ -52,6 +52,10 @@ pub struct AppServer {
     approvals: HashMap<String, &'static str>,
     streamed: HashSet<String>,
     tools: HashSet<String>,
+    /// Commands started but not yet terminal in the current turn. Codex keeps
+    /// a resumable command alive across the turn that spawned it; registering
+    /// it when the turn ends preserves the busy fence until its real exit.
+    in_flight_commands: HashMap<String, Option<String>>,
     background_commands: HashMap<String, BackgroundCommand>,
     children: HashSet<String>,
     child_activity_turns: HashMap<String, String>,
@@ -582,6 +586,32 @@ impl AppServer {
                     "failed" | "interrupted" => true,
                     _ => bail!("Agent 返回非终态完成消息"),
                 };
+                // Commands still running natively keep the CLI busy after the
+                // turn ends. Register them under the finished turn so a
+                // matching terminal snapshot can release them later, even
+                // while the session sits idle. Overflow skips the fence
+                // instead of failing a completed turn; the in-flight ledger
+                // is already bounded.
+                let finished_turn = self.turn.clone().context("Agent 后台命令缺少轮次身份")?;
+                let mut background_notices = Vec::new();
+                for (id, process) in self.in_flight_commands.drain() {
+                    if self.background_commands.contains_key(&id)
+                        || self.background_commands.len() >= 512
+                    {
+                        continue;
+                    }
+                    background_notices.push(format!(
+                        "命令已转入后台继续运行，结果待确认（工具 ID：{id}，进程 ID：{}）",
+                        process.as_deref().unwrap_or("未提供")
+                    ));
+                    self.background_commands.insert(
+                        id,
+                        BackgroundCommand {
+                            turn: finished_turn.clone(),
+                            process,
+                        },
+                    );
+                }
                 self.phase = Phase::Ready;
                 self.approvals.clear();
                 self.completed_turn = self.turn.take();
@@ -603,6 +633,9 @@ impl AppServer {
                     None
                 };
                 let mut actions = Vec::new();
+                for notice in background_notices {
+                    actions.push(Action::Event(EventKind::Notice { text: notice }));
+                }
                 if !failed && !self.steered.is_empty() {
                     actions.push(Action::InputsConsumed(self.steered.drain().collect()));
                 }
@@ -704,6 +737,13 @@ impl AppServer {
             }
         }
         let mut actions = Vec::new();
+        if !completed && kind == "commandExecution" {
+            if self.in_flight_commands.len() >= 512 && !self.in_flight_commands.contains_key(&id) {
+                bail!("Agent 进行中命令数量超出限制");
+            }
+            self.in_flight_commands
+                .insert(id.clone(), command_process(item));
+        }
         if !self.tools.contains(&id) && !self.background_commands.contains_key(&id) {
             if self.tools.len() >= 4096 {
                 bail!("Agent 工具数量超出限制");
@@ -740,6 +780,8 @@ impl AppServer {
                     .map(|command| command.turn.clone())
                     .or_else(|| self.turn.clone())
                     .context("Agent 后台命令缺少轮次身份")?;
+                // The background ledger owns this command now.
+                self.in_flight_commands.remove(&id);
                 // item/completed ends the tool's foreground wait, not the
                 // process. Keep the Tool unresolved; a result would imply success
                 // in existing clients. Notices preserve output/identity without
@@ -767,6 +809,9 @@ impl AppServer {
             if kind != "webSearch" && !terminal {
                 bail!("Agent 工具完成状态无效");
             }
+            if kind == "commandExecution" {
+                self.in_flight_commands.remove(&id);
+            }
             let is_error = matches!(status, Some("failed" | "declined" | "interrupted"))
                 || item["success"] == false
                 || item["exitCode"].as_i64().is_some_and(|code| code != 0);
@@ -790,6 +835,8 @@ impl AppServer {
                 {
                     self.background_commands
                         .retain(|_, command| command.process.as_ref() != Some(&process));
+                    self.in_flight_commands
+                        .retain(|_, pending| pending.as_ref() != Some(&process));
                 }
             }
             actions.push(Action::Event(EventKind::ToolResult {
@@ -1619,6 +1666,64 @@ mod tests {
             );
             assert!(agent.can_reconfigure());
         }
+    }
+    #[test]
+    fn commands_started_before_the_turn_ends_fence_idle_and_release_on_identity() {
+        let mut agent = running();
+        // A resumable command starts inside the turn and outlives it.
+        agent
+            .item(
+                &json!({"id":"bg","type":"commandExecution","status":"inProgress","processId":"42"}),
+                false,
+            )
+            .unwrap();
+        let actions = message(
+            &mut agent,
+            json!({"method":"turn/completed","params":{"threadId":"t","turn":{"id":"turn","status":"completed"}}}),
+        );
+        assert!(actions.iter().any(|action| matches!(
+            action,
+            Action::Event(EventKind::Notice { text, .. }) if text.contains("转入后台")
+        )));
+        assert!(agent.has_background_work());
+        assert!(!agent.can_reconfigure());
+        // The native exit arrives while the session is idle, tied to the
+        // original turn; the guarded idle channel must release it.
+        let late = message(
+            &mut agent,
+            json!({"method":"item/completed","params":{"threadId":"t","turnId":"turn","item":{"id":"bg","type":"commandExecution","status":"completed","exitCode":0,"processId":"42","aggregatedOutput":"done"}}}),
+        );
+        assert!(late.iter().any(|action| matches!(
+            action,
+            Action::Event(EventKind::ToolResult {
+                is_error: false,
+                ..
+            })
+        )));
+        assert!(!agent.has_background_work());
+        assert!(agent.can_reconfigure());
+    }
+    #[test]
+    fn commands_finishing_within_the_turn_stay_unregistered() {
+        let mut agent = running();
+        agent
+            .item(
+                &json!({"id":"fg","type":"commandExecution","status":"inProgress","processId":"7"}),
+                false,
+            )
+            .unwrap();
+        agent
+            .item(
+                &json!({"id":"fg","type":"commandExecution","status":"completed","exitCode":0,"processId":"7"}),
+                true,
+            )
+            .unwrap();
+        message(
+            &mut agent,
+            json!({"method":"turn/completed","params":{"threadId":"t","turn":{"id":"turn","status":"completed"}}}),
+        );
+        assert!(!agent.has_background_work());
+        assert!(agent.can_reconfigure());
     }
     #[test]
     fn late_background_results_are_fenced_by_thread_turn_and_item_even_while_idle() {
