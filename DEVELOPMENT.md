@@ -136,7 +136,9 @@ cleanup remains visible for explicit retry rather than automatically replaying i
 
 `crates/latte-work-server/src/agents/adapter.rs` defines the internal contract;
 `agents/mod.rs` registers implementations: `agents/claude.rs` owns Claude Code
-and `agents/traex.rs` owns Traex app-server v2. Keep protocol order and wire messages in the implementation.
+and `agents/app_server.rs` implements the shared Codex/Traex app-server v2 state
+machine. `agents/codex.rs` and `agents/traex.rs` own their native capabilities.
+Keep protocol order and wire messages in the implementation.
 Runtime consumes common actions and retains approval authorization, process
 supervision and persistence. Each opened conversation has a persistent actor and
 native process. The additive `open_agent_session` and `close_agent_session`
@@ -565,6 +567,39 @@ scope or newly edited version is never hidden. A polled running state alone does
 not confirm admission or enable Stop. Before native activity arrives, the active
 turn shows sending rather than waiting for a model response; reported progress,
 tools, approval, stopping and disconnect evidence take precedence.
+
+Inline code spans in assistant and subagent messages gain bounded interactivity
+when the conversation provides workspace actions. A span that parses as a bare
+http(s) URL opens through the shared link handling (internal tab or system
+browser per the stored link target). A project-relative path with an extension,
+dotfile or trailing slash opens in the workspace file browser on every host;
+a `file.ts:12` line hint is stripped rather than treated as part of the path,
+and any `..` segment keeps the span plain text so a joined project-root path
+can never resolve outside the project. An absolute or `~/` path resolves on
+the execution host's terms: local paths open with the default app, while
+remote absolute paths are copy-only — left click copies the path — because the
+server's canonical containment deliberately never reads outside a project.
+
+Chips expose a context menu modeled on the shared link menu. Hovering a chip
+shows the full path after a 350ms delay — resolved against the project root
+when known, with a line hint rendered Codex-style as `(line N)` — plus a muted
+hint matching the available actions; scrolling, resizing, Escape, clicks and
+menus dismiss it, including while the reveal timer is still pending. Project
+files use the bounded `preview_source` read for 另存为 and content copy on
+local and SSH hosts alike; local external paths use desktop commands that
+expand `~/`, require a bounded absolute path and never execute the target
+(`open_path` refuses executable bits plus app bundles and install/script
+targets such as `.app`, `.pkg`, `.dmg`, `.terminal`, `.command`, `.desktop`;
+`reveal_path` is macOS-only reveal; `save_local_file_as` streams a
+dialog-targeted copy, `read_local_text` caps at 2MB and refuses binary
+content, `save_file_as` caps dialog writes at 32MB, and VS Code opens only on
+the local host and only when the project root is known). Copy and save
+failures surface through the existing status-issue panel; a cancelled dialog
+is silent. Views without workspace actions keep plain code. Ordinary code,
+branch names, commit hashes and shell snippets never become interactive;
+classification stays heuristic and misses are harmless. Focused tests:
+`inlineReferences`, `MessageContent` and the `latte-work-desktop` command
+suite, which `make test-native` runs inside the CI gate.
 
 ## Native subagent presentation
 
@@ -1445,3 +1480,61 @@ request/mutation lifecycle, and operation dialogs are separated into
 operation errors have distinct state. The shared Modal falls back to a surviving
 parent dialog or the trigger's nearest live region when the trigger disappears.
 CLI fixtures, browser layout, native UI and actual SSH execution are separate evidence scopes.
+
+## Codex integration
+
+New tasks offer Codex alongside Claude Code and Traex. Discovery uses the host's
+shell environment and PATH; `LATTE_WORK_CODEX` overrides its executable. Install
+and authenticate Codex on each execution host, or select an App Responses Provider.
+No account credentials are copied from the desktop to another host. Local and SSH
+requests share the existing protocol, actor, durable queue and request ledger.
+
+The shared app-server adapter launches a dedicated `codex app-server --stdio` child.
+It handles prompt-free open, thread resume, streamed text, shell/file/MCP tool
+records, single-use approvals, structured questions, live title edits, native
+`turn/steer` and `turn/interrupt`. EOF never confirms completion. Thread and turn
+IDs fence notifications; native reasoning text is discarded. The existing Traex
+background-work and no-replay rules also apply to Codex. Native stdout retains
+the ingestion limitation documented in the Traex section above.
+
+Codex models and efforts come from bounded, prompt-free `model/list` probes.
+Catalog `model` slugs, rather than opaque row IDs, are submitted to native turns.
+Codex never receives Traex backend-variant fields or its per-turn `modelProvider`
+extension. CLI `config/read` null Provider means Codex's native `openai` default;
+an explicit configured Provider/model takes precedence. If no CLI model is set,
+startup resolves the native catalog default before resuming a saved thread rather
+than retaining an old App Provider model. Resume requests exclude historical turns;
+Latte's own history remains authoritative for presentation. Platform instructions
+append to the native developer instructions using the existing preservation checks.
+
+Permission discovery verifies the installed CLI's sandbox/approval flags. Explicit
+`default` selects on-request/workspace-write with the user as reviewer;
+`bypass_permissions` selects never/danger-full-access. An omitted mode preserves
+native configuration. App Providers support OpenAI Responses with Bearer, API-key
+or no authentication. Keys use dedicated child environment variables; process-local
+config overrides use fresh Provider IDs. No native user configuration is rewritten.
+Custom Provider effort overrides remain unavailable without native capability evidence.
+Native slash commands, offline title edits and child transcript reads remain
+explicitly unsupported, as for Traex. Native child calls appear as tool activity. Codex `subAgentActivity` records also
+fence process replacement and undo; late completion must match the observed child
+and originating turn. This does not claim a dedicated Codex child transcript implementation.
+
+Contract baseline: codex-cli 0.162.0 and its generated JSON schema; see
+[official app-server documentation](https://learn.chatgpt.com/docs/app-server).
+Focused checks:
+
+```sh
+cargo test -p latte-work-server --bin latte-work-server --locked app_server
+cargo test -p latte-work-server --bin latte-work-server --locked codex
+cargo test -p latte-work-server --test e2e --locked codex_ -- --test-threads=1
+python3 scripts/smoke-codex.py
+python3 scripts/smoke-codex-providers.py
+```
+
+The first smoke uses the real installed CLI for metadata and prompt-free open.
+The Provider smoke uses the real CLI against a disposable localhost Responses
+fixture, covering auth, Provider/model switches, native resume and an actual shell
+tool execution in the disposable project without a paid
+model API. `smoke-codex.py --live` optionally sends two small actual model turns;
+`--live-tools` also requests a file write in its disposable project. Fixture,
+localhost-upstream, actual model, native desktop and real SSH evidence are separate.

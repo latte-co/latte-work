@@ -1850,6 +1850,80 @@ button.recent-notice {
 .markdown a {
   color: var(--accent);
 }
+.markdown .inline-code-ref {
+  display: inline-flex;
+  align-items: baseline;
+  background: none;
+  padding: 0;
+}
+.inline-ref-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font: inherit;
+  background: none;
+  border: none;
+  padding: 2px var(--space-1);
+  margin: 0;
+  border-radius: var(--radius-sm);
+  font-family: var(--font-code);
+  font-weight: var(--weight-code);
+  font-size: 0.9em;
+  background: var(--color-hover);
+  color: inherit;
+  cursor: pointer;
+  text-align: left;
+  overflow-wrap: anywhere;
+}
+.inline-ref-button > svg {
+  flex: none;
+  color: var(--color-text-secondary);
+}
+.inline-ref-button:is(:hover, :focus-visible) {
+  color: var(--accent);
+  text-decoration: underline;
+}
+.inline-code-ref .inline-ref-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  background: var(--color-hover);
+  padding: 2px var(--space-1);
+  border-radius: var(--radius-sm);
+  font-family: var(--font-code);
+  font-weight: var(--weight-code);
+  font-size: 0.9em;
+  overflow-wrap: anywhere;
+}
+.inline-code-ref .inline-ref-link > svg {
+  flex: none;
+  color: var(--color-text-secondary);
+}
+.inline-ref-tooltip {
+  position: fixed;
+  z-index: 1000;
+  display: grid;
+  gap: 2px;
+  width: max-content;
+  max-width: min(420px, calc(100vw - 16px));
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-control);
+  background: var(--color-elevated);
+  box-shadow: var(--shadow-popover);
+  color: var(--color-text);
+  font-size: var(--text-sm);
+  line-height: var(--leading-ui);
+  overflow-wrap: anywhere;
+  pointer-events: none;
+}
+.inline-ref-tooltip-path {
+  font-family: var(--font-code);
+  overflow-wrap: anywhere;
+}
+.inline-ref-tooltip-hint {
+  color: var(--color-text-muted);
+}
 .markdown img {
   max-width: 100%;
   height: auto;

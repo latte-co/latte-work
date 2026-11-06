@@ -2,8 +2,8 @@
 
 A small desktop workspace for coding agents, with local and SSH projects.
 
-**Tauri 2 · React · Rust**. The first integration is the installed **Claude Code
-CLI**, using its structured stream-json protocol and native session history.
+**Tauri 2 · React · Rust**. Integrates installed **Claude Code**, **Traex** and
+**Codex** CLIs through native protocols and session history.
 
 ## Start
 
@@ -12,7 +12,8 @@ make setup
 make dev
 ```
 
-Install and sign in to `claude` on each execution host before sending a task.
+Install and sign in to the selected CLI (`claude`, `traex` or `codex`) on each
+execution host, or bind a compatible App Provider, before sending a task.
 Create a project, select this computer or an SSH host, and choose its folder
 (local system picker or remote directory browser). Then create a task and send
 a prompt. You can also enter an absolute path. File
@@ -27,7 +28,7 @@ stop host tasks. The same server binary and protocol are used over SSH.
 
 - Local/SSH host connections and persistent project registration.
 - Three resizable columns, project/session navigation, streaming Markdown.
-- Claude CLI tool events, explicit permission responses, cancellation and resume.
+- Native Agent tool events, explicit permission responses, cancellation and resume.
 - SQLite event replay, request deduplication, reconnect, interrupted-state recovery.
 - Read-only text files and staged/unstaged Git diff, with bounded output.
 - macOS desktop bundle; headless server for macOS/Linux.
@@ -50,12 +51,13 @@ See [development](DEVELOPMENT.md), [architecture](docs/architecture.md),
 [verification](docs/verification.md).
 
 Not included in v0.1: integrated terminal, file editing, automatic remote binary
-installation, other agent implementations, auto-updater, signing/notarization,
+installation, auto-updater, signing/notarization,
 Windows support, or guaranteed continuation after a host daemon crashes.
 
 模型服务在「设置 → Provider」统一管理，支持 Anthropic Messages、
 OpenAI Chat Completions、OpenAI Responses 配置。在「设置 → 连接与 Agent」中关联兼容的
-Provider；Claude Code 仅接受 Anthropic Messages，远端关联通过 SSH 同步。
+Provider；Claude Code 仅接受 Anthropic Messages，Codex 仅接受 OpenAI Responses。
+Codex 使用主机原生配置与登录；`LATTE_WORK_CODEX` 可指定 CLI 路径。
 详见 [Provider 与 Agent 配置](docs/providers.md)。
 
 Provider 可配置默认模型和多个可选模型。在输入框底部选择本轮模型，下一次发送时生效；

@@ -308,6 +308,11 @@ export default function App() {
                   path,
                 );
             }}
+            openFile={(path) =>
+              openWorkspaceResource(workbench.workspaceId, "files", {
+                file: path,
+              })
+            }
             drafts={drafts}
             agent={agent}
             agents={workbench.agents}

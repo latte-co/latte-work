@@ -1,0 +1,160 @@
+#!/usr/bin/env python3
+"""Isolated real Codex/Server smoke. Metadata-only by default; --live sends two small model turns."""
+import argparse
+import hashlib
+import json
+import os
+from pathlib import Path
+import shutil
+import signal
+import socket
+import subprocess
+import tempfile
+import time
+
+parser = argparse.ArgumentParser(description=__doc__)
+parser.add_argument('--binary', default='target/debug/latte-work-server')
+parser.add_argument('--codex', default=shutil.which('codex') or 'codex')
+parser.add_argument('--output', default='target/codex-native-smoke.json')
+parser.add_argument('--live', action='store_true')
+parser.add_argument('--model')
+parser.add_argument('--live-tools', action='store_true', help='also verify an actual model file write in the disposable project')
+args = parser.parse_args()
+binary = str(Path(args.binary).resolve())
+if not Path(args.codex).exists():
+    raise SystemExit(f'codex CLI 不存在: {args.codex}（请安装后重试或用 --codex 指定路径）')
+codex = str(Path(args.codex).resolve())
+
+def kill_agent_groups(server_pid):
+    """SIGKILL of the Server's own group cannot reach the agents: the runtime
+    puts every agent into a fresh process group (PGID = its own PID), and a
+    killed Server never runs its Group drop. Collect the Server's direct
+    children while it is still alive and kill each agent group explicitly."""
+    try:
+        children = subprocess.check_output(
+            ['pgrep', '-P', str(server_pid)], text=True
+        ).split()
+    except (subprocess.CalledProcessError, OSError):
+        return
+    for child in children:
+        try:
+            os.killpg(int(child), signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass
+
+report = {'cli_version': subprocess.check_output([codex, '--version'], text=True, timeout=5).strip(),
+          'binary_sha256': hashlib.sha256(Path(binary).read_bytes()).hexdigest(),
+          'live': args.live or args.live_tools, 'checks': []}
+with tempfile.TemporaryDirectory(prefix='lw-codex-', dir='/tmp') as directory:
+    root = Path(directory)
+    project = root / 'project'
+    project.mkdir()
+    env = {**os.environ, 'LATTE_WORK_AGENT_ENV': 'inherit', 'LATTE_WORK_CODEX': codex}
+    server = subprocess.Popen([binary, 'serve', '--state-dir', str(root / 'state')], env=env,
+                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+    connection = None
+    try:
+        deadline = time.monotonic() + 15
+        while not (root / 'state/control.sock').exists():
+            if time.monotonic() > deadline or server.poll() is not None:
+                raise TimeoutError('isolated Server startup')
+            time.sleep(.05)
+        connection = socket.socket(socket.AF_UNIX)
+        connection.settimeout(25)
+        connection.connect(str(root / 'state/control.sock'))
+        wire = connection.makefile('rw')
+
+        def rpc(method, **params):
+            wire.write(json.dumps({'method': method, **params}) + '\n')
+            wire.flush()
+            response = json.loads(wire.readline())
+            if response['kind'] == 'error':
+                raise RuntimeError(response['message'])
+            return response
+
+        hello = rpc('hello', version=1)
+        assert any(a['id'] == 'codex' and a['available'] for a in hello['agents'])
+        catalog = rpc('models_for_provider', agent='codex', model=None, project_id=None, provider=None)
+        report['model_count'] = len(catalog['models'])
+        if args.model:
+            assert args.model in catalog['models'], 'model is not in the native catalog'
+            report['selected_model'] = args.model
+        report['checks'].append('native model catalog')
+        modes = rpc('agent_permissions', agent='codex')['modes']
+        assert any(m['id'] == 'default' for m in modes)
+        report['checks'].append('native permission discovery')
+        pid = rpc('add_project', path=str(project), name=None)['project']['id']
+        sid = rpc('create_session', project_id=pid, agent='codex')['session']['id']
+        commands = rpc('agent_commands', agent='codex', project_id=pid)
+        assert commands['commands'] == []
+        try:
+            rpc('open_agent_session', session_id=sid, provider={'kind': 'cli'})
+        except RuntimeError as error:
+            raise RuntimeError(str(error) + ': ' + json.dumps(rpc('poll', session_id=sid, after=0)['events'][-4:], ensure_ascii=False)) from error
+
+        def wait(status, timeout=90):
+            deadline = time.monotonic() + timeout
+            while time.monotonic() < deadline:
+                result = rpc('poll', session_id=sid, after=0)
+                if result['session']['status'] == status:
+                    return result
+                if result['session']['status'] == 'failed':
+                    raise RuntimeError(json.dumps(result['events'][-4:], ensure_ascii=False))
+                time.sleep(.1)
+            raise TimeoutError('Codex ' + status)
+
+        deadline = time.monotonic() + 20
+        while True:
+            current = rpc('session', session_id=sid)['session']
+            if current.get('agent_session_open'):
+                break
+            if time.monotonic() > deadline:
+                raise TimeoutError('native thread open')
+            time.sleep(.1)
+        assert not rpc('poll', session_id=sid, after=0)['events']
+        native = current['native_id']
+        report['checks'].append('prompt-free native open')
+        if args.live:
+            for index, marker in enumerate(['CODEX_OK', 'CODEX_RESUMED_OK']):
+                receipt = rpc('send_queued', session_id=sid, request_id='smoke-' + str(index),
+                              text='Do not use tools. Reply exactly ' + marker + '.', model=args.model,
+                              effort=None, permission_mode='default', provider={'kind': 'cli'})
+                assert receipt['kind'] in ('accepted', 'message_queued')
+                result = wait('completed')
+                text = ''.join(e['event']['text'] for e in result['events'] if e['event']['kind'] == 'text')
+                assert marker in text, text
+                if native is None:
+                    native = result['session']['native_id']
+                assert native and result['session']['native_id'] == native
+                report['checks'].append('real model turn ' + str(index + 1))
+                rpc('close_agent_session', session_id=sid, only_if_idle=True)
+                rpc('open_agent_session', session_id=sid, provider={'kind': 'cli'})
+            report['checks'].append('native close/resume preserves identity')
+        if args.live_tools:
+            marker = 'CODEX_FILE_OK'
+            rpc('send_queued', session_id=sid, request_id='smoke-file',
+                text='Use a tool to create codex-smoke.txt in the current project with exactly CODEX_FILE_OK. Then reply CODEX_FILE_OK. Do not do anything else.',
+                model=args.model, effort=None, permission_mode='default', provider={'kind': 'cli'})
+            result = wait('completed')
+            assert (project / 'codex-smoke.txt').read_text().strip() == marker
+            assert any(e['event']['kind'] == 'tool' for e in result['events'])
+            assert any(e['event']['kind'] == 'tool_result' and not e['event']['is_error'] for e in result['events'])
+            report['checks'].append('real model tool writes the requested file')
+        rpc('close_agent_session', session_id=sid, only_if_idle=True)
+    finally:
+        if connection:
+            connection.close()
+        # The Server owns child processes (a real `codex app-server` with
+        # --live); signal the whole group so a wedged Server cannot strand it.
+        os.killpg(server.pid, signal.SIGTERM)
+        try:
+            server.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            # Agents live in their own process groups; kill them while the
+            # Server is still alive and their PIDs are discoverable.
+            kill_agent_groups(server.pid)
+            os.killpg(server.pid, signal.SIGKILL)
+            server.wait()
+Path(args.output).parent.mkdir(parents=True, exist_ok=True)
+Path(args.output).write_text(json.dumps(report, ensure_ascii=False, indent=2) + '\n')
+print(json.dumps(report, ensure_ascii=False, indent=2))

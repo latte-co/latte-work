@@ -1,0 +1,69 @@
+{
+  "date": "2026-11-02",
+  "base_revision": "0652b6a9b82fde65535a84326079d3a000d71b12",
+  "implementation": "uncommitted feature worktree",
+  "cli_version": "codex-cli 0.162.0",
+  "source_sha256": {
+    "apps/desktop/src/SSHSettings.tsx": "52cde56626f9e1987e5b1c955cb5ef8b282f74e13fcd1fa1b64632391d0b9c21",
+    "crates/latte-work-server/src/agents/app_server.rs": "917f99d20ddb79ae20051187828f43a6b8da1473c96f629b425828e5ec3b6cc0",
+    "crates/latte-work-server/src/agents/codex.rs": "cd3fe2679e843920971dd7d4fcd6d307a36b951dca3317f2830bbb241fd82a8b",
+    "crates/latte-work-server/src/agents/mod.rs": "c437fa65cb59d67f9793c45321e5c7cba91cb7a17c6c76a9655fc0470a2055a1",
+    "crates/latte-work-server/src/agents/traex.rs": "4bb8d8f942328415a36c3bc906648e947861e023a2fcc101ba13e36af3507f78",
+    "crates/latte-work-server/src/agents/traex_metadata.rs": "426733b809d34f49ca140010c15af629fb4062902a7e752508a84868c162ad0a",
+    "crates/latte-work-server/src/agents/traex_provider.rs": "3ad21a14d386c19b09cccaa64778e0e96c58cbbbddc2df22489e787dc6b534b3",
+    "crates/latte-work-server/src/main.rs": "3de14034c1bb59d890b79432d42d90289276075d3166e685f8bac4ddd03bf898",
+    "crates/latte-work-server/src/providers.rs": "f036d781b86d07d9f1c9ec45087e18e3d96851e9d295394a8b4e4b83b859c0d1",
+    "crates/latte-work-server/tests/e2e.rs": "987f4a2addf3601dcca0f1deb2f1d4d3c9949d3cf7a2f148d0922e28f64986da",
+    "crates/latte-work-server/tests/fixtures/codex.py": "a85892b1d6d2ca5ed9fd9347949f311e8476332fde731e5ea3744cb5a0c9e076",
+    "crates/latte-work-server/tests/support/codex.rs": "ada39b98d42d6fdbfcb7c4271d3f7907b606cce04445839d954ef3f496f4289f",
+    "crates/latte-work-server/tests/support/traex.rs": "1569153f2c4c5d4c7a95321889a89f3a87a38f71097530d4d2af243bd65aab14",
+    "scripts/smoke-codex-providers.py": "dfcfc46283d39d2ce25ab1f5d84e51c8469a9bd3b50c2ed30ad436241de90aad",
+    "scripts/smoke-codex.py": "0c03405ddc3f26ba111c42966b7fbb39f2b3b1d5ec43e37390068542960d5cea"
+  },
+  "generated_schema_sha256": "71a94eab0d0b27f2aab30993097bc13d78314eb386801c105280b53f0963af44",
+  "metadata": {
+    "cli_version": "codex-cli 0.162.0",
+    "binary_sha256": "86e6b689e1b351b1072d6adc327f7eace20dffeea2e5d8acfba660a16cc47877",
+    "live": false,
+    "checks": [
+      "native model catalog",
+      "native permission discovery",
+      "prompt-free native open"
+    ],
+    "model_count": 8
+  },
+  "local_upstream_fixture": {
+    "cli_version": "codex-cli 0.162.0",
+    "binary_sha256": "86e6b689e1b351b1072d6adc327f7eace20dffeea2e5d8acfba660a16cc47877",
+    "checks": [
+      {
+        "protocol": "openai_responses",
+        "auth": "bearer",
+        "endpoint": "/v1/responses",
+        "model": "provider-model-0"
+      },
+      {
+        "protocol": "openai_responses",
+        "auth": "api_key",
+        "endpoint": "/v1/responses",
+        "model": "provider-model-1"
+      },
+      {
+        "protocol": "openai_responses",
+        "auth": "none",
+        "endpoint": "/v1/responses",
+        "model": "provider-model-2"
+      },
+      {
+        "protocol": "restored CLI config",
+        "auth": "none",
+        "endpoint": "/cli/v1/responses",
+        "model": "cli-model"
+      },
+      "real CLI executes fixture-requested shell tool and records its result",
+      "unset CLI model resolves current catalog default on resume",
+      "same native identity across automatic provider reconfiguration and explicit close/resume; credential absent from durable files"
+    ]
+  },
+  "evidence_scope": "Real installed CLI and final host binary; synthetic localhost Responses SSE, no paid model API, no native desktop or actual SSH verification."
+}
