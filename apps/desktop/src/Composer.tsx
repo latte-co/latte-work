@@ -111,6 +111,20 @@ export function Composer(props: Props) {
   useEffect(() => {
     if (props.focusRequest && !props.hidden) input.current?.focus();
   }, [props.focusRequest, props.hidden]);
+  // The conceal remount drops focus; restore it when the submission resolves
+  // unless the user has already moved focus elsewhere.
+  const concealedBefore = useRef(concealSubmitted);
+  useEffect(() => {
+    const wasConcealed = concealedBefore.current;
+    concealedBefore.current = concealSubmitted;
+    if (
+      wasConcealed &&
+      !concealSubmitted &&
+      !hidden &&
+      document.activeElement === document.body
+    )
+      input.current?.focus();
+  }, [concealSubmitted, hidden]);
   useLayoutEffect(() => {
     const element = input.current;
     if (!element || hidden) return;
@@ -1154,6 +1168,10 @@ export function Composer(props: Props) {
       )}
       <textarea
         ref={input}
+        /* Remount across conceal transitions: a fresh node carries no IME
+           composition state, so an engine cannot replay the submitted text
+           into the cleared field after re-enabling it. */
+        key={concealSubmitted ? "concealed" : "editing"}
         rows={1}
         aria-label="任务输入"
         aria-autocomplete="list"

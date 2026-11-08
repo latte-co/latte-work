@@ -1631,3 +1631,163 @@ it("removing Skill Creator preserves the user's draft and normal send behavior",
   await waitFor(() => expect(p.send).toHaveBeenCalled());
   expect(p.send.mock.calls[0][0]).toBe("已有草稿");
 });
+
+it("keeps the composer empty after an accepted send once execution starts", async () => {
+  const p = props();
+  const key = JSON.stringify(["local", "run"]);
+  let finish!: (value: boolean) => void;
+  p.send.mockImplementationOnce(
+    () =>
+      new Promise<boolean>((resolve) => {
+        finish = resolve;
+      }),
+  );
+  const view = render(<Conversation {...p} session={session("run")} />);
+  fireEvent.change(input(), { target: { value: "开始执行的任务" } });
+  fireEvent.click(screen.getByRole("button", { name: "发送任务" }));
+  // Admission lands after the turn already started streaming events.
+  view.rerender(
+    <Conversation
+      {...p}
+      session={{ ...session("run"), status: "running" }}
+      events={[
+        {
+          seq: 1,
+          at: 0,
+          session_id: "run",
+          event: {
+            kind: "user",
+            request_id: "r1",
+            text: "开始执行的任务",
+          },
+        },
+        {
+          seq: 2,
+          at: 1,
+          session_id: "run",
+          event: { kind: "text", text: "正在处理…" },
+        },
+      ]}
+    />,
+  );
+  await act(async () => finish(true));
+  expect(input().value).toBe("");
+  expect(p.drafts.get(key).text).toBe("");
+  // And it stays empty as more execution events arrive.
+  view.rerender(
+    <Conversation
+      {...p}
+      session={{ ...session("run"), status: "running" }}
+      events={[
+        {
+          seq: 1,
+          at: 0,
+          session_id: "run",
+          event: { kind: "user", request_id: "r1", text: "开始执行的任务" },
+        },
+        {
+          seq: 2,
+          at: 1,
+          session_id: "run",
+          event: { kind: "text", text: "正在处理…" },
+        },
+        {
+          seq: 3,
+          at: 2,
+          session_id: "run",
+          event: { kind: "tool", id: "t1", name: "Bash", input: {} },
+        },
+        {
+          seq: 4,
+          at: 3,
+          session_id: "run",
+          event: {
+            kind: "tool_result",
+            id: "t1",
+            content: "ok",
+            is_error: false,
+          },
+        },
+      ]}
+    />,
+  );
+  expect(input().value).toBe("");
+  expect(p.drafts.get(key).text).toBe("");
+});
+
+it("keeps the composer empty when a new-task submission migrates into its created session", async () => {
+  const p = props();
+  let finish!: (value: boolean) => void;
+  p.send.mockImplementationOnce(
+    () =>
+      new Promise<boolean>((resolve) => {
+        finish = resolve;
+      }),
+  );
+  // New task: no session yet.
+  const view = render(<Conversation {...p} session={undefined} />);
+  fireEvent.change(input(), { target: { value: "新任务的第一条消息" } });
+  fireEvent.click(screen.getByRole("button", { name: "发送任务" }));
+  // The session materializes (persistSession) and execution starts streaming.
+  view.rerender(
+    <Conversation
+      {...p}
+      session={{ ...session("created"), status: "running" }}
+      events={[
+        {
+          seq: 1,
+          at: 0,
+          session_id: "created",
+          event: {
+            kind: "user",
+            request_id: "r1",
+            text: "新任务的第一条消息",
+          },
+        },
+        {
+          seq: 2,
+          at: 1,
+          session_id: "created",
+          event: { kind: "text", text: "开始执行…" },
+        },
+      ]}
+    />,
+  );
+  await act(async () => finish(true));
+  expect(input().value).toBe("");
+  expect(p.drafts.get("new-task").text).toBe("");
+  expect(p.drafts.get(JSON.stringify(["local", "created"])).text).toBe("");
+});
+
+it("a stale IME-style input event cannot refill the composer after submission", async () => {
+  const p = props();
+  const key = JSON.stringify(["local", "ime"]);
+  let finish!: (value: boolean) => void;
+  p.send.mockImplementationOnce(
+    () =>
+      new Promise<boolean>((resolve) => {
+        finish = resolve;
+      }),
+  );
+  render(<Conversation {...p} session={session("ime")} />);
+  fireEvent.change(input(), { target: { value: "带输入法的消息" } });
+  const original = input();
+  fireEvent.click(screen.getByRole("button", { name: "发送任务" }));
+  // Conceal starts: the textarea remounts, so the old node keeps no IME
+  // composition state for the engine to replay after re-enabling.
+  const concealed = input();
+  expect(concealed).not.toBe(original);
+  expect(concealed.value).toBe("");
+  // An engine replaying the composition into the detached node cannot reach
+  // the draft store; the same text through the live node is a no-op anyway.
+  fireEvent.change(original, { target: { value: "带输入法的消息" } });
+  fireEvent.change(concealed, { target: { value: "带输入法的消息" } });
+  expect(p.drafts.get(key).text).toBe("带输入法的消息");
+  await act(async () => finish(true));
+  // The accepted submission resolves after execution started.
+  await act(async () => {});
+  const restored = input();
+  expect(restored).not.toBe(concealed);
+  expect(restored.value).toBe("");
+  expect(p.drafts.get(key).text).toBe("");
+});

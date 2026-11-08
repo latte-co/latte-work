@@ -1141,6 +1141,11 @@ share the host protocol. Drag/keyboard reordering compares the complete pending
 request ID order and atomically persists its replacement. Editing into the
 composer is disabled during send confirmation; an already pending take blocks
 submission only for its owning draft until it settles, including across navigation.
+While a submission is pending the composer textarea remounts on both conceal
+transitions: a fresh DOM node carries no IME composition state, so an input
+engine cannot replay the submitted text into the re-enabled field after the
+draft was cleared, and events on the detached node cannot reach the store.
+When the submission settles and nothing else took focus, the input refocuses.
 Stale, missing or duplicate
 IDs fail without mutation; a repeated identical order is idempotent. Dispatch always
 uses this saved order. The session actor serializes reorder/edits/cancellation against
