@@ -11,7 +11,7 @@ import {
   useState,
   type ReactNode,
 } from "react";
-import ReactMarkdown from "react-markdown";
+import ReactMarkdown, { defaultUrlTransform } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import {
   Check,
@@ -477,11 +477,21 @@ function MarkdownLink({
     </>
   );
 }
+/**
+ * The default transform blanks file:// targets before custom components run,
+ * which would make the local-path branch unreachable. Pass them through for
+ * the path classifier; everything else keeps the default sanitization, so
+ * unknown or dangerous schemes still never become links.
+ */
+function preserveLocalTargets(url: string): string {
+  return /^file:\/\//i.test(url.trim()) ? url : defaultUrlTransform(url);
+}
 export function MessageContent({ text }: { text: string }) {
   return (
     <>
       <ReactMarkdown
         remarkPlugins={[remarkGfm]}
+        urlTransform={preserveLocalTargets}
         components={{ pre: CodeBlock, a: MarkdownLink, code: InlineCodeRef }}
       >
         {text}

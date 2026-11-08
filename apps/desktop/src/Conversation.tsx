@@ -729,6 +729,11 @@ export function Conversation({
                               decision={item.decision}
                               tool={item.approvalTool}
                               presentation="record"
+                              loadContext={
+                                session
+                                  ? { hostId, sessionId: session.id }
+                                  : undefined
+                              }
                               onDecision={(allow) =>
                                 void decide(v.request_id, allow)
                               }
@@ -914,6 +919,9 @@ export function Conversation({
                 tool={tool}
                 disabled={!connected || stopping || !!submittingApproval}
                 busy={submittingApproval === request.request_id}
+                loadContext={
+                  session ? { hostId, sessionId: session.id } : undefined
+                }
                 onDecision={(allow) => void decide(request.request_id, allow)}
               />
             ))}

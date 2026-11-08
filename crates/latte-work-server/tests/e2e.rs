@@ -8061,7 +8061,7 @@ async fn snapshot_legacy_oversized_events_advance_cursor_and_leave_other_session
     let events = wait(&mut client, &id, Status::Completed).await;
     assert!(events.iter().any(|e| e.seq == blocked
         && matches!(&e.event, EventKind::Notice { text } if text.len() < 96 * 1024)
-        && e.content_size == Some(3 * 1024 * 1024)));
+        && e.content_size == Some(old.len())));
     // The full payload streams back in frame-safe chunks that reassemble exactly.
     let mut assembled = 0;
     let mut offset = 0;
@@ -8108,6 +8108,55 @@ async fn snapshot_legacy_oversized_events_advance_cursor_and_leave_other_session
         .await,
         Response::Error { .. }
     ));
+    // A multibyte payload rejects offsets landing inside a character instead
+    // of panicking with the shared database lock held; the other session keeps
+    // serving polls afterwards.
+    let db = rusqlite::Connection::open(host.directory.path().join("state.sqlite")).unwrap();
+    db.execute(
+        "INSERT INTO events(session_id,at,data) VALUES (?1,2,?2)",
+        rusqlite::params![
+            id,
+            serde_json::json!({
+                "kind":"tool_result",
+                "id":"exec-cjk",
+                "content":"中文负载".repeat(80_000),
+                "is_error":false
+            })
+            .to_string()
+        ],
+    )
+    .unwrap();
+    let cjk = db.last_insert_rowid() as f64;
+    drop(db);
+    for offset in [1usize, 4, 5] {
+        assert!(matches!(
+            ask(
+                &mut client,
+                Request::EventContent {
+                    session_id: id.clone(),
+                    seq: cjk,
+                    offset,
+                }
+            )
+            .await,
+            Response::Error { .. }
+        ));
+    }
+    assert!(matches!(
+        ask(
+            &mut client,
+            Request::EventContent {
+                session_id: id.clone(),
+                seq: cjk,
+                offset: 0,
+            }
+        )
+        .await,
+        Response::EventContent {
+            encoding: latte_work_protocol::ContentEncoding::Text,
+            ..
+        }
+    ));
     assert!(events.iter().any(|e| matches!(
         e.event,
         EventKind::State {
@@ -8127,7 +8176,12 @@ async fn snapshot_legacy_oversized_events_advance_cursor_and_leave_other_session
     else {
         panic!()
     };
-    assert!(events.is_empty());
+    // The follow-up poll delivers only the multibyte tool result inserted for
+    // the offset probes.
+    assert!(matches!(
+        events.as_slice(),
+        [event] if event.seq == cjk
+    ));
     assert!(matches!(
         send(&mut client, &other, "other-session", "identity").await,
         Response::Accepted { .. }

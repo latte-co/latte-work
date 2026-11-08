@@ -437,3 +437,44 @@ describe("MessageContent markdown file links", () => {
     expect(anchor.getAttribute("href")).toBe("https://example.com/");
   });
 });
+
+describe("MessageContent markdown file URLs", () => {
+  it("renders file URLs as clickable local paths that open with the system opener", () => {
+    const openFile = vi.fn();
+    render(
+      <MessageActionsProvider value={{ openFile, localHost: true }}>
+        <MessageContent text={"见[评审](file:///tmp/review.md)。"} />
+      </MessageActionsProvider>,
+    );
+    const link = screen.getByRole("button", { name: "评审" });
+    fireEvent.click(link);
+    expect(openFile).not.toHaveBeenCalled();
+    expect(mocks.invoke).toHaveBeenCalledWith("open_path", {
+      path: "/tmp/review.md",
+    });
+  });
+  it("routes file URLs inside the project root through the file tab", () => {
+    const openFile = vi.fn();
+    render(
+      <MessageActionsProvider
+        value={{ openFile, localHost: true, projectRoot: "/tmp" }}
+      >
+        <MessageContent text={"见[评审](file:///tmp/review.md)。"} />
+      </MessageActionsProvider>,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "评审" }));
+    expect(openFile).toHaveBeenCalledWith("review.md");
+    expect(mocks.invoke).not.toHaveBeenCalled();
+  });
+  it("still strips dangerous schemes through the default transform", () => {
+    render(
+      <MessageActionsProvider value={{ openFile: vi.fn(), localHost: true }}>
+        <MessageContent text={"[坏](javascript:alert(1)) 与[好](notes.md)"} />
+      </MessageActionsProvider>,
+    );
+    expect(screen.queryAllByRole("button").map((b) => b.textContent)).toEqual([
+      "好",
+    ]);
+    expect(document.querySelectorAll("a[href]")).toHaveLength(0);
+  });
+});

@@ -897,7 +897,17 @@ because merged fragments lose per-sequence identity; other oversized kinds
 degrade to a notice that keeps the same streamable payload. Poll and history
 batches bill only delivered bytes and always admit at least one event, so a
 single oversized stored row can never stall the cursor, and the raw row always
-remains in SQLite.
+remains in SQLite. All presentation budgets count serialized JSON bytes, because
+control characters can inflate a payload sixfold on the wire; previews and
+chunks shrink until their serialized form is frame-safe. Stored rows larger than
+a 2 MiB read bound preview from their byte length alone and are never read into
+memory by poll or history. Chunk requests parse each payload once into a bounded
+64 MiB cache and slice the cached string; offsets must be exact byte boundaries
+or the request fails without poisoning the shared database lock, and a failure
+after the first chunk resets the composer of the output back to its preview with
+the retry affordance intact. Approval records share the same load-full output
+component, and markdown `file://` targets survive URL sanitization so they reach
+the path classifier while unknown schemes stay stripped.
 
 Before accepting requests, startup archives legacy snapshot rows over 256 KiB using
 SQLite incremental blob reads into private `legacy/*.json` files. Valid records up

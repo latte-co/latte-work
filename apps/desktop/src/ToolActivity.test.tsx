@@ -104,3 +104,43 @@ describe("ToolRow load-full streaming", () => {
     expect(screen.queryByText(/加载完整内容/)).toBeNull();
   });
 });
+
+describe("ToolRow mid-stream failure", () => {
+  it("restores the preview and the retry affordance after a later chunk fails", async () => {
+    streamEventContent.mockImplementation(
+      async (
+        _target: unknown,
+        onChunk: (p: {
+          encoding: "text";
+          accumulated: string;
+          received: number;
+          total: number;
+        }) => void,
+      ) => {
+        onChunk({
+          encoding: "text",
+          accumulated: "第一块",
+          received: 4,
+          total: 679_286,
+        });
+        throw new Error("服务已重启");
+      },
+    );
+    render(
+      <ToolRow
+        tool={previewed}
+        loadContext={{ hostId: "h", sessionId: "s" }}
+      />,
+    );
+    fireEvent.click(screen.getByText(/加载完整内容/));
+    await waitFor(() =>
+      expect(screen.getByText(/加载失败：服务已重启/)).toBeTruthy(),
+    );
+    // Progress display ended, preview came back, and the retry button is
+    // available again.
+    expect(screen.queryByText(/正在流式加载/)).toBeNull();
+    expect(screen.getByText(/预览头部/)).toBeTruthy();
+    const retry = screen.getByText(/加载完整内容/);
+    expect((retry as HTMLButtonElement).disabled).toBe(false);
+  });
+});

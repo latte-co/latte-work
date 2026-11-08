@@ -12,16 +12,25 @@ use std::{
 use uuid::Uuid;
 
 // Presentation reads keep every stored byte on disk and bound only what goes
-// over the wire. Polls always emit at least one event, so an oversized legacy
-// row can never block the cursor; larger payloads stream on demand instead.
-/// Payloads up to this size are delivered whole in poll and history batches.
-const WHOLE_BYTES: usize = 512 * 1024;
+// over the wire, measured as serialized JSON — control characters can inflate
+// a payload sixfold through escaping. Polls always emit at least one event, so
+// an oversized legacy row can never block the cursor; larger payloads stream
+// on demand instead.
+/// Serialized events up to this size ride whole in poll and history batches.
+const WHOLE_EVENT_WIRE: usize = 512 * 1024;
 /// Oversized tool payloads preview their leading bytes; the rest loads on click.
 const PREVIEW_BYTES: usize = 64 * 1024;
-/// Reply prose rides whole up to the frame bound instead of previewing.
-const TEXT_WHOLE_BYTES: usize = latte_work_protocol::MAX_FRAME - 256 * 1024;
-/// Full payloads stream back in chunks sized to leave frame envelope room.
-const CHUNK_BYTES: usize = 512 * 1024;
+/// Previews themselves stay under this serialized size, escape inflation included.
+const PREVIEW_WIRE: usize = 192 * 1024;
+/// Reply prose rides whole up to this serialized bound instead of previewing:
+/// merged reply text cannot be re-associated with one sequence number.
+const TEXT_WHOLE_WIRE: usize = latte_work_protocol::MAX_FRAME - 512 * 1024;
+/// Full payloads stream in chunks whose serialized form stays frame-safe.
+const CHUNK_RAW: usize = 512 * 1024;
+const CHUNK_WIRE: usize = latte_work_protocol::MAX_FRAME - 768 * 1024;
+/// Poll and history never read stored rows larger than this; bigger rows
+/// preview through their byte length alone and stream on explicit request.
+const ROW_READ_BYTES: i64 = 2 * 1024 * 1024;
 const PRESENTATION_MARKER: &str = "…（内容过大，已截断）";
 
 /// The streamable payload of an event plus how a client should reassemble it:
@@ -53,9 +62,50 @@ fn clip_head(text: &str, limit: usize) -> String {
     head.push_str(PRESENTATION_MARKER);
     head
 }
+
+/// Builds the preview variant for an oversized payload; `size` discloses the
+/// full payload length for kinds that degrade to a notice.
+fn preview_event(event: &EventKind, head: String, size: usize) -> EventKind {
+    match event {
+        // Keep the leading bytes of oversized prose visible; the marker in
+        // the clipped head already discloses the omission.
+        EventKind::Text { .. } => EventKind::Text { text: head },
+        EventKind::Notice { .. } => EventKind::Notice { text: head },
+        EventKind::ToolResult {
+            id: tool_id,
+            is_error,
+            ..
+        } => EventKind::ToolResult {
+            id: tool_id.clone(),
+            content: serde_json::Value::String(head),
+            is_error: *is_error,
+        },
+        _ => EventKind::Notice {
+            text: format!("内容 {size} 字节超过展示上限，已省略；原始记录保留。"),
+        },
+    }
+}
+
+/// One parsed stream payload, shared by every chunk request for that event so
+/// repeated chunks never re-read and re-parse the stored row.
+struct CachedPayload {
+    session: String,
+    seq: i64,
+    encoding: ContentEncoding,
+    text: String,
+}
+#[derive(Default)]
+struct PayloadCache {
+    bytes: usize,
+    entries: std::collections::VecDeque<std::sync::Arc<CachedPayload>>,
+}
+/// Cached stream payloads are bounded in total, so slicing stays cheap without
+/// pinning unbounded memory.
+const CACHE_BYTES: usize = 64 * 1024 * 1024;
 pub struct Store {
     pub(crate) db: Connection,
     pub(crate) snapshot_dir: std::path::PathBuf,
+    content_cache: std::cell::RefCell<PayloadCache>,
 }
 pub fn now() -> f64 {
     SystemTime::now()
@@ -113,7 +163,11 @@ impl Store {
         crate::message_queue::initialize(&db)?;
         let snapshot_dir = crate::snapshot_storage::prepare(&path.with_extension("snapshots"))?;
         crate::snapshot_migration::migrate(&db, &snapshot_dir)?;
-        let store = Self { db, snapshot_dir };
+        let store = Self {
+            db,
+            snapshot_dir,
+            content_cache: std::cell::RefCell::default(),
+        };
         let forwarded = store
             .db
             .prepare("SELECT DISTINCT session_id FROM message_queue WHERE status='forwarded'")?
@@ -1283,42 +1337,86 @@ impl Store {
     /// Presentation delivery for one stored event: payloads up to the whole
     /// threshold stream through unchanged; larger ones become bounded previews
     /// whose full bytes load separately in frame-safe chunks.
-    fn present_event(&self, id: &str, data: &str) -> Result<(EventKind, Option<usize>)> {
+    /// Presentation delivery for one stored event, measured in serialized
+    /// bytes: JSON escaping can inflate a payload sixfold, so decoded length
+    /// alone cannot keep a response inside one frame. Returns the event, its
+    /// full payload size when previewed, and the wire size for batch budgets.
+    fn present_event(&self, id: &str, data: &str) -> Result<(EventKind, Option<usize>, usize)> {
         let event = self.presentation_event(id, data)?;
+        let whole_limit = match &event {
+            EventKind::Text { .. } | EventKind::Notice { .. } => TEXT_WHOLE_WIRE,
+            _ => WHOLE_EVENT_WIRE,
+        };
+        let wire = serde_json::to_vec(&event)?.len();
+        if wire <= whole_limit {
+            return Ok((event, None, wire));
+        }
         let (payload, _) = presentation_payload(&event)?;
         let size = payload.len();
-        let threshold = match &event {
-            // Merged reply text cannot be re-associated with one sequence
-            // number, so text rides whole up to the frame bound.
-            EventKind::Text { .. } | EventKind::Notice { .. } => TEXT_WHOLE_BYTES,
-            _ => WHOLE_BYTES,
+        let mut head_limit = PREVIEW_BYTES.min(size);
+        let (preview, wire) = loop {
+            let head = clip_head(&payload, head_limit);
+            let preview = preview_event(&event, head, size);
+            let wire = serde_json::to_vec(&preview)?.len();
+            // Escape-heavy heads shrink until their serialized form is bounded.
+            if wire <= PREVIEW_WIRE || head_limit <= 32 {
+                break (preview, wire);
+            }
+            head_limit = (head_limit / 2).max(32);
         };
-        if size <= threshold {
-            return Ok((event, None));
+        Ok((preview, Some(size), wire))
+    }
+    /// One stream payload per event, parsed once and shared across chunks so
+    /// repeated requests slice a cached string instead of re-reading the row
+    /// under the shared database lock.
+    fn streamed_payload(&self, id: &str, seq: i64) -> Result<std::sync::Arc<CachedPayload>> {
+        {
+            let mut cache = self.content_cache.borrow_mut();
+            if let Some(index) = cache
+                .entries
+                .iter()
+                .position(|entry| entry.session == id && entry.seq == seq)
+            {
+                let entry = cache.entries.remove(index).unwrap();
+                cache.entries.push_back(entry.clone());
+                return Ok(entry);
+            }
         }
-        let head = clip_head(&payload, PREVIEW_BYTES);
-        let preview = match event {
-            // Keep the leading bytes of oversized prose visible; the marker in
-            // the clipped head already discloses the omission.
-            EventKind::Text { .. } => EventKind::Text { text: head },
-            EventKind::Notice { .. } => EventKind::Notice { text: head },
-            EventKind::ToolResult {
-                id: tool_id,
-                is_error,
-                ..
-            } => EventKind::ToolResult {
-                id: tool_id,
-                content: serde_json::Value::String(head),
-                is_error,
-            },
-            _ => EventKind::Notice {
-                text: format!("内容 {size} 字节超过展示上限，已省略；原始记录保留。"),
-            },
+        let data: Option<String> = self
+            .db
+            .query_row(
+                "SELECT data FROM events WHERE session_id=?1 AND seq=?2",
+                params![id, seq],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let Some(data) = data else {
+            bail!("事件不存在");
         };
-        Ok((preview, Some(size)))
+        let event = self.presentation_event(id, &data)?;
+        let (text, encoding) = presentation_payload(&event)?;
+        let entry = std::sync::Arc::new(CachedPayload {
+            session: id.into(),
+            seq,
+            encoding,
+            text,
+        });
+        let mut cache = self.content_cache.borrow_mut();
+        cache.bytes += entry.text.len();
+        cache.entries.push_back(entry.clone());
+        while cache.bytes > CACHE_BYTES {
+            let Some(evicted) = cache.entries.pop_front() else {
+                break;
+            };
+            cache.bytes = cache.bytes.saturating_sub(evicted.text.len());
+        }
+        Ok(entry)
     }
     /// Streams one stored event's full payload in chunks. Offsets come from a
-    /// previous response's `next`, so they always land on UTF-8 boundaries.
+    /// previous response's `next`; any other value — including one landing
+    /// inside a multibyte character — must fail instead of panicking while the
+    /// shared database lock is held. Chunk sizes shrink until their serialized
+    /// form stays frame-safe under escape inflation.
     pub fn event_content(
         &self,
         id: &str,
@@ -1328,29 +1426,36 @@ impl Store {
         if !seq.is_finite() || seq < 0.0 || seq.fract() != 0.0 {
             bail!("事件序号无效");
         }
-        let data: Option<String> = self
-            .db
-            .query_row(
-                "SELECT data FROM events WHERE session_id=?1 AND seq=?2",
-                params![id, seq as i64],
-                |row| row.get(0),
-            )
-            .optional()?;
-        let Some(data) = data else {
-            bail!("事件不存在");
-        };
-        let event = self.presentation_event(id, &data)?;
-        let (payload, encoding) = presentation_payload(&event)?;
+        let entry = self.streamed_payload(id, seq as i64)?;
+        let payload = entry.text.as_str();
         let total = payload.len();
-        if offset > total {
+        if offset > total || !payload.is_char_boundary(offset) {
             bail!("事件内容偏移无效");
         }
-        let mut end = (offset + CHUNK_BYTES).min(total);
+        let mut end = (offset + CHUNK_RAW).min(total);
         while end > offset && !payload.is_char_boundary(end) {
             end -= 1;
         }
+        while end > offset {
+            let fits = serde_json::to_string(&payload[offset..end])?.len() + 512 <= CHUNK_WIRE;
+            if fits {
+                break;
+            }
+            // Halve the candidate; a span of one character always fits.
+            let mut half = offset + (end - offset) / 2;
+            if half == offset {
+                half = offset + payload[offset..].chars().next().unwrap().len_utf8();
+            }
+            while half < end && !payload.is_char_boundary(half) {
+                half += 1;
+            }
+            if half >= end {
+                bail!("事件内容分块异常");
+            }
+            end = half;
+        }
         let chunk = payload[offset..end].to_owned();
-        Ok((encoding, chunk, total, (end < total).then_some(end)))
+        Ok((entry.encoding, chunk, total, (end < total).then_some(end)))
     }
     /// Reverse pages avoid replaying every historical tool output to show the latest reply.
     pub fn history(
@@ -1362,9 +1467,10 @@ impl Store {
             bail!("事件游标无效");
         }
         let mut statement = self.db.prepare(
-            "SELECT seq,at,data FROM events WHERE session_id=?1 AND seq<?2 ORDER BY seq DESC LIMIT 16385"
+            "SELECT seq,at,octet_length(data),CASE WHEN octet_length(data)>?3 THEN NULL ELSE data END \
+             FROM events WHERE session_id=?1 AND seq<?2 ORDER BY seq DESC LIMIT 16385",
         )?;
-        let mut rows = statement.query(params![id, before.unwrap_or(f64::MAX)])?;
+        let mut rows = statement.query(params![id, before.unwrap_or(f64::MAX), ROW_READ_BYTES])?;
         let mut events: Vec<Event> = Vec::new();
         let mut text_fragments: Vec<String> = Vec::new();
         let mut bytes = 0;
@@ -1374,8 +1480,21 @@ impl Store {
         let mut has_more = false;
         let mut split_text = false;
         while let Some(row) = rows.next()? {
-            let data: String = row.get(2)?;
-            let (event, content_size) = self.present_event(id, &data)?;
+            let row_bytes = row.get::<_, i64>(2)?;
+            let (event, content_size, wire) = match row.get::<_, Option<String>>(3)? {
+                Some(data) => self.present_event(id, &data)?,
+                // Rows past the read bound preview from their byte length
+                // alone; their payload still streams on explicit request.
+                None => {
+                    let notice = EventKind::Notice {
+                        text: format!(
+                            "内容 {row_bytes} 字节超过读取上限，已省略展示；原始记录保留。"
+                        ),
+                    };
+                    let wire = serde_json::to_vec(&notice)?.len();
+                    (notice, Some(row_bytes as usize), wire)
+                }
+            };
             let text = match &event {
                 EventKind::Text { text } => Some(text),
                 _ => None,
@@ -1384,15 +1503,10 @@ impl Store {
                 && events
                     .last()
                     .is_some_and(|e| matches!(e.event, EventKind::Text { .. }));
-            // Budget the bytes actually delivered: previews stream as bounded
-            // heads, so a huge stored row no longer monopolizes the window.
-            let size = if let Some(t) = text {
-                t.len() + if joins { 0 } else { id.len() + 96 }
-            } else if content_size.is_some() {
-                PREVIEW_BYTES + PRESENTATION_MARKER.len() + id.len() + 96
-            } else {
-                data.len() + id.len() + 96
-            };
+            // Budget the serialized bytes actually delivered: previews stream
+            // as bounded heads, so a huge stored row cannot monopolize the
+            // window or inflate a response past one frame.
+            let size = wire + if joins { 0 } else { id.len() + 96 };
             if turns == 2
                 || count == 16384
                 || (!joins && events.len() == 128)
@@ -1468,22 +1582,30 @@ impl Store {
             bail!("事件游标无效");
         }
         let mut statement = self.db.prepare(
-            "SELECT seq,at,data FROM events WHERE session_id=?1 AND seq>?2 ORDER BY seq LIMIT 201",
+            "SELECT seq,at,octet_length(data),CASE WHEN octet_length(data)>?3 THEN NULL ELSE data END \
+             FROM events WHERE session_id=?1 AND seq>?2 ORDER BY seq LIMIT 201",
         )?;
-        let mut rows = statement.query(params![id, after])?;
+        let mut rows = statement.query(params![id, after, ROW_READ_BYTES])?;
         let mut events = Vec::new();
         let mut bytes = 0;
         while let Some(row) = rows.next()? {
-            let data: String = row.get(2)?;
-            let (event, content_size) = self.present_event(id, &data)?;
-            // Budget the bytes actually delivered; previews stream as bounded
-            // heads. Always admit at least one event so an oversized row can
-            // never stall the cursor behind the byte budget.
-            let size = if content_size.is_some() {
-                PREVIEW_BYTES + PRESENTATION_MARKER.len() + id.len() + 96
-            } else {
-                data.len() + id.len() + 96
+            let row_bytes = row.get::<_, i64>(2)?;
+            let (event, content_size, wire) = match row.get::<_, Option<String>>(3)? {
+                Some(data) => self.present_event(id, &data)?,
+                None => {
+                    let notice = EventKind::Notice {
+                        text: format!(
+                            "内容 {row_bytes} 字节超过读取上限，已省略展示；原始记录保留。"
+                        ),
+                    };
+                    let wire = serde_json::to_vec(&notice)?.len();
+                    (notice, Some(row_bytes as usize), wire)
+                }
             };
+            // Budget the serialized bytes actually delivered; previews stream
+            // as bounded heads. Always admit at least one event so an
+            // oversized row can never stall the cursor behind the byte budget.
+            let size = wire + id.len() + 96;
             if events.len() == 200 || (bytes + size > 1024 * 1024 && !events.is_empty()) {
                 return Ok((events, true));
             }
@@ -3056,6 +3178,118 @@ mod large_snapshot_tests {
     use crate::task_changes::{FrozenTurn, Snapshot};
     use tokio::io::AsyncReadExt;
     #[test]
+    fn event_content_rejects_mid_character_offsets_and_keeps_other_sessions_live() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(&dir.path().join("state.sqlite")).unwrap();
+        let project = store.add_project(dir.path()).unwrap();
+        let session = store
+            .create_session(project.id.clone(), "claude".into())
+            .unwrap();
+        let other = store.create_session(project.id, "claude".into()).unwrap();
+        let record = |store: &Store, session: &str, body: &str| -> f64 {
+            store
+                .event(
+                    session,
+                    EventKind::ToolResult {
+                        id: "exec".into(),
+                        content: serde_json::json!(body),
+                        is_error: false,
+                    },
+                )
+                .unwrap();
+            store
+                .db
+                .query_row(
+                    "SELECT MAX(seq) FROM events WHERE session_id=?1",
+                    params![session],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap() as f64
+        };
+        let cjk = record(&store, &session.id, &"中文负载".repeat(60_000));
+        let emoji = record(&store, &session.id, &"\u{1F600}".repeat(40_000));
+        // Offsets landing inside multibyte characters must fail before slicing
+        // instead of panicking with the shared database lock held.
+        for (seq, offset) in [(cjk, 1), (cjk, 4), (emoji, 2), (emoji, 3)] {
+            assert!(store.event_content(&session.id, seq, offset).is_err());
+        }
+        // Valid boundaries keep streaming, and a rejected request never
+        // poisons access for other sessions.
+        assert!(matches!(
+            store.event_content(&session.id, cjk, 0),
+            Ok((ContentEncoding::Text, _, _, Some(_)))
+        ));
+        store
+            .event(
+                &other.id,
+                EventKind::Text {
+                    text: "still alive".into(),
+                },
+            )
+            .unwrap();
+        let (events, _) = store.events(&other.id, 0.0).unwrap();
+        assert!(matches!(
+            events.as_slice(),
+            [Event {
+                event: EventKind::Text { text },
+                ..
+            }] if text == "still alive"
+        ));
+    }
+    #[test]
+    fn escape_inflation_stays_frame_safe_in_previews_and_chunks() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(&dir.path().join("state.sqlite")).unwrap();
+        let project = store.add_project(dir.path()).unwrap();
+        let session = store.create_session(project.id, "claude".into()).unwrap();
+        // 400k NUL bytes decode under the whole threshold but serialize to
+        // 2.4 MB; wire budgets must preview instead of blowing the frame.
+        for body in ["\0".repeat(400_000), "\\".repeat(300_000)] {
+            store
+                .event(
+                    &session.id,
+                    EventKind::ToolResult {
+                        id: "exec".into(),
+                        content: serde_json::json!(body),
+                        is_error: false,
+                    },
+                )
+                .unwrap();
+        }
+        let (events, _) = store.events(&session.id, 0.0).unwrap();
+        assert_eq!(events.len(), 2);
+        for event in &events {
+            let wire = serde_json::to_vec(&event).unwrap().len();
+            assert!(wire <= PREVIEW_WIRE, "preview wire {wire}");
+            assert!(event.content_size.is_some());
+        }
+        assert!(serde_json::to_vec(&events).unwrap().len() < latte_work_protocol::MAX_FRAME);
+        // Chunks shrink until each serialized chunk fits a frame on its own.
+        for (index, body) in ["\0".repeat(400_000), "\\".repeat(300_000)]
+            .into_iter()
+            .enumerate()
+        {
+            let seq = events[index].seq;
+            let mut assembled = String::new();
+            let mut offset = 0;
+            loop {
+                let (_, chunk, total, next) =
+                    store.event_content(&session.id, seq, offset).unwrap();
+                assert_eq!(total, body.len());
+                assert!(
+                    serde_json::to_string(&chunk).unwrap().len() + 512 <= CHUNK_WIRE,
+                    "chunk wire exceeds frame budget"
+                );
+                assembled.push_str(&chunk);
+                match next {
+                    Some(next_offset) => offset = next_offset,
+                    None => break,
+                }
+            }
+            assert_eq!(assembled, body);
+        }
+    }
+    #[test]
     fn oversized_events_preview_stream_content_and_keep_polls_advancing() {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open(&dir.path().join("state.sqlite")).unwrap();
@@ -3065,7 +3299,7 @@ mod large_snapshot_tests {
             .unwrap();
         // Multibyte payload forces chunk boundaries inside UTF-8 sequences.
         let body = "结果行·".repeat(52_000);
-        assert!(body.len() > WHOLE_BYTES && body.len() < latte_work_protocol::MAX_FRAME);
+        assert!(body.len() > WHOLE_EVENT_WIRE && body.len() < latte_work_protocol::MAX_FRAME);
         store
             .event(
                 &session.id,
@@ -3155,7 +3389,7 @@ mod large_snapshot_tests {
         // stalling the cursor.
         let budget_session = store.create_session(project.id, "claude".into()).unwrap();
         let whole = "整行".repeat(66_666);
-        assert!(whole.len() < WHOLE_BYTES);
+        assert!(whole.len() < WHOLE_EVENT_WIRE);
         for n in 0..3 {
             store
                 .event(
@@ -3196,7 +3430,7 @@ mod large_snapshot_tests {
                 store.event_content(&session.id, tool_seq, offset).unwrap();
             assert_eq!(encoding, ContentEncoding::Text);
             assert_eq!(total, body.len());
-            assert!(chunk.len() <= CHUNK_BYTES);
+            assert!(chunk.len() <= CHUNK_RAW);
             assembled.push_str(&chunk);
             chunks += 1;
             match next {

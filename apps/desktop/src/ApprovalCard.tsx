@@ -10,6 +10,7 @@ import {
 } from "lucide-react";
 import type { Event } from "./protocol";
 import { toolLabel, type ToolActivity } from "./activity";
+import { FullToolOutput, type ToolLoadContext } from "./ToolActivity";
 import { ApprovalOperation } from "./ApprovalOperation";
 
 type Request = Extract<Event["event"], { kind: "approval" }>;
@@ -21,6 +22,7 @@ export function ApprovalCard({
   disabled,
   busy,
   presentation = "request",
+  loadContext,
   onDecision,
 }: {
   request: Request;
@@ -30,6 +32,7 @@ export function ApprovalCard({
   disabled?: boolean;
   busy?: boolean;
   presentation?: "request" | "record";
+  loadContext?: ToolLoadContext;
   onDecision: (allow: boolean) => void;
 }) {
   const label = toolLabel({
@@ -136,11 +139,11 @@ export function ApprovalCard({
               <small>
                 {tool.status === "failed" ? "错误输出" : "工具结果"}
               </small>
-              <pre>
-                {typeof tool.output === "string"
-                  ? tool.output
-                  : JSON.stringify(tool.output, null, 2)}
-              </pre>
+              <FullToolOutput
+                output={tool.output}
+                load={tool.load}
+                loadContext={loadContext}
+              />
             </div>
           )}
         </div>
