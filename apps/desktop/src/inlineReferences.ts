@@ -50,6 +50,31 @@ export function classifyInlineCode(raw: string): InlineReference {
   return pathLike(text) ?? { kind: "text" };
 }
 
+const OTHER_SCHEME = /^[a-zA-Z][a-zA-Z0-9+.-]*:/;
+const FILE_URL = /^file:\/\/(.+)$/;
+const FRAGMENT_LINE = /#L(\d{1,5}(?:-\d{1,5})?)$/;
+
+/**
+ * Classify a markdown link target. Same path rules as code spans, plus
+ * `file:///` unwrapping and `#L12` line fragments; anchors and unknown
+ * schemes stay inert instead of guessing at local paths.
+ */
+export function classifyLinkHref(href: string): InlineReference {
+  const text = href.trim();
+  if (!text || text.length > MAX_REFERENCE_LENGTH) return { kind: "text" };
+  if (URL_PATTERN.test(text)) return { kind: "url", url: text };
+  const file = text.match(FILE_URL)?.[1];
+  if (file) return pathLike(file) ?? { kind: "text" };
+  if (text.startsWith("#") || OTHER_SCHEME.test(text)) return { kind: "text" };
+  const fragment = text.match(FRAGMENT_LINE)?.[1];
+  const body = fragment
+    ? text.slice(0, text.length - fragment.length - 2)
+    : text;
+  const reference = pathLike(body);
+  if (!reference) return { kind: "text" };
+  return { ...reference, line: reference.line ?? fragment };
+}
+
 /** Flatten rendered code children to the literal text markdown received. */
 export function codeText(children: ReactNode): string {
   if (

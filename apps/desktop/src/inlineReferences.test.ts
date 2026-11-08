@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
 import type { ReactElement } from "react";
-import { classifyInlineCode, codeText } from "./inlineReferences";
+import {
+  classifyInlineCode,
+  classifyLinkHref,
+  codeText,
+} from "./inlineReferences";
 
 describe("classifyInlineCode", () => {
   it("detects project paths including line hints and directories", () => {
@@ -120,5 +124,38 @@ describe("codeText", () => {
     expect(codeText(null)).toBe("");
     expect(codeText(undefined)).toBe("");
     expect(codeText(true)).toBe("");
+  });
+});
+
+describe("classifyLinkHref", () => {
+  it("unwraps file URLs to external paths", () => {
+    expect(classifyLinkHref("file:///Users/ka/report.md")).toEqual({
+      kind: "externalPath",
+      path: "/Users/ka/report.md",
+    });
+  });
+  it("accepts fragment and suffix line hints", () => {
+    expect(classifyLinkHref("src/app.ts#L12")).toEqual({
+      kind: "projectPath",
+      path: "src/app.ts",
+      line: "12",
+    });
+    expect(classifyLinkHref("src/app.ts:12-20")).toEqual({
+      kind: "projectPath",
+      path: "src/app.ts",
+      line: "12-20",
+    });
+  });
+  it("keeps anchors, unknown schemes and escapes inert", () => {
+    expect(classifyLinkHref("#section")).toEqual({ kind: "text" });
+    expect(classifyLinkHref("mailto:a@b")).toEqual({ kind: "text" });
+    expect(classifyLinkHref("ftp://host/x")).toEqual({ kind: "text" });
+    expect(classifyLinkHref("../outside.ts")).toEqual({ kind: "text" });
+  });
+  it("still classifies plain web urls", () => {
+    expect(classifyLinkHref("https://example.com/x")).toEqual({
+      kind: "url",
+      url: "https://example.com/x",
+    });
   });
 });

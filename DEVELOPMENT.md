@@ -584,7 +584,15 @@ Chips expose a context menu modeled on the shared link menu. Hovering a chip
 shows the full path after a 350ms delay — resolved against the project root
 when known, with a line hint rendered Codex-style as `(line N)` — plus a muted
 hint matching the available actions; scrolling, resizing, Escape, clicks and
-menus dismiss it, including while the reveal timer is still pending. Project
+menus dismiss it, including while the reveal timer is still pending. Markdown
+link targets follow the same contract through `classifyLinkHref`: http(s)
+keeps the shared link menu, `file://` unwraps to an absolute path, `#L12`
+fragments and `:12` suffixes ride along as line hints, and anchors/unknown
+schemes render as plain text instead of dead blue links. Local-path links and
+chips share one open path and one context menu: project-relative targets (and
+absolute targets under the project root) open in the workspace file tab on
+every host, while other local absolutes fall back to the guarded `open_path`.
+Project
 files use the bounded `preview_source` read for 另存为 and content copy on
 local and SSH hosts alike; local external paths use desktop commands that
 expand `~/`, require a bounded absolute path and never execute the target

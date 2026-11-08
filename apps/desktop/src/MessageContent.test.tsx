@@ -355,3 +355,85 @@ describe("MessageContent hover tooltips", () => {
     expect(screen.getByRole("menu")).toBeTruthy();
   });
 });
+
+describe("MessageContent markdown file links", () => {
+  it("opens project-relative link targets in the workspace file tab", () => {
+    const openFile = vi.fn();
+    render(
+      <MessageActionsProvider
+        value={{ openFile, localHost: true, projectRoot: "/repo" }}
+      >
+        <MessageContent text={"见[实现](apps/desktop/src/app.ts#L12)。"} />
+      </MessageActionsProvider>,
+    );
+    const link = screen.getByRole("button", { name: "实现" });
+    expect(link.title).toBe("apps/desktop/src/app.ts");
+    fireEvent.click(link);
+    expect(openFile).toHaveBeenCalledWith("apps/desktop/src/app.ts");
+  });
+  it("routes absolute link targets inside the project root through the file tab", () => {
+    const openFile = vi.fn();
+    render(
+      <MessageActionsProvider
+        value={{ openFile, localHost: true, projectRoot: "/repo" }}
+      >
+        <MessageContent text={"见[配置](/repo/conf/app.toml)。"} />
+      </MessageActionsProvider>,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "配置" }));
+    expect(openFile).toHaveBeenCalledWith("conf/app.toml");
+    expect(mocks.invoke).not.toHaveBeenCalled();
+  });
+  it("falls back to the guarded system opener for local absolutes outside the project", () => {
+    const openFile = vi.fn();
+    render(
+      <MessageActionsProvider
+        value={{ openFile, localHost: true, projectRoot: "/repo" }}
+      >
+        <MessageContent text={"见[外部](/tmp/elsewhere/notes.md)。"} />
+      </MessageActionsProvider>,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "外部" }));
+    expect(openFile).not.toHaveBeenCalled();
+    expect(mocks.invoke).toHaveBeenCalledWith("open_path", {
+      path: "/tmp/elsewhere/notes.md",
+    });
+  });
+  it("exposes the shared context menu on right click", () => {
+    const openFile = vi.fn();
+    render(
+      <MessageActionsProvider
+        value={{ openFile, localHost: true, projectRoot: "/repo" }}
+      >
+        <MessageContent text={"见[实现](apps/desktop/src/app.ts)。"} />
+      </MessageActionsProvider>,
+    );
+    fireEvent.contextMenu(screen.getByRole("button", { name: "实现" }));
+    expect(screen.getByRole("menu")).toBeTruthy();
+    expect(menuLabels()).toContain("打开文件");
+    expect(menuLabels()).toContain("复制路径");
+  });
+  it("renders inert targets as plain text without dead link affordances", () => {
+    const openFile = vi.fn();
+    render(
+      <MessageActionsProvider value={{ openFile, localHost: true }}>
+        <MessageContent
+          text={
+            "[锚点](#section)、[邮件](mailto:a@b) 与[目录逃逸](../outside.ts)。"
+          }
+        />
+      </MessageActionsProvider>,
+    );
+    expect(screen.queryAllByRole("button")).toHaveLength(0);
+    expect(document.querySelectorAll("a")).toHaveLength(0);
+  });
+  it("keeps http links as regular web links", () => {
+    render(
+      <MessageActionsProvider value={{}}>
+        <MessageContent text={"[官网](https://example.com)"} />
+      </MessageActionsProvider>,
+    );
+    const anchor = screen.getByRole("link", { name: "官网" });
+    expect(anchor.getAttribute("href")).toBe("https://example.com/");
+  });
+});

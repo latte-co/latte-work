@@ -1850,6 +1850,25 @@ button.recent-notice {
 .markdown a {
   color: var(--accent);
 }
+/* Local-path markdown links: same accent as web links, but as a button. */
+.markdown .markdown-file-link {
+  background: none;
+  border: none;
+  padding: 0;
+  margin: 0;
+  font: inherit;
+  text-align: inherit;
+  color: var(--accent);
+  cursor: pointer;
+}
+.markdown .markdown-file-link:hover,
+.markdown .markdown-file-link:focus-visible {
+  text-decoration: underline;
+}
+/* Inert targets (anchors, unknown schemes) must not look clickable. */
+.markdown .markdown-link-inert {
+  color: inherit;
+}
 .markdown .inline-code-ref {
   display: inline-flex;
   align-items: baseline;

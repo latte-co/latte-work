@@ -25,10 +25,16 @@ import {
 } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
 import { message } from "./api";
-import { classifyInlineCode, codeText } from "./inlineReferences";
+import {
+  classifyInlineCode,
+  classifyLinkHref,
+  codeText,
+  type InlineReference,
+} from "./inlineReferences";
 import { InlineRefMenu, type InlineRefMenuItem } from "./InlineRefMenu";
 import { InlineRefTooltip } from "./InlineRefTooltip";
 import type { SourceData } from "./sourceLoader";
+import { webLink } from "./browserLinks";
 
 export function CopyButton({
   text,
@@ -137,131 +143,71 @@ async function saveAs(
     report(message(e));
   }
 }
-function InlineCodeRef({ children }: { children?: ReactNode }) {
-  const actions = useContext(MessageActionsContext);
-  const raw = codeText(children);
-  const reference = classifyInlineCode(raw);
-  const [point, setPoint] = useState<{ x: number; y: number } | null>(null);
-  // Same hover contract as the sidebar hover cards: 350ms delay, dismissed by
-  // leaving, scrolling, resizing, Escape, and any menu or click. `pending`
-  // gates the dismissal listeners so idle chips carry none of them.
-  const [hover, setHover] = useState<DOMRect | null>(null);
-  const [pending, setPending] = useState(false);
-  const hoverTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const tipId = useId();
-  function cancelHover() {
-    if (hoverTimer.current !== null) clearTimeout(hoverTimer.current);
-    hoverTimer.current = null;
-    setPending(false);
-    setHover(null);
+type PathReference = Extract<
+  InlineReference,
+  { kind: "projectPath" | "externalPath" }
+>;
+/** An absolute path inside the current project, as the file tab's relative form. */
+function projectRelative(
+  root: string | undefined,
+  external: string,
+): string | null {
+  if (!root) return null;
+  const base = root.replace(/\/$/, "");
+  return external.startsWith(`${base}/`)
+    ? external.slice(base.length + 1)
+    : null;
+}
+function openInlineReference(
+  reference: PathReference,
+  actions: MessageActions,
+  report: (text: string) => void,
+) {
+  if (reference.kind === "projectPath") {
+    actions.openFile?.(reference.path);
+    return;
   }
-  function scheduleHover(target: HTMLButtonElement) {
-    if (point) return;
-    if (hoverTimer.current !== null) clearTimeout(hoverTimer.current);
-    hoverTimer.current = setTimeout(() => {
-      hoverTimer.current = null;
-      setPending(false);
-      if (target.isConnected) setHover(target.getBoundingClientRect());
-    }, 350);
-    setPending(true);
+  // Absolute paths inside the current project open in the workspace file tab;
+  // only paths outside any project fall back to the guarded system opener.
+  const relative = projectRelative(actions.projectRoot, reference.path);
+  if (relative && actions.openFile) {
+    actions.openFile(relative);
+    return;
   }
-  useEffect(() => () => cancelHover(), []);
-  useEffect(() => {
-    if (point) cancelHover();
-  }, [point]);
-  // Scrolling while the timer is still pending must not pop the tooltip at a
-  // stale anchor afterwards, so dismissal listeners stay mounted through the
-  // pending phase, not only while the tooltip is visible.
-  useEffect(() => {
-    if (!hover && !pending) return;
-    const key = (event: KeyboardEvent) => {
-      if (event.key === "Escape") cancelHover();
-    };
-    window.addEventListener("keydown", key);
-    window.addEventListener("resize", cancelHover);
-    window.addEventListener("scroll", cancelHover, true);
-    return () => {
-      window.removeEventListener("keydown", key);
-      window.removeEventListener("resize", cancelHover);
-      window.removeEventListener("scroll", cancelHover, true);
-    };
-  }, [hover, pending]);
-  if (reference.kind === "text") return <code>{children}</code>;
-  if (reference.kind === "url")
-    return (
-      <code className="inline-code-ref">
-        <WebLink href={reference.url} className="inline-ref-link">
-          <ExternalLink size={12} />
-          {raw}
-        </WebLink>
-      </code>
-    );
-  // Outside the conversation (markdown previews, settings) the chips degrade
-  // back to plain code instead of dead ends.
-  const provided =
-    actions.openFile !== undefined || actions.localHost !== undefined;
-  if (reference.kind === "projectPath" && !actions.openFile)
-    return <code>{children}</code>;
-  if (reference.kind === "externalPath" && !provided)
-    return <code>{children}</code>;
-  const report = actions.reportError ?? (() => undefined);
+  if (!actions.localHost) {
+    // Remote absolutes are copy-only; left click runs the only available
+    // action instead of dead-ending.
+    void copyText(reference.path).catch((e) => report(message(e)));
+    return;
+  }
+  void invoke("open_path", { path: reference.path }).catch((e) =>
+    report(message(e)),
+  );
+}
+/** Context-menu actions shared by reference chips and markdown file links. */
+function inlineRefMenuItems(
+  reference: PathReference,
+  actions: MessageActions,
+  report: (text: string) => void,
+): InlineRefMenuItem[] {
   const directory = reference.path.endsWith("/");
   const file = !directory;
-  const local = reference.kind === "externalPath";
-  const title = local
-    ? actions.localHost
-      ? "打开文件，右键查看更多操作"
-      : "点击复制路径，右键查看更多操作"
-    : "在工作区中打开，右键查看更多操作";
-  const open = () => {
-    if (reference.kind === "projectPath") {
-      actions.openFile?.(reference.path);
-      return;
-    }
-    if (!actions.localHost) {
-      // Remote absolutes are copy-only; left click runs the only available
-      // action instead of dead-ending.
-      void copyText(reference.path).catch((e) => report(message(e)));
-      return;
-    }
-    void invoke("open_path", { path: reference.path }).catch((e) =>
-      report(message(e)),
-    );
-  };
-  // Codex-style hover: reveal the full path (resolved against the project
-  // root when known) plus a muted hint matching the available actions.
-  const tipPath =
-    reference.kind === "projectPath" && actions.projectRoot
-      ? absolutePath(actions.projectRoot, reference.path)
-      : reference.path;
-  const tipPrimary = reference.line
-    ? `${tipPath} (${reference.line.includes("-") ? "lines" : "line"} ${reference.line})`
-    : tipPath;
-  const tipHint =
-    reference.kind === "projectPath"
-      ? "左键在工作区打开 · 右键更多操作"
-      : actions.localHost
-        ? "左键打开 · 右键更多操作"
-        : "点击复制路径 · 右键更多操作";
   const items: InlineRefMenuItem[] = [];
-  if (reference.kind === "projectPath") {
+  // The open action exists only where something can actually open: the file
+  // tab for project paths (or absolutes inside the root), or the guarded
+  // system opener for other local absolutes. Remote paths stay copy-only.
+  const openable =
+    reference.kind === "projectPath" ||
+    actions.localHost ||
+    (actions.openFile !== undefined &&
+      projectRelative(actions.projectRoot, reference.path) !== null);
+  if (openable)
     items.push({
       key: "open",
       icon: directory ? <FolderOpen size={16} /> : <FileText size={16} />,
       label: "打开文件",
-      run: () => actions.openFile?.(reference.path),
+      run: () => openInlineReference(reference, actions, report),
     });
-  } else if (actions.localHost) {
-    items.push({
-      key: "open",
-      icon: directory ? <FolderOpen size={16} /> : <FileText size={16} />,
-      label: "打开文件",
-      run: () =>
-        void invoke("open_path", { path: reference.path }).catch((e) =>
-          report(message(e)),
-        ),
-    });
-  }
   if (actions.localHost) {
     // Without a project root the resolved editor target would be the bare
     // relative path and always fail, so hide the item instead.
@@ -332,7 +278,7 @@ function InlineCodeRef({ children }: { children?: ReactNode }) {
       },
     });
   }
-  if (local && actions.localHost) {
+  if (reference.kind === "externalPath" && actions.localHost) {
     items.push(
       { key: "sep-2", separator: true },
       {
@@ -346,6 +292,100 @@ function InlineCodeRef({ children }: { children?: ReactNode }) {
       },
     );
   }
+  return items;
+}
+function InlineCodeRef({ children }: { children?: ReactNode }) {
+  const actions = useContext(MessageActionsContext);
+  const raw = codeText(children);
+  const reference = classifyInlineCode(raw);
+  const [point, setPoint] = useState<{ x: number; y: number } | null>(null);
+  // Same hover contract as the sidebar hover cards: 350ms delay, dismissed by
+  // leaving, scrolling, resizing, Escape, and any menu or click. `pending`
+  // gates the dismissal listeners so idle chips carry none of them.
+  const [hover, setHover] = useState<DOMRect | null>(null);
+  const [pending, setPending] = useState(false);
+  const hoverTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const tipId = useId();
+  function cancelHover() {
+    if (hoverTimer.current !== null) clearTimeout(hoverTimer.current);
+    hoverTimer.current = null;
+    setPending(false);
+    setHover(null);
+  }
+  function scheduleHover(target: HTMLButtonElement) {
+    if (point) return;
+    if (hoverTimer.current !== null) clearTimeout(hoverTimer.current);
+    hoverTimer.current = setTimeout(() => {
+      hoverTimer.current = null;
+      setPending(false);
+      if (target.isConnected) setHover(target.getBoundingClientRect());
+    }, 350);
+    setPending(true);
+  }
+  useEffect(() => () => cancelHover(), []);
+  useEffect(() => {
+    if (point) cancelHover();
+  }, [point]);
+  // Scrolling while the timer is still pending must not pop the tooltip at a
+  // stale anchor afterwards, so dismissal listeners stay mounted through the
+  // pending phase, not only while the tooltip is visible.
+  useEffect(() => {
+    if (!hover && !pending) return;
+    const key = (event: KeyboardEvent) => {
+      if (event.key === "Escape") cancelHover();
+    };
+    window.addEventListener("keydown", key);
+    window.addEventListener("resize", cancelHover);
+    window.addEventListener("scroll", cancelHover, true);
+    return () => {
+      window.removeEventListener("keydown", key);
+      window.removeEventListener("resize", cancelHover);
+      window.removeEventListener("scroll", cancelHover, true);
+    };
+  }, [hover, pending]);
+  if (reference.kind === "text") return <code>{children}</code>;
+  if (reference.kind === "url")
+    return (
+      <code className="inline-code-ref">
+        <WebLink href={reference.url} className="inline-ref-link">
+          <ExternalLink size={12} />
+          {raw}
+        </WebLink>
+      </code>
+    );
+  // Outside the conversation (markdown previews, settings) the chips degrade
+  // back to plain code instead of dead ends.
+  const provided =
+    actions.openFile !== undefined || actions.localHost !== undefined;
+  if (reference.kind === "projectPath" && !actions.openFile)
+    return <code>{children}</code>;
+  if (reference.kind === "externalPath" && !provided)
+    return <code>{children}</code>;
+  const report = actions.reportError ?? (() => undefined);
+  const directory = reference.path.endsWith("/");
+  const local = reference.kind === "externalPath";
+  const title = local
+    ? actions.localHost
+      ? "打开文件，右键查看更多操作"
+      : "点击复制路径，右键查看更多操作"
+    : "在工作区中打开，右键查看更多操作";
+  const open = () => openInlineReference(reference, actions, report);
+  // Codex-style hover: reveal the full path (resolved against the project
+  // root when known) plus a muted hint matching the available actions.
+  const tipPath =
+    reference.kind === "projectPath" && actions.projectRoot
+      ? absolutePath(actions.projectRoot, reference.path)
+      : reference.path;
+  const tipPrimary = reference.line
+    ? `${tipPath} (${reference.line.includes("-") ? "lines" : "line"} ${reference.line})`
+    : tipPath;
+  const tipHint =
+    reference.kind === "projectPath"
+      ? "左键在工作区打开 · 右键更多操作"
+      : actions.localHost
+        ? "左键打开 · 右键更多操作"
+        : "点击复制路径 · 右键更多操作";
+  const items = inlineRefMenuItems(reference, actions, report);
   return (
     <code className="inline-code-ref">
       <button
@@ -388,12 +428,61 @@ function InlineCodeRef({ children }: { children?: ReactNode }) {
     </code>
   );
 }
+/**
+ * Markdown link targets: http(s) keep browser semantics; local path targets
+ * open in the workspace file tab and carry the same context menu as reference
+ * chips. Anything else renders as plain text instead of a dead blue link.
+ */
+function MarkdownLink({
+  href,
+  children,
+}: {
+  href?: string;
+  children?: ReactNode;
+}) {
+  const actions = useContext(MessageActionsContext);
+  const [point, setPoint] = useState<{ x: number; y: number } | null>(null);
+  if (href && webLink(href)) return <WebLink href={href}>{children}</WebLink>;
+  const reference = href ? classifyLinkHref(href) : ({ kind: "text" } as const);
+  const provided =
+    actions.openFile !== undefined || actions.localHost !== undefined;
+  const inert = <span className="markdown-link-inert">{children}</span>;
+  if (reference.kind !== "projectPath" && reference.kind !== "externalPath")
+    return inert;
+  if (reference.kind === "projectPath" && !actions.openFile) return inert;
+  if (reference.kind === "externalPath" && !provided) return inert;
+  const report = actions.reportError ?? (() => undefined);
+  return (
+    <>
+      <button
+        type="button"
+        className="markdown-file-link"
+        title={reference.path}
+        onClick={() => openInlineReference(reference, actions, report)}
+        onContextMenu={(event) => {
+          event.preventDefault();
+          setPoint({ x: event.clientX, y: event.clientY });
+        }}
+      >
+        {children}
+      </button>
+      {point && (
+        <InlineRefMenu
+          point={point}
+          label={`文件操作：${baseName(reference.path)}`}
+          items={inlineRefMenuItems(reference, actions, report)}
+          close={() => setPoint(null)}
+        />
+      )}
+    </>
+  );
+}
 export function MessageContent({ text }: { text: string }) {
   return (
     <>
       <ReactMarkdown
         remarkPlugins={[remarkGfm]}
-        components={{ pre: CodeBlock, a: WebLink, code: InlineCodeRef }}
+        components={{ pre: CodeBlock, a: MarkdownLink, code: InlineCodeRef }}
       >
         {text}
       </ReactMarkdown>
