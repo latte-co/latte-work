@@ -252,6 +252,19 @@ pub struct Event {
     pub session_id: String,
     pub at: f64,
     pub event: EventKind,
+    /// Present when `event` carries a size-bounded preview: byte length of the
+    /// full payload, loadable as streamable chunks via `Request::EventContent`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub content_size: Option<usize>,
+}
+/// How an `EventContent` chunk encodes the full payload: text streams the raw
+/// payload for progressive display; json must be parsed once fully received.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+pub enum ContentEncoding {
+    Text,
+    Json,
 }
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 pub struct FileEntry {
@@ -654,6 +667,12 @@ pub enum Request {
     Poll {
         session_id: String,
         after: f64,
+    },
+    /// Streams one persisted event's full payload in frame-safe chunks.
+    EventContent {
+        session_id: String,
+        seq: f64,
+        offset: usize,
     },
     Subagents {
         session_id: String,
@@ -1196,6 +1215,14 @@ pub enum Response {
         events: Vec<Event>,
         session: Session,
         has_more: bool,
+    },
+    EventContent {
+        encoding: ContentEncoding,
+        chunk: String,
+        /// Total payload bytes; chunks concatenate to exactly this length.
+        total: usize,
+        /// Byte offset of the next chunk; None marks the payload complete.
+        next: Option<usize>,
     },
     Files {
         entries: Vec<FileEntry>,

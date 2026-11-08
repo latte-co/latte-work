@@ -4652,6 +4652,7 @@ async fn persisted_handback_report_is_read_without_reopening_or_replaying_agent(
                 name: "SubagentHandback".into(),
                 input: serde_json::json!({"message":report}),
             },
+            content_size: None,
         },
         latte_work_protocol::Event {
             seq: 2.0,
@@ -4662,6 +4663,7 @@ async fn persisted_handback_report_is_read_without_reopening_or_replaying_agent(
                 content: serde_json::json!([{"type":"text","text":"{\"success\":true}"}]),
                 is_error: false,
             },
+            content_size: None,
         },
     ];
     let db = rusqlite::Connection::open(host.directory.path().join("state.sqlite")).unwrap();
@@ -8057,11 +8059,55 @@ async fn snapshot_legacy_oversized_events_advance_cursor_and_leave_other_session
         Response::Accepted { .. }
     ));
     let events = wait(&mut client, &id, Status::Completed).await;
-    assert!(
-        events
-            .iter()
-            .any(|e| e.seq == blocked && matches!(e.event, EventKind::Notice { .. }))
-    );
+    assert!(events.iter().any(|e| e.seq == blocked
+        && matches!(&e.event, EventKind::Notice { text } if text.len() < 96 * 1024)
+        && e.content_size == Some(3 * 1024 * 1024)));
+    // The full payload streams back in frame-safe chunks that reassemble exactly.
+    let mut assembled = 0;
+    let mut offset = 0;
+    loop {
+        let Response::EventContent {
+            encoding,
+            chunk,
+            total,
+            next,
+        } = ask(
+            &mut client,
+            Request::EventContent {
+                session_id: id.clone(),
+                seq: blocked,
+                offset,
+            },
+        )
+        .await
+        else {
+            panic!("event content")
+        };
+        assert_eq!(encoding, latte_work_protocol::ContentEncoding::Text);
+        assert_eq!(total, 3 * 1024 * 1024);
+        assert!(chunk.len() <= 512 * 1024 + 8);
+        assembled += chunk.len();
+        match next {
+            Some(next_offset) => {
+                assert!(next_offset > offset);
+                offset = next_offset;
+            }
+            None => break,
+        }
+    }
+    assert_eq!(assembled, 3 * 1024 * 1024);
+    assert!(matches!(
+        ask(
+            &mut client,
+            Request::EventContent {
+                session_id: id.clone(),
+                seq: blocked,
+                offset: 3 * 1024 * 1024 + 1,
+            }
+        )
+        .await,
+        Response::Error { .. }
+    ));
     assert!(events.iter().any(|e| matches!(
         e.event,
         EventKind::State {

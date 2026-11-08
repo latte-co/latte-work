@@ -8,6 +8,8 @@ export interface ToolActivity {
   name: string;
   input?: JsonValue;
   output?: JsonValue;
+  /** Present when `output` is a size-bounded preview of a larger payload. */
+  load?: { seq: number; size: number };
   status:
     | "pending"
     | "waiting"
@@ -78,6 +80,9 @@ export function activityTranscript(
   const attached = new Set<ToolActivity>();
   const pending = new Map<string, ToolActivity>();
   const unfinished = new Set<ToolActivity>();
+  const eventLoads = new Map<number, { seq: number; size: number }>();
+  for (const { seq, content_size } of events)
+    if (content_size != null) eventLoads.set(seq, { seq, size: content_size });
   function finish() {
     for (const tool of unfinished) {
       if (tool.status === "pending") tool.status = "unconfirmed";
@@ -122,9 +127,13 @@ export function activityTranscript(
       if (value.id) pending.set(value.id, tool);
     } else if (value.kind === "tool_result") {
       const output = toolOutput(value.content);
+      // Preview rows keep their full payload addressable by the result event's
+      // sequence number; whole payloads have no load identity.
+      const load = eventLoads.get(item.key);
       const tool = value.id ? pending.get(value.id) : undefined;
       if (tool) {
         tool.output = output.content;
+        tool.load = load;
         if (tool.status !== "denied")
           tool.status = value.is_error ? "failed" : "completed";
         pending.delete(value.id);
@@ -136,6 +145,7 @@ export function activityTranscript(
           type: "tool",
           name: "工具输出",
           output: output.content,
+          load,
           status: value.is_error ? "failed" : "completed",
         });
       }

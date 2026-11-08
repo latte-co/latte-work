@@ -879,11 +879,17 @@ anchor returns the first page), returning at most
 64 entries and 64 KiB of serialized entries with `total_files`, `offset` and
 `next_offset` when paged. Paging does not mark capture truncated, change totals or
 reduce the files covered by Undo. Both the card and review workspace replace each
-page rather than accumulating thousands of DOM nodes. Event polling projects legacy
-rows over 512 KiB to a notice with the same sequence number before reading their
-contents; the raw row remains stored and later replies/status events can advance.
-Forward and reverse history use this rule, keeping each response below the frame
-limit even when its first original event was oversized.
+page rather than accumulating thousands of DOM nodes. Event payloads up to
+512 KiB are delivered whole. Larger tool results arrive as a 64 KiB head preview
+carrying `content_size`; the desktop offers a load-full action that streams the
+complete payload back in 512 KiB chunks via `Request::EventContent`
+(`encoding: text` streams displayable prose, `json` reassembles structured
+values after the final chunk). Reply text rides whole up to the frame bound
+because merged fragments lose per-sequence identity; other oversized kinds
+degrade to a notice that keeps the same streamable payload. Poll and history
+batches bill only delivered bytes and always admit at least one event, so a
+single oversized stored row can never stall the cursor, and the raw row always
+remains in SQLite.
 
 Before accepting requests, startup archives legacy snapshot rows over 256 KiB using
 SQLite incremental blob reads into private `legacy/*.json` files. Valid records up

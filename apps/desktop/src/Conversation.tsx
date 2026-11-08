@@ -667,9 +667,25 @@ export function Conversation({
                         active={!settingsOpen && !preparingHistory}
                       />
                     ) : item.type === "tool" ? (
-                      <ToolRow key={item.key} tool={item} />
+                      <ToolRow
+                        key={item.key}
+                        tool={item}
+                        loadContext={
+                          session
+                            ? { hostId, sessionId: session.id }
+                            : undefined
+                        }
+                      />
                     ) : item.type === "tools" ? (
-                      <ToolGroup key={item.key} tools={item.tools} />
+                      <ToolGroup
+                        key={item.key}
+                        tools={item.tools}
+                        loadContext={
+                          session
+                            ? { hostId, sessionId: session.id }
+                            : undefined
+                        }
+                      />
                     ) : (
                       (() => {
                         const v = item.value;

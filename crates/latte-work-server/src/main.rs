@@ -1152,6 +1152,20 @@ async fn dispatch(s: &Service, request: Request) -> Result<Response> {
                 has_more,
             })
         })?,
+        Request::EventContent {
+            session_id,
+            seq,
+            offset,
+        } => db(&s.database, |d| {
+            d.session(&session_id)?;
+            let (encoding, chunk, total, next) = d.event_content(&session_id, seq, offset)?;
+            Ok(Response::EventContent {
+                encoding,
+                chunk,
+                total,
+                next,
+            })
+        })?,
         Request::AnswerQuestion {
             session_id,
             request_id,
