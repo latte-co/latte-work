@@ -1231,6 +1231,37 @@ button.recent-notice {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.markdown .message-image {
+  display: block;
+  max-width: min(100%, 480px);
+  max-height: 360px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-panel);
+}
+.markdown .message-image-placeholder {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-2);
+  max-width: 100%;
+  padding: var(--space-3) var(--space-4);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-panel);
+  background: var(--color-input);
+  color: var(--color-text-muted);
+  font-size: var(--text-sm);
+}
+.markdown .message-image-placeholder > span {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.markdown .message-image-placeholder > .message-image-hint {
+  white-space: normal;
+  text-align: center;
+  color: var(--color-text-secondary);
+}
 .user-file-reference {
   display: flex;
   align-items: center;

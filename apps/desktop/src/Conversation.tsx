@@ -17,6 +17,7 @@ import { activityTranscript } from "./activity";
 import { ComposerAction } from "./ComposerAction";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { MessageActionsProvider, MessageContent } from "./MessageContent";
+import { createExternalImageLoader } from "./externalImageLoader";
 import { loadSource } from "./sourceLoader";
 import { DraftStore, useDraft, type Draft } from "./drafts";
 import { useStatusIssues } from "./statusNotices";
@@ -632,6 +633,9 @@ export function Conversation({
                           () => true,
                           true,
                         )
+                    : undefined,
+                  loadExternalImage: projectId
+                    ? createExternalImageLoader(hostId, projectId, session?.id)
                     : undefined,
                   reportError: setInlineRefError,
                 }}
