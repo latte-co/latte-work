@@ -10,9 +10,15 @@ export interface MessageActions {
   /** Absolute project root, used to resolve local editor and file-manager calls. */
   projectRoot?: string;
   /** Bounded project-file read shared by save-as and content copy. */
-  readProjectFile?: (path: string) => Promise<SourceData>;
-  /** Explicitly granted read of an absolute path outside the project. */
-  loadExternalImage?: (path: string) => Promise<SourceData>;
+  readProjectFile?: (
+    path: string,
+    valid?: () => boolean,
+  ) => Promise<SourceData>;
+  /** Display-only read of an absolute path rendered as a message image. */
+  loadExternalImage?: (
+    path: string,
+    valid: () => boolean,
+  ) => Promise<SourceData>;
   /** Menu actions report failures to a persistent status surface. */
   reportError?: (text: string) => void;
 }

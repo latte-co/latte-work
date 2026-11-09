@@ -1625,6 +1625,32 @@ async fn dispatch(s: &Service, request: Request) -> Result<Response> {
             }
             sources::preview(&target, offset).await?
         }
+        Request::PreviewMessageImage {
+            project_id,
+            path,
+            offset,
+        } => {
+            db(&s.database, |d| d.project(&project_id))?;
+            if path.len() > 4096 || path.contains('\0') {
+                bail!("来源路径无效");
+            }
+            if !Path::new(&path).is_absolute() {
+                bail!("消息图片需要绝对路径");
+            }
+            let target = tokio::fs::canonicalize(Path::new(&path)).await?;
+            // Display-only read: never consults or writes reference_access,
+            // so a reply can neither gain nor resurrect persisted access by
+            // rendering an image. The image-only gate plus the bounded
+            // preview pipeline keeps the exposure to decodable raster data.
+            let data = sources::preview(&target, offset).await?;
+            let Response::SourcePreview { mime_type, .. } = &data else {
+                bail!("消息图片需要指向具体文件");
+            };
+            if !mime_type.starts_with("image/") {
+                bail!("此文件不是可显示的图片");
+            }
+            data
+        }
         Request::ReadFile { project_id, path } => {
             let p = db(&s.database, |d| d.project(&project_id))?;
             let (text, truncated) = files::read(Path::new(&p.path), &path).await?;

@@ -839,6 +839,16 @@ pub enum Request {
         #[ts(type = "number")]
         offset: u64,
     },
+    /// Read one raster image rendered inside a conversation reply. Unlike
+    /// `PreviewSource` this never consults or writes the per-project
+    /// reference grants: message images stay display-only regardless of what
+    /// the reply text points at, and reading one leaves no persisted access.
+    PreviewMessageImage {
+        project_id: String,
+        path: String,
+        #[ts(type = "number")]
+        offset: u64,
+    },
     /// Read one raster-image version from the same comparison as the diff.
     PreviewChange {
         target: ChangePreviewTarget,

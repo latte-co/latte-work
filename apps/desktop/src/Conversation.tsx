@@ -624,18 +624,18 @@ export function Conversation({
                   localHost: hostId === "local",
                   projectRoot: project?.path,
                   readProjectFile: projectId
-                    ? (path) =>
+                    ? (path, valid = () => true) =>
                         loadSource(
                           hostId,
                           projectId,
                           undefined,
                           path,
-                          () => true,
+                          valid,
                           true,
                         )
                     : undefined,
                   loadExternalImage: projectId
-                    ? createExternalImageLoader(hostId, projectId, session?.id)
+                    ? createExternalImageLoader(hostId, projectId)
                     : undefined,
                   reportError: setInlineRefError,
                 }}

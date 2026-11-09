@@ -74,18 +74,46 @@ describe("MessageContent markdown images", () => {
   it("auto-loads external images in place", async () => {
     const { container } = renderMarkdown("![二维码](/tmp/qr.png)");
     await act(() => Promise.resolve());
-    expect(loadExternal).toHaveBeenCalledWith("/tmp/qr.png");
+    expect(loadExternal).toHaveBeenCalledWith(
+      "/tmp/qr.png",
+      expect.any(Function),
+    );
     const img = container.querySelector("img");
     expect(img).not.toBeNull();
     expect(img!.getAttribute("src")).toBe("blob:mock");
     expect(img!.getAttribute("alt")).toBe("二维码");
   });
 
-  it("accepts file:// unwrapping for external images", async () => {
-    const { container } = renderMarkdown("![二维码](file:///tmp/qr.png)");
+  it("decodes percent-encoded local targets back to filesystem paths", async () => {
+    const { container } = renderMarkdown(
+      "![二维码](/tmp/%E4%BA%8C%E7%BB%B4%E7%A0%81%20%E6%88%AA%E5%9B%BE.png)",
+    );
     await act(() => Promise.resolve());
-    expect(loadExternal).toHaveBeenCalledWith("/tmp/qr.png");
-    expect(container.querySelector("img[src='blob:mock']")).not.toBeNull();
+    expect(loadExternal).toHaveBeenCalledWith(
+      "/tmp/二维码 截图.png",
+      expect.any(Function),
+    );
+    const img = container.querySelector("img[title='/tmp/二维码 截图.png']");
+    expect(img).not.toBeNull();
+    expect(img!.getAttribute("src")).toBe("blob:mock");
+  });
+
+  it("decodes encoded project-relative targets with spaces", async () => {
+    renderMarkdown("![流程](docs/my%20flow.png)");
+    await act(() => Promise.resolve());
+    expect(readProjectFile).toHaveBeenCalledWith(
+      "docs/my flow.png",
+      expect.any(Function),
+    );
+  });
+
+  it("decodes file:// targets after unwrapping", async () => {
+    renderMarkdown("![二维码](file:///tmp/%E5%9B%BE.png)");
+    await act(() => Promise.resolve());
+    expect(loadExternal).toHaveBeenCalledWith(
+      "/tmp/图.png",
+      expect.any(Function),
+    );
   });
 
   it("waits for viewport proximity before reading when observed", async () => {
@@ -109,7 +137,50 @@ describe("MessageContent markdown images", () => {
       expect(screen.getByText("/tmp/qr.png")).toBeTruthy();
       act(() => visibility([{ isIntersecting: true }]));
       await act(() => Promise.resolve());
-      expect(loadExternal).toHaveBeenCalledWith("/tmp/qr.png");
+      expect(loadExternal).toHaveBeenCalledWith(
+        "/tmp/qr.png",
+        expect.any(Function),
+      );
+      expect(document.querySelector("img[src='blob:mock']")).not.toBeNull();
+    } finally {
+      delete (window as { IntersectionObserver?: unknown })
+        .IntersectionObserver;
+    }
+  });
+
+  it("keeps activation latched across node replacement, decode failure and retry", async () => {
+    let visibility: (entries: { isIntersecting: boolean }[]) => void = () =>
+      undefined;
+    class StubObserver {
+      constructor(callback: typeof visibility) {
+        visibility = callback;
+      }
+      observe() {}
+      // The component disconnects once latched; the manual `false` callback
+      // below simulates a detached-node notification reaching the handler.
+      disconnect() {}
+    }
+    Object.defineProperty(window, "IntersectionObserver", {
+      value: StubObserver,
+      configurable: true,
+    });
+    try {
+      renderMarkdown("![二维码](/tmp/broken.png)");
+      act(() => visibility([{ isIntersecting: true }]));
+      await act(() => Promise.resolve());
+      const img = document.querySelector("img");
+      expect(img).not.toBeNull();
+      // A detached placeholder only produces non-intersecting notifications.
+      act(() => visibility([{ isIntersecting: false }]));
+      // The blob fails to decode: the error placeholder must still be armed
+      // for retry despite the replacement of the observed node.
+      fireEvent.error(img!);
+      expect(screen.getByRole("alert").textContent).toContain(
+        "图片格式无法解码",
+      );
+      fireEvent.click(screen.getByRole("button", { name: "重试" }));
+      await act(() => Promise.resolve());
+      expect(loadExternal).toHaveBeenCalledTimes(2);
       expect(document.querySelector("img[src='blob:mock']")).not.toBeNull();
     } finally {
       delete (window as { IntersectionObserver?: unknown })
@@ -140,7 +211,10 @@ describe("MessageContent markdown images", () => {
   it("auto-loads project-relative images through the project reader", async () => {
     const { container } = renderMarkdown("![流程图](docs/flow.png)");
     await act(() => Promise.resolve());
-    expect(readProjectFile).toHaveBeenCalledWith("docs/flow.png");
+    expect(readProjectFile).toHaveBeenCalledWith(
+      "docs/flow.png",
+      expect.any(Function),
+    );
     expect(container.querySelector("img[src='blob:mock']")).not.toBeNull();
     expect(screen.queryByRole("button")).toBeNull();
   });

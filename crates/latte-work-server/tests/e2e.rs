@@ -5874,6 +5874,97 @@ async fn user_questions_are_not_permissions_and_answers_are_bound_single_use_and
 }
 
 #[tokio::test]
+async fn message_image_preview_reads_without_persisting_reference_grants() {
+    let host = Host::start().await;
+    let mut client = host.client().await;
+    let project = tempfile::tempdir().unwrap();
+    let id = session(&mut client, project.path()).await;
+    let Response::Events { session: task, .. } = ask(
+        &mut client,
+        Request::Poll {
+            session_id: id.clone(),
+            after: 0.0,
+        },
+    )
+    .await
+    else {
+        panic!("session");
+    };
+    let outside = tempfile::tempdir().unwrap();
+    let png = b"\x89PNG\r\n\x1a\n";
+    let image = outside
+        .path()
+        .canonicalize()
+        .unwrap()
+        .join("二维码 截图.png");
+    std::fs::write(&image, png).unwrap();
+    let text = outside.path().canonicalize().unwrap().join("notes.txt");
+    std::fs::write(&text, b"plain notes").unwrap();
+    let preview = |path: String, offset| Request::PreviewMessageImage {
+        project_id: task.project_id.clone(),
+        path,
+        offset,
+    };
+    // An outside path renders without any explicit grant.
+    let Response::SourcePreview {
+        data,
+        mime_type,
+        size,
+        next,
+        has_more,
+    } = ask(
+        &mut client,
+        preview(image.to_string_lossy().into_owned(), 0),
+    )
+    .await
+    else {
+        panic!("image preview");
+    };
+    assert_eq!(data, png);
+    assert_eq!(mime_type, "image/png");
+    assert!(!has_more);
+    assert_eq!(next, size);
+    // The read left no persisted grant behind: the same path stays rejected
+    // for the regular source preview, so reopening history cannot resurrect
+    // access that the user revoked or never gave.
+    assert!(matches!(
+        ask(
+            &mut client,
+            Request::PreviewSource {
+                project_id: task.project_id.clone(),
+                session_id: Some(id.clone()),
+                path: image.to_string_lossy().into_owned(),
+                offset: 0,
+            }
+        )
+        .await,
+        Response::Error { .. }
+    ));
+    // Non-image payloads are refused before any bytes leave the host.
+    assert!(matches!(
+        ask(&mut client, preview(text.to_string_lossy().into_owned(), 0)).await,
+        Response::Error { .. }
+    ));
+    // Relative targets never resolve: replies carry absolute paths only.
+    assert!(matches!(
+        ask(&mut client, preview("notes.txt".into(), 0)).await,
+        Response::Error { .. }
+    ));
+    assert!(matches!(
+        ask(
+            &mut client,
+            Request::PreviewMessageImage {
+                project_id: task.project_id.clone(),
+                path: String::new(),
+                offset: 0,
+            }
+        )
+        .await,
+        Response::Error { .. }
+    ));
+}
+
+#[tokio::test]
 async fn compact_and_legacy_reference_prompts_persist_and_preview_on_the_owning_host() {
     let host = Host::start().await;
     let mut client = host.client().await;

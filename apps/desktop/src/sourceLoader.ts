@@ -15,6 +15,7 @@ export async function loadSource(
   path: string,
   valid: () => boolean,
   full = false,
+  method: "preview_source" | "preview_message_image" = "preview_source",
 ): Promise<SourceData> {
   const chunks: Uint8Array[] = [];
   let offset = 0,
@@ -23,13 +24,23 @@ export async function loadSource(
   const deadline = Date.now() + 30000;
   while (valid()) {
     if (Date.now() > deadline) throw new Error("来源预览读取超时");
-    const response = await request(hostId, {
-      method: "preview_source",
-      project_id: projectId,
-      session_id: sessionId ?? null,
-      path,
-      offset,
-    });
+    const response = await request(
+      hostId,
+      method === "preview_message_image"
+        ? {
+            method,
+            project_id: projectId,
+            path,
+            offset,
+          }
+        : {
+            method,
+            project_id: projectId,
+            session_id: sessionId ?? null,
+            path,
+            offset,
+          },
+    );
     if (!valid()) throw new Error("来源预览已取消");
     if (response.kind === "source_directory")
       return {
