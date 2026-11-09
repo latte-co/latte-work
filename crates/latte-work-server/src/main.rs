@@ -1637,7 +1637,14 @@ async fn dispatch(s: &Service, request: Request) -> Result<Response> {
             if !Path::new(&path).is_absolute() {
                 bail!("消息图片需要绝对路径");
             }
-            let target = tokio::fs::canonicalize(Path::new(&path)).await?;
+            // Slow mounts can hang canonicalize well past the client's
+            // transport deadline; bound it like the reference revoke path.
+            let target = tokio::time::timeout(
+                Duration::from_secs(5),
+                tokio::fs::canonicalize(Path::new(&path)),
+            )
+            .await
+            .context("读取路径超时")??;
             // Display-only read: never consults or writes reference_access,
             // so a reply can neither gain nor resurrect persisted access by
             // rendering an image. The image-only gate plus the bounded
