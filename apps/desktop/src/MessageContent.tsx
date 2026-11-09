@@ -2,7 +2,6 @@ import { WebLink } from "./LinkHandling";
 import { copyText } from "./clipboard";
 import {
   Children,
-  createContext,
   isValidElement,
   useContext,
   useEffect,
@@ -33,6 +32,8 @@ import {
 } from "./inlineReferences";
 import { InlineRefMenu, type InlineRefMenuItem } from "./InlineRefMenu";
 import { InlineRefTooltip } from "./InlineRefTooltip";
+import { MarkdownImage } from "./MessageImage";
+import { MessageActionsContext, type MessageActions } from "./messageActions";
 import type { SourceData } from "./sourceLoader";
 import { webLink } from "./browserLinks";
 
@@ -83,20 +84,6 @@ function CodeBlock({ children }: { children?: ReactNode }) {
     </div>
   );
 }
-/** Workspace hooks that make inline references in messages actionable. */
-export interface MessageActions {
-  /** Open a project-relative path in the workspace file browser. */
-  openFile?: (path: string) => void;
-  /** Absolute paths belong to this host and can leave the app locally. */
-  localHost?: boolean;
-  /** Absolute project root, used to resolve local editor and file-manager calls. */
-  projectRoot?: string;
-  /** Bounded project-file read shared by save-as and content copy. */
-  readProjectFile?: (path: string) => Promise<SourceData>;
-  /** Menu actions report failures to a persistent status surface. */
-  reportError?: (text: string) => void;
-}
-const MessageActionsContext = createContext<MessageActions>({});
 const absolutePath = (root: string | undefined, relative: string) => {
   if (!root) return relative;
   return `${root.replace(/\/$/, "")}/${relative.replace(/^\.\//, "").replace(/^\//, "")}`;
@@ -492,7 +479,12 @@ export function MessageContent({ text }: { text: string }) {
       <ReactMarkdown
         remarkPlugins={[remarkGfm]}
         urlTransform={preserveLocalTargets}
-        components={{ pre: CodeBlock, a: MarkdownLink, code: InlineCodeRef }}
+        components={{
+          pre: CodeBlock,
+          a: MarkdownLink,
+          code: InlineCodeRef,
+          img: MarkdownImage,
+        }}
       >
         {text}
       </ReactMarkdown>

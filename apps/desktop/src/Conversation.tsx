@@ -17,6 +17,7 @@ import { activityTranscript } from "./activity";
 import { ComposerAction } from "./ComposerAction";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { MessageActionsProvider, MessageContent } from "./MessageContent";
+import { createExternalImageLoader } from "./externalImageLoader";
 import { loadSource } from "./sourceLoader";
 import { DraftStore, useDraft, type Draft } from "./drafts";
 import { useStatusIssues } from "./statusNotices";
@@ -623,15 +624,18 @@ export function Conversation({
                   localHost: hostId === "local",
                   projectRoot: project?.path,
                   readProjectFile: projectId
-                    ? (path) =>
+                    ? (path, valid = () => true) =>
                         loadSource(
                           hostId,
                           projectId,
                           undefined,
                           path,
-                          () => true,
+                          valid,
                           true,
                         )
+                    : undefined,
+                  loadExternalImage: projectId
+                    ? createExternalImageLoader(hostId, projectId)
                     : undefined,
                   reportError: setInlineRefError,
                 }}

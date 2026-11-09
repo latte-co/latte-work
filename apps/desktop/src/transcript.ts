@@ -47,10 +47,18 @@ export type Item =
       decision?: "allowed" | "denied" | "expired";
     };
 export function appendEvents(existing: Event[], incoming: Event[]): Event[] {
-  const seen = new Set(existing.map((e) => e.seq));
-  return [...existing, ...incoming.filter((e) => !seen.has(e.seq))].sort(
-    (a, b) => a.seq - b.seq,
-  );
+  // Overlapping poll and history windows can repeat inside either side of a
+  // merge, so the seq key is applied across both sides at once. seq is only
+  // unique within one session, hence the compound key.
+  const seen = new Set<string>();
+  return [...existing, ...incoming]
+    .filter((e) => {
+      const key = `${e.session_id}\u0000${e.seq}`;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    })
+    .sort((a, b) => a.seq - b.seq);
 }
 const inputKey = (sessionId: string, requestId: string) =>
   JSON.stringify([sessionId, requestId]);

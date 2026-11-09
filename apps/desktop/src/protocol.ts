@@ -616,6 +616,12 @@ export type Request =
       offset: number;
     }
   | {
+      method: "preview_message_image";
+      project_id: string;
+      path: string;
+      offset: number;
+    }
+  | {
       method: "preview_change";
       target: ChangePreviewTarget;
       path: string;
