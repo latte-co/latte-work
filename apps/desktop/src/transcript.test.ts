@@ -151,6 +151,39 @@ describe("durable transcript projection", () => {
       { key: 1, type: "assistant", text: "你好" },
     ]);
   });
+  it("deduplicates repeats inside either side of a merge and keeps distinct sessions apart", () => {
+    const other = (seq: number, event: EventKind): Event => ({
+      seq,
+      event,
+      at: 0,
+      session_id: "s2",
+    });
+    // Overlapping poll/history windows can repeat inside one batch; those
+    // repeats used to survive and produced duplicate transcript turn keys
+    // (two active markers in the turn navigator).
+    expect(
+      appendEvents(
+        [],
+        [e(1, { kind: "text", text: "a" }), e(1, { kind: "text", text: "a" })],
+      ),
+    ).toHaveLength(1);
+    expect(
+      appendEvents(
+        [e(1, { kind: "text", text: "a" }), e(1, { kind: "text", text: "a" })],
+        [e(2, { kind: "text", text: "b" }), e(2, { kind: "text", text: "b" })],
+      ).map((row) => row.seq),
+    ).toEqual([1, 2]);
+    // The same seq in another session is a different event stream.
+    expect(
+      appendEvents(
+        [],
+        [
+          e(1, { kind: "text", text: "a" }),
+          other(1, { kind: "text", text: "b" }),
+        ],
+      ),
+    ).toHaveLength(2);
+  });
   it("does not merge across user turns", () => {
     expect(
       transcript([
