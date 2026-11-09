@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { Event, EventKind } from "./protocol";
-import { activityTranscript, toolLabel } from "./activity";
+import { activityTranscript, toolLabel, type ToolActivity } from "./activity";
 const e = (seq: number, event: EventKind): Event => ({
   seq,
   event,
@@ -12,6 +12,31 @@ const call = (seq: number, id: string, name = "Read") =>
 const result = (seq: number, id: string, is_error = false) =>
   e(seq, { kind: "tool_result", id, content: `${id} output`, is_error });
 describe("readable activity projection", () => {
+  it("carries load-full identity only on previewed tool results", () => {
+    const rows = activityTranscript([
+      call(1, "a"),
+      { ...result(2, "a"), content_size: 679_286 },
+      { ...result(3, "orphan"), content_size: 512 * 1024 + 1 },
+      result(4, "whole"),
+    ]);
+    expect(rows).toHaveLength(1);
+    const group = rows[0] as { type: "tools"; tools: ToolActivity[] };
+    expect(group.tools).toMatchObject([
+      {
+        type: "tool",
+        name: "Read",
+        output: "a output",
+        load: { seq: 2, size: 679_286 },
+      },
+      {
+        type: "tool",
+        name: "工具输出",
+        load: { seq: 3, size: 512 * 1024 + 1 },
+      },
+      { type: "tool", name: "工具输出", output: "whole output" },
+    ]);
+    expect(group.tools[2].load).toBeUndefined();
+  });
   it("keeps an in-flight tool paired across a queued input handoff", () => {
     const rows = activityTranscript([
       call(1, "a"),

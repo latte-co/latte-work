@@ -4,12 +4,12 @@ use anyhow::Result;
 use latte_work_protocol::{ProviderAuth, ProviderProtocol};
 use tokio::process::Command;
 
-pub(super) fn id() -> String {
+pub(in crate::agents) fn id() -> String {
     format!("latte-work-{}", uuid::Uuid::new_v4().simple())
 }
 const TOKEN: &str = "LATTE_WORK_TRAEX_PROVIDER_TOKEN";
 
-pub(super) fn configure(
+pub(in crate::agents) fn configure(
     command: &mut Command,
     provider: &ResolvedProvider,
     id: &str,

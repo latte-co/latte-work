@@ -148,7 +148,13 @@ export type Event = {
   session_id: string;
   at: number;
   event: EventKind;
+  /**
+   * Present when `event` carries a size-bounded preview: byte length of the
+   * full payload, loadable as streamable chunks via `Request::EventContent`.
+   */
+  content_size?: number;
 };
+export type ContentEncoding = "text" | "json";
 export type FileEntry = { name: string; path: string; directory: boolean };
 export type ChangeSection = "unstaged" | "staged" | "untracked";
 export type ChangePreviewTarget =
@@ -490,6 +496,7 @@ export type Request =
     }
   | { method: "history"; session_id: string; before: number | null }
   | { method: "poll"; session_id: string; after: number }
+  | { method: "event_content"; session_id: string; seq: number; offset: number }
   | { method: "subagents"; session_id: string }
   | { method: "subagent_transcript"; session_id: string; task_id: string }
   | {
@@ -756,6 +763,19 @@ export type Response =
       events: Array<Event>;
       session: Session;
       has_more: boolean;
+    }
+  | {
+      kind: "event_content";
+      encoding: ContentEncoding;
+      chunk: string;
+      /**
+       * Total payload bytes; chunks concatenate to exactly this length.
+       */
+      total: number;
+      /**
+       * Byte offset of the next chunk; None marks the payload complete.
+       */
+      next: number | null;
     }
   | { kind: "files"; entries: Array<FileEntry> }
   | { kind: "attachment_upload"; id: string }

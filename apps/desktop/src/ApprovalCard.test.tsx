@@ -2,7 +2,16 @@
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, expect, it, vi } from "vitest";
 import { ApprovalCard } from "./ApprovalCard";
-afterEach(cleanup);
+const streamEventContent = vi.fn();
+vi.mock("./eventContent", () => ({
+  streamEventContent: (...args: unknown[]) => streamEventContent(...args),
+  reassembleFullContent: (encoding: string, content: string) =>
+    encoding === "text" ? content : content,
+}));
+afterEach(() => {
+  cleanup();
+  vi.clearAllMocks();
+});
 const request = {
   kind: "approval" as const,
   request_id: "r",
@@ -71,4 +80,33 @@ it("does not offer an empty allow response for an old-server user question", () 
   expect(screen.queryByRole("button", { name: "允许一次" })).toBeNull();
   fireEvent.click(screen.getByRole("button", { name: "跳过问题" }));
   expect(decide).toHaveBeenCalledWith(false);
+});
+
+it("keeps the load-full affordance for previewed outputs in approval records", async () => {
+  streamEventContent.mockResolvedValue({
+    encoding: "text",
+    content: "完整输出",
+  });
+  render(
+    <ApprovalCard
+      request={request}
+      presentation="record"
+      loadContext={{ hostId: "h", sessionId: "s" }}
+      tool={{
+        key: 1,
+        type: "tool",
+        name: "Bash",
+        output: "预览头部…（内容过大，已截断）",
+        load: { seq: 9, size: 679_286 },
+        status: "completed",
+      }}
+      onDecision={vi.fn()}
+    />,
+  );
+  fireEvent.click(screen.getByText(/加载完整内容/));
+  await vi.waitFor(() => expect(screen.getByText("完整输出")).toBeTruthy());
+  expect(streamEventContent).toHaveBeenCalledWith(
+    { hostId: "h", sessionId: "s", seq: 9 },
+    expect.any(Function),
+  );
 });

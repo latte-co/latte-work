@@ -1,3 +1,4 @@
+import { useState } from "react";
 import {
   ChevronRight,
   CircleAlert,
@@ -8,7 +9,27 @@ import {
   Wrench,
 } from "lucide-react";
 import { toolGroupLabel, toolLabel, type ToolActivity } from "./activity";
-import type { JsonValue } from "./protocol";
+import { reassembleFullContent, streamEventContent } from "./eventContent";
+import type { ContentEncoding, JsonValue } from "./protocol";
+
+/** Identity a previewed tool output needs to stream its full payload. */
+export interface ToolLoadContext {
+  hostId: string;
+  sessionId: string;
+}
+
+function formatBytes(size: number): string {
+  if (size >= 1024 * 1024) return `${(size / (1024 * 1024)).toFixed(1)} MiB`;
+  return `${Math.max(1, Math.round(size / 1024))} KB`;
+}
+
+interface ToolStream {
+  encoding: ContentEncoding;
+  text: string;
+  received: number;
+  total: number;
+  done: boolean;
+}
 
 function outputText(value: JsonValue): string {
   if (typeof value === "string") return value;
@@ -42,7 +63,111 @@ function Status({ status }: { status: ToolActivity["status"] }) {
     </span>
   );
 }
-export function ToolRow({ tool }: { tool: ToolActivity }) {
+/**
+ * The output section of one tool result: the stored preview until a load-full
+ * stream replaces it. A failure after the first chunk resets to the preview
+ * so the retry affordance stays available and no half-loaded progress lingers.
+ */
+export function FullToolOutput({
+  output,
+  load,
+  loadContext,
+  pending,
+}: {
+  output?: JsonValue;
+  load?: ToolActivity["load"];
+  loadContext?: ToolLoadContext;
+  pending?: boolean;
+}) {
+  const [stream, setStream] = useState<ToolStream | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  async function loadFull() {
+    if (!loadContext || !load || busy) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const outcome = await streamEventContent(
+        { ...loadContext, seq: load.seq },
+        ({ encoding, accumulated, received, total }) =>
+          setStream({
+            encoding,
+            text: accumulated,
+            received,
+            total,
+            done: false,
+          }),
+      );
+      setStream({
+        encoding: outcome.encoding,
+        text: outcome.content,
+        received: load.size,
+        total: load.size,
+        done: true,
+      });
+    } catch (cause) {
+      // End the progress display and drop the partial stream so the preview
+      // and its load button come back for an explicit retry.
+      setStream(null);
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setBusy(false);
+    }
+  }
+  return (
+    <>
+      {stream ? (
+        <>
+          {!stream.done && (
+            <div className="activity-load-progress">
+              正在流式加载{" "}
+              {Math.min(
+                100,
+                Math.round((stream.received / stream.total) * 100),
+              )}
+              %（{formatBytes(stream.received)} / {formatBytes(stream.total)}）
+            </div>
+          )}
+          {stream.encoding === "text" || stream.done ? (
+            <pre>
+              {stream.done
+                ? stream.encoding === "text"
+                  ? stream.text
+                  : reassembleFullContent("json", stream.text)
+                : stream.text}
+            </pre>
+          ) : (
+            <p>结构化内容接收中…</p>
+          )}
+        </>
+      ) : output !== undefined ? (
+        <pre>{outputText(output)}</pre>
+      ) : (
+        <p>{pending ? "等待工具返回结果…" : "未收到工具结果。"}</p>
+      )}
+      {load && loadContext && !stream && (
+        <button
+          type="button"
+          className="activity-load"
+          disabled={busy}
+          onClick={loadFull}
+        >
+          {busy
+            ? "加载中…"
+            : `加载完整内容（已省略至预览，共 ${formatBytes(load.size)}）`}
+        </button>
+      )}
+      {error && <p className="activity-load-error">加载失败：{error}</p>}
+    </>
+  );
+}
+export function ToolRow({
+  tool,
+  loadContext,
+}: {
+  tool: ToolActivity;
+  loadContext?: ToolLoadContext;
+}) {
   const label = toolLabel(tool).replace(/\s+/g, " ");
   return (
     <details
@@ -71,20 +196,23 @@ export function ToolRow({ tool }: { tool: ToolActivity }) {
         <div className="activity-output-label">
           {tool.status === "failed" ? "错误输出" : "输出"}
         </div>
-        {tool.output !== undefined ? (
-          <pre>{outputText(tool.output)}</pre>
-        ) : (
-          <p>
-            {tool.status === "pending"
-              ? "等待工具返回结果…"
-              : "未收到工具结果。"}
-          </p>
-        )}
+        <FullToolOutput
+          output={tool.output}
+          load={tool.load}
+          loadContext={loadContext}
+          pending={tool.status === "pending"}
+        />
       </div>
     </details>
   );
 }
-export function ToolGroup({ tools }: { tools: ToolActivity[] }) {
+export function ToolGroup({
+  tools,
+  loadContext,
+}: {
+  tools: ToolActivity[];
+  loadContext?: ToolLoadContext;
+}) {
   const status = tools.some((t) => t.status === "pending")
     ? "pending"
     : tools.some((t) => t.status === "unconfirmed")
@@ -104,7 +232,7 @@ export function ToolGroup({ tools }: { tools: ToolActivity[] }) {
       </summary>
       <div className="activity-children">
         {tools.map((tool) => (
-          <ToolRow key={tool.key} tool={tool} />
+          <ToolRow key={tool.key} tool={tool} loadContext={loadContext} />
         ))}
       </div>
     </details>

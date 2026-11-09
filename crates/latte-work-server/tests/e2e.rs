@@ -1,4 +1,6 @@
 //! Final-binary tests: real daemon, real socket/bridge, deterministic native processes.
+#[path = "support/codex.rs"]
+mod codex_e2e;
 #[path = "support/ssh.rs"]
 mod ssh_e2e;
 #[path = "support/traex.rs"]
@@ -37,6 +39,10 @@ impl Host {
             .env(
                 "LATTE_WORK_TRAEX",
                 PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/traex.py"),
+            )
+            .env(
+                "LATTE_WORK_CODEX",
+                PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/codex.py"),
             )
             .env("CLAUDE_CONFIG_DIR", directory.path().join("claude-config"))
             .envs(env.iter().copied())
@@ -450,7 +456,7 @@ async fn denies_permissions_and_bounds_paths_and_failures() {
             &mut c,
             Request::CreateSession {
                 project_id,
-                agent: "codex".into()
+                agent: "opencode".into()
             }
         )
         .await,
@@ -3115,7 +3121,7 @@ async fn agent_commands_discovery_dispatch_resume_and_unsupported_are_native() {
     assert!(
         matches!(ask(&mut client, Request::Sessions { project_id: project_id.clone() }).await, Response::Sessions { sessions } if sessions.is_empty())
     );
-    for (agent, project) in [("codex", project_id.as_str()), ("claude", "missing")] {
+    for (agent, project) in [("opencode", project_id.as_str()), ("claude", "missing")] {
         assert!(matches!(
             ask(
                 &mut client,
@@ -3505,7 +3511,7 @@ async fn permission_discovery_launch_resume_reset_and_approval_stay_native() {
         ask(
             &mut client,
             Request::AgentPermissions {
-                agent: "codex".into()
+                agent: "opencode".into()
             }
         )
         .await,
@@ -4646,6 +4652,7 @@ async fn persisted_handback_report_is_read_without_reopening_or_replaying_agent(
                 name: "SubagentHandback".into(),
                 input: serde_json::json!({"message":report}),
             },
+            content_size: None,
         },
         latte_work_protocol::Event {
             seq: 2.0,
@@ -4656,6 +4663,7 @@ async fn persisted_handback_report_is_read_without_reopening_or_replaying_agent(
                 content: serde_json::json!([{"type":"text","text":"{\"success\":true}"}]),
                 is_error: false,
             },
+            content_size: None,
         },
     ];
     let db = rusqlite::Connection::open(host.directory.path().join("state.sqlite")).unwrap();
@@ -8051,11 +8059,104 @@ async fn snapshot_legacy_oversized_events_advance_cursor_and_leave_other_session
         Response::Accepted { .. }
     ));
     let events = wait(&mut client, &id, Status::Completed).await;
-    assert!(
-        events
-            .iter()
-            .any(|e| e.seq == blocked && matches!(e.event, EventKind::Notice { .. }))
-    );
+    assert!(events.iter().any(|e| e.seq == blocked
+        && matches!(&e.event, EventKind::Notice { text } if text.len() < 96 * 1024)
+        && e.content_size == Some(old.len())));
+    // The full payload streams back in frame-safe chunks that reassemble exactly.
+    let mut assembled = 0;
+    let mut offset = 0;
+    loop {
+        let Response::EventContent {
+            encoding,
+            chunk,
+            total,
+            next,
+        } = ask(
+            &mut client,
+            Request::EventContent {
+                session_id: id.clone(),
+                seq: blocked,
+                offset,
+            },
+        )
+        .await
+        else {
+            panic!("event content")
+        };
+        assert_eq!(encoding, latte_work_protocol::ContentEncoding::Text);
+        assert_eq!(total, 3 * 1024 * 1024);
+        assert!(chunk.len() <= 512 * 1024 + 8);
+        assembled += chunk.len();
+        match next {
+            Some(next_offset) => {
+                assert!(next_offset > offset);
+                offset = next_offset;
+            }
+            None => break,
+        }
+    }
+    assert_eq!(assembled, 3 * 1024 * 1024);
+    assert!(matches!(
+        ask(
+            &mut client,
+            Request::EventContent {
+                session_id: id.clone(),
+                seq: blocked,
+                offset: 3 * 1024 * 1024 + 1,
+            }
+        )
+        .await,
+        Response::Error { .. }
+    ));
+    // A multibyte payload rejects offsets landing inside a character instead
+    // of panicking with the shared database lock held; the other session keeps
+    // serving polls afterwards.
+    let db = rusqlite::Connection::open(host.directory.path().join("state.sqlite")).unwrap();
+    db.execute(
+        "INSERT INTO events(session_id,at,data) VALUES (?1,2,?2)",
+        rusqlite::params![
+            id,
+            serde_json::json!({
+                "kind":"tool_result",
+                "id":"exec-cjk",
+                "content":"中文负载".repeat(80_000),
+                "is_error":false
+            })
+            .to_string()
+        ],
+    )
+    .unwrap();
+    let cjk = db.last_insert_rowid() as f64;
+    drop(db);
+    for offset in [1usize, 4, 5] {
+        assert!(matches!(
+            ask(
+                &mut client,
+                Request::EventContent {
+                    session_id: id.clone(),
+                    seq: cjk,
+                    offset,
+                }
+            )
+            .await,
+            Response::Error { .. }
+        ));
+    }
+    assert!(matches!(
+        ask(
+            &mut client,
+            Request::EventContent {
+                session_id: id.clone(),
+                seq: cjk,
+                offset: 0,
+            }
+        )
+        .await,
+        Response::EventContent {
+            encoding: latte_work_protocol::ContentEncoding::Text,
+            ..
+        }
+    ));
     assert!(events.iter().any(|e| matches!(
         e.event,
         EventKind::State {
@@ -8075,7 +8176,12 @@ async fn snapshot_legacy_oversized_events_advance_cursor_and_leave_other_session
     else {
         panic!()
     };
-    assert!(events.is_empty());
+    // The follow-up poll delivers only the multibyte tool result inserted for
+    // the offset probes.
+    assert!(matches!(
+        events.as_slice(),
+        [event] if event.seq == cjk
+    ));
     assert!(matches!(
         send(&mut client, &other, "other-session", "identity").await,
         Response::Accepted { .. }

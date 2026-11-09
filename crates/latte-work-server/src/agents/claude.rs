@@ -1702,6 +1702,7 @@ pub(super) fn parse_child_history(
                 session_id: session_id.into(),
                 at,
                 event,
+                content_size: None,
             });
             if let Some(text) = report {
                 events.push(latte_work_protocol::Event {
@@ -1709,6 +1710,7 @@ pub(super) fn parse_child_history(
                     session_id: session_id.into(),
                     at,
                     event: EventKind::Text { text },
+                    content_size: None,
                 });
             }
         }
@@ -1815,6 +1817,7 @@ pub(super) fn parse_child_transcript(
                     session_id: session_id.into(),
                     at,
                     event,
+                    content_size: None,
                 },
                 size,
             ));
@@ -1870,6 +1873,7 @@ fn report_events(mut text: String, seq: f64, session_id: &str, at: f64) -> super
             event: EventKind::Text {
                 text: rest[..end].into(),
             },
+            content_size: None,
         });
         rest = &rest[end..];
     }
@@ -2744,6 +2748,7 @@ mod tests {
                 content: json!([{"type":"text","text":"{\"success\":true}"}]),
                 is_error: false,
             },
+            content_size: None,
         });
         // A receipt or empty streaming fragment must not hide the report.
         for text in ["", "Report delivered. Read it in the parent session."] {
@@ -2753,6 +2758,7 @@ mod tests {
                 session_id: "public".into(),
                 at: 0.0,
                 event: EventKind::Text { text: text.into() },
+                content_size: None,
             });
             let restored = normalize_child_transcript(source).unwrap();
             let actual: String = restored

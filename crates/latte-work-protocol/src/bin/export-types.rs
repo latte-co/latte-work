@@ -24,6 +24,7 @@ fn main() {
         UserQuestion::decl(),
         QuestionAnswer::decl(),
         Event::decl(),
+        ContentEncoding::decl(),
         FileEntry::decl(),
         ChangeSection::decl(),
         ChangePreviewTarget::decl(),

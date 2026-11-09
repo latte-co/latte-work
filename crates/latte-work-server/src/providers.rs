@@ -425,7 +425,7 @@ impl ProviderStore {
             })
         } else {
             Ok(Response::Models {
-                models: if agent == "traex" {
+                models: if matches!(agent, "traex" | "codex") {
                     model.map(str::to_owned).into_iter().collect()
                 } else {
                     crate::agents::model_aliases(agent)
@@ -787,7 +787,13 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
-        assert!(store.snapshot_for_host("remote-a", "codex").is_err());
+        assert!(store.snapshot_for_host("remote-a", "opencode").is_err());
+        assert!(
+            store
+                .snapshot_for_host("remote-a", "codex")
+                .unwrap()
+                .is_none()
+        );
         assert!(store.launch_config("claude").provider.is_none());
         assert!(store.delete(&id).is_err());
         let first = store

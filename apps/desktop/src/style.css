@@ -1850,6 +1850,99 @@ button.recent-notice {
 .markdown a {
   color: var(--accent);
 }
+/* Local-path markdown links: same accent as web links, but as a button. */
+.markdown .markdown-file-link {
+  background: none;
+  border: none;
+  padding: 0;
+  margin: 0;
+  font: inherit;
+  text-align: inherit;
+  color: var(--accent);
+  cursor: pointer;
+}
+.markdown .markdown-file-link:hover,
+.markdown .markdown-file-link:focus-visible {
+  text-decoration: underline;
+}
+/* Inert targets (anchors, unknown schemes) must not look clickable. */
+.markdown .markdown-link-inert {
+  color: inherit;
+}
+.markdown .inline-code-ref {
+  display: inline-flex;
+  align-items: baseline;
+  background: none;
+  padding: 0;
+}
+.inline-ref-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font: inherit;
+  background: none;
+  border: none;
+  padding: 2px var(--space-1);
+  margin: 0;
+  border-radius: var(--radius-sm);
+  font-family: var(--font-code);
+  font-weight: var(--weight-code);
+  font-size: 0.9em;
+  background: var(--color-hover);
+  color: inherit;
+  cursor: pointer;
+  text-align: left;
+  overflow-wrap: anywhere;
+}
+.inline-ref-button > svg {
+  flex: none;
+  color: var(--color-text-secondary);
+}
+.inline-ref-button:is(:hover, :focus-visible) {
+  color: var(--accent);
+  text-decoration: underline;
+}
+.inline-code-ref .inline-ref-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  background: var(--color-hover);
+  padding: 2px var(--space-1);
+  border-radius: var(--radius-sm);
+  font-family: var(--font-code);
+  font-weight: var(--weight-code);
+  font-size: 0.9em;
+  overflow-wrap: anywhere;
+}
+.inline-code-ref .inline-ref-link > svg {
+  flex: none;
+  color: var(--color-text-secondary);
+}
+.inline-ref-tooltip {
+  position: fixed;
+  z-index: 1000;
+  display: grid;
+  gap: 2px;
+  width: max-content;
+  max-width: min(420px, calc(100vw - 16px));
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-control);
+  background: var(--color-elevated);
+  box-shadow: var(--shadow-popover);
+  color: var(--color-text);
+  font-size: var(--text-sm);
+  line-height: var(--leading-ui);
+  overflow-wrap: anywhere;
+  pointer-events: none;
+}
+.inline-ref-tooltip-path {
+  font-family: var(--font-code);
+  overflow-wrap: anywhere;
+}
+.inline-ref-tooltip-hint {
+  color: var(--color-text-muted);
+}
 .markdown img {
   max-width: 100%;
   height: auto;
@@ -1965,6 +2058,32 @@ button.recent-notice {
 }
 .activity-output pre:last-child {
   margin-bottom: 0;
+}
+.activity-load {
+  margin: 4px 0 10px;
+  font-size: var(--text-sm);
+  color: var(--color-text-secondary);
+  background: none;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-control);
+  padding: 3px 10px;
+  cursor: pointer;
+}
+.activity-load:hover:not(:disabled) {
+  background: var(--color-hover);
+}
+.activity-load:disabled {
+  cursor: default;
+  opacity: 0.7;
+}
+.activity-load-progress {
+  font-size: var(--text-sm);
+  color: var(--color-text-muted);
+  margin: 4px 0;
+}
+.activity-load-error {
+  color: var(--color-danger, #d2553d);
+  font-size: var(--text-sm);
 }
 .activity-output p {
   margin: 6px 0;

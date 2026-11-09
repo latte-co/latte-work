@@ -16,7 +16,8 @@ import { ApprovalCard } from "./ApprovalCard";
 import { activityTranscript } from "./activity";
 import { ComposerAction } from "./ComposerAction";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { MessageContent } from "./MessageContent";
+import { MessageActionsProvider, MessageContent } from "./MessageContent";
+import { loadSource } from "./sourceLoader";
 import { DraftStore, useDraft, type Draft } from "./drafts";
 import { useStatusIssues } from "./statusNotices";
 import { ArrowUp, ArrowDown, Bot } from "lucide-react";
@@ -51,6 +52,7 @@ export const statusNames = {
 interface Props {
   openSubagents?: () => void;
   openTurnChanges?: (changes: TurnChanges, path?: string) => void;
+  openFile?: (path: string) => void;
   drafts: DraftStore;
   agent?: AgentInfo;
   agents?: AgentInfo[];
@@ -99,6 +101,7 @@ interface Props {
 export function Conversation({
   openSubagents,
   openTurnChanges,
+  openFile,
   drafts,
   agent,
   agents = [],
@@ -256,6 +259,7 @@ export function Conversation({
     !preparingHistory &&
     (turnEntries.length > 1 || (hasEarlierHistory && turnEntries.length > 0));
   const [stopping, setStopping] = useState(false);
+  const [inlineRefError, setInlineRefError] = useState("");
   const stopGeneration = useRef(0);
   const active = session && ["running", "waiting"].includes(session.status);
   const pendingQuestions = useMemo(
@@ -527,6 +531,12 @@ export function Conversation({
       pending: stopping,
       action: { label: "停止当前任务", run: stop },
     },
+    {
+      id: `inline-refs:${hostId}`,
+      title: "文件操作未完成",
+      error: inlineRefError,
+      action: { label: "知道了", run: () => setInlineRefError("") },
+    },
   ]);
   return (
     <section
@@ -607,108 +617,149 @@ export function Conversation({
                   </button>
                 </div>
               )}
-              <TurnTranscript
-                key={JSON.stringify([hostId, session?.id])}
-                events={events}
-                turns={turns}
+              <MessageActionsProvider
+                value={{
+                  openFile,
+                  localHost: hostId === "local",
+                  projectRoot: project?.path,
+                  readProjectFile: projectId
+                    ? (path) =>
+                        loadSource(
+                          hostId,
+                          projectId,
+                          undefined,
+                          path,
+                          () => true,
+                          true,
+                        )
+                    : undefined,
+                  reportError: setInlineRefError,
+                }}
               >
-                {(item) =>
-                  item.type === "user" ? (
-                    <UserMessage
-                      key={item.key}
-                      text={item.text}
-                      at={item.at}
-                      hostId={hostId}
-                      projectId={projectId}
-                      sessionId={session?.id}
-                      connected={connected}
-                      active={!settingsOpen && !preparingHistory}
-                    />
-                  ) : item.type === "assistant" ? (
-                    <article
-                      className="assistant-message markdown"
-                      key={item.key}
-                    >
-                      <MessageContent text={item.text} />
-                    </article>
-                  ) : item.type === "tool_images" ? (
-                    <ToolImages
-                      key={item.key}
-                      images={item.images}
-                      active={!settingsOpen && !preparingHistory}
-                    />
-                  ) : item.type === "tool" ? (
-                    <ToolRow key={item.key} tool={item} />
-                  ) : item.type === "tools" ? (
-                    <ToolGroup key={item.key} tools={item.tools} />
-                  ) : (
-                    (() => {
-                      const v = item.value;
-                      if (v.kind === "turn_changes" && openTurnChanges)
-                        return (
-                          <TurnChangesCard
-                            key={`${hostId}:${session?.id}:${item.key}`}
-                            hostId={hostId}
-                            sessionId={session?.id ?? ""}
-                            canUndo={
-                              connected &&
-                              !!session &&
-                              !["running", "waiting"].includes(
-                                session.status,
-                              ) &&
-                              latestRequestId(events) === v.changes.request_id
-                            }
-                            changes={v.changes}
-                            open={(path) => openTurnChanges(v.changes, path)}
-                          />
-                        );
-                      if (v.kind === "question")
-                        return (
-                          <QuestionCard
-                            key={item.key}
-                            request={v}
-                            resolved={item.resolved}
-                            answers={
-                              item.type === "event" ? item.answers : undefined
-                            }
-                            record
-                            onAnswer={() => {}}
-                          />
-                        );
-                      if (v.kind === "approval")
-                        return (
-                          <ApprovalCard
-                            key={item.key}
-                            request={v}
-                            resolved={item.resolved}
-                            decision={item.decision}
-                            tool={item.approvalTool}
-                            presentation="record"
-                            onDecision={(allow) =>
-                              void decide(v.request_id, allow)
-                            }
-                          />
-                        );
-                      if (v.kind === "state" && v.message)
-                        return (
-                          <div
-                            className={`notice ${v.status === "failed" ? "failure" : ""}`}
-                            key={item.key}
-                          >
-                            {v.message}
-                          </div>
-                        );
-                      if (v.kind === "notice")
-                        return (
-                          <div className="notice" key={item.key}>
-                            {v.text}
-                          </div>
-                        );
-                      return null;
-                    })()
-                  )
-                }
-              </TurnTranscript>
+                <TurnTranscript
+                  key={JSON.stringify([hostId, session?.id])}
+                  events={events}
+                  turns={turns}
+                >
+                  {(item) =>
+                    item.type === "user" ? (
+                      <UserMessage
+                        key={item.key}
+                        text={item.text}
+                        at={item.at}
+                        hostId={hostId}
+                        projectId={projectId}
+                        sessionId={session?.id}
+                        connected={connected}
+                        active={!settingsOpen && !preparingHistory}
+                      />
+                    ) : item.type === "assistant" ? (
+                      <article
+                        className="assistant-message markdown"
+                        key={item.key}
+                      >
+                        <MessageContent text={item.text} />
+                      </article>
+                    ) : item.type === "tool_images" ? (
+                      <ToolImages
+                        key={item.key}
+                        images={item.images}
+                        active={!settingsOpen && !preparingHistory}
+                      />
+                    ) : item.type === "tool" ? (
+                      <ToolRow
+                        key={item.key}
+                        tool={item}
+                        loadContext={
+                          session
+                            ? { hostId, sessionId: session.id }
+                            : undefined
+                        }
+                      />
+                    ) : item.type === "tools" ? (
+                      <ToolGroup
+                        key={item.key}
+                        tools={item.tools}
+                        loadContext={
+                          session
+                            ? { hostId, sessionId: session.id }
+                            : undefined
+                        }
+                      />
+                    ) : (
+                      (() => {
+                        const v = item.value;
+                        if (v.kind === "turn_changes" && openTurnChanges)
+                          return (
+                            <TurnChangesCard
+                              key={`${hostId}:${session?.id}:${item.key}`}
+                              hostId={hostId}
+                              sessionId={session?.id ?? ""}
+                              canUndo={
+                                connected &&
+                                !!session &&
+                                !["running", "waiting"].includes(
+                                  session.status,
+                                ) &&
+                                latestRequestId(events) === v.changes.request_id
+                              }
+                              changes={v.changes}
+                              open={(path) => openTurnChanges(v.changes, path)}
+                            />
+                          );
+                        if (v.kind === "question")
+                          return (
+                            <QuestionCard
+                              key={item.key}
+                              request={v}
+                              resolved={item.resolved}
+                              answers={
+                                item.type === "event" ? item.answers : undefined
+                              }
+                              record
+                              onAnswer={() => {}}
+                            />
+                          );
+                        if (v.kind === "approval")
+                          return (
+                            <ApprovalCard
+                              key={item.key}
+                              request={v}
+                              resolved={item.resolved}
+                              decision={item.decision}
+                              tool={item.approvalTool}
+                              presentation="record"
+                              loadContext={
+                                session
+                                  ? { hostId, sessionId: session.id }
+                                  : undefined
+                              }
+                              onDecision={(allow) =>
+                                void decide(v.request_id, allow)
+                              }
+                            />
+                          );
+                        if (v.kind === "state" && v.message)
+                          return (
+                            <div
+                              className={`notice ${v.status === "failed" ? "failure" : ""}`}
+                              key={item.key}
+                            >
+                              {v.message}
+                            </div>
+                          );
+                        if (v.kind === "notice")
+                          return (
+                            <div className="notice" key={item.key}>
+                              {v.text}
+                            </div>
+                          );
+                        return null;
+                      })()
+                    )
+                  }
+                </TurnTranscript>
+              </MessageActionsProvider>
               {workingStatus && (
                 <WorkingStatus
                   label={workingStatus}
@@ -868,6 +919,9 @@ export function Conversation({
                 tool={tool}
                 disabled={!connected || stopping || !!submittingApproval}
                 busy={submittingApproval === request.request_id}
+                loadContext={
+                  session ? { hostId, sessionId: session.id } : undefined
+                }
                 onDecision={(allow) => void decide(request.request_id, allow)}
               />
             ))}

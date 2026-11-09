@@ -1,4 +1,4 @@
-//! Bounded metadata-only probes of the installed Traex executable. No prompt or thread.
+//! Bounded metadata-only probes of the installed App-server executable. No prompt or thread.
 use anyhow::{Context, Result, bail};
 use futures_util::StreamExt;
 use latte_work_protocol::{AgentInfo, AgentPermissionMode, Effort, ModelVariant, Response};
@@ -7,7 +7,7 @@ use std::{collections::BTreeMap, path::PathBuf, process::Stdio, time::Duration};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio_util::codec::{FramedRead, LinesCodec};
 
-pub(super) async fn output(binary: &str, args: &[&str]) -> Result<String> {
+pub(in crate::agents) async fn output(binary: &str, args: &[&str]) -> Result<String> {
     let child = crate::agent_environment::command(binary)
         .args(args)
         .stdin(Stdio::null())
@@ -16,7 +16,7 @@ pub(super) async fn output(binary: &str, args: &[&str]) -> Result<String> {
         .kill_on_drop(true)
         .process_group(0)
         .spawn()?;
-    let pid = child.id().context("Traex PID missing")? as i32;
+    let pid = child.id().context("App-server PID missing")? as i32;
     let mut group = crate::runtime::Group { child, pid };
     let result = tokio::time::timeout(Duration::from_secs(5), async {
         let mut out = Vec::new();
@@ -25,25 +25,25 @@ pub(super) async fn output(binary: &str, args: &[&str]) -> Result<String> {
             .child
             .stdout
             .take()
-            .context("Traex stdout missing")?
+            .context("App-server stdout missing")?
             .take(131073);
         let mut stderr = group
             .child
             .stderr
             .take()
-            .context("Traex stderr missing")?
+            .context("App-server stderr missing")?
             .take(131073);
         tokio::try_join!(stdout.read_to_end(&mut out), stderr.read_to_end(&mut err))?;
         if out.len() + err.len() > 131072 {
-            bail!("Traex 元数据超出限制");
+            bail!("App-server 元数据超出限制");
         }
         if !group.child.wait().await?.success() {
-            bail!("Traex 元数据读取失败，请检查 CLI 安装和登录状态");
+            bail!("App-server 元数据读取失败，请检查 CLI 安装和登录状态");
         }
         Ok(String::from_utf8(out)?)
     })
     .await
-    .context("Traex 元数据读取超时")?;
+    .context("App-server 元数据读取超时")?;
     let _ = nix::sys::signal::killpg(
         nix::unistd::Pid::from_raw(pid),
         nix::sys::signal::Signal::SIGKILL,
@@ -84,7 +84,7 @@ pub(crate) async fn permission_modes(binary: &str) -> Result<Vec<AgentPermission
     let section = help
         .split("--permission-mode")
         .nth(1)
-        .context("此 Traex 未公布权限模式")?
+        .context("此 App-server 未公布权限模式")?
         .split("\n  -")
         .next()
         .unwrap_or_default();
@@ -117,7 +117,7 @@ pub(crate) async fn permission_modes(binary: &str) -> Result<Vec<AgentPermission
         })
         .collect();
     if modes.is_empty() {
-        bail!("此 Traex 没有已适配的权限模式");
+        bail!("此 App-server 没有已适配的权限模式");
     }
     Ok(modes)
 }
@@ -141,6 +141,15 @@ pub(crate) async fn models(
     path: Option<&str>,
     selected: Option<&str>,
 ) -> Result<Response> {
+    models_for_agent(binary, path, selected, false).await
+}
+
+pub(in crate::agents) async fn models_for_agent(
+    binary: &str,
+    path: Option<&str>,
+    selected: Option<&str>,
+    codex: bool,
+) -> Result<Response> {
     let mut command = crate::agent_environment::command(binary);
     command.args(["app-server", "--stdio"]);
     if let Some(path) = path {
@@ -153,11 +162,19 @@ pub(crate) async fn models(
         .kill_on_drop(true)
         .process_group(0)
         .spawn()?;
-    let pid = child.id().context("Traex PID missing")? as i32;
+    let pid = child.id().context("App-server PID missing")? as i32;
     let mut group = crate::runtime::Group { child, pid };
-    let mut input = group.child.stdin.take().context("Traex stdin missing")?;
+    let mut input = group
+        .child
+        .stdin
+        .take()
+        .context("App-server stdin missing")?;
     let mut output = FramedRead::new(
-        group.child.stdout.take().context("Traex stdout missing")?,
+        group
+            .child
+            .stdout
+            .take()
+            .context("App-server stdout missing")?,
         LinesCodec::new_with_max_length(1024 * 1024),
     );
     let result = tokio::time::timeout(Duration::from_secs(12), async {
@@ -175,20 +192,20 @@ pub(crate) async fn models(
             let line = output
                 .next()
                 .await
-                .context("Traex 在返回模型列表前退出")??;
+                .context("App-server 在返回模型列表前退出")??;
             bytes += line.len();
             if bytes > 1024 * 1024 {
-                bail!("Traex 模型列表超出限制");
+                bail!("App-server 模型列表超出限制");
             }
             let message: Value = serde_json::from_str(&line)?;
             if message.get("method").is_some() && message.get("id").is_some() {
-                bail!("Traex 元数据读取期间请求执行操作");
+                bail!("App-server 元数据读取期间请求执行操作");
             }
             if message["id"].as_u64() != Some(u64::from(expected)) {
                 continue;
             }
             if message.get("error").is_some() {
-                bail!("Traex 模型读取失败，请检查 CLI 版本和登录状态");
+                bail!("App-server 模型读取失败，请检查 CLI 版本和登录状态");
             }
             if expected == 1 {
                 input.write_all(b"{\"method\":\"initialized\"}\n").await?;
@@ -200,18 +217,22 @@ pub(crate) async fn models(
             entries.extend(
                 result["data"]
                     .as_array()
-                    .context("Traex 未返回有效模型列表")?
+                    .context("App-server 未返回有效模型列表")?
                     .iter()
                     .cloned(),
             );
             if entries.len() > 256 {
-                bail!("Traex 模型数量超出限制");
+                bail!("App-server 模型数量超出限制");
             }
             if result["nextCursor"].is_null() {
-                return catalog(&entries, selected);
+                return if codex {
+                    codex_catalog(entries, selected)
+                } else {
+                    catalog(&entries, selected)
+                };
             }
             if expected >= 6 {
-                bail!("Traex 模型分页超出限制");
+                bail!("App-server 模型分页超出限制");
             }
             expected += 1;
             rpc(
@@ -222,10 +243,10 @@ pub(crate) async fn models(
             )
             .await?;
         }
-        bail!("Traex 元数据消息超出限制")
+        bail!("App-server 元数据消息超出限制")
     })
     .await
-    .context("读取 Traex 模型超时")?;
+    .context("读取 App-server 模型超时")?;
     let _ = nix::sys::signal::killpg(
         nix::unistd::Pid::from_raw(pid),
         nix::sys::signal::Signal::SIGKILL,
@@ -233,6 +254,22 @@ pub(crate) async fn models(
     let _ = group.child.wait().await;
     result
 }
+fn codex_catalog(mut entries: Vec<Value>, selected: Option<&str>) -> Result<Response> {
+    // Catalog row IDs may differ from the model slug accepted by turn/start.
+    // Hidden rows never reach the picker; an incomplete hidden row must not
+    // take the whole visible catalog down with it.
+    for entry in &mut entries {
+        if entry["hidden"] == true {
+            continue;
+        }
+        let model = entry.get("model").cloned().context("Codex 模型 ID 缺失")?;
+        let fields = entry.as_object_mut().context("Codex 模型条目无效")?;
+        fields.insert("id".into(), model);
+        fields.remove("businessMetadata");
+    }
+    catalog(&entries, selected)
+}
+
 fn native_id(value: &Value) -> Option<&str> {
     value
         .as_str()
@@ -268,9 +305,9 @@ fn catalog(entries: &[Value], selected: Option<&str>) -> Result<Response> {
     let mut default_model = None;
     let mut effort_levels = Vec::new();
     for entry in entries.iter().filter(|v| v["hidden"] != true) {
-        let id = native_id(&entry["id"]).context("Traex 模型 ID 无效")?;
+        let id = native_id(&entry["id"]).context("App-server 模型 ID 无效")?;
         if models.iter().any(|v| v == id) {
-            bail!("Traex 模型 ID 重复");
+            bail!("App-server 模型 ID 重复");
         }
         models.push(id.to_owned());
         let label = entry["displayName"]
@@ -286,7 +323,7 @@ fn catalog(entries: &[Value], selected: Option<&str>) -> Result<Response> {
             if models.contains(&max.model)
                 || entries.iter().any(|v| v["id"].as_str() == Some(&max.model))
             {
-                bail!("Traex 模式 ID 与模型重复");
+                bail!("App-server 模式 ID 与模型重复");
             }
             models.push(max.model.clone());
             labels.insert(max.model.clone(), format!("{label} / Max"));
@@ -350,10 +387,10 @@ pub(crate) async fn validate_selection(
         unreachable!()
     };
     if selected.is_some_and(|id| !models.iter().any(|m| m == id)) {
-        bail!("模型不在当前 Traex 可选列表中，请刷新模型列表");
+        bail!("模型不在当前 App-server 可选列表中，请刷新模型列表");
     }
     if effort.is_some_and(|level| !effort_levels.contains(&level)) {
-        bail!("此 Traex 模型不支持所选思考强度");
+        bail!("此 App-server 模型不支持所选思考强度");
     }
     Ok(model_variants
         .into_iter()
@@ -378,6 +415,36 @@ pub(crate) async fn validate_selection(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn codex_catalog_uses_model_slugs_and_rejects_malformed_entries() {
+        let entries = vec![
+            json!({"id":"opaque-row", "model":"native-model", "isDefault":true,
+            "supportedReasoningEfforts":[{"reasoningEffort":"high"}],
+            "businessMetadata":{"variants":{"max_key":"not-a-codex-mode","standard_key":"standard"}}}),
+        ];
+        let Response::Models {
+            models,
+            default_model,
+            effort_levels,
+            model_variants,
+            ..
+        } = codex_catalog(entries, Some("native-model")).unwrap()
+        else {
+            panic!()
+        };
+        assert_eq!(models, ["native-model"]);
+        assert_eq!(default_model.as_deref(), Some("native-model"));
+        assert_eq!(effort_levels, [Effort::High]);
+        assert!(model_variants.is_none());
+        for malformed in [
+            json!("invalid"),
+            json!({"id":"no-model"}),
+            json!({"model":null}),
+        ] {
+            assert!(codex_catalog(vec![malformed], None).is_err());
+        }
+        assert!(codex_catalog(vec![json!({"id":"hidden-row","hidden":true})], None).is_ok());
+    }
     #[test]
     fn native_catalog_preserves_ids_and_per_model_efforts_without_claude_fallback() {
         let entries = vec![

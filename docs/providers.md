@@ -181,3 +181,21 @@ python3 scripts/smoke-traex-providers.py --binary target/debug/latte-work-server
 
 该检查覆盖三种协议的真实流式回复、认证、模型与 Provider 切换后的原生续聊、恢复 CLI
 配置，以及持久文件中不包含凭据；不代表实际远程主机或用户模型服务已经验证。
+
+
+## Codex Provider
+
+Codex 仅接受 OpenAI Responses。关联 Provider 后使用 App 的模型目录，不合成 Traex
+Standard / Max 模式或 Claude `[1m]` 后缀，也不提供未经原生目录确认的思考档位。
+未关联时读取执行主机 Codex 的模型目录、显示名称和逐模型思考档位。
+
+每个专属 `codex app-server --stdio` 子进程使用随机 Provider ID 和进程级配置覆盖。
+Bearer 使用原生 `env_key`，API Key 使用原生 `env_http_headers` 注入 `x-api-key`；
+无认证模式不继承原生 OpenAI 登录。凭据不进入命令行、JSON-RPC 或原生配置文件。
+线程启动／恢复时明确指定当前 Provider；解除关联后重新读取 CLI 配置。Codex 的 turn
+请求不使用 Traex 的 `modelProvider` 扩展字段。远端需安装 Codex 和更新 Server。
+
+`python3 scripts/smoke-codex-providers.py` 使用真实 CLI 与本地 Responses 模拟服务
+验证三种认证、模型和 Provider 切换、原生恢复、CLI 配置恢复、临时项目的原生工具执行
+与凭据持久化边界。
+这不代表真实模型服务、原生桌面 UI 或 SSH 执行已经验证。

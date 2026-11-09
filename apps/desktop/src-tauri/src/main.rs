@@ -851,6 +851,361 @@ async fn reveal_project(
     }
     Ok(())
 }
+/// Expand `~/` and require a bounded absolute path before any file-manager call.
+fn resolve_reveal_path(raw: &str, home: &std::path::Path) -> Result<PathBuf, String> {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return Err("路径为空".into());
+    }
+    if raw.len() > 1024 {
+        return Err("路径超出限制".into());
+    }
+    let expanded = if let Some(rest) = raw.strip_prefix("~/") {
+        if rest.is_empty() {
+            return Err("路径无效".into());
+        }
+        home.join(rest)
+    } else if raw.starts_with('~') {
+        // `~` and `~user` forms have no meaning on this host.
+        return Err("路径无效".into());
+    } else {
+        PathBuf::from(raw)
+    };
+    if !expanded.is_absolute() {
+        return Err("仅支持绝对路径".into());
+    }
+    if expanded.as_os_str().as_encoded_bytes().contains(&0) {
+        return Err("路径无效".into());
+    }
+    Ok(expanded)
+}
+/// Reveal one local absolute path in Finder, never executing it.
+/// Reveal-only semantics have no `xdg-open` equivalent that shows instead of
+/// opens, so non-macOS platforms decline like `reveal_project`.
+#[tauri::command]
+async fn reveal_path(path: String) -> Result<(), String> {
+    let path = local_target(&path)?;
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = &path;
+        return Err("此平台暂不支持在文件管理器中显示".into());
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let mut command = tokio::process::Command::new("/usr/bin/open");
+        command.arg("-R").arg(&path);
+        run_bounded(command, "无法在访达中显示该路径").await
+    }
+}
+fn reveal_home() -> Result<PathBuf, String> {
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .filter(|home| home.is_absolute())
+        .ok_or("无法确定主目录".into())
+}
+fn local_target(raw: &str) -> Result<PathBuf, String> {
+    let path = resolve_reveal_path(raw, &reveal_home()?)?;
+    if !path.exists() {
+        return Err("文件不存在或已移动".into());
+    }
+    Ok(path)
+}
+fn is_executable(path: &std::path::Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    path.metadata()
+        .map(|meta| meta.permissions().mode() & 0o111 != 0)
+        .unwrap_or(false)
+}
+/// Directory suffixes whose `open` target is an app bundle or system plugin:
+/// launching it, not showing it. `.app`/`.workflow` are directories, so the
+/// executable-bit guard never sees them.
+const OPEN_LAUNCH_BUNDLES: [&str; 12] = [
+    ".app",
+    ".appex",
+    ".bundle",
+    ".framework",
+    ".kext",
+    ".plugin",
+    ".prefPane",
+    ".qlgenerator",
+    ".service",
+    ".wdgt",
+    ".workflow",
+    ".xpc",
+];
+/// File suffixes whose default `open` handler installs or executes a script
+/// regardless of any executable bit.
+const OPEN_LAUNCH_FILES: [&str; 6] = [".command", ".desktop", ".dmg", ".mpkg", ".pkg", ".terminal"];
+/// Whether `open` would launch or install this target instead of showing it.
+fn open_launches_target(path: &std::path::Path) -> bool {
+    let Some(suffix) = path
+        .extension()
+        .map(|ext| format!(".{}", ext.to_string_lossy().to_lowercase()))
+    else {
+        return false;
+    };
+    if path.is_dir() {
+        OPEN_LAUNCH_BUNDLES.contains(&suffix.as_str())
+    } else {
+        OPEN_LAUNCH_FILES.contains(&suffix.as_str())
+    }
+}
+/// Resolve symlinks and judge the open target on its real identity: a plain
+/// `report.txt` link pointing at `Tool.app` must not slip past the bundle
+/// guard through its link name. The resolved target is what gets opened.
+fn open_guard(path: &std::path::Path) -> Result<PathBuf, String> {
+    let resolved = path
+        .canonicalize()
+        .map_err(|_| "无法解析路径".to_string())?;
+    if resolved.is_file() && is_executable(&resolved) {
+        return Err("可执行文件不支持直接打开，请在访达中操作".into());
+    }
+    if open_launches_target(&resolved) {
+        return Err("应用包与安装包不支持直接打开，请在访达中显示".into());
+    }
+    Ok(resolved)
+}
+/// Refuse saving onto the source itself: `fs::copy` truncates same-inode
+/// targets (plain duplicates, hard links and symlinks alike), and a
+/// post-failure cleanup would then delete the original.
+fn guard_save_destination(
+    source: &std::path::Path,
+    destination: &std::path::Path,
+) -> Result<(), String> {
+    use std::os::unix::fs::MetadataExt;
+    let same = match (source.metadata(), destination.metadata()) {
+        (Ok(s), Ok(d)) => (s.dev(), s.ino()) == (d.dev(), d.ino()),
+        _ => false,
+    };
+    if same {
+        return Err("保存目标与源文件相同，已保留原文件".into());
+    }
+    Ok(())
+}
+async fn run_bounded(mut command: tokio::process::Command, failure: &str) -> Result<(), String> {
+    let status = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        command.kill_on_drop(true).status(),
+    )
+    .await
+    .map_err(|_| format!("{failure}超时"))?
+    .map_err(|e| e.to_string())?;
+    if !status.success() {
+        return Err(failure.to_string());
+    }
+    Ok(())
+}
+/// Open one local path with its platform default application, never a bare
+/// executable, app bundle or installer, judged on the resolved target.
+#[tauri::command]
+async fn open_path(path: String) -> Result<(), String> {
+    let path = open_guard(&local_target(&path)?)?;
+    #[cfg(target_os = "macos")]
+    let command = {
+        let mut command = tokio::process::Command::new("/usr/bin/open");
+        command.arg(&path);
+        command
+    };
+    #[cfg(not(target_os = "macos"))]
+    let command = {
+        let mut command = tokio::process::Command::new("xdg-open");
+        command.arg(&path);
+        command
+    };
+    run_bounded(command, "无法打开该文件").await
+}
+/// Open one local path in VS Code when it is installed.
+#[tauri::command]
+async fn open_in_vscode(path: String) -> Result<(), String> {
+    let path = local_target(&path)?;
+    #[cfg(target_os = "macos")]
+    let command = {
+        let mut command = tokio::process::Command::new("/usr/bin/open");
+        command.arg("-a").arg("Visual Studio Code").arg(&path);
+        command
+    };
+    #[cfg(not(target_os = "macos"))]
+    let command = {
+        let mut command = tokio::process::Command::new("code");
+        command.arg(&path);
+        command
+    };
+    run_bounded(command, "未找到 VS Code，请安装后重试").await
+}
+/// Copy one local file to a user-chosen destination through a save dialog.
+#[tauri::command]
+async fn save_local_file_as(
+    app: tauri::AppHandle,
+    path: String,
+    name: String,
+) -> Result<Option<String>, String> {
+    let source = local_target(&path)?;
+    if !source.is_file() {
+        return Err("仅支持保存文件".into());
+    }
+    let bound = source.metadata().map_err(|e| e.to_string())?.len();
+    if bound > 512 * 1024 * 1024 {
+        return Err("文件超出 512MB，不支持另存".into());
+    }
+    let Some(destination) = browser_downloads::choose_save(&app, &name, None).await? else {
+        return Ok(None);
+    };
+    guard_save_destination(&source, &destination)?;
+    // Cleanup may only remove output this run created; a pre-existing file
+    // the copy merely failed to overwrite stays untouched.
+    let pre_existing = destination.exists();
+    let copied = tokio::fs::copy(&source, &destination)
+        .await
+        .map_err(|e| e.to_string())?;
+    if copied != bound {
+        if !pre_existing {
+            let _ = tokio::fs::remove_file(&destination).await;
+        }
+        return Err("文件在复制期间发生变化，请重试".into());
+    }
+    Ok(Some(destination.to_string_lossy().into_owned()))
+}
+/// Write bounded bytes to a user-chosen destination through a save dialog.
+#[tauri::command]
+async fn save_file_as(
+    app: tauri::AppHandle,
+    name: String,
+    data: Vec<u8>,
+) -> Result<Option<String>, String> {
+    if data.len() > 32 * 1024 * 1024 {
+        return Err("内容超出 32MB，不支持另存".into());
+    }
+    let Some(destination) = browser_downloads::choose_save(&app, &name, None).await? else {
+        return Ok(None);
+    };
+    tokio::fs::write(&destination, &data)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(Some(destination.to_string_lossy().into_owned()))
+}
+/// Read a bounded plain-text local file for clipboard copy; binary content is refused.
+#[tauri::command]
+async fn read_local_text(path: String) -> Result<String, String> {
+    let path = local_target(&path)?;
+    if !path.is_file() {
+        return Err("仅支持复制文件内容".into());
+    }
+    let bound = path.metadata().map_err(|e| e.to_string())?.len();
+    if bound > 2 * 1024 * 1024 {
+        return Err("文件超过 2MB，不支持复制内容".into());
+    }
+    let data = tokio::fs::read(&path).await.map_err(|e| e.to_string())?;
+    let sniff = data.len().min(8192);
+    if data[..sniff].contains(&0) {
+        return Err("二进制文件不支持复制内容".into());
+    }
+    Ok(String::from_utf8_lossy(&data).into_owned())
+}
+#[cfg(test)]
+mod reveal_path_tests {
+    use super::resolve_reveal_path;
+    use std::path::PathBuf;
+    #[test]
+    fn detects_executable_bits_for_the_open_guard() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("latte-open-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("probe.bin");
+        std::fs::write(&file, b"x").unwrap();
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(!super::is_executable(&file));
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(super::is_executable(&file));
+        let _ = std::fs::remove_file(&file);
+        let _ = std::fs::remove_dir(dir);
+    }
+    #[test]
+    fn expands_home_and_keeps_absolute_paths() {
+        let home = std::path::Path::new("/Users/dev");
+        assert_eq!(
+            resolve_reveal_path("~/Downloads/a.dmg", home).unwrap(),
+            PathBuf::from("/Users/dev/Downloads/a.dmg")
+        );
+        assert_eq!(
+            resolve_reveal_path(" /tmp/x/y.bin ", home).unwrap(),
+            PathBuf::from("/tmp/x/y.bin")
+        );
+    }
+    #[test]
+    fn rejects_relative_tilde_and_hostile_paths() {
+        let home = std::path::Path::new("/Users/dev");
+        for raw in [
+            "",
+            "relative/path.txt",
+            "~",
+            "~carol/notes.md",
+            "~/",
+            "/tmp/\0hidden",
+            &format!("/tmp/{}", "x".repeat(1024)),
+            "./local",
+        ] {
+            assert!(resolve_reveal_path(raw, home).is_err(), "{raw} 被放行");
+        }
+    }
+    #[test]
+    fn flags_launch_targets_for_the_open_guard() {
+        let dir = std::env::temp_dir().join(format!("latte-guard-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("Tool.app/Contents")).unwrap();
+        std::fs::write(dir.join("installer.pkg"), b"x").unwrap();
+        std::fs::write(dir.join("installer.PKG"), b"x").unwrap();
+        std::fs::write(dir.join("job.terminal"), b"x").unwrap();
+        std::fs::write(dir.join("notes.txt"), b"x").unwrap();
+        assert!(super::open_launches_target(&dir.join("Tool.app")));
+        assert!(super::open_launches_target(&dir.join("installer.pkg")));
+        assert!(super::open_launches_target(&dir.join("installer.PKG")));
+        assert!(super::open_launches_target(&dir.join("job.terminal")));
+        assert!(!super::open_launches_target(&dir.join("notes.txt")));
+        assert!(!super::open_launches_target(&dir));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+    #[test]
+    fn guards_symlinked_bundles_behind_plain_names() {
+        let dir = std::env::temp_dir().join(format!("latte-link-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("Tool.app/Contents")).unwrap();
+        std::os::unix::fs::symlink(dir.join("Tool.app"), dir.join("report.txt")).unwrap();
+        assert!(
+            super::open_guard(&dir.join("report.txt")).is_err(),
+            "链接名 .txt 不得绕过已解析目标的应用包守卫"
+        );
+        std::os::unix::fs::symlink(dir.join("notes.txt"), dir.join("alias.txt")).unwrap();
+        std::fs::write(dir.join("notes.txt"), b"body").unwrap();
+        assert_eq!(
+            super::open_guard(&dir.join("alias.txt")).unwrap(),
+            dir.join("notes.txt").canonicalize().unwrap()
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+    #[test]
+    fn saves_refuse_the_source_identity() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("latte-save-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let source = dir.join("source.txt");
+        std::fs::write(&source, b"original").unwrap();
+        let hardlink = dir.join("hardlink.txt");
+        std::fs::hard_link(&source, &hardlink).unwrap();
+        let symlink = dir.join("symlink.txt");
+        std::os::unix::fs::symlink(&source, &symlink).unwrap();
+        let other = dir.join("other.txt");
+        std::fs::write(&other, b"other").unwrap();
+        for destination in [&source, &hardlink, &symlink] {
+            assert!(
+                super::guard_save_destination(&source, destination).is_err(),
+                "{} 与源同 inode 却被放行",
+                destination.display()
+            );
+        }
+        assert!(super::guard_save_destination(&source, &other).is_ok());
+        assert_eq!(std::fs::read(&source).unwrap(), b"original");
+        let _ = std::fs::set_permissions(&source, std::fs::Permissions::from_mode(0o644));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
 fn main() {
     if std::env::var("LATTE_WORK_SSH_ASKPASS").as_deref() == Ok("1") {
         let result = std::env::var_os("LATTE_WORK_SSH_ASKPASS_SOCKET")
@@ -968,7 +1323,13 @@ fn main() {
             paste::finish_paste_upload,
             paste::import_clipboard_file,
             choose_identity_file,
-            reveal_project
+            reveal_project,
+            reveal_path,
+            open_path,
+            open_in_vscode,
+            save_local_file_as,
+            save_file_as,
+            read_local_text
         ])
         .build(tauri::generate_context!())
         .expect("failed to build Latte Work desktop")
