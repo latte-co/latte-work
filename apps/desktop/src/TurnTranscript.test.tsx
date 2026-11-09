@@ -64,7 +64,7 @@ it("labels and preserves unphased earlier reports in one expandable process", ()
   const view = render(content(rows));
   const receipt = screen.getByText("评审已完成，记忆已同步");
   expect(screen.queryByText("完整评审报告：发现与依据")).toBeNull();
-  expect(screen.getByText("· 1 段较早回复")).toBeTruthy();
+  expect(screen.queryByText(/段较早回复/)).toBeNull();
   const parts = view.container.querySelectorAll("details");
   expect(parts).toHaveLength(1);
   expect(
@@ -86,7 +86,7 @@ it("labels and preserves unphased earlier reports in one expandable process", ()
   expect(screen.getByText("完整评审报告：发现与依据")).toBe(report);
   expect(parts[0].isConnected && parts[0].open).toBe(true);
   expect(view.container.querySelectorAll("details")).toHaveLength(1);
-  expect(screen.getByText("· 2 段较早回复")).toBeTruthy();
+  expect(screen.queryByText(/段较早回复/)).toBeNull();
   expect(screen.getByText("补充验证完成").closest("details")).toBeNull();
 });
 it("keeps and copies the complete terminal reply across metadata instead of only its last paragraph", async () => {

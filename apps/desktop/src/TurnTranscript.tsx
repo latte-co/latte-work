@@ -133,7 +133,6 @@ export function TurnTranscript({
             memory={processMemory.current}
           >
             <ProcessSummary
-              items={segment.items}
               label={turn.processCount > 1 ? "执行过程" : turn.elapsed}
               title={turn.stopped ? "已执行的文件改动不会撤销。" : undefined}
             />
@@ -164,18 +163,14 @@ export function TurnTranscript({
 
 export function ProcessSummary({
   label,
-  items,
   title,
 }: {
   label: string;
-  items: ActivityItem[];
   title?: string;
 }) {
-  const replies = items.filter((item) => item.type === "assistant").length;
   return (
-    <summary title={title ?? "展开查看完整过程和较早回复。"}>
+    <summary title={title ?? "展开查看完整过程。"}>
       <span>{label}</span>
-      {replies > 0 && <span> · {replies} 段较早回复</span>}
       <ChevronRight size={14} aria-hidden="true" />
     </summary>
   );

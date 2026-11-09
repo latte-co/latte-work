@@ -104,7 +104,6 @@ export function SubagentTranscript({
             memory={processMemory.current}
           >
             <ProcessSummary
-              items={segment.items}
               label={
                 processCount === 1 && elapsed ? `用时 ${elapsed}` : "执行过程"
               }
