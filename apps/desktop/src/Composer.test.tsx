@@ -1013,6 +1013,29 @@ it.each(["local", "ssh:devbox"])(
     expect(mocks.send).not.toHaveBeenCalled();
   },
 );
+it.each(["local", "ssh:devbox"])(
+  "adds files dropped on the input field itself in %s",
+  async (hostId) => {
+    pasteMocks.store.mockImplementation(async (file: File, host: string) => ({
+      name: file.name,
+      path: `/${host}/cache/${file.name}`,
+      directory: false,
+      attachmentKind: "file",
+    }));
+    render(<Harness hostId={hostId} />);
+    type("draft");
+    const textarea = screen.getByRole("textbox");
+    const dataTransfer = dropData([new File(["a"], "a.txt")]);
+    fireEvent.dragEnter(textarea, { dataTransfer });
+    // The drop must stay prevented even when it lands on the editable
+    // field: WebKit otherwise inserts the file name as text.
+    expect(fireEvent.dragOver(textarea, { dataTransfer })).toBe(false);
+    expect(screen.getByText("松开以添加附件")).toBeTruthy();
+    expect(fireEvent.drop(textarea, { dataTransfer })).toBe(false);
+    await screen.findByText("a.txt");
+    expect(pasteMocks.store).toHaveBeenCalledOnce();
+  },
+);
 it("keeps failed file batches retryable and preserves the draft", async () => {
   pasteMocks.store
     .mockRejectedValueOnce(new Error("上传失败"))

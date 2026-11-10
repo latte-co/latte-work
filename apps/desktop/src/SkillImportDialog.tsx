@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { FileText, FolderOpen, Upload } from "lucide-react";
 import { message } from "./api";
 import { Modal } from "./Modal";
+import { dragHasFiles } from "./fileDrag";
 import {
   droppedSkillFiles,
   selectedSkillFiles,
@@ -105,7 +106,7 @@ export function SkillImportDialog({
           role="group"
           aria-label="拖入技能文件或文件夹"
           onDragOver={(event) => {
-            if (!Array.from(event.dataTransfer.types).includes("Files")) return;
+            if (!dragHasFiles(event.dataTransfer)) return;
             event.preventDefault();
             event.stopPropagation();
             event.dataTransfer.dropEffect = locked ? "none" : "copy";
