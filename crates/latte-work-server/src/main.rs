@@ -75,6 +75,7 @@ impl Service {
                 Some(path),
                 config.model.as_deref(),
                 config.effort,
+                &config.environment,
             )
             .await?;
             return Ok(());
@@ -84,6 +85,7 @@ impl Service {
             Some(path),
             config.model.as_deref(),
             config.effort,
+            &config.environment,
         )
         .await?;
         Ok(())
@@ -319,6 +321,7 @@ async fn connection(stream: UnixStream, service: Service) -> Result<()> {
                                 .map(|(_, agent)| agent.clone())
                                 .collect(),
                             permission_settings: true,
+                            custom_agent_environment: true,
                             history_window: true,
                             skill_management: true,
                             skill_file_import: true,
@@ -484,6 +487,7 @@ async fn dispatch(s: &Service, request: Request) -> Result<Response> {
                     binary,
                     project.as_ref().map(|p| p.path.as_str()),
                     model.as_deref(),
+                    &Default::default(),
                 )
                 .await?;
             }
@@ -577,7 +581,9 @@ async fn dispatch(s: &Service, request: Request) -> Result<Response> {
             model,
             project_id,
             provider,
+            environment,
         } => {
+            latte_work_config::validate_agent_environment(&environment)?;
             let project = project_id
                 .map(|id| db(&s.database, |d| d.project(&id)))
                 .transpose()?;
@@ -596,6 +602,7 @@ async fn dispatch(s: &Service, request: Request) -> Result<Response> {
                     binary,
                     project.as_ref().map(|p| p.path.as_str()),
                     model.as_deref(),
+                    &environment,
                 )
                 .await?;
             }

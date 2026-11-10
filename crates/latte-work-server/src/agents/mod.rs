@@ -170,10 +170,11 @@ pub async fn native_models(
     binary: &str,
     path: Option<&str>,
     selected: Option<&str>,
+    environment: &latte_work_protocol::AgentEnvironment,
 ) -> Result<latte_work_protocol::Response> {
     match agent {
-        "codex" => codex::models(binary, path, selected).await,
-        "traex" => traex::models(binary, path, selected).await,
+        "codex" => codex::models(binary, path, selected, environment).await,
+        "traex" => traex::models(binary, path, selected, environment).await,
         _ => bail!("此 Agent 尚未实现原生模型目录：{agent}"),
     }
 }

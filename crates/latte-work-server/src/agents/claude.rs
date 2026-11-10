@@ -461,6 +461,7 @@ impl AgentAdapter for Claude {
                 .or_else(|| config.provider.as_ref().map(|p| p.metadata.model.clone())),
         );
         let mut command = crate::agent_environment::command(binary);
+        command.envs(&config.environment.0);
         let instructions = crate::skills::platform_instructions(&config.settings_dir);
         if !instructions.is_empty() {
             command.arg("--append-system-prompt").arg(instructions);
@@ -2155,6 +2156,7 @@ mod tests {
         use super::*;
         let directory = tempfile::tempdir().unwrap();
         let config = LaunchConfig {
+            environment: Default::default(),
             traex_model: None,
             provider: None,
             model: None,
@@ -2538,6 +2540,7 @@ mod tests {
     fn bounded_child_window_keeps_a_complete_first_record_at_a_nonzero_offset() {
         use super::*;
         let config = LaunchConfig {
+            environment: Default::default(),
             traex_model: None,
             provider: None,
             settings_dir: PathBuf::from("/tmp"),
@@ -2572,6 +2575,7 @@ mod tests {
     fn complete_child_history_preserves_long_reports_and_cross_page_confirmation() {
         use super::*;
         let config = LaunchConfig {
+            environment: Default::default(),
             traex_model: None,
             provider: None,
             settings_dir: PathBuf::from("/tmp"),
@@ -2615,6 +2619,7 @@ mod tests {
         use super::*;
         let secret = "fixture-provider-secret";
         let config = LaunchConfig {
+            environment: Default::default(),
             traex_model: None,
             provider: Some(crate::providers::ResolvedProvider { metadata: serde_json::from_value(json!({"id":"p","name":"fixture","protocol":"anthropic_messages","base_url":"http://127.0.0.1","model":"m","models":[],"model_labels":{},"auth":"bearer","has_credential":true,"revision":"1"})).unwrap(), credential: secret.into() }),
             settings_dir: PathBuf::from("/tmp"), model: None, effort: None, permission_mode: None,
@@ -2661,6 +2666,7 @@ mod tests {
     fn native_handback_promotes_only_confirmed_report_before_tool_input_clipping() {
         use super::*;
         let config = LaunchConfig {
+            environment: Default::default(),
             traex_model: None,
             provider: None,
             settings_dir: PathBuf::from("/tmp"),
@@ -3014,6 +3020,7 @@ mod tests {
     fn usage_matches_explicit_launch_alias_without_using_child_capacity() {
         let dir = tempfile::tempdir().unwrap();
         let config = crate::providers::LaunchConfig {
+            environment: Default::default(),
             traex_model: None,
             provider: None,
             model: Some("relay/seed-0812".into()),
@@ -3163,6 +3170,7 @@ mod tests {
     fn permission_launch_omits_inheritance_and_passes_explicit_modes_on_resume() {
         let dir = tempfile::tempdir().unwrap();
         let mut config = crate::providers::LaunchConfig {
+            environment: Default::default(),
             traex_model: None,
             provider: None,
             model: None,
@@ -3379,6 +3387,7 @@ mod tests {
     fn platform_skills_are_only_child_arguments_and_respect_host_preferences() {
         let dir = tempfile::tempdir().unwrap();
         let config = LaunchConfig {
+            environment: Default::default(),
             settings_dir: dir.path().into(),
             traex_model: None,
             provider: None,
@@ -3412,6 +3421,7 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().unwrap();
         let mut config = LaunchConfig {
+            environment: Default::default(),
             traex_model: None,
             provider: None,
             model: None,
@@ -3511,6 +3521,7 @@ mod tests {
                 (Some("small".into()), None, None),
             ] {
                 let config = LaunchConfig {
+                    environment: Default::default(),
                     traex_model: None,
                     settings_dir: directory.path().into(),
                     model,

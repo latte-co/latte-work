@@ -142,6 +142,11 @@ for line in sys.stdin:
             emit({'type':'result','subtype':'success','is_error':False})
             emit({'type':'system','subtype':'session_state_changed','state':'idle'})
             continue
+        if text=='custom-environment':
+            output=json.dumps({'pid':os.getpid(), **{name:os.environ.get(name) for name in ['HTTP_PROXY','HTTPS_PROXY','NO_PROXY','LATTE_TEST_LITERAL','LATTE_TEST_EMPTY','LATTE_TEST_SECRET']}})
+            emit({'type':'assistant','message':{'content':[{'type':'text','text':output}]}})
+            emit({'type':'result','subtype':'success','is_error':False})
+            continue
         if text=='environment':
             output=subprocess.check_output(['latte-env-fixture'],text=True)
             emit({'type':'assistant','message':{'content':[{'type':'text','text':output}]}})

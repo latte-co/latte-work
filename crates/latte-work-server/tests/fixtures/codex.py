@@ -81,7 +81,10 @@ for line in sys.stdin:
         reply(value, {'turn': {'id': turn, 'status': 'inProgress'}})
         if prompt == 'eof':
             sys.exit(0)
-        if prompt == 'failed':
+        if prompt == 'custom-environment':
+            text(json.dumps({'pid':os.getpid(), **{name:os.environ.get(name) for name in ['HTTP_PROXY','HTTPS_PROXY','NO_PROXY','LATTE_TEST_LITERAL','LATTE_TEST_EMPTY','LATTE_TEST_SECRET']}}))
+            complete()
+        elif prompt == 'failed':
             complete('failed')
         elif prompt == 'wait':
             text('WAITING')

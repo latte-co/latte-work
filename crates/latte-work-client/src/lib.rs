@@ -15,6 +15,7 @@ pub struct Client {
     output: FramedRead<ChildStdout, LinesCodec>,
     broken: bool,
     permission_settings: bool,
+    custom_agent_environment: bool,
     server_id: String,
 }
 
@@ -75,17 +76,20 @@ impl Client {
             output,
             broken: false,
             permission_settings: false,
+            custom_agent_environment: false,
             server_id: String::new(),
         };
         match client.request(Request::Hello { version: VERSION }).await? {
             Response::Hello {
                 version: VERSION,
                 permission_settings,
+                custom_agent_environment,
                 server_id,
                 ..
             } => {
                 client.server_id = server_id;
                 client.permission_settings = permission_settings;
+                client.custom_agent_environment = custom_agent_environment;
                 Ok(client)
             }
             Response::Error { code, message } if code == "version_mismatch" => bail!(
@@ -102,6 +106,22 @@ impl Client {
     pub async fn request(&mut self, request: Request) -> Result<Response> {
         if self.broken {
             bail!("连接已失效，请重新连接；任务不会自动重发");
+        }
+        let custom_environment = match &request {
+            Request::ModelsForProvider { environment, .. } => !environment.is_empty(),
+            Request::Send { provider, .. }
+            | Request::SendQueued { provider, .. }
+            | Request::DispatchQueuedMessage { provider, .. }
+            | Request::ResumeMessageQueue { provider, .. }
+            | Request::OpenAgentSession { provider, .. }
+            | Request::SubagentHistory { provider, .. } => matches!(
+                provider,
+                Some(latte_work_protocol::TurnProvider::Configured { .. })
+            ),
+            _ => false,
+        };
+        if custom_environment && !self.custom_agent_environment {
+            bail!("此 Server 不支持自定义 Agent 环境变量，请更新 Server 后重新连接；请求未发送");
         }
         if matches!(
             &request,
@@ -315,6 +335,25 @@ where
     F: FnOnce(String) -> Fut,
     Fut: std::future::Future<Output = Result<Option<latte_work_protocol::ProviderSnapshot>>>,
 {
+    request_with_app_agent_config(target, request, |agent| async move {
+        Ok(resolve(agent)
+            .await?
+            .map(|s| latte_work_protocol::TurnProvider::Snapshot(Box::new(s)))
+            .unwrap_or(latte_work_protocol::TurnProvider::Cli))
+    })
+    .await
+}
+
+/// Resolve both Provider and custom environment in one App configuration transaction.
+pub async fn request_with_app_agent_config<F, Fut>(
+    target: &tokio::sync::Mutex<Client>,
+    request: Request,
+    resolve: F,
+) -> Result<Response>
+where
+    F: FnOnce(String) -> Fut,
+    Fut: std::future::Future<Output = Result<latte_work_protocol::TurnProvider>>,
+{
     let agent = match &request {
         Request::Models { agent, .. } => agent.clone(),
         Request::Send { session_id, .. }
@@ -338,14 +377,29 @@ where
         }
         _ => bail!("此请求不接受本轮 Provider 配置"),
     };
-    let snapshot = resolve(agent).await?;
-    request_with_snapshot(target, request, snapshot).await
+    let config = resolve(agent).await?;
+    request_with_launch_config(target, request, config).await
 }
 
 async fn request_with_snapshot(
     target: &tokio::sync::Mutex<Client>,
     request: Request,
     snapshot: Option<latte_work_protocol::ProviderSnapshot>,
+) -> Result<Response> {
+    request_with_launch_config(
+        target,
+        request,
+        snapshot
+            .map(|s| latte_work_protocol::TurnProvider::Snapshot(Box::new(s)))
+            .unwrap_or(latte_work_protocol::TurnProvider::Cli),
+    )
+    .await
+}
+
+async fn request_with_launch_config(
+    target: &tokio::sync::Mutex<Client>,
+    request: Request,
+    config: latte_work_protocol::TurnProvider,
 ) -> Result<Response> {
     let is_send = matches!(&request, Request::Send { .. } | Request::SendQueued { .. });
     let is_queue_control = matches!(
@@ -360,12 +414,25 @@ async fn request_with_snapshot(
             agent,
             model,
             project_id,
-        } => Request::ModelsForProvider {
-            agent,
-            model,
-            project_id,
-            provider: snapshot.map(|s| s.provider),
-        },
+        } => {
+            let (provider, environment) = match config {
+                latte_work_protocol::TurnProvider::Cli => (None, Default::default()),
+                latte_work_protocol::TurnProvider::Snapshot(s) => {
+                    (Some(s.provider), Default::default())
+                }
+                latte_work_protocol::TurnProvider::Configured {
+                    provider,
+                    environment,
+                } => (provider.map(|s| s.provider), environment),
+            };
+            Request::ModelsForProvider {
+                agent,
+                model,
+                project_id,
+                provider,
+                environment,
+            }
+        }
         Request::Send {
             session_id,
             request_id,
@@ -381,11 +448,7 @@ async fn request_with_snapshot(
             model,
             effort,
             permission_mode,
-            provider: Some(
-                snapshot
-                    .map(|snapshot| latte_work_protocol::TurnProvider::Snapshot(Box::new(snapshot)))
-                    .unwrap_or(latte_work_protocol::TurnProvider::Cli),
-            ),
+            provider: Some(config),
         },
         Request::SendQueued {
             session_id,
@@ -402,11 +465,7 @@ async fn request_with_snapshot(
             model,
             effort,
             permission_mode,
-            provider: Some(
-                snapshot
-                    .map(|snapshot| latte_work_protocol::TurnProvider::Snapshot(Box::new(snapshot)))
-                    .unwrap_or(latte_work_protocol::TurnProvider::Cli),
-            ),
+            provider: Some(config),
         },
         Request::DispatchQueuedMessage {
             interrupt,
@@ -419,27 +478,15 @@ async fn request_with_snapshot(
             session_id,
             request_id,
             revision,
-            provider: Some(
-                snapshot
-                    .map(|snapshot| latte_work_protocol::TurnProvider::Snapshot(Box::new(snapshot)))
-                    .unwrap_or(latte_work_protocol::TurnProvider::Cli),
-            ),
+            provider: Some(config),
         },
         Request::ResumeMessageQueue { session_id, .. } => Request::ResumeMessageQueue {
             session_id,
-            provider: Some(
-                snapshot
-                    .map(|snapshot| latte_work_protocol::TurnProvider::Snapshot(Box::new(snapshot)))
-                    .unwrap_or(latte_work_protocol::TurnProvider::Cli),
-            ),
+            provider: Some(config),
         },
         Request::OpenAgentSession { session_id, .. } => Request::OpenAgentSession {
             session_id,
-            provider: Some(
-                snapshot
-                    .map(|snapshot| latte_work_protocol::TurnProvider::Snapshot(Box::new(snapshot)))
-                    .unwrap_or(latte_work_protocol::TurnProvider::Cli),
-            ),
+            provider: Some(config),
         },
         Request::SubagentHistory {
             session_id,
@@ -452,11 +499,7 @@ async fn request_with_snapshot(
             task_id,
             after,
             source,
-            provider: Some(
-                snapshot
-                    .map(|snapshot| latte_work_protocol::TurnProvider::Snapshot(Box::new(snapshot)))
-                    .unwrap_or(latte_work_protocol::TurnProvider::Cli),
-            ),
+            provider: Some(config),
         },
         _ => unreachable!(),
     };

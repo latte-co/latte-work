@@ -140,8 +140,9 @@ pub(crate) async fn models(
     binary: &str,
     path: Option<&str>,
     selected: Option<&str>,
+    environment: &latte_work_protocol::AgentEnvironment,
 ) -> Result<Response> {
-    models_for_agent(binary, path, selected, false).await
+    models_for_agent(binary, path, selected, false, environment).await
 }
 
 pub(in crate::agents) async fn models_for_agent(
@@ -149,8 +150,10 @@ pub(in crate::agents) async fn models_for_agent(
     path: Option<&str>,
     selected: Option<&str>,
     codex: bool,
+    environment: &latte_work_protocol::AgentEnvironment,
 ) -> Result<Response> {
     let mut command = crate::agent_environment::command(binary);
+    command.envs(&environment.0);
     command.args(["app-server", "--stdio"]);
     if let Some(path) = path {
         command.current_dir(path);
@@ -376,13 +379,14 @@ pub(crate) async fn validate_selection(
     path: Option<&str>,
     selected: Option<&str>,
     effort: Option<Effort>,
+    environment: &latte_work_protocol::AgentEnvironment,
 ) -> Result<Option<ModelSelection>> {
     let Response::Models {
         models,
         effort_levels,
         model_variants,
         ..
-    } = models(binary, path, selected).await?
+    } = models(binary, path, selected, environment).await?
     else {
         unreachable!()
     };

@@ -209,6 +209,7 @@ it.each([
       server_path: null,
     };
     invoke.mockImplementation(async (command, args) => {
+      if (command === "agent_environments") return {};
       if (command === "connect_host") {
         if (args.host.id === "local")
           throw new Error("Local Server unavailable");

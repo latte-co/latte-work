@@ -890,6 +890,7 @@ impl AgentAdapter for AppServer {
         self.model_provider = resolved.provider.as_ref().map(|_| provider::id());
         self.config = Some(resolved);
         let mut command = crate::agent_environment::command(binary);
+        command.envs(&config.environment.0);
         command.args(["app-server", "--stdio"]).current_dir(cwd);
         if let Some(provider) = &config.provider {
             let id = self
@@ -1051,6 +1052,7 @@ mod tests {
     use super::*;
     fn config() -> LaunchConfig {
         LaunchConfig {
+            environment: Default::default(),
             traex_model: None,
             provider: None,
             settings_dir: std::env::temp_dir(),

@@ -1,5 +1,99 @@
 use super::*;
 use latte_work_protocol::{ProviderAuth, ProviderProtocol};
+#[test]
+fn agent_environment_is_private_persistent_and_isolated_by_host_and_agent() {
+    let dir = tempfile::tempdir().unwrap();
+    let environment = AgentEnvironment(BTreeMap::from([
+        ("HTTPS_PROXY".into(), "http://proxy.test:7890".into()),
+        ("TEST_SECRET".into(), "fixture-environment-secret".into()),
+        ("EMPTY".into(), String::new()),
+    ]));
+    let mut store = ProviderStore::open(dir.path(), None).unwrap();
+    assert!(matches!(
+        store.launch_for_host("devbox", "codex").unwrap(),
+        TurnProvider::Cli
+    ));
+    store
+        .save_environment("devbox", "codex", environment.clone())
+        .unwrap();
+    let id = save(&mut store, draft("Preserved"));
+    store.bind("devbox", "codex", Some(id.clone())).unwrap();
+    assert!(
+        !serde_json::to_string(&store.list())
+            .unwrap()
+            .contains("proxy.test")
+    );
+    assert!(
+        !format!("{:?}", store.launch_for_host("devbox", "codex").unwrap())
+            .contains("fixture-environment-secret")
+    );
+    drop(store);
+    let mut store = ProviderStore::open(dir.path(), None).unwrap();
+    assert_eq!(
+        store.environments_for_host("devbox").unwrap()["codex"],
+        environment
+    );
+    assert!(store.environments_for_host("local").unwrap().is_empty());
+    assert!(matches!(
+        store.launch_for_host("devbox", "claude").unwrap(),
+        TurnProvider::Cli
+    ));
+    assert!(matches!(
+        store.launch_for_host("other", "codex").unwrap(),
+        TurnProvider::Cli
+    ));
+    assert!(matches!(
+        store.launch_for_host("devbox", "codex").unwrap(),
+        TurnProvider::Configured {
+            provider: Some(_),
+            ..
+        }
+    ));
+    let before = std::fs::read(dir.path().join("providers.json")).unwrap();
+    for invalid in [
+        AgentEnvironment(BTreeMap::from([("BAD-NAME".into(), "hidden".into())])),
+        AgentEnvironment(BTreeMap::from([("HOME".into(), "/other".into())])),
+        AgentEnvironment(BTreeMap::from([(
+            "LATTE_WORK_CODEX".into(),
+            "other".into(),
+        )])),
+        AgentEnvironment(BTreeMap::from([("TOKEN".into(), "nul\0value".into())])),
+        AgentEnvironment(BTreeMap::from([("TOKEN".into(), "x".repeat(8193))])),
+        AgentEnvironment((0..65).map(|i| (format!("V_{i}"), String::new())).collect()),
+        AgentEnvironment(
+            (0..5)
+                .map(|i| (format!("V_{i}"), "x".repeat(8192)))
+                .collect(),
+        ),
+    ] {
+        assert!(store.save_environment("devbox", "codex", invalid).is_err());
+        assert_eq!(
+            before,
+            std::fs::read(dir.path().join("providers.json")).unwrap()
+        );
+    }
+    store
+        .save_environment("devbox", "codex", AgentEnvironment::default())
+        .unwrap();
+    assert!(matches!(
+        store.launch_for_host("devbox", "codex").unwrap(),
+        TurnProvider::Snapshot(_)
+    ));
+    assert_eq!(
+        store
+            .snapshot_for_host("devbox", "codex")
+            .unwrap()
+            .unwrap()
+            .provider
+            .id,
+        id
+    );
+    store
+        .save_environment("devbox", "codex", environment)
+        .unwrap();
+    store.forget_host("devbox").unwrap();
+    assert!(store.environments_for_host("devbox").unwrap().is_empty());
+}
 fn draft(name: &str) -> ProviderDraft {
     ProviderDraft {
         models_1m: Default::default(),

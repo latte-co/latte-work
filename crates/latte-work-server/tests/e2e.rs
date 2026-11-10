@@ -1,6 +1,8 @@
 //! Final-binary tests: real daemon, real socket/bridge, deterministic native processes.
 #[path = "support/codex.rs"]
 mod codex_e2e;
+#[path = "support/environment.rs"]
+mod environment_e2e;
 #[path = "support/ssh.rs"]
 mod ssh_e2e;
 #[path = "support/traex.rs"]
@@ -1888,6 +1890,7 @@ async fn provider_1m_selection_survives_reopen_and_rejects_removed_capabilities_
         } = ask(
             &mut client,
             Request::ModelsForProvider {
+                environment: Default::default(),
                 agent: "claude".into(),
                 model: Some("gateway/model[1m]".into()),
                 project_id: Some(saved.project_id),

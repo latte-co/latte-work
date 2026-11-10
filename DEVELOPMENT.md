@@ -434,6 +434,30 @@ remove the status line. Both progress and usage are excluded before text merging
 
 ## Agent Shell environment
 
+The App's Connection & Agent settings also save literal `NAME=value` overrides
+per host/Agent in its private Provider configuration. A fresh native configuration
+transaction captures Provider and ENV together for Open, Send, queue operations,
+history redaction and model discovery. `TurnProvider::Configured` transports the
+ephemeral snapshot; only its digest enters request/queue identity. Empty overrides
+keep the existing CLI/Snapshot serialization and fingerprints unchanged.
+
+The `custom_agent_environment` Hello capability defaults to false. Both the UI and
+native client reject custom ENV on older hosts before sending the request. Updated
+local and SSH hosts apply overrides after the captured shell environment and before
+adapter/Provider/effort controls. Environment changes participate in process
+configuration comparison: active/background work is preserved, idle processes are
+recreated on the next explicit use. No task is interrupted or replayed on save.
+Codex/Traex model probes and launch-time native selection use the same overrides.
+Installation discovery and permission/command probes still use the host shell.
+
+Names are POSIX-style, at most 255 bytes, with 64 variables / 8 KiB per value /
+32 KiB total. NUL, host identity/cwd names and `LATTE_WORK_*` controls are rejected.
+Values are not shell-expanded. Debug formatting hides values; credential-named
+variables and authenticated proxy URLs are redacted from persisted Agent events.
+Focused checks: `agentEnvironment` and `AgentSettings` frontend tests, config and
+protocol tests, and final-binary
+`custom_agent_environment_reaches_all_adapters_and_reconfigures_without_replay`.
+
 At daemon startup, the host Server captures exported variables from the user's
 default shell (`SHELL`, falling back to the account shell), using `-ilc` in the
 home directory. zsh, bash, sh/dash and fish are supported; each shell follows its

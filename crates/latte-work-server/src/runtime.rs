@@ -997,6 +997,7 @@ async fn finish_turn(
 }
 fn same_config(a: &LaunchConfig, b: &LaunchConfig) -> bool {
     a.model == b.model
+        && a.environment == b.environment
         && a.traex_model == b.traex_model
         && a.effort == b.effort
         && a.permission_mode == b.permission_mode
@@ -1900,6 +1901,7 @@ mod tests {
                     model: None,
                     fingerprint: None,
                     config: LaunchConfig {
+                        environment: Default::default(),
                         traex_model: None,
                         provider: None,
                         model: None,
@@ -1943,6 +1945,7 @@ mod tests {
             model: None,
             fingerprint: None,
             config: LaunchConfig {
+                environment: Default::default(),
                 traex_model: None,
                 provider: None,
                 model: None,
@@ -2025,6 +2028,7 @@ mod tests {
             Store::open(&dir.path().join("state.sqlite")).unwrap(),
         ));
         let config = LaunchConfig {
+            environment: Default::default(),
             traex_model: None,
             provider: None,
             model: None,
@@ -2246,6 +2250,7 @@ mod tests {
             Store::open(&dir.path().join("state.sqlite")).unwrap(),
         ));
         let config = LaunchConfig {
+            environment: Default::default(),
             traex_model: None,
             provider: None,
             model: None,

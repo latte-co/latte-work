@@ -2,6 +2,8 @@ import { useEffect, useRef, useState } from "react";
 import { Check, RefreshCw, Monitor, LoaderCircle } from "lucide-react";
 import {
   agentProviders,
+  agentEnvironments,
+  saveAgentEnvironment,
   bindAgentProvider,
   connect,
   localHost,
@@ -9,7 +11,8 @@ import {
 } from "./api";
 import { Select } from "./Select";
 import { protocols } from "./ProviderSettings";
-import type { AgentInfo, Response } from "./protocol";
+import { formatEnvironment, parseEnvironment } from "./agentEnvironment";
+import type { AgentEnvironment, AgentInfo, Response } from "./protocol";
 import type { Workbench } from "./useWorkbench";
 type Catalog = Extract<Response, { kind: "providers" }>;
 export function AgentSettings({
@@ -25,11 +28,18 @@ export function AgentSettings({
   const [agents, setAgents] = useState<AgentInfo[]>([]);
   const [catalog, setCatalog] = useState<Catalog>();
   const [choices, setChoices] = useState<Record<string, string>>({});
+  const [environments, setEnvironments] = useState<
+    Record<string, AgentEnvironment>
+  >({});
+  const [environmentDrafts, setEnvironmentDrafts] = useState<
+    Record<string, string>
+  >({});
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const [retry, setRetry] = useState(0);
   const [serverId, setServerId] = useState("");
+  const [environmentSupported, setEnvironmentSupported] = useState(false);
   const generation = useRef(0);
   const host = state.hosts.find((h) => h.id === hostId) ?? localHost;
   useEffect(() => {
@@ -38,6 +48,7 @@ export function AgentSettings({
       return;
     }
     setServerId("");
+    setEnvironmentSupported(false);
     const current = ++generation.current;
     setBusy(true);
     setError("");
@@ -45,18 +56,29 @@ export function AgentSettings({
     setCatalog(undefined);
     setAgents([]);
     void (async () => {
-      const [hello, target] = await Promise.all([
+      const [hello, target, savedEnvironments] = await Promise.all([
         connect(host),
         agentProviders(host.id),
+        agentEnvironments(host.id),
       ]);
       if (hello.kind !== "hello")
         throw new Error("无法读取 Agent，请检查主机连接和 Server 版本");
       if (current !== generation.current) return;
       setServerId(hello.server_id);
+      setEnvironmentSupported(hello.custom_agent_environment === true);
       if (target.kind !== "providers") throw new Error("Provider 响应不匹配");
       if (current !== generation.current) return;
       setAgents(hello.agents);
       setCatalog(target);
+      setEnvironments(savedEnvironments);
+      setEnvironmentDrafts(
+        Object.fromEntries(
+          Object.entries(savedEnvironments).map(([agent, env]) => [
+            agent,
+            formatEnvironment(env),
+          ]),
+        ),
+      );
       setChoices(
         Object.fromEntries(
           target.bindings.map((b) => [b.agent, b.provider_id]),
@@ -97,10 +119,39 @@ export function AgentSettings({
       if (current === generation.current) setBusy(false);
     }
   }
+  async function saveEnvironment(agent: string) {
+    const current = generation.current;
+    setBusy(true);
+    onBusy(true);
+    setError("");
+    setNotice("");
+    try {
+      const saved = await saveAgentEnvironment(
+        host.id,
+        agent,
+        parseEnvironment(environmentDrafts[agent] || ""),
+      );
+      if (current === generation.current) {
+        setEnvironments((values) => ({ ...values, [agent]: saved }));
+        setEnvironmentDrafts((values) => ({
+          ...values,
+          [agent]: formatEnvironment(saved),
+        }));
+        setNotice(
+          "环境变量已保存；下次启动 Agent 实例时生效，正在执行的任务继续使用原配置。",
+        );
+      }
+    } catch (e) {
+      if (current === generation.current) setError(message(e));
+    } finally {
+      onBusy(false);
+      if (current === generation.current) setBusy(false);
+    }
+  }
   return (
     <div className="settings-panel-content">
       <h2>连接与 Agent</h2>
-      <p>选择运行主机，查看连接状态并为 Code Agent 关联 Provider。</p>
+      <p>选择运行主机，为 Code Agent 配置 Provider 和环境变量。</p>
       <label>
         运行主机
         <Select
@@ -170,6 +221,15 @@ export function AgentSettings({
             "";
           const dirty = (choices[agent.id] || "") !== saved;
           const provider = catalog.providers.find((p) => p.id === saved);
+          const environmentText = environmentDrafts[agent.id] || "";
+          const environmentDirty =
+            environmentText !== formatEnvironment(environments[agent.id] || {});
+          let environmentError = "";
+          try {
+            parseEnvironment(environmentText);
+          } catch (e) {
+            environmentError = message(e);
+          }
           return (
             <div className="agent-card" key={agent.id}>
               <h3>{agent.name}</h3>
@@ -209,6 +269,63 @@ export function AgentSettings({
                 >
                   {busy ? "正在保存…" : "保存关联"}
                 </button>
+              </div>
+              <div className="agent-environment">
+                <label>
+                  自定义环境变量（ENV）
+                  <textarea
+                    aria-label={`${agent.name} 环境变量`}
+                    aria-describedby={`environment-note-${agent.id}`}
+                    aria-invalid={!!environmentError}
+                    rows={4}
+                    spellCheck={false}
+                    autoCapitalize="off"
+                    autoCorrect="off"
+                    value={environmentText}
+                    disabled={busy || !environmentSupported}
+                    placeholder={
+                      "HTTPS_PROXY=http://127.0.0.1:7890\nHTTP_PROXY=http://127.0.0.1:7890\nNO_PROXY=localhost,127.0.0.1"
+                    }
+                    onChange={(event) =>
+                      setEnvironmentDrafts((values) => ({
+                        ...values,
+                        [agent.id]: event.target.value,
+                      }))
+                    }
+                  />
+                </label>
+                <p className="form-note" id={`environment-note-${agent.id}`}>
+                  每行 NAME=value，值按原文传入，无需 export 或引号。仅用于{" "}
+                  {host.name} 上的 {agent.name}
+                  ；留空可恢复继承环境。代理地址须能从该主机访问。
+                </p>
+                {!environmentSupported && (
+                  <p className="form-note">
+                    此主机需要更新 Server 并重新连接，才能配置自定义环境变量。
+                  </p>
+                )}
+                {environmentError && (
+                  <div className="form-error" role="alert">
+                    {environmentError}
+                  </div>
+                )}
+                <div className="modal-actions">
+                  <span className="form-note" role="status">
+                    {environmentDirty ? "有未保存的环境变量" : "环境变量已保存"}
+                  </span>
+                  <button
+                    className="primary"
+                    disabled={
+                      busy ||
+                      !environmentSupported ||
+                      !environmentDirty ||
+                      !!environmentError
+                    }
+                    onClick={() => void saveEnvironment(agent.id)}
+                  >
+                    保存环境变量
+                  </button>
+                </div>
               </div>
             </div>
           );

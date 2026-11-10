@@ -47,6 +47,7 @@ impl Default for Config {
 // Intentionally no Debug/Serialize: launch snapshots contain a credential.
 #[derive(Clone)]
 pub struct LaunchConfig {
+    pub environment: latte_work_protocol::AgentEnvironment,
     pub provider: Option<ResolvedProvider>,
     pub settings_dir: PathBuf,
     pub model: Option<String>,
@@ -61,10 +62,21 @@ pub struct ResolvedProvider {
 }
 impl LaunchConfig {
     pub fn redact(&self, text: &str) -> String {
-        match &self.provider {
+        let mut text = match &self.provider {
             Some(p) if !p.credential.is_empty() => text.replace(&p.credential, "[redacted]"),
             _ => text.to_owned(),
+        };
+        for (name, value) in &self.environment.0 {
+            let name = name.to_ascii_uppercase();
+            let sensitive = ["TOKEN", "KEY", "SECRET", "PASSWORD", "CREDENTIAL", "AUTH"]
+                .iter()
+                .any(|part| name.contains(part))
+                || (value.contains("://") && value.contains('@'));
+            if sensitive && !value.is_empty() {
+                text = text.replace(value, "[redacted]");
+            }
         }
+        text
     }
     pub fn redact_event(
         &self,
@@ -460,6 +472,9 @@ impl ProviderStore {
     ) -> Result<LaunchConfig> {
         let metadata = match &provider {
             Some(TurnProvider::Snapshot(snapshot)) => Some(snapshot.provider.clone()),
+            Some(TurnProvider::Configured { provider, .. }) => {
+                provider.as_ref().map(|s| s.provider.clone())
+            }
             Some(TurnProvider::Cli) => None,
             None => self.launch_config(agent).provider.map(|p| p.metadata),
         };
@@ -484,9 +499,20 @@ impl ProviderStore {
             return self.selected_config(agent, model);
         };
         let mut config = self.launch_config(agent);
-        config.provider = match provider {
+        let snapshot = match provider {
             TurnProvider::Cli => None,
-            TurnProvider::Snapshot(snapshot) => {
+            TurnProvider::Snapshot(snapshot) => Some(snapshot),
+            TurnProvider::Configured {
+                provider,
+                environment,
+            } => {
+                latte_work_config::validate_agent_environment(&environment)?;
+                config.environment = environment;
+                provider
+            }
+        };
+        config.provider = match snapshot {
+            Some(snapshot) => {
                 compatible(agent, &snapshot.provider)?;
                 validate(&snapshot.provider, &snapshot.credential)?;
                 Some(ResolvedProvider {
@@ -494,6 +520,7 @@ impl ProviderStore {
                     credential: snapshot.credential,
                 })
             }
+            None => None,
         };
         let Response::Models { models, .. } = Self::models_for_provider(
             agent,
@@ -511,6 +538,7 @@ impl ProviderStore {
     }
     pub fn launch_config(&self, agent: &str) -> LaunchConfig {
         LaunchConfig {
+            environment: Default::default(),
             traex_model: None,
             effort: None,
             permission_mode: None,
@@ -592,6 +620,62 @@ fn compatible(agent: &str, provider: &Provider) -> Result<()> {
 mod tests {
     use super::*;
     use latte_work_protocol::{ProviderAuth, ProviderProtocol};
+    #[test]
+    fn custom_environment_is_validated_fingerprinted_and_redacted() {
+        use latte_work_protocol::AgentEnvironment;
+        let dir = tempfile::tempdir().unwrap();
+        let store = ProviderStore::open(dir.path()).unwrap();
+        let environment = AgentEnvironment(BTreeMap::from([
+            (
+                "HTTP_PROXY".into(),
+                "http://user:password@proxy.test:7890".into(),
+            ),
+            ("TEST_TOKEN".into(), "fixture-environment-token".into()),
+            ("MODE".into(), "1".into()),
+        ]));
+        let context = TurnProvider::Configured {
+            provider: None,
+            environment: environment.clone(),
+        };
+        let config = store
+            .turn_config("claude", None, Some(context.clone()))
+            .unwrap();
+        assert_eq!(config.environment, environment);
+        assert!(config.provider.is_none());
+        assert_eq!(
+            config.redact("http://user:password@proxy.test:7890 fixture-environment-token MODE=1"),
+            "[redacted] [redacted] MODE=1"
+        );
+        assert_ne!(
+            turn_fingerprint(Some(&context)).unwrap(),
+            turn_fingerprint(Some(&TurnProvider::Cli)).unwrap()
+        );
+        let mut changed = environment.clone();
+        changed.0.insert("MODE".into(), "2".into());
+        assert_ne!(
+            turn_fingerprint(Some(&context)).unwrap(),
+            turn_fingerprint(Some(&TurnProvider::Configured {
+                provider: None,
+                environment: changed
+            }))
+            .unwrap()
+        );
+        assert!(
+            store
+                .turn_config(
+                    "claude",
+                    None,
+                    Some(TurnProvider::Configured {
+                        provider: None,
+                        environment: AgentEnvironment(BTreeMap::from([(
+                            "PWD".into(),
+                            "/other".into()
+                        )])),
+                    })
+                )
+                .is_err()
+        );
+    }
     #[test]
     fn provider_1m_modes_are_claude_only_and_removal_rejects_the_old_selection() {
         let dir = tempfile::tempdir().unwrap();
@@ -691,6 +775,7 @@ mod tests {
             "auth":"none", "has_credential":false
         })).unwrap();
         let config = LaunchConfig {
+            environment: Default::default(),
             traex_model: None,
             provider: Some(ResolvedProvider {
                 metadata: provider.clone(),

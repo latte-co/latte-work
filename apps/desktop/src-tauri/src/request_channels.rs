@@ -87,6 +87,7 @@ mod tests {
     #[test]
     fn provider_model_reads_use_metadata_lane() {
         let request = Request::ModelsForProvider {
+            environment: Default::default(),
             agent: "traex".into(),
             model: None,
             project_id: None,
