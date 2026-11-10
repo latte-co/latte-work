@@ -35,7 +35,9 @@ for line in sys.stdin:
     value=json.loads(line)
     if value['type']=='control_request':
         if value['request']['subtype']=='generate_session_title':
-            description=value['request']['description']
+            description=value['request']['description'].split('\n\nAssistant reply:', 1)[0]
+            if description.startswith('native-auto-title'):
+                pathlib.Path('fixture-title-context').write_text(value['request']['description'])
             if description.startswith('native-auto-title'):
                 with pathlib.Path('fixture-title-requests').open('a') as record: record.write(description+'\n')
             def finish_title(request=value,description=description):

@@ -45,6 +45,7 @@ def kill_agent_groups(server_pid):
         except (ProcessLookupError, PermissionError):
             pass
 seen = []
+title_requests = []
 tool_called = False
 
 class Handler(http.server.BaseHTTPRequestHandler):
@@ -54,13 +55,17 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def do_POST(self):
         global tool_called
         body = json.loads(self.rfile.read(int(self.headers['Content-Length'])))
+        title_request = 'title' in body.get('text', {}).get('format', {}).get('schema', {}).get('properties', {})
+        if title_request:
+            title_requests.append(body)
+            assert not body.get('tools'), body.get('tools')
         seen.append({'path': self.path, 'model': body.get('model'),
                      'authorization': self.headers.get('Authorization'),
                      'api_key': self.headers.get('x-api-key'), 'old_header': self.headers.get('X-Old-Header')})
         self.send_response(200)
         self.send_header('Content-Type', 'text/event-stream')
         self.end_headers()
-        marker = 'PROVIDER_OK'
+        marker = json.dumps({'title': '检查 Codex Provider 切换'}, ensure_ascii=False) if title_request else 'PROVIDER_OK'
         if self.path.endswith('/responses') and 'NATIVE_TOOL_CHECK' in json.dumps(body.get('input', [])) and not tool_called:
             assert any(t.get('name') == 'exec_command' for t in body.get('tools', [])), 'native exec_command not offered'
             tool_called = True
@@ -166,6 +171,19 @@ try:
                 assert actual['api_key'] == (KEY if auth == 'api_key' else None), actual
                 text = ''.join(e['event'].get('text', '') for e in value['events'] if e['event']['kind'] == 'text')
                 assert 'PROVIDER_OK' in text
+                if index == 0:
+                    while time.monotonic() < deadline:
+                        value = rpc('poll', session_id=sid, after=0)
+                        if value['session']['title'] == '检查 Codex Provider 切换':
+                            break
+                        time.sleep(.1)
+                    else:
+                        raise TimeoutError('native automatic title: ' + json.dumps(value, ensure_ascii=False))
+                    assert len(title_requests) == 1 and not value['session']['custom_title']
+                    assert len([e for e in value['events'] if e['event']['kind'] == 'user']) == 1
+                    title_input = json.dumps(title_requests[0]['input'], ensure_ascii=False)
+                    assert 'Assistant reply:' in title_input and 'PROVIDER_OK' in title_input
+                    report['checks'].append('ephemeral automatic title uses first reply, exposes no tools and adds no visible turn')
                 current_native = value['session']['native_id']
                 assert current_native and (native_id is None or current_native == native_id)
                 native_id = current_native

@@ -268,7 +268,7 @@ fn count(value: &Value, key: &str) -> Option<f64> {
 #[derive(Default)]
 pub struct Claude {
     initial_title: Option<String>,
-    title_description: Option<String>,
+    title_description: Option<super::titles::Context>,
     title_attempted: bool,
     generating_title_for: Option<String>,
     native_named: bool,
@@ -330,7 +330,7 @@ impl Claude {
             && !prompt.trim().is_empty()
             && !prompt.trim_start().starts_with('/')
         {
-            self.title_description = Some(prompt.chars().take(1024).collect());
+            self.title_description = Some(super::titles::Context::new(prompt));
         }
     }
     fn set_accounting_model(&mut self, model: Option<String>) {
@@ -426,6 +426,7 @@ fn write_action(value: Value) -> Result<Action> {
 impl AgentAdapter for Claude {
     fn set_session_title(&mut self, title: Option<String>, resuming: bool) {
         self.native_named = title.is_some();
+        self.title_attempted = resuming;
         self.initial_title = if resuming { None } else { title };
     }
     fn has_background_work(&self) -> bool {
@@ -600,6 +601,7 @@ impl AgentAdapter for Claude {
                 Ok(vec![write_action(self.initialize())?])
             }
             Input::Interrupt => {
+                self.title_description = None;
                 if !matches!(self.phase, Phase::Running) {
                     return Ok(vec![Action::Interrupted]);
                 }
@@ -1582,13 +1584,17 @@ impl Claude {
                 if !failed
                     && !self.title_attempted
                     && !self.native_named
-                    && let (Some(description), Some(native_session_id)) = (
+                    && let (Some(mut context), Some(native_session_id)) = (
                         self.title_description.take(),
                         self.native_session_id.clone(),
                     )
                 {
                     self.title_attempted = true;
                     self.generating_title_for = Some(native_session_id);
+                    if let Some(reply) = m["result"].as_str() {
+                        context.reply(reply);
+                    }
+                    let description = context.description();
                     let Action::Write(bytes) = write_action(json!({
                         "type": "control_request", "request_id": "latte-generate-title",
                         "request": {"subtype": "generate_session_title", "description": description, "persist": true}
@@ -1602,6 +1608,13 @@ impl Claude {
                 self.last_result = m["result"].as_str().map(str::to_owned);
             }
             _ => {}
+        }
+        if let Some(context) = &mut self.title_description {
+            for action in &output {
+                if let Action::Event(EventKind::Text { text }) = action {
+                    context.reply(text);
+                }
+            }
         }
         Ok(output)
     }
@@ -2057,6 +2070,12 @@ mod tests {
             ..Default::default()
         };
         agent.remember_title_description("修复消息发送后的输入框");
+        agent
+            .decode(json!({"type":"assistant","message":{"content":[
+                {"type":"thinking","thinking":"PRIVATE_REASONING"},
+                {"type":"text","text":"已修复发送后的输入框状态"}
+            ]}}))
+            .unwrap();
         let actions = agent
             .decode(json!({"type":"result","is_error":false}))
             .unwrap();
@@ -2064,7 +2083,7 @@ mod tests {
         assert_eq!(wire.len(), 1);
         assert_eq!(
             wire[0]["request"],
-            json!({"subtype":"generate_session_title","description":"修复消息发送后的输入框","persist":true})
+            json!({"subtype":"generate_session_title","description":"修复消息发送后的输入框\n\nAssistant reply:\n已修复发送后的输入框状态","persist":true})
         );
         assert!(matches!(
             actions.last(),
@@ -2226,9 +2245,12 @@ mod tests {
             wire[0]["request"]["description"]
                 .as_str()
                 .unwrap()
+                .split("\n\nAssistant reply:")
+                .next()
+                .unwrap()
                 .chars()
                 .count(),
-            1024
+            2048
         );
     }
     fn handoff(agent: &mut super::Claude, request_id: &str) -> String {

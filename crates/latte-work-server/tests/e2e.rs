@@ -3,6 +3,8 @@
 mod codex_e2e;
 #[path = "support/ssh.rs"]
 mod ssh_e2e;
+#[path = "support/titles.rs"]
+mod titles_e2e;
 #[path = "support/traex.rs"]
 mod traex_e2e;
 use latte_work_client::Client;

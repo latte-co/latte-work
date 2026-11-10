@@ -6,6 +6,8 @@ mod claude_models;
 mod claude_sessions;
 pub(crate) mod claude_skills;
 pub(crate) mod codex;
+pub(crate) mod codex_title;
+mod titles;
 pub(crate) mod traex;
 pub use adapter::{Action, AgentAdapter, AgentCommand, Input};
 use anyhow::{Result, bail};

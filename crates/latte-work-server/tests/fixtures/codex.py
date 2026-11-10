@@ -4,6 +4,7 @@ import json
 import os
 import pathlib
 import sys
+import time
 
 if '--version' in sys.argv:
     print('codex-cli fixture-0.162.0')
@@ -17,6 +18,7 @@ turn = None
 count = 0
 waiting = None
 turn_prompt = None
+title_only = False
 
 
 def emit(value):
@@ -55,6 +57,16 @@ for line in sys.stdin:
     elif method == 'config/read':
         reply(value, {'config': {'model_provider': None, 'model': None, 'developer_instructions': 'NATIVE_CODEX_INSTRUCTIONS'}})
     elif method in ('thread/start', 'thread/resume'):
+        if params.get('ephemeral'):
+            assert params['sandbox'] == 'read-only'
+            assert params['config']['features.shell_tool'] is False
+            assert params['config']['features.plugins'] is False
+            assert params['environments'] == [] and params['dynamicTools'] == []
+            assert params['developerInstructions'] == ''
+            title_only = True
+            thread = 'codex-title-thread'
+            reply(value, {'thread': {'id': thread, 'ephemeral': True}, 'sandbox': {'type': 'readOnly'}})
+            continue
         assert 'model_backend_variant' not in params.get('config', {}), params
         if 'developerInstructions' in params:
             assert params['developerInstructions'].startswith('NATIVE_CODEX_INSTRUCTIONS\n\nLatte Work')
@@ -68,6 +80,33 @@ for line in sys.stdin:
         notify('thread/name/updated', {'threadName': params['name']})
         reply(value, {})
     elif method == 'turn/start':
+        if title_only:
+            assert params['threadId'] == thread and params['outputSchema']['required'] == ['title']
+            description = params['input'][0]['text']
+            with pathlib.Path('codex-title-inputs').open('a') as f:
+                f.write(json.dumps({'description': description, 'pid': os.getpid()}) + '\n')
+            turn = 'title-turn'
+            early_title = 'native-auto-title-early' in description
+            if not early_title:
+                notify('turn/started', {'turn': {'id': turn, 'status': 'inProgress'}})
+                reply(value, {'turn': {'id': turn, 'status': 'inProgress'}})
+            if 'native-auto-title-held' in description:
+                deadline = time.monotonic() + 10
+                while not pathlib.Path('title-release').exists() and time.monotonic() < deadline:
+                    time.sleep(.02)
+            if 'native-auto-title-failed' in description:
+                pathlib.Path('title-response').write_text('sent')
+                complete('failed')
+            else:
+                title = '' if 'native-auto-title-empty' in description else '修复附件拖入失败'
+                # Unrelated output must not become a title.
+                notify('item/completed', {'threadId': 'other', 'item': {'id': 'bad', 'type': 'agentMessage', 'text': '{"title":"wrong"}'}})
+                text(json.dumps({'title': title}, ensure_ascii=False))
+                pathlib.Path('title-response').write_text('sent')
+                complete()
+            if early_title:
+                reply(value, {'turn': {'id': turn, 'status': 'completed'}})
+            continue
         assert 'modelProvider' not in params and 'modelBackendVariant' not in params, params
         assert params['threadId'] == thread
         assert params.get('model') in (None, 'codex-test', 'custom-codex')

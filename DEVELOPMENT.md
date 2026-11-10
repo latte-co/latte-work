@@ -1056,20 +1056,46 @@ have not been validated; this is not a claim about when individual flags were
 introduced. Platform injection requires native `--append-system-prompt` support,
 and unsupported optional title controls degrade to a notice rather than fail a task.
 
-Agent-generated titles are host metadata, not UI-generated summaries. Claude's
-headless stream mode does not create AI titles automatically. After the first
-successful ordinary turn in each process, Latte sends the native
-`generate_session_title` control with `persist: true` and a bounded description.
-The CLI reuses an existing native name or generates and persists its AI title.
-This optional metadata exchange never creates a chat turn or requires a title
-acknowledgement before subsequent input. Unsupported controls preserve the
-fallback name and emit a notice.
-Successful responses without a valid title also report a notice. A persisted
-manual name suppresses generation on resume without passing `--name` or issuing
-an implicit rename to the existing native session.
+New conversations initially use the prompt prefix. After their first successful
+ordinary turn, the execution host requests a friendly title using the request and
+visible first-turn reply. Titles are saved in host metadata and appear through the
+existing session/list polling on local and SSH hosts. Hidden reasoning is not
+collected. Generation runs once for a newly created native session; reopening or
+resuming does not regenerate names or backfill old history.
+
+Claude uses `generate_session_title` with `persist: true`; its bounded description
+contains up to 2,048 request characters and 4,096 characters of recent visible
+reply, including result-only responses. The CLI persists its AI title. Traex uses
+`thread/name/generate` on the existing native history and correlates the resulting
+`thread/name/generated` notification with its request and thread IDs. The suggestion
+is saved as generated Work metadata, without a native manual rename.
+
+Codex has no equivalent generation RPC in CLI 0.162.0. A separately supervised
+app-server creates an ephemeral structured turn with the same selected model and
+Provider/authentication, using the bounded request/reply context above. It disables
+environment access, built-in/extension tools, skills, hooks and every effective
+MCP server, and verifies read-only or preserved custom permissions before sending.
+The host permits two concurrent jobs, with a 30-second deadline, 256-KiB frames,
+1-MiB total output, 4,096 messages and an 8-KiB structured reply limit. Its process
+group is reaped on completion/failure; closing or replacing the owning session
+cancels it. Generated titles remain Work metadata. This adds an optional model
+request using the selected Agent's existing service; no separate Provider is needed.
+
+None of these paths adds a turn to the visible conversation or blocks subsequent
+input on the title response. Rejected, failed or invalid title requests retain
+the prefix and report a notice. Persisted manual names suppress generation on
+resume without implicitly renaming the native session.
 Responses are bound to the native identity, and generated names cannot overwrite
 a manual name. Opening a session, discovery, slash commands, failed turns and
 child results do not trigger generation.
+
+Focused checks: the server `agents::` unit tests and final-binary `titles_e2e`
+tests cover context bounds, correlation, manual-name precedence, failures,
+concurrent input, reconnect and resume without extra visible turns.
+`scripts/smoke-codex-providers.py`, `scripts/smoke-traex-providers.py` and
+`scripts/smoke-claude-queue.py` separately exercise installed CLIs with disposable
+localhost model fixtures. These validate native protocol behavior, not live-model
+title quality, native UI behavior or deployment to a configured SSH host.
 
 Claude's `session_title_changed` reports an explicit native session name (not an AI title).
 It updates the saved custom name without creating a turn, including a native-side

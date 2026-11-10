@@ -25,6 +25,7 @@ binary = str(Path(args.binary).resolve())
 traex = str(Path(args.traex).resolve())
 KEY = 'latte-traex-fixture-secret-91b4'
 seen = []
+title_requests = []
 
 class Handler(http.server.BaseHTTPRequestHandler):
     def log_message(self, *_):
@@ -32,13 +33,17 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
     def do_POST(self):
         body = json.loads(self.rfile.read(int(self.headers['Content-Length'])))
+        title_request = 'thread-title assistant' in json.dumps(body)
+        if title_request:
+            title_requests.append(body)
+            assert not body.get('tools'), body.get('tools')
         seen.append({'path': self.path, 'model': body.get('model'),
                      'authorization': self.headers.get('Authorization'),
                      'api_key': self.headers.get('x-api-key'), 'old_header': self.headers.get('X-Old-Header')})
         self.send_response(200)
         self.send_header('Content-Type', 'text/event-stream')
         self.end_headers()
-        marker = 'PROVIDER_OK'
+        marker = '<title>检查 Traex Provider 切换</title>' if title_request else 'PROVIDER_OK'
         if self.path.endswith('/messages'):
             events = [
                 {'type': 'message_start', 'message': {'id': 'msg_fixture', 'type': 'message', 'role': 'assistant', 'model': body['model'], 'content': [], 'usage': {'input_tokens': 10, 'output_tokens': 0}}},
@@ -148,6 +153,18 @@ try:
                 assert actual['api_key'] == (KEY if auth == 'api_key' else None), actual
                 text = ''.join(e['event'].get('text', '') for e in value['events'] if e['event']['kind'] == 'text')
                 assert 'PROVIDER_OK' in text
+                if index == 0:
+                    while time.monotonic() < deadline:
+                        value = rpc('poll', session_id=sid, after=0)
+                        if value['session']['title'] == '检查 Traex Provider 切换':
+                            break
+                        time.sleep(.1)
+                    else:
+                        raise TimeoutError('native automatic title: ' + json.dumps(value, ensure_ascii=False))
+                    assert len(title_requests) == 1 and not value['session']['custom_title']
+                    assert len([e for e in value['events'] if e['event']['kind'] == 'user']) == 1
+                    assert 'PROVIDER_OK' in json.dumps(title_requests[0])
+                    report['checks'].append('native generated title uses conversation history, has no tools and adds no visible turn')
                 current_native = value['session']['native_id']
                 assert current_native and (native_id is None or current_native == native_id)
                 native_id = current_native
