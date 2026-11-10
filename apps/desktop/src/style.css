@@ -6027,6 +6027,12 @@ button.task-info-row:not(:disabled):hover,
   text-align: center;
   pointer-events: none;
 }
+/* Keep the input field out of drag hit-testing: WebKit's editable-area drag
+   handling can consume drops over an editable field and insert the dropped
+   file name as text before the composer sees them. */
+.composer-dragging textarea {
+  pointer-events: none;
+}
 .composer-add-menu {
   width: min(360px, 100%);
   padding: var(--space-2);

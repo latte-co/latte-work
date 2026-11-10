@@ -42,6 +42,7 @@ import {
   type ComposerReference,
 } from "./pasteAttachments";
 import { skillCreatorPrompt } from "./skillCreator";
+import { dragHasFiles } from "./fileDrag";
 import { AttachmentImage } from "./AttachmentImage";
 import { referenceKind } from "./referenceMessage";
 
@@ -533,7 +534,7 @@ export function Composer(props: Props) {
     }
   }
   function dropFiles(event: React.DragEvent<HTMLDivElement>) {
-    if (!Array.from(event.dataTransfer.types).includes("Files")) return;
+    if (!dragHasFiles(event.dataTransfer)) return;
     event.preventDefault();
     event.stopPropagation();
     dragDepth.current = 0;
@@ -761,7 +762,7 @@ export function Composer(props: Props) {
       className={`composer ${!connected ? "disabled" : ""}${dragging ? " composer-dragging" : ""}`}
       ref={root}
       onDragEnter={(event) => {
-        if (!Array.from(event.dataTransfer.types).includes("Files")) return;
+        if (!dragHasFiles(event.dataTransfer)) return;
         event.preventDefault();
         if (
           !disabled &&
@@ -775,7 +776,7 @@ export function Composer(props: Props) {
         }
       }}
       onDragOver={(event) => {
-        if (!Array.from(event.dataTransfer.types).includes("Files")) return;
+        if (!dragHasFiles(event.dataTransfer)) return;
         event.preventDefault();
         event.dataTransfer.dropEffect =
           disabled || sending || hidden || pasting || externalBusy
