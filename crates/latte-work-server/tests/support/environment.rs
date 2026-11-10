@@ -5,6 +5,214 @@ use latte_work_protocol::AgentEnvironment;
 use std::collections::BTreeMap;
 use tokio::sync::Mutex;
 
+fn text_content(events: &[latte_work_protocol::Event]) -> String {
+    events
+        .iter()
+        .filter_map(|e| match &e.event {
+            EventKind::Text { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect()
+}
+
+fn stored_content(host: &Host, table: &str, id: &str) -> Vec<EventKind> {
+    assert!(matches!(table, "events" | "subagent_history"));
+    let database = rusqlite::Connection::open_with_flags(
+        host.directory.path().join("state.sqlite"),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .unwrap();
+    database
+        .prepare(&format!(
+            "SELECT data FROM {table} WHERE session_id=?1 ORDER BY seq"
+        ))
+        .unwrap()
+        .query_map([id], |row| row.get::<_, String>(0))
+        .unwrap()
+        .map(|row| serde_json::from_str(&row.unwrap()).unwrap())
+        .collect()
+}
+
+#[tokio::test]
+async fn environment_secrets_are_redacted_before_storage_across_json_and_stream_fragments() {
+    let host = Host::start().await;
+    for secret in ["fixture-environment-secret", "abc\"def"] {
+        let project = tempfile::tempdir().unwrap();
+        let mut client = host.client().await;
+        let id = session(&mut client, project.path()).await;
+        let provider = latte_work_protocol::TurnProvider::Configured {
+            provider: None,
+            environment: AgentEnvironment(BTreeMap::from([
+                ("TOKEN".into(), "text".into()),
+                ("LATTE_TEST_SECRET".into(), secret.into()),
+            ])),
+        };
+        assert!(matches!(
+            ask(
+                &mut client,
+                Request::Send {
+                    session_id: id.clone(),
+                    request_id: format!("redaction-{id}"),
+                    text: "custom-environment-stream".into(),
+                    model: None,
+                    effort: None,
+                    permission_mode: None,
+                    provider: Some(provider.clone()),
+                }
+            )
+            .await,
+            Response::Accepted { duplicate: false }
+        ));
+        let deadline = Instant::now() + Duration::from_secs(15);
+        loop {
+            let Response::Events {
+                session, events, ..
+            } = ask(
+                &mut client,
+                Request::Poll {
+                    session_id: id.clone(),
+                    after: 0.0,
+                },
+            )
+            .await
+            else {
+                panic!("events")
+            };
+            assert_ne!(session.status, Status::Failed);
+            if text_content(&events).starts_with("public before ") {
+                assert_eq!(text_content(&events), "public before ");
+                break;
+            }
+            assert!(Instant::now() < deadline, "first delta was not observed");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        let stored = stored_content(&host, "events", &id);
+        let initial_text: String = stored
+            .iter()
+            .filter_map(|e| match e {
+                EventKind::Text { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            initial_text, "public before ",
+            "unmatched secret prefixes must not be stored"
+        );
+        std::fs::write(project.path().join("environment-stream-continue"), "").unwrap();
+        let events = wait(&mut client, &id, Status::Completed).await;
+        assert_eq!(
+            text_content(&events),
+            "public before [redacted] public after\n{\"secret\": \"[redacted]\"}\n"
+        );
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(&e.event, EventKind::Tool { id, name, input }
+            if id == "text" && name == "text" && input["body"] == "[redacted]"))
+        );
+        assert!(events.iter().any(
+            |e| matches!(&e.event, EventKind::ToolResult { id, content, .. }
+            if id == "text" && content[0]["type"] == "text" && content[0]["text"] == "[redacted]")
+        ));
+        let history = Request::SubagentHistory {
+            session_id: id.clone(),
+            task_id: "tool:secret-child".into(),
+            after: None,
+            source: None,
+            provider: Some(provider),
+        };
+        let Response::SubagentHistory { events: child, .. } =
+            ask(&mut client, history.clone()).await
+        else {
+            panic!("child history")
+        };
+        assert_eq!(text_content(&child), "child before [redacted] child after");
+        for table in ["events", "subagent_history"] {
+            let stored = stored_content(&host, table, &id);
+            let text: String = stored
+                .iter()
+                .filter_map(|e| match e {
+                    EventKind::Text { text } => Some(text.as_str()),
+                    _ => None,
+                })
+                .collect();
+            assert!(!text.contains(secret));
+            assert!(!serde_json::to_string(&stored).unwrap().contains(secret));
+            assert!(text.contains("[redacted]"));
+        }
+        drop(client);
+        let mut reconnected = host.client().await;
+        let replay = wait(&mut reconnected, &id, Status::Completed).await;
+        assert_eq!(text_content(&replay), text_content(&events));
+        let Response::SubagentHistory { events: replay, .. } = ask(&mut reconnected, history).await
+        else {
+            panic!("child replay")
+        };
+        assert_eq!(
+            serde_json::to_value(&replay).unwrap(),
+            serde_json::to_value(&child).unwrap()
+        );
+    }
+}
+
+#[tokio::test]
+async fn claude_model_labels_use_the_effective_app_environment_and_config_directory() {
+    let host = Host::start_with_environment(&[
+        (
+            "ANTHROPIC_DEFAULT_OPUS_MODEL",
+            std::ffi::OsStr::new("host/opus"),
+        ),
+        (
+            "ANTHROPIC_DEFAULT_OPUS_MODEL_NAME",
+            std::ffi::OsStr::new("Host Opus"),
+        ),
+    ])
+    .await;
+    let directory = tempfile::tempdir().unwrap();
+    std::fs::write(
+        directory.path().join("settings.json"),
+        serde_json::json!({"env": {
+            "ANTHROPIC_DEFAULT_SONNET_MODEL":"session/sonnet",
+            "ANTHROPIC_DEFAULT_SONNET_MODEL_NAME":"Session Sonnet"
+        }})
+        .to_string(),
+    )
+    .unwrap();
+    let mut client = host.client().await;
+    let Response::Models { model_labels, .. } = ask(
+        &mut client,
+        Request::ModelsForProvider {
+            agent: "claude".into(),
+            project_id: None,
+            model: None,
+            provider: None,
+            environment: AgentEnvironment(BTreeMap::from([
+                (
+                    "CLAUDE_CONFIG_DIR".into(),
+                    directory.path().to_string_lossy().into(),
+                ),
+                ("ANTHROPIC_DEFAULT_OPUS_MODEL".into(), "app/opus".into()),
+                (
+                    "ANTHROPIC_DEFAULT_OPUS_MODEL_NAME".into(),
+                    "App Opus".into(),
+                ),
+            ])),
+        },
+    )
+    .await
+    else {
+        panic!("models")
+    };
+    assert_eq!(
+        model_labels.get("opus").map(String::as_str),
+        Some("App Opus")
+    );
+    assert_eq!(
+        model_labels.get("sonnet").map(String::as_str),
+        Some("Session Sonnet")
+    );
+}
+
 fn reported_environment(events: &[latte_work_protocol::Event]) -> serde_json::Value {
     events
         .iter()

@@ -44,12 +44,18 @@ pub fn provider_variants(
     variants
 }
 
-pub fn labels(project: Option<&Path>) -> BTreeMap<String, String> {
-    let directory = std::env::var_os("CLAUDE_CONFIG_DIR")
+pub fn labels(
+    project: Option<&Path>,
+    environment: &latte_work_protocol::AgentEnvironment,
+) -> BTreeMap<String, String> {
+    let directory = crate::agent_environment::configured_variable("CLAUDE_CONFIG_DIR", environment)
         .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".claude")));
+        .or_else(|| {
+            crate::agent_environment::variable("HOME").map(|h| PathBuf::from(h).join(".claude"))
+        });
     let mut files = Vec::new();
     if let Some(directory) = directory {
+        let directory = project.map_or_else(|| directory.clone(), |p| p.join(&directory));
         files.push(directory.join("settings.json"));
     }
     if let Some(project) = project {
@@ -71,7 +77,11 @@ pub fn labels(project: Option<&Path>) -> BTreeMap<String, String> {
                 format!("ANTHROPIC_DEFAULT_{family}_MODEL_NAME"),
             ]
         })
-        .filter_map(|key| std::env::var(&key).ok().map(|value| (key, value)))
+        .filter_map(|key| {
+            crate::agent_environment::configured_variable(&key, environment)
+                .and_then(|value| value.into_string().ok())
+                .map(|value| (key, value))
+        })
         .collect();
     labels_from_sources(&files, env)
 }

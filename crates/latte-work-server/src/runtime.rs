@@ -510,6 +510,8 @@ type Outcome = (Status, Option<String>);
 #[derive(Default)]
 struct TurnState {
     ready: bool,
+    redactor: Option<crate::redaction::Redactor>,
+    text_tails: HashMap<String, String>,
     pending: HashMap<
         String,
         (
@@ -520,6 +522,71 @@ struct TurnState {
     >,
 }
 impl TurnState {
+    fn flush_text(&mut self, database: &Database, session_id: &str, channel: &str) -> Result<()> {
+        // An unfinished prefix is never written in clear, including on an
+        // explicit content boundary. It cannot be reconstructed after replay.
+        if self.text_tails.remove(channel).is_some() {
+            self.store_event(
+                database,
+                session_id,
+                channel,
+                EventKind::Text {
+                    text: "[redacted]".into(),
+                },
+            )?;
+        }
+        Ok(())
+    }
+    fn store_event(
+        &self,
+        database: &Database,
+        session_id: &str,
+        channel: &str,
+        event: EventKind,
+    ) -> Result<()> {
+        db(database, |s| {
+            if channel.is_empty() {
+                s.event(session_id, event).map(|_| ())
+            } else {
+                s.subagent_event(session_id, channel, event)
+            }
+        })
+    }
+    fn event(
+        &mut self,
+        database: &Database,
+        session_id: &str,
+        channel: &str,
+        event: EventKind,
+    ) -> Result<()> {
+        if let EventKind::Text { text } = event {
+            let mut pending = self.text_tails.remove(channel).unwrap_or_default();
+            let mut text = self
+                .redactor
+                .as_ref()
+                .expect("initialized")
+                .fragment(&text, &mut pending);
+            if !pending.is_empty() {
+                // Keep at most one main stream and the adapter's bounded child
+                // stream quota. Extra pending suffixes are masked immediately.
+                if self.text_tails.len() < 513 {
+                    self.text_tails.insert(channel.into(), pending);
+                } else {
+                    text.push_str("[redacted]");
+                }
+            }
+            if !text.is_empty() {
+                self.store_event(database, session_id, channel, EventKind::Text { text })?;
+            }
+        } else {
+            if !matches!(event, EventKind::Progress { .. } | EventKind::Usage { .. }) {
+                self.flush_text(database, session_id, channel)?;
+            }
+            let event = self.redactor.as_ref().expect("initialized").event(event);
+            self.store_event(database, session_id, channel, event)?;
+        }
+        Ok(())
+    }
     async fn apply(
         &mut self,
         actions: Vec<Action>,
@@ -528,10 +595,13 @@ impl TurnState {
         session_id: &str,
         config: &LaunchConfig,
     ) -> Result<Option<Outcome>> {
+        self.redactor.get_or_insert_with(|| config.redactor());
         for action in actions {
             match action {
                 Action::NativeName(title) => {
-                    db(database, |s| s.sync_live_native_title(session_id, &title))?;
+                    db(database, |s| {
+                        s.sync_live_native_title(session_id, &config.redact(&title))
+                    })?;
                 }
                 Action::GeneratedTitle {
                     native_session_id,
@@ -539,7 +609,7 @@ impl TurnState {
                 } => {
                     db(database, |s| {
                         if s.session(session_id)?.native_id.as_deref() == Some(&native_session_id) {
-                            s.sync_native_title(session_id, &title, false)?;
+                            s.sync_native_title(session_id, &config.redact(&title), false)?;
                         }
                         Ok(())
                     })?;
@@ -583,6 +653,12 @@ impl TurnState {
                     s.save(&current)
                 })?,
                 Action::Event(event) => {
+                    if let EventKind::Subagent { update } = &event
+                        && update.status.is_some_and(|status| !status.active())
+                        && let Some(channel) = &update.tool_use_id
+                    {
+                        self.flush_text(database, session_id, channel)?;
+                    }
                     let terminal_child = match &event {
                         EventKind::Subagent { update }
                             if update.status.is_some_and(|status| !status.active()) =>
@@ -591,9 +667,7 @@ impl TurnState {
                         }
                         _ => None,
                     };
-                    db(database, |s| {
-                        s.event(session_id, config.redact_event(event)?)
-                    })?;
+                    self.event(database, session_id, "", event)?;
                     // Capture a completed child's full native output before this
                     // process/redaction context can be replaced by a later turn.
                     if let Some(native_id) = terminal_child
@@ -678,15 +752,16 @@ impl TurnState {
                         }
                     }
                 }
-                Action::SubagentEvent { tool_use_id, event } => db(database, |s| {
-                    s.subagent_event(session_id, &tool_use_id, config.redact_event(event)?)
-                })?,
+                Action::SubagentEvent { tool_use_id, event } => {
+                    self.event(database, session_id, &tool_use_id, event)?;
+                }
                 Action::Question {
                     id,
                     tool_use_id,
                     input,
                     questions,
                 } => {
+                    self.flush_text(database, session_id, "")?;
                     if self.pending.len() >= 32 {
                         bail!("待处理交互数量超出限制");
                     }
@@ -711,6 +786,7 @@ impl TurnState {
                     tool,
                     input: original,
                 } => {
+                    self.flush_text(database, session_id, "")?;
                     if self.pending.len() >= 32 {
                         bail!("待审批工具数量超出限制");
                     }
@@ -731,6 +807,7 @@ impl TurnState {
                     })?;
                 }
                 Action::Finished { failed, message } => {
+                    self.flush_text(database, session_id, "")?;
                     return Ok(Some((
                         if failed {
                             Status::Failed
@@ -2019,6 +2096,73 @@ mod tests {
             .await
             .is_err()
         );
+    }
+
+    #[tokio::test]
+    async fn streaming_redaction_masks_pending_prefixes_at_content_and_turn_boundaries() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(&dir.path().join("state.sqlite")).unwrap();
+        let project = store.add_project(dir.path()).unwrap();
+        let session = store.create_session(project.id, "claude".into()).unwrap();
+        let database = Arc::new(Mutex::new(store));
+        let config = crate::providers::ProviderStore::open(dir.path())
+            .unwrap()
+            .turn_config(
+                "claude",
+                None,
+                Some(latte_work_protocol::TurnProvider::Configured {
+                    provider: None,
+                    environment: latte_work_protocol::AgentEnvironment(
+                        std::collections::BTreeMap::from([
+                            ("TOKEN".into(), "text".into()),
+                            ("SECRET".into(), "fixture-environment-secret".into()),
+                        ]),
+                    ),
+                }),
+            )
+            .unwrap();
+        let (mut input, _reader) = tokio::io::duplex(1024);
+        let mut state = TurnState::default();
+        let actions = vec![
+            Action::Event(EventKind::Text {
+                text: "before fixture-environment-".into(),
+            }),
+            Action::Event(EventKind::Progress {
+                phase: latte_work_protocol::ExecutionPhase::Thinking,
+            }),
+            Action::Event(EventKind::Text {
+                text: "secret after fixture-".into(),
+            }),
+            Action::Event(EventKind::Tool {
+                id: "text".into(),
+                name: "text".into(),
+                input: Value::Null,
+            }),
+            Action::Event(EventKind::Text {
+                text: "safe fi".into(),
+            }),
+            Action::Finished {
+                failed: false,
+                message: None,
+            },
+        ];
+        assert_eq!(
+            state
+                .apply(actions, &mut input, &database, &session.id, &config)
+                .await
+                .unwrap(),
+            Some((Status::Completed, None))
+        );
+        let (events, _) = db(&database, |s| s.events(&session.id, 0.0)).unwrap();
+        let text: String = events
+            .iter()
+            .filter_map(|e| match &e.event {
+                EventKind::Text { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(text, "before [redacted] after [redacted]safe [redacted]");
+        assert!(state.text_tails.is_empty());
     }
 
     #[tokio::test]

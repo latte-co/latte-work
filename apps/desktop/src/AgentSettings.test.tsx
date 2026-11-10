@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { afterEach, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import {
   cleanup,
   fireEvent,
@@ -13,6 +13,9 @@ import type { Workbench } from "./useWorkbench";
 
 const { invoke } = vi.hoisted(() => ({ invoke: vi.fn() }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke }));
+beforeEach(() => {
+  HTMLElement.prototype.scrollIntoView = vi.fn();
+});
 afterEach(() => {
   cleanup();
   vi.clearAllMocks();
@@ -175,7 +178,86 @@ it("keeps hosts isolated when switching the settings target", async () => {
   expect(invoke).toHaveBeenCalledWith("agent_environments", {
     hostId: other.id,
   });
+  fireEvent.click(screen.getByRole("combobox", { name: "运行主机" }));
+  fireEvent.click(screen.getByRole("option", { name: host.name }));
+  await waitFor(() =>
+    expect(
+      (screen.getByLabelText("Claude Code 环境变量") as HTMLTextAreaElement)
+        .value,
+    ).toBe("TOKEN=unsaved-private-value"),
+  );
+  expect(
+    (screen.getByLabelText("Codex 环境变量") as HTMLTextAreaElement).value,
+  ).toBe("");
   expect(
     invoke.mock.calls.some(([command]) => command === "save_agent_environment"),
   ).toBe(false);
+});
+
+it.each(["", "TOKEN=first\nTOKEN=invalid-draft"])(
+  "retains an unsaved ENV draft (%j) across category changes and reconnects",
+  async (draft) => {
+    setup();
+    const onBusy = vi.fn();
+    const view = render(<AgentSettings state={state} active onBusy={onBusy} />);
+    fireEvent.change(await screen.findByLabelText("Claude Code 环境变量"), {
+      target: { value: draft },
+    });
+    fireEvent.change(screen.getByLabelText("Codex 环境变量"), {
+      target: { value: "CODEX_TOKEN=independent-unsaved-value" },
+    });
+    view.rerender(
+      <AgentSettings state={state} active={false} onBusy={onBusy} />,
+    );
+    view.rerender(<AgentSettings state={state} active onBusy={onBusy} />);
+    const reopened = (await screen.findByLabelText(
+      "Claude Code 环境变量",
+    )) as HTMLTextAreaElement;
+    await waitFor(() => expect(reopened.disabled).toBe(false));
+    expect(reopened.value).toBe(draft);
+    fireEvent.click(screen.getByRole("button", { name: "重新连接" }));
+    const reconnected = (await screen.findByLabelText(
+      "Claude Code 环境变量",
+    )) as HTMLTextAreaElement;
+    await waitFor(() => expect(reconnected.disabled).toBe(false));
+    expect(reconnected.value).toBe(draft);
+    expect(
+      (screen.getByLabelText("Codex 环境变量") as HTMLTextAreaElement).value,
+    ).toBe("CODEX_TOKEN=independent-unsaved-value");
+    expect(
+      invoke.mock.calls.some(
+        ([command]) => command === "save_agent_environment",
+      ),
+    ).toBe(false);
+  },
+);
+
+it("refreshes clean ENV while retaining dirty input against the latest saved baseline", async () => {
+  setup();
+  render(<AgentSettings state={state} active onBusy={() => {}} />);
+  await screen.findByLabelText("Claude Code 环境变量");
+  const original = invoke.getMockImplementation()!;
+  let saved = { HTTPS_PROXY: "http://external.test:7890" };
+  invoke.mockImplementation((command, args) =>
+    command === "agent_environments"
+      ? Promise.resolve({ claude: saved })
+      : original(command, args),
+  );
+  fireEvent.click(screen.getByRole("button", { name: "重新连接" }));
+  let field = (await screen.findByLabelText(
+    "Claude Code 环境变量",
+  )) as HTMLTextAreaElement;
+  await waitFor(() =>
+    expect(field.value).toBe("HTTPS_PROXY=http://external.test:7890"),
+  );
+  expect(saveButton(field).disabled).toBe(true);
+  fireEvent.change(field, { target: { value: "TOKEN=keep-this-draft" } });
+  saved = { HTTPS_PROXY: "http://newer.test:7890" };
+  fireEvent.click(screen.getByRole("button", { name: "重新连接" }));
+  field = (await screen.findByLabelText(
+    "Claude Code 环境变量",
+  )) as HTMLTextAreaElement;
+  await waitFor(() => expect(field.disabled).toBe(false));
+  expect(field.value).toBe("TOKEN=keep-this-draft");
+  expect(saveButton(field).disabled).toBe(false);
 });

@@ -61,40 +61,30 @@ pub struct ResolvedProvider {
     pub credential: String,
 }
 impl LaunchConfig {
+    pub fn redactor(&self) -> crate::redaction::Redactor {
+        let credentials = self.provider.iter().map(|p| p.credential.clone());
+        let environment = self
+            .environment
+            .0
+            .iter()
+            .filter(|(name, value)| {
+                let name = name.to_ascii_uppercase();
+                ["TOKEN", "KEY", "SECRET", "PASSWORD", "CREDENTIAL", "AUTH"]
+                    .iter()
+                    .any(|part| name.contains(part))
+                    || (value.contains("://") && value.contains('@'))
+            })
+            .map(|(_, value)| value.clone());
+        crate::redaction::Redactor::new(credentials.chain(environment))
+    }
     pub fn redact(&self, text: &str) -> String {
-        let mut text = match &self.provider {
-            Some(p) if !p.credential.is_empty() => text.replace(&p.credential, "[redacted]"),
-            _ => text.to_owned(),
-        };
-        for (name, value) in &self.environment.0 {
-            let name = name.to_ascii_uppercase();
-            let sensitive = ["TOKEN", "KEY", "SECRET", "PASSWORD", "CREDENTIAL", "AUTH"]
-                .iter()
-                .any(|part| name.contains(part))
-                || (value.contains("://") && value.contains('@'));
-            if sensitive && !value.is_empty() {
-                text = text.replace(value, "[redacted]");
-            }
-        }
-        text
+        self.redactor().text(text)
     }
     pub fn redact_event(
         &self,
         event: latte_work_protocol::EventKind,
     ) -> Result<latte_work_protocol::EventKind> {
-        fn visit(value: &mut serde_json::Value, config: &LaunchConfig) {
-            match value {
-                serde_json::Value::String(text) => *text = config.redact(text),
-                serde_json::Value::Array(items) => items.iter_mut().for_each(|v| visit(v, config)),
-                serde_json::Value::Object(fields) => {
-                    fields.values_mut().for_each(|v| visit(v, config))
-                }
-                _ => {}
-            }
-        }
-        let mut value = serde_json::to_value(event)?;
-        visit(&mut value, self);
-        Ok(serde_json::from_value(value)?)
+        Ok(self.redactor().event(event))
     }
 }
 pub struct ProviderStore {

@@ -3181,7 +3181,30 @@ async fn native_child_transcript_is_cached_without_reopening_an_agent_or_replayi
     let mut client = host.client().await;
     let project = tempfile::tempdir().unwrap();
     let id = session(&mut client, project.path()).await;
-    send(&mut client, &id, "native-child-process", "subagent-process").await;
+    let native_directory = tempfile::tempdir().unwrap();
+    let provider = latte_work_protocol::TurnProvider::Configured {
+        provider: None,
+        environment: latte_work_protocol::AgentEnvironment(std::collections::BTreeMap::from([(
+            "CLAUDE_CONFIG_DIR".into(),
+            native_directory.path().to_string_lossy().into(),
+        )])),
+    };
+    assert!(matches!(
+        ask(
+            &mut client,
+            Request::Send {
+                session_id: id.clone(),
+                request_id: "native-child-process".into(),
+                text: "subagent-process".into(),
+                model: None,
+                effort: None,
+                permission_mode: None,
+                provider: Some(provider.clone()),
+            }
+        )
+        .await,
+        Response::Accepted { .. }
+    ));
     wait(&mut client, &id, Status::Completed).await;
     let Response::Subagents { tasks, .. } = ask(
         &mut client,
@@ -3244,6 +3267,53 @@ async fn native_child_transcript_is_cached_without_reopening_an_agent_or_replayi
         panic!("cached child")
     };
     assert_eq!(events.len(), restored.len());
+    // Discard only the test's history index to exercise fallback after the
+    // process has closed. Its original launch fingerprint still owns the read.
+    let database = rusqlite::Connection::open(host.directory.path().join("state.sqlite")).unwrap();
+    database
+        .execute("DELETE FROM subagent_history WHERE session_id=?1", [&id])
+        .unwrap();
+    database
+        .execute(
+            "DELETE FROM subagent_history_sources WHERE session_id=?1",
+            [&id],
+        )
+        .unwrap();
+    drop(database);
+    let Response::SubagentHistory {
+        events: history,
+        source,
+        incomplete,
+        ..
+    } = ask(
+        &mut reconnected,
+        Request::SubagentHistory {
+            session_id: id.clone(),
+            task_id: task.id.clone(),
+            after: None,
+            source: None,
+            provider: Some(provider),
+        },
+    )
+    .await
+    else {
+        panic!("native fallback")
+    };
+    assert_eq!(source, "native");
+    assert!(!incomplete);
+    assert!(history.iter().any(
+        |e| matches!(&e.event, EventKind::Text { text } if text == "text only in native file")
+    ));
+    assert!(
+        history
+            .iter()
+            .any(|e| matches!(&e.event, EventKind::Tool { id, .. } if id == "child-read"))
+    );
+    assert!(
+        history
+            .iter()
+            .any(|e| matches!(&e.event, EventKind::Text { text } if text == "native file final"))
+    );
     assert!(
         matches!(ask(&mut reconnected, Request::Poll { session_id: id, after: 0.0 }).await, Response::Events { session, events, .. } if session.agent_session_open == Some(false) && events.iter().filter(|e| matches!(e.event, EventKind::User { .. })).count() == 1)
     );
@@ -3984,10 +4054,20 @@ async fn usage_alias_capacity_is_persisted_and_replayed() {
     drop(client);
     let mut reconnected = host.client().await;
     let replay = wait(&mut reconnected, &id, Status::Completed).await;
+    // Native title metadata can arrive after Completed. The snapshot's existing
+    // events must replay exactly, and usage must not gain duplicate accounting.
     assert_eq!(
         serde_json::to_value(&events).unwrap(),
-        serde_json::to_value(&replay).unwrap()
+        serde_json::to_value(replay.iter().take(events.len()).collect::<Vec<_>>()).unwrap()
     );
+    let usage = |events: &[latte_work_protocol::Event]| {
+        events
+            .iter()
+            .filter(|e| matches!(e.event, EventKind::Usage { .. }))
+            .map(|e| serde_json::to_value(e).unwrap())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(usage(&events), usage(&replay));
 }
 
 #[tokio::test]

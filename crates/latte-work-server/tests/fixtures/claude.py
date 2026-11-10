@@ -147,6 +147,30 @@ for line in sys.stdin:
             emit({'type':'assistant','message':{'content':[{'type':'text','text':output}]}})
             emit({'type':'result','subtype':'success','is_error':False})
             continue
+        if text=='custom-environment-stream':
+            secret=os.environ['LATTE_TEST_SECRET']
+            split=len(secret)//2
+            def delta(part,parent=None):
+                emit({'type':'stream_event','parent_tool_use_id':parent,'event':{'type':'content_block_delta','delta':{'type':'text_delta','text':part}}})
+            delta('public before '+secret[:split])
+            pathlib.Path('environment-stream-ready').touch()
+            deadline=time.monotonic()+15
+            while not pathlib.Path('environment-stream-continue').exists():
+                if time.monotonic()>deadline: raise RuntimeError('ENV fixture rendezvous timed out')
+                time.sleep(.01)
+            delta(secret[split:]+' public after\n')
+            encoded=json.dumps({'secret':secret})
+            for part in encoded: delta(part)
+            delta('\n')
+            emit({'type':'assistant','message':{'content':[{'type':'tool_use','id':'text','name':'text','input':{'body':'text'}}]}})
+            emit({'type':'user','message':{'content':[{'type':'tool_result','tool_use_id':'text','content':[{'type':'text','text':secret}],'is_error':False}]}})
+            emit({'type':'assistant','message':{'content':[{'type':'tool_use','id':'secret-child','name':'Agent','input':{'description':'Secret fixture'}}]}})
+            emit({'type':'system','subtype':'task_started','task_id':'secret-child-native','task_type':'local_agent','tool_use_id':'secret-child','description':'Secret fixture'})
+            delta('child before '+secret[:split],'secret-child')
+            delta(secret[split:]+' child after','secret-child')
+            emit({'type':'system','subtype':'task_notification','task_id':'secret-child-native','status':'completed','summary':'Complete'})
+            emit({'type':'result','subtype':'success','is_error':False})
+            continue
         if text=='environment':
             output=subprocess.check_output(['latte-env-fixture'],text=True)
             emit({'type':'assistant','message':{'content':[{'type':'text','text':output}]}})

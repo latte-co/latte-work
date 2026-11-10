@@ -1629,6 +1629,7 @@ pub(super) fn parse_child_history(
 ) -> Result<super::ChildHistoryPage> {
     let mut cursor = raw.cursor;
     let mut events = Vec::new();
+    let redactor = config.redactor();
     let at = crate::store::now();
     for line in raw.bytes.split_inclusive(|b| *b == b'\n') {
         let base = cursor.offset;
@@ -1676,7 +1677,7 @@ pub(super) fn parse_child_history(
             let Some(event) = event else {
                 continue;
             };
-            let event = config.redact_event(event)?;
+            let event = redactor.event(event);
             let mut report = None;
             match &event {
                 EventKind::Tool { id, name, input } if name == "SubagentHandback" => {
@@ -1736,6 +1737,7 @@ pub(super) fn parse_child_transcript(
         (VecDeque::new(), 0usize, raw.start, raw.truncated);
     let at = crate::store::now();
     let mut handbacks = HashMap::<String, String>::new();
+    let redactor = config.redactor();
     for line in raw.bytes.split_inclusive(|b| *b == b'\n') {
         let base = offset;
         offset += line.len() as u64;
@@ -1808,8 +1810,7 @@ pub(super) fn parse_child_transcript(
             let Some(event) = event else {
                 continue;
             };
-            let (event, partial) =
-                crate::store::bounded_subagent_event(config.redact_event(event)?)?;
+            let (event, partial) = crate::store::bounded_subagent_event(redactor.event(event))?;
             truncated |= partial;
             let size = serde_json::to_vec(&event)?.len() + 128;
             events.push_back((
@@ -1824,8 +1825,7 @@ pub(super) fn parse_child_transcript(
             ));
             bytes += size;
             if let Some(report) = report {
-                let EventKind::Text { text } =
-                    config.redact_event(EventKind::Text { text: report })?
+                let EventKind::Text { text } = redactor.event(EventKind::Text { text: report })
                 else {
                     unreachable!("redaction preserves the event kind")
                 };

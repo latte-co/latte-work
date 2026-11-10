@@ -82,7 +82,14 @@ pub async fn child_history(
         std::time::Duration::from_secs(3),
         tokio::task::spawn_blocking(move || {
             let _permit = permit;
-            let Some(raw) = claude_sessions::read_child_page(&cwd, &parent, &child, cursor)? else {
+            let Some(raw) = claude_sessions::read_child_page(
+                &cwd,
+                &parent,
+                &child,
+                &config.environment,
+                cursor,
+            )?
+            else {
                 return Ok(None);
             };
             claude::parse_child_history(raw, &parent, &child, &session_id, &config).map(Some)
@@ -123,7 +130,9 @@ pub async fn child_transcript(
         std::time::Duration::from_secs(3),
         tokio::task::spawn_blocking(move || {
             let _permit = permit;
-            let Some(bytes) = claude_sessions::read_child(&cwd, &parent, &child)? else {
+            let Some(bytes) =
+                claude_sessions::read_child(&cwd, &parent, &child, &config.environment)?
+            else {
                 return Ok(None);
             };
             claude::parse_child_transcript(bytes, &parent, &child, &session_id, &config).map(Some)
@@ -212,9 +221,10 @@ pub async fn permission_modes(
 pub fn model_labels(
     agent: &str,
     project: Option<&std::path::Path>,
+    environment: &latte_work_protocol::AgentEnvironment,
 ) -> std::collections::BTreeMap<String, String> {
     match agent {
-        "claude" => claude_models::labels(project),
+        "claude" => claude_models::labels(project, environment),
         _ => std::collections::BTreeMap::new(),
     }
 }

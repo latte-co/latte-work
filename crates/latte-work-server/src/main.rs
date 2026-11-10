@@ -8,6 +8,7 @@ mod image_preview;
 mod message_queue;
 mod providers;
 mod questions;
+mod redaction;
 mod runtime;
 mod skill_staging;
 mod skill_worker;
@@ -501,6 +502,7 @@ async fn dispatch(s: &Service, request: Request) -> Result<Response> {
                 *model_labels = agents::model_labels(
                     &agent,
                     project.as_ref().map(|p| std::path::Path::new(&p.path)),
+                    &Default::default(),
                 );
             }
             response
@@ -616,6 +618,7 @@ async fn dispatch(s: &Service, request: Request) -> Result<Response> {
                 *model_labels = agents::model_labels(
                     &agent,
                     project.as_ref().map(|p| std::path::Path::new(&p.path)),
+                    &environment,
                 );
             }
             response

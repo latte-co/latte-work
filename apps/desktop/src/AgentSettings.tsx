@@ -15,6 +15,7 @@ import { formatEnvironment, parseEnvironment } from "./agentEnvironment";
 import type { AgentEnvironment, AgentInfo, Response } from "./protocol";
 import type { Workbench } from "./useWorkbench";
 type Catalog = Extract<Response, { kind: "providers" }>;
+type EnvironmentDraft = { text: string; saved: string };
 export function AgentSettings({
   state,
   active,
@@ -31,8 +32,8 @@ export function AgentSettings({
   const [environments, setEnvironments] = useState<
     Record<string, AgentEnvironment>
   >({});
-  const [environmentDrafts, setEnvironmentDrafts] = useState<
-    Record<string, string>
+  const [draftsByHost, setDraftsByHost] = useState<
+    Record<string, Record<string, EnvironmentDraft>>
   >({});
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
@@ -42,6 +43,7 @@ export function AgentSettings({
   const [environmentSupported, setEnvironmentSupported] = useState(false);
   const generation = useRef(0);
   const host = state.hosts.find((h) => h.id === hostId) ?? localHost;
+  const environmentDrafts = draftsByHost[host.id] ?? {};
   useEffect(() => {
     if (!active) {
       setBusy(false);
@@ -71,14 +73,23 @@ export function AgentSettings({
       setAgents(hello.agents);
       setCatalog(target);
       setEnvironments(savedEnvironments);
-      setEnvironmentDrafts(
-        Object.fromEntries(
-          Object.entries(savedEnvironments).map(([agent, env]) => [
-            agent,
-            formatEnvironment(env),
-          ]),
-        ),
-      );
+      setDraftsByHost((values) => {
+        const previous = values[host.id] ?? {};
+        const drafts = { ...previous };
+        for (const agent of new Set([
+          ...hello.agents.map((agent) => agent.id),
+          ...Object.keys(savedEnvironments),
+          ...Object.keys(previous),
+        ])) {
+          const saved = formatEnvironment(savedEnvironments[agent] ?? {});
+          const draft = previous[agent];
+          drafts[agent] = {
+            text: draft && draft.text !== draft.saved ? draft.text : saved,
+            saved,
+          };
+        }
+        return { ...values, [host.id]: drafts };
+      });
       setChoices(
         Object.fromEntries(
           target.bindings.map((b) => [b.agent, b.provider_id]),
@@ -129,13 +140,19 @@ export function AgentSettings({
       const saved = await saveAgentEnvironment(
         host.id,
         agent,
-        parseEnvironment(environmentDrafts[agent] || ""),
+        parseEnvironment(environmentDrafts[agent]?.text ?? ""),
       );
       if (current === generation.current) {
         setEnvironments((values) => ({ ...values, [agent]: saved }));
-        setEnvironmentDrafts((values) => ({
+        setDraftsByHost((values) => ({
           ...values,
-          [agent]: formatEnvironment(saved),
+          [host.id]: {
+            ...values[host.id],
+            [agent]: {
+              text: formatEnvironment(saved),
+              saved: formatEnvironment(saved),
+            },
+          },
         }));
         setNotice(
           "环境变量已保存；下次启动 Agent 实例时生效，正在执行的任务继续使用原配置。",
@@ -221,7 +238,7 @@ export function AgentSettings({
             "";
           const dirty = (choices[agent.id] || "") !== saved;
           const provider = catalog.providers.find((p) => p.id === saved);
-          const environmentText = environmentDrafts[agent.id] || "";
+          const environmentText = environmentDrafts[agent.id]?.text ?? "";
           const environmentDirty =
             environmentText !== formatEnvironment(environments[agent.id] || {});
           let environmentError = "";
@@ -286,12 +303,21 @@ export function AgentSettings({
                     placeholder={
                       "HTTPS_PROXY=http://127.0.0.1:7890\nHTTP_PROXY=http://127.0.0.1:7890\nNO_PROXY=localhost,127.0.0.1"
                     }
-                    onChange={(event) =>
-                      setEnvironmentDrafts((values) => ({
+                    onChange={(event) => {
+                      const text = event.target.value;
+                      setDraftsByHost((values) => ({
                         ...values,
-                        [agent.id]: event.target.value,
-                      }))
-                    }
+                        [host.id]: {
+                          ...values[host.id],
+                          [agent.id]: {
+                            text,
+                            saved: formatEnvironment(
+                              environments[agent.id] ?? {},
+                            ),
+                          },
+                        },
+                      }));
+                    }}
                   />
                 </label>
                 <p className="form-note" id={`environment-note-${agent.id}`}>

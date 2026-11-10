@@ -448,15 +448,23 @@ adapter/Provider/effort controls. Environment changes participate in process
 configuration comparison: active/background work is preserved, idle processes are
 recreated on the next explicit use. No task is interrupted or replayed on save.
 Codex/Traex model probes and launch-time native selection use the same overrides.
+Claude display labels and native child-history paths also use the effective ENV;
+child reads retain the owning launch snapshot and all UUID/symlink/path checks.
 Installation discovery and permission/command probes still use the host shell.
 
 Names are POSIX-style, at most 255 bytes, with 64 variables / 8 KiB per value /
 32 KiB total. NUL, host identity/cwd names and `LATTE_WORK_*` controls are rejected.
 Values are not shell-expanded. Debug formatting hides values; credential-named
 variables and authenticated proxy URLs are redacted from persisted Agent events.
+Redaction visits typed content fields, preserving protocol tags and correlation
+IDs. It recognizes raw and JSON-escaped values, including ASCII Unicode escapes.
+Text streams retain at most one possible secret-prefix suffix per channel, bounded
+by the longest configured pattern and 513 main/child channels. Content boundaries
+mask unfinished prefixes; raw tails never enter storage or replay.
+Unsaved ENV drafts remain in App memory per host/Agent across settings navigation
+and reconnects. Refresh replaces clean fields and preserves dirty or invalid input.
 Focused checks: `agentEnvironment` and `AgentSettings` frontend tests, config and
-protocol tests, and final-binary
-`custom_agent_environment_reaches_all_adapters_and_reconfigures_without_replay`.
+protocol tests, `redaction` server tests, and final-binary `environment_e2e` tests.
 
 At daemon startup, the host Server captures exported variables from the user's
 default shell (`SHELL`, falling back to the account shell), using `-ilc` in the
