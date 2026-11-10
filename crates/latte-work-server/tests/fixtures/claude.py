@@ -41,7 +41,7 @@ for line in sys.stdin:
             if description.startswith('native-auto-title'):
                 with pathlib.Path('fixture-title-requests').open('a') as record: record.write(description+'\n')
             def finish_title(request=value,description=description):
-                if description=='native-auto-title-held':
+                if description in ('native-auto-title-held', 'usage', 'usage-alias'):
                     deadline=time.monotonic()+20
                     while not pathlib.Path('title-release').exists() and time.monotonic()<deadline: time.sleep(.02)
                 if description=='native-auto-title-unsupported':

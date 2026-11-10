@@ -3899,6 +3899,32 @@ async fn app_providers_and_native_defaults_only_contact_the_selected_host() {
     );
 }
 
+async fn assert_usage_replayed_after_title_notice(
+    host: &Host,
+    project: &Path,
+    id: &str,
+    events: &[latte_work_protocol::Event],
+) {
+    // Release the title response only after the completed-turn snapshot, so the
+    // replay always contains late metadata rather than relying on scheduler timing.
+    std::fs::write(project.join("title-release"), "release").unwrap();
+    let mut reconnected = host.client().await;
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let replay = loop {
+        let replay = wait(&mut reconnected, id, Status::Completed).await;
+        if replay.iter().any(|e| matches!(&e.event, EventKind::Notice { text } if text.contains("自动命名未返回有效标题"))) {
+            break replay;
+        }
+        assert!(Instant::now() < deadline, "late title notice timeout");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    };
+    assert_eq!(replay.len(), events.len() + 1, "one late title notice");
+    assert_eq!(
+        serde_json::to_value(events).unwrap(),
+        serde_json::to_value(&replay[..events.len()]).unwrap()
+    );
+}
+
 #[tokio::test]
 async fn usage_snapshot_survives_bridge_reconnect_without_billing_inflation() {
     let host = Host::start().await;
@@ -3930,12 +3956,7 @@ async fn usage_snapshot_survives_bridge_reconnect_without_billing_inflation() {
         matches!(&latest.event,EventKind::Usage {context:Some(c),totals:Some(t)} if c.used_tokens == 1000.0 && c.window_tokens == Some(200000.0) && t.input_tokens == Some(200.0) && t.cache_read_tokens == Some(1200.0))
     );
     drop(client);
-    let mut reconnected = host.client().await;
-    let replay = wait(&mut reconnected, &id, Status::Completed).await;
-    assert_eq!(
-        serde_json::to_value(&events).unwrap(),
-        serde_json::to_value(&replay).unwrap()
-    );
+    assert_usage_replayed_after_title_notice(&host, project.path(), &id, &events).await;
 }
 
 #[tokio::test]
@@ -3981,12 +4002,7 @@ async fn usage_alias_capacity_is_persisted_and_replayed() {
         matches!(&latest.event, EventKind::Usage {context:Some(c),..} if c.model == "model_api/experimental_0812" && c.used_tokens == 69692.0 && c.window_tokens == Some(200000.0))
     );
     drop(client);
-    let mut reconnected = host.client().await;
-    let replay = wait(&mut reconnected, &id, Status::Completed).await;
-    assert_eq!(
-        serde_json::to_value(&events).unwrap(),
-        serde_json::to_value(&replay).unwrap()
-    );
+    assert_usage_replayed_after_title_notice(&host, project.path(), &id, &events).await;
 }
 
 #[tokio::test]
