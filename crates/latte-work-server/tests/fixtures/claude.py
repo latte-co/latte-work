@@ -48,8 +48,14 @@ for line in sys.stdin:
                     emit({'type':'control_response','response':{'subtype':'error','request_id':request['request_id'],'error':'unsupported generate_session_title'}})
                     return
                 title='Friendly generated title' if description.startswith('native-auto-title') and description!='native-auto-title-empty' else None
+                if description=='native-auto-title-credential':
+                    title='Fix '+os.environ['ANTHROPIC_AUTH_TOKEN']
                 if title and request['request'].get('persist'):
                     metadata({'type':'ai-title','aiTitle':title,'sessionId':native_id})
+                    if description=='native-auto-title-credential':
+                        pathlib.Path('fixture-title-raw').write_text('persisted')
+                        deadline=time.monotonic()+20
+                        while not pathlib.Path('title-callback-release').exists() and time.monotonic()<deadline: time.sleep(.02)
                 emit({'type':'control_response','response':{'subtype':'success','request_id':request['request_id'],'response':{'title':title}}})
                 if description.startswith('native-auto-title'): pathlib.Path('fixture-title-response').write_text('sent')
             threading.Thread(target=finish_title,daemon=True).start()

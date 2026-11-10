@@ -288,7 +288,9 @@ pub async fn rename_title(
             agents::rename_saved_session(&agent, std::path::Path::new(&path), &id, &title)
         })
         .await??;
-        return db(database, |s| s.rename_session(&session.id, &actual));
+        return db(database, |s| {
+            s.sync_native_title(&session.id, &actual, true)
+        });
     }
     // No native session exists yet. Persist the requested initial title, and pass it
     // at native creation; never create a fake transcript or send a naming prompt.
@@ -531,7 +533,9 @@ impl TurnState {
         for action in actions {
             match action {
                 Action::NativeName(title) => {
-                    db(database, |s| s.sync_live_native_title(session_id, &title))?;
+                    db(database, |s| {
+                        s.sync_live_native_title(session_id, &config.redact(&title))
+                    })?;
                 }
                 Action::GeneratedTitle {
                     native_session_id,
@@ -580,6 +584,9 @@ impl TurnState {
                 })?,
                 Action::NativeSession(id) => db(database, |s| {
                     let mut current = s.session(session_id)?;
+                    if let Some(provider) = &config.provider {
+                        s.remember_title_credential(session_id, &id, &provider.credential)?;
+                    }
                     current.native_id = Some(id);
                     s.save(&current)
                 })?,
@@ -876,6 +883,7 @@ impl Process {
                 native_session_id,
                 description,
                 model,
+                native_provider,
             } = action
             {
                 if self.title_job.is_some()
@@ -891,8 +899,14 @@ impl Process {
                 let mut config = self.config.clone();
                 config.model = model;
                 self.title_job = Some(tokio::spawn(async move {
-                    let result =
-                        agents::codex_title::generate(&binary, &path, &config, &description).await;
+                    let result = agents::codex_title::generate(
+                        &binary,
+                        &path,
+                        &config,
+                        &description,
+                        native_provider.as_ref(),
+                    )
+                    .await;
                     let _ = db(&database, |s| {
                         let session = s.session(&id)?;
                         if session.custom_title
@@ -920,15 +934,23 @@ impl Process {
                     });
                 }));
             } else if let Action::TitleRenamed(result) = action {
+                if result.is_ok() {
+                    self.cancel_title().await;
+                }
                 let result = result.and_then(|title| {
-                    db(database, |s| s.sync_native_title(id, &title, true))
-                        .map(|session| session.title)
-                        .map_err(|e| e.to_string())
+                    db(database, |s| {
+                        s.sync_native_title(id, &self.config.redact(&title), true)
+                    })
+                    .map(|session| session.title)
+                    .map_err(|e| e.to_string())
                 });
                 if let Some(reply) = self.rename_reply.take() {
                     let _ = reply.send(result);
                 }
             } else {
+                if matches!(&action, Action::NativeName(_)) {
+                    self.cancel_title().await;
+                }
                 remaining.push(action);
             }
         }
@@ -991,11 +1013,14 @@ impl Process {
         self.session_open.store(self.state.ready, Ordering::SeqCst);
         Ok(())
     }
-    async fn close(&mut self) {
+    async fn cancel_title(&mut self) {
         if let Some(job) = self.title_job.take() {
             job.abort();
             let _ = job.await;
         }
+    }
+    async fn close(&mut self) {
+        self.cancel_title().await;
         if let Some(reply) = self.rename_reply.take() {
             let _ = reply.send(Err("原生会话已关闭，标题修改结果待确认".into()));
         }

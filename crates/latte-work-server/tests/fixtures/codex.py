@@ -19,6 +19,7 @@ count = 0
 waiting = None
 turn_prompt = None
 title_only = False
+title_provider = None
 
 
 def emit(value):
@@ -55,15 +56,20 @@ for line in sys.stdin:
         reply(value, {'data': [{'id': 'catalog-row', 'model': 'codex-test', 'displayName': 'Codex Test', 'isDefault': True,
                                'supportedReasoningEfforts': [{'reasoningEffort': 'low'}, {'reasoningEffort': 'high'}]}], 'nextCursor': None})
     elif method == 'config/read':
-        reply(value, {'config': {'model_provider': None, 'model': None, 'developer_instructions': 'NATIVE_CODEX_INSTRUCTIONS'}})
+        config_file = pathlib.Path('codex-native-config.json')
+        reply(value, {'config': json.loads(config_file.read_text()) if config_file.exists() else {'model_provider': None, 'model': None, 'developer_instructions': 'NATIVE_CODEX_INSTRUCTIONS'}})
     elif method in ('thread/start', 'thread/resume'):
         if params.get('ephemeral'):
             assert params['sandbox'] == 'read-only'
             assert params['config']['features.shell_tool'] is False
             assert params['config']['features.plugins'] is False
+            assert params['config']['notify'] == []
+            assert params['config']['features.stable_environment_tools'] is False
+            assert params['config']['features.sleep_tool'] is False
             assert params['environments'] == [] and params['dynamicTools'] == []
             assert params['developerInstructions'] == ''
             title_only = True
+            title_provider = params['modelProvider']
             thread = 'codex-title-thread'
             reply(value, {'thread': {'id': thread, 'ephemeral': True}, 'sandbox': {'type': 'readOnly'}})
             continue
@@ -84,7 +90,7 @@ for line in sys.stdin:
             assert params['threadId'] == thread and params['outputSchema']['required'] == ['title']
             description = params['input'][0]['text']
             with pathlib.Path('codex-title-inputs').open('a') as f:
-                f.write(json.dumps({'description': description, 'pid': os.getpid()}) + '\n')
+                f.write(json.dumps({'description': description, 'pid': os.getpid(), 'provider': title_provider, 'effort': params.get('effort')}) + '\n')
             turn = 'title-turn'
             early_title = 'native-auto-title-early' in description
             if not early_title:
@@ -114,6 +120,14 @@ for line in sys.stdin:
         turn = 'turn-' + str(count)
         prompt = params['input'][0]['text']
         turn_prompt = prompt
+        if prompt in ('native-provider-selection-drift', 'native-provider-endpoint-drift'):
+            config_file = pathlib.Path('codex-native-config.json')
+            changed = json.loads(config_file.read_text())
+            if prompt.endswith('selection-drift'):
+                changed['model_provider'] = 'second'
+            else:
+                changed['model_providers']['first']['base_url'] = 'http://localhost:9999/v1'
+            config_file.write_text(json.dumps(changed))
         with pathlib.Path('codex-inputs').open('a') as f:
             f.write(json.dumps({'prompt': prompt, 'params': params, 'pid': os.getpid()}) + '\n')
         notify('turn/started', {'turn': {'id': turn, 'status': 'inProgress'}})

@@ -1581,6 +1581,9 @@ impl Claude {
                 {
                     output.push(Action::Event(EventKind::Text { text: text.into() }));
                 }
+                if failed {
+                    self.title_description = None;
+                }
                 if !failed
                     && !self.title_attempted
                     && !self.native_named
@@ -2061,6 +2064,36 @@ fn parse_commands(value: &Value) -> Result<Vec<latte_work_protocol::AgentSlashCo
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn failed_title_context_is_discarded_before_a_different_successful_request() {
+        use super::*;
+        let mut agent = Claude {
+            phase: Phase::Running,
+            native_session_id: Some("native-1".into()),
+            ..Default::default()
+        };
+        agent.remember_title_description("排查登录失败");
+        agent.decode(json!({"type":"assistant","message":{"content":[{"type":"text","text":"登录诊断的部分结果"}]}})).unwrap();
+        let failed = agent
+            .decode(json!({"type":"result","is_error":true,"result":"登录失败"}))
+            .unwrap();
+        assert!(encoded(&failed).is_empty());
+        assert!(agent.title_description.is_none());
+        agent
+            .advance(Input::Start {
+                prompt: "导出 CSV"
+            })
+            .unwrap();
+        agent.decode(json!({"type":"assistant","message":{"content":[{"type":"text","text":"已导出 CSV 文件"}]}})).unwrap();
+        let completed = agent
+            .decode(json!({"type":"result","is_error":false}))
+            .unwrap();
+        assert_eq!(
+            encoded(&completed)[0]["request"]["description"],
+            "导出 CSV\n\nAssistant reply:\n已导出 CSV 文件"
+        );
+    }
+
     #[test]
     fn generated_titles_are_optional_once_per_process_and_never_start_turns() {
         use super::*;

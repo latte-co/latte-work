@@ -47,6 +47,7 @@ def kill_agent_groups(server_pid):
 seen = []
 title_requests = []
 tool_called = False
+native_config_drift = None
 
 class Handler(http.server.BaseHTTPRequestHandler):
     def log_message(self, *_):
@@ -59,7 +60,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if title_request:
             title_requests.append(body)
             assert not body.get('tools'), body.get('tools')
+        if not title_request and 'NATIVE_PROVIDER_DRIFT_CHECK' in json.dumps(body.get('input', [])):
+            config, origin = native_config_drift
+            config.write_text(config.read_text().replace('model_provider="cli-fixture"', 'model_provider="changed-fixture"', 1)
+                              + f'\n[model_providers.changed-fixture]\nname="Changed"\nbase_url="{origin}/changed/v1"\nwire_api="responses"\nrequires_openai_auth=false\n')
         seen.append({'path': self.path, 'model': body.get('model'),
+                     'title_request': title_request, 'reasoning_effort': body.get('reasoning', {}).get('effort'),
                      'authorization': self.headers.get('Authorization'),
                      'api_key': self.headers.get('x-api-key'), 'old_header': self.headers.get('X-Old-Header')})
         self.send_response(200)
@@ -106,7 +112,9 @@ try:
         native = root / 'codex'
         native.mkdir()
         origin = f'http://127.0.0.1:{httpd.server_port}'
-        (native / 'config.toml').write_text(f'model="cli-model"\nmodel_provider="cli-fixture"\n[model_providers.cli-fixture]\nname="CLI Fixture"\nbase_url="{origin}/cli/v1"\nwire_api="responses"\nrequires_openai_auth=false\n[model_providers.latte-work]\nname="Old"\nbase_url="http://127.0.0.1:1"\nwire_api="responses"\nexperimental_bearer_token="legacy-fixture-token"\nhttp_headers={{X-Old-Header="legacy"}}\n')
+        notify = root / 'notify.py'
+        notify.write_text('import pathlib,sys\nwith pathlib.Path(__file__).with_suffix(".events").open("a") as f: f.write(sys.argv[-1]+"\\n")\n')
+        (native / 'config.toml').write_text(f'model="cli-model"\nmodel_provider="cli-fixture"\nmodel_reasoning_effort="high"\nnotify=["python3", {json.dumps(str(notify))}]\n[features]\nstable_environment_tools=true\nsleep_tool={{enabled=true,mode="always_on"}}\n[model_providers.cli-fixture]\nname="CLI Fixture"\nbase_url="{origin}/cli/v1"\nwire_api="responses"\nrequires_openai_auth=false\n[model_providers.latte-work]\nname="Old"\nbase_url="http://127.0.0.1:1"\nwire_api="responses"\nexperimental_bearer_token="legacy-fixture-token"\nhttp_headers={{X-Old-Header="legacy"}}\n')
         env = {**os.environ, 'LATTE_WORK_AGENT_ENV': 'inherit', 'LATTE_WORK_CODEX': codex, 'CODEX_HOME': str(native)}
         server = subprocess.Popen([binary, 'serve', '--state-dir', str(root / 'state')], env=env,
                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
@@ -230,6 +238,35 @@ try:
             assert seen[-1]['path'] == '/cli/v1/responses'
             assert value['session']['native_id'] == native_id
             report['checks'].append('unset CLI model resolves current catalog default on resume')
+            # Changing the active native provider during a turn must not route
+            # its private transcript to the newly selected service for naming.
+            drift_id = rpc('create_session', project_id=pid, agent='codex')['session']['id']
+            native_config_drift = (config, origin)
+            before = len(seen)
+            before_titles = len(title_requests)
+            rpc('send_queued', session_id=drift_id, request_id='native-provider-drift', text='NATIVE_PROVIDER_DRIFT_CHECK. Reply PROVIDER_OK.', model=None, effort='low', permission_mode='default', provider={'kind': 'cli'})
+            deadline = time.monotonic() + 45
+            while time.monotonic() < deadline:
+                value = rpc('poll', session_id=drift_id, after=0)
+                if value['session']['title'] == '检查 Codex Provider 切换' and value['session']['status'] == 'completed':
+                    break
+                if value['session']['status'] not in ('running', 'waiting', 'completed'):
+                    raise RuntimeError(json.dumps(value, ensure_ascii=False))
+                time.sleep(.1)
+            else:
+                raise TimeoutError('native provider snapshot title: ' + json.dumps(value, ensure_ascii=False))
+            assert len(title_requests) == before_titles + 1
+            actual = seen[before:]
+            assert len(actual) == 2 and {item['title_request'] for item in actual} == {True, False}, actual
+            assert all(item['path'] == '/cli/v1/responses' and item['reasoning_effort'] == 'low' for item in actual), actual
+            report['checks'].append('CLI title pins the first-turn provider across native selection changes and forwards low effort over a high native default')
+            deadline = time.monotonic() + 5
+            while not notify.with_suffix('.events').exists():
+                assert time.monotonic() < deadline, 'regular native turns must exercise legacy notify'
+                time.sleep(.05)
+            notifications = [json.loads(line) for line in notify.with_suffix('.events').read_text().splitlines()]
+            assert notifications and all('检查 Codex Provider 切换' not in json.dumps(event, ensure_ascii=False) for event in notifications)
+            report['checks'].append('title requests expose no tools with inherited stable environment/sleep features and never run legacy notify')
             # Check the durable Server and native rollout files, not transient WAL state alone.
             for file in root.rglob('*'):
                 if file.is_file() and not file.is_symlink() and file.stat().st_size < 8 * 1024 * 1024:

@@ -61,6 +61,7 @@ pub enum Action {
         native_session_id: String,
         description: String,
         model: Option<String>,
+        native_provider: Option<super::codex_title::NativeProvider>,
     },
     TitleRenamed(Result<String, String>),
     SourceUsed {

@@ -51,6 +51,7 @@ pub struct AppServer {
     native_developer_instructions: Option<String>,
     config: Option<LaunchConfig>,
     model_provider: Option<String>,
+    title_provider: Option<super::codex_title::NativeProvider>,
     counter: u64,
     pending: HashMap<String, PendingRequest>,
     approvals: HashMap<String, &'static str>,
@@ -370,6 +371,12 @@ impl AppServer {
                             .context("Agent 未返回原生 Provider")?
                             .to_owned(),
                     );
+                    if self.codex {
+                        self.title_provider = super::codex_title::NativeProvider::capture(
+                            &result["config"],
+                            self.model_provider.as_deref().expect("resolved provider"),
+                        );
+                    }
                 }
                 if let Some(config) = &mut self.config
                     && config.model.is_none()
@@ -695,6 +702,7 @@ impl AppServer {
                             native_session_id: self.thread.clone().expect("active thread"),
                             description: context.description(),
                             model: self.config.as_ref().and_then(|c| c.model.clone()),
+                            native_provider: self.title_provider.take(),
                         });
                     } else {
                         self.generating_title = true;

@@ -19,6 +19,35 @@ identifiers and PR/issue numbers, and prefer an action and its object. Use at mo
 24 Chinese characters. No quotes, Markdown, trailing punctuation or generic 'coding task'. \
 Do not use tools or perform the task. Return only JSON matching the title schema.";
 
+/// Memory-only identity/config snapshot. Never log or serialize native credentials.
+pub(crate) struct NativeProvider {
+    id: String,
+    definition: Option<Value>,
+}
+impl NativeProvider {
+    pub(super) fn capture(config: &Value, id: &str) -> Option<Self> {
+        let config = config.as_object()?;
+        let definitions = config.get("model_providers").filter(|v| !v.is_null());
+        if definitions.is_some_and(|v| !v.is_object()) {
+            return None;
+        }
+        Some(Self {
+            id: id.into(),
+            definition: definitions.and_then(|v| v.get(id)).cloned(),
+        })
+    }
+
+    fn verify(&self, current: &Value) -> Result<&str> {
+        let current = Self::capture(current, &self.id).context("无法核对原生 Provider 配置")?;
+        // Never send conversation content to a changed endpoint/auth configuration.
+        // Sparse native overrides cannot safely restore removed credential fields.
+        if current.definition != self.definition {
+            bail!("原生 Provider 配置已变化，保留原名称");
+        }
+        Ok(&self.id)
+    }
+}
+
 struct Wire {
     input: tokio::process::ChildStdin,
     output: FramedRead<tokio::process::ChildStdout, LinesCodec>,
@@ -65,7 +94,7 @@ impl Wire {
 fn isolated_config(effective: &Value) -> Result<Value> {
     let effective = effective.as_object().context("Codex 未返回有效配置")?;
     let mut config = json!({
-        "web_search":"disabled", "project_doc_max_bytes":0,
+        "web_search":"disabled", "project_doc_max_bytes":0, "notify":[],
         "cloud.skills.enabled":false, "skills.include_instructions":false,
         "tools.experimental_request_user_input.enabled":false,
         "tools.update_plan.enabled":false
@@ -89,6 +118,8 @@ fn isolated_config(effective: &Value) -> Result<Value> {
         "shell_snapshot",
         "shell_tool",
         "standalone_web_search",
+        "stable_environment_tools",
+        "sleep_tool",
         "token_budget",
         "tool_suggest",
         "unified_exec",
@@ -122,6 +153,7 @@ pub(crate) async fn generate(
     cwd: &str,
     config: &LaunchConfig,
     description: &str,
+    native_provider: Option<&NativeProvider>,
 ) -> Result<String> {
     static JOBS: OnceLock<Arc<tokio::sync::Semaphore>> = OnceLock::new();
     let _permit = JOBS
@@ -163,7 +195,7 @@ pub(crate) async fn generate(
         let effective = wire.rpc("title-config", "config/read", json!({"cwd":cwd,"includeLayers":false})).await?;
         let isolated = isolated_config(&effective["config"])?;
         let provider = if config.provider.is_some() { provider_id.as_str() } else {
-            effective["config"]["model_provider"].as_str().unwrap_or("openai")
+            native_provider.context("缺少首轮原生 Provider 配置快照")?.verify(&effective["config"])?
         };
         let custom_profile = effective["config"]["default_permissions"].as_str().filter(|s| !s.starts_with(':'));
         let mut params = json!({"cwd":cwd,"model":config.model,"modelProvider":provider,
@@ -178,7 +210,7 @@ pub(crate) async fn generate(
         if opened["thread"]["ephemeral"] != true { bail!("标题请求不是临时会话"); }
         let thread = opened["thread"]["id"].as_str().context("标题会话 ID 缺失")?;
         wire.send(json!({"id":"title-turn","method":"turn/start","params":{
-            "threadId":thread,"input":[{"type":"text","text":description}],
+            "threadId":thread,"input":[{"type":"text","text":description}],"effort":config.effort,
             "outputSchema":{"type":"object","properties":{"title":{"type":"string"}},"required":["title"],"additionalProperties":false}
         }})).await?;
         let mut turn: Option<String> = None;
@@ -244,10 +276,33 @@ mod tests {
     use super::*;
     #[test]
     fn isolation_disables_each_effective_mcp_server_and_preserves_custom_policy() {
-        let config = isolated_config(&json!({"mcp_servers":{"private.server":{"required":true}},"default_permissions":"restricted"})).unwrap();
+        let config = isolated_config(&json!({"mcp_servers":{"private.server":{"required":true}},"default_permissions":"restricted","notify":["side-effect"],"features":{"stable_environment_tools":true,"sleep_tool":{"enabled":true,"mode":"always_on"}}})).unwrap();
         assert_eq!(config["mcp_servers"]["private.server"]["enabled"], false);
         assert_eq!(config["features.shell_tool"], false);
+        assert_eq!(config["notify"], json!([]));
+        assert_eq!(config["features.stable_environment_tools"], false);
+        assert_eq!(config["features.sleep_tool"], false);
         assert!(config.get("default_permissions").is_none());
         assert!(isolated_config(&json!({"mcp_servers":[]})).is_err());
+    }
+
+    #[test]
+    fn native_provider_pins_identity_and_rejects_endpoint_or_auth_drift() {
+        let mut initial = json!({"model_provider":"first","model_providers":{"first":{"base_url":"http://localhost:8000","env_key":"FIRST_KEY"},"second":{"base_url":"http://localhost:9000"}}});
+        let snapshot = NativeProvider::capture(&initial, "first").unwrap();
+        initial["model_provider"] = json!("second");
+        assert_eq!(snapshot.verify(&initial).unwrap(), "first");
+        for key in ["base_url", "env_key"] {
+            let mut changed = initial.clone();
+            changed["model_providers"]["first"][key] = json!("changed");
+            assert!(snapshot.verify(&changed).is_err());
+        }
+        assert!(snapshot.verify(&json!({})).is_err());
+        let builtin = NativeProvider::capture(&json!({}), "openai").unwrap();
+        assert!(
+            builtin
+                .verify(&json!({"model_providers":{"openai":{"base_url":"http://localhost:9000"}}}))
+                .is_err()
+        );
     }
 }

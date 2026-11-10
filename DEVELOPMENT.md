@@ -1069,16 +1069,22 @@ reply, including result-only responses. The CLI persists its AI title. Traex use
 `thread/name/generate` on the existing native history and correlates the resulting
 `thread/name/generated` notification with its request and thread IDs. The suggestion
 is saved as generated Work metadata, without a native manual rename.
+Failed Claude turns discard their naming context before another request starts.
 
 Codex has no equivalent generation RPC in CLI 0.162.0. A separately supervised
-app-server creates an ephemeral structured turn with the same selected model and
-Provider/authentication, using the bounded request/reply context above. It disables
+app-server creates an ephemeral structured turn with the same selected model,
+reasoning effort and Provider, using the bounded request/reply context above. CLI
+mode pins the first turn's native Provider identity and definition: a later active
+selection cannot redirect the title request, and an endpoint/auth definition change
+declines naming instead of forwarding the transcript to the changed service.
+It disables legacy `notify`, inherited stable environment/sleep tools,
 environment access, built-in/extension tools, skills, hooks and every effective
 MCP server, and verifies read-only or preserved custom permissions before sending.
 The host permits two concurrent jobs, with a 30-second deadline, 256-KiB frames,
 1-MiB total output, 4,096 messages and an 8-KiB structured reply limit. Its process
-group is reaped on completion/failure; closing or replacing the owning session
-cancels it. Generated titles remain Work metadata. This adds an optional model
+group is reaped on completion/failure; closing or replacing the owning session,
+or confirming a manual native name, cancels it and releases its concurrency permit.
+Generated titles remain Work metadata. This adds an optional model
 request using the selected Agent's existing service; no separate Provider is needed.
 
 None of these paths adds a turn to the visible conversation or blocks subsequent
@@ -1089,9 +1095,18 @@ Responses are bound to the native identity, and generated names cannot overwrite
 a manual name. Opening a session, discovery, slash commands, failed turns and
 child results do not trigger generation.
 
+All native title imports redact known Work Provider credentials, including raw
+native records written before the generation callback. Before admitting native
+output, the host stores only an identity-bound SHA-256 credential fingerprint and
+byte length in a private title-guard table; no plaintext credential or raw title is
+stored there. The guards survive closing/reopening and daemon restart, even for
+volatile Provider snapshots. Imports examine at most 64 matching fingerprints
+against the bounded title; excessive guards decline the optional import.
+
 Focused checks: the server `agents::` unit tests and final-binary `titles_e2e`
 tests cover context bounds, correlation, manual-name precedence, failures,
-concurrent input, reconnect and resume without extra visible turns.
+failed-turn context reset, Provider drift, effort forwarding, permit release,
+native refresh redaction, reconnect and resume without extra visible turns.
 `scripts/smoke-codex-providers.py`, `scripts/smoke-traex-providers.py` and
 `scripts/smoke-claude-queue.py` separately exercise installed CLIs with disposable
 localhost model fixtures. These validate native protocol behavior, not live-model
