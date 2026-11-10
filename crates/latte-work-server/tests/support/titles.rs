@@ -250,14 +250,25 @@ async fn codex_titles_pin_native_provider_and_forward_selected_effort() {
     for prompt in [
         "native-provider-selection-drift",
         "native-provider-endpoint-drift",
+        "native-provider-openai-base-url-drift",
     ] {
         let root = tempfile::tempdir().unwrap();
-        std::fs::write(root.path().join("codex-native-config.json"), serde_json::to_vec(&serde_json::json!({
+        let mut config = serde_json::json!({
             "model_provider":"first", "model":"codex-test", "model_reasoning_effort":"high",
             "developer_instructions":"NATIVE_CODEX_INSTRUCTIONS",
             "model_providers":{"first":{"name":"First","base_url":"http://localhost:8000/v1"},"second":{"name":"Second","base_url":"http://localhost:9000/v1"}},
             "notify":["side-effect"], "features":{"stable_environment_tools":true,"sleep_tool":{"enabled":true,"mode":"always_on"}}
-        })).unwrap()).unwrap();
+        });
+        if prompt == "native-provider-openai-base-url-drift" {
+            config["model_provider"] = serde_json::json!("openai");
+            config["openai_base_url"] = serde_json::json!("http://localhost:8000/v1");
+            config.as_object_mut().unwrap().remove("model_providers");
+        }
+        std::fs::write(
+            root.path().join("codex-native-config.json"),
+            serde_json::to_vec(&config).unwrap(),
+        )
+        .unwrap();
         let id = create(&mut client, root.path(), "codex").await;
         assert!(matches!(
             ask(

@@ -120,11 +120,13 @@ for line in sys.stdin:
         turn = 'turn-' + str(count)
         prompt = params['input'][0]['text']
         turn_prompt = prompt
-        if prompt in ('native-provider-selection-drift', 'native-provider-endpoint-drift'):
+        if prompt in ('native-provider-selection-drift', 'native-provider-endpoint-drift', 'native-provider-openai-base-url-drift'):
             config_file = pathlib.Path('codex-native-config.json')
             changed = json.loads(config_file.read_text())
             if prompt.endswith('selection-drift'):
                 changed['model_provider'] = 'second'
+            elif prompt == 'native-provider-openai-base-url-drift':
+                changed['openai_base_url'] = 'http://localhost:9999/v1'
             else:
                 changed['model_providers']['first']['base_url'] = 'http://localhost:9999/v1'
             config_file.write_text(json.dumps(changed))

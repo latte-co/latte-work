@@ -23,6 +23,7 @@ Do not use tools or perform the task. Return only JSON matching the title schema
 pub(crate) struct NativeProvider {
     id: String,
     definition: Option<Value>,
+    openai_base_url: Option<Value>,
 }
 impl NativeProvider {
     pub(super) fn capture(config: &Value, id: &str) -> Option<Self> {
@@ -34,6 +35,11 @@ impl NativeProvider {
         Some(Self {
             id: id.into(),
             definition: definitions.and_then(|v| v.get(id)).cloned(),
+            // The built-in provider also reads its endpoint outside model_providers.
+            openai_base_url: config
+                .get("openai_base_url")
+                .filter(|v| id == "openai" && !v.is_null())
+                .cloned(),
         })
     }
 
@@ -41,7 +47,8 @@ impl NativeProvider {
         let current = Self::capture(current, &self.id).context("无法核对原生 Provider 配置")?;
         // Never send conversation content to a changed endpoint/auth configuration.
         // Sparse native overrides cannot safely restore removed credential fields.
-        if current.definition != self.definition {
+        if current.definition != self.definition || current.openai_base_url != self.openai_base_url
+        {
             bail!("原生 Provider 配置已变化，保留原名称");
         }
         Ok(&self.id)
@@ -304,5 +311,24 @@ mod tests {
                 .verify(&json!({"model_providers":{"openai":{"base_url":"http://localhost:9000"}}}))
                 .is_err()
         );
+    }
+
+    #[test]
+    fn builtin_openai_provider_rejects_top_level_endpoint_drift() {
+        let initial = json!({"openai_base_url":"http://localhost:8000/v1"});
+        let snapshot = NativeProvider::capture(&initial, "openai").unwrap();
+        assert_eq!(snapshot.verify(&initial).unwrap(), "openai");
+        let changed = json!({"openai_base_url":"http://localhost:9000/v1"});
+        assert!(snapshot.verify(&changed).is_err());
+        assert!(snapshot.verify(&json!({})).is_err());
+        let default = NativeProvider::capture(&json!({}), "openai").unwrap();
+        assert!(default.verify(&initial).is_err());
+        assert_eq!(
+            default.verify(&json!({"openai_base_url":null})).unwrap(),
+            "openai"
+        );
+        // This setting cannot redirect a different, explicitly selected provider.
+        let custom = NativeProvider::capture(&initial, "first").unwrap();
+        assert_eq!(custom.verify(&changed).unwrap(), "first");
     }
 }

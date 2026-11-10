@@ -64,6 +64,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
             config, origin = native_config_drift
             config.write_text(config.read_text().replace('model_provider="cli-fixture"', 'model_provider="changed-fixture"', 1)
                               + f'\n[model_providers.changed-fixture]\nname="Changed"\nbase_url="{origin}/changed/v1"\nwire_api="responses"\nrequires_openai_auth=false\n')
+        if not title_request and 'BUILTIN_OPENAI_ENDPOINT_DRIFT_CHECK' in json.dumps(body.get('input', [])):
+            config, origin = native_config_drift
+            config.write_text(config.read_text().replace(f'openai_base_url="{origin}/builtin-a/v1"',
+                                                        f'openai_base_url="{origin}/builtin-b/v1"', 1))
         seen.append({'path': self.path, 'model': body.get('model'),
                      'title_request': title_request, 'reasoning_effort': body.get('reasoning', {}).get('effort'),
                      'authorization': self.headers.get('Authorization'),
@@ -115,7 +119,9 @@ try:
         notify = root / 'notify.py'
         notify.write_text('import pathlib,sys\nwith pathlib.Path(__file__).with_suffix(".events").open("a") as f: f.write(sys.argv[-1]+"\\n")\n')
         (native / 'config.toml').write_text(f'model="cli-model"\nmodel_provider="cli-fixture"\nmodel_reasoning_effort="high"\nnotify=["python3", {json.dumps(str(notify))}]\n[features]\nstable_environment_tools=true\nsleep_tool={{enabled=true,mode="always_on"}}\n[model_providers.cli-fixture]\nname="CLI Fixture"\nbase_url="{origin}/cli/v1"\nwire_api="responses"\nrequires_openai_auth=false\n[model_providers.latte-work]\nname="Old"\nbase_url="http://127.0.0.1:1"\nwire_api="responses"\nexperimental_bearer_token="legacy-fixture-token"\nhttp_headers={{X-Old-Header="legacy"}}\n')
-        env = {**os.environ, 'LATTE_WORK_AGENT_ENV': 'inherit', 'LATTE_WORK_CODEX': codex, 'CODEX_HOME': str(native)}
+        env = {**os.environ, 'LATTE_WORK_AGENT_ENV': 'inherit', 'LATTE_WORK_CODEX': codex, 'CODEX_HOME': str(native),
+               'OPENAI_API_KEY': 'latte-builtin-openai-fixture-key'}
+        env.pop('OPENAI_BASE_URL', None)
         server = subprocess.Popen([binary, 'serve', '--state-dir', str(root / 'state')], env=env,
                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
         connection = None
@@ -260,6 +266,33 @@ try:
             assert len(actual) == 2 and {item['title_request'] for item in actual} == {True, False}, actual
             assert all(item['path'] == '/cli/v1/responses' and item['reasoning_effort'] == 'low' for item in actual), actual
             report['checks'].append('CLI title pins the first-turn provider across native selection changes and forwards low effort over a high native default')
+            # Built-in OpenAI routes via a top-level setting, with no custom
+            # model_providers.openai definition. Changing it must decline naming.
+            config.write_text(f'model={json.dumps(default)}\nmodel_provider="openai"\nopenai_base_url="{origin}/builtin-a/v1"\n')
+            builtin_id = rpc('create_session', project_id=pid, agent='codex')['session']['id']
+            before = len(seen)
+            before_titles = len(title_requests)
+            prompt = 'BUILTIN_OPENAI_ENDPOINT_DRIFT_CHECK. Reply PROVIDER_OK.'
+            rpc('send_queued', session_id=builtin_id, request_id='builtin-openai-endpoint-drift', text=prompt,
+                model=None, effort='low', permission_mode='default', provider={'kind': 'cli'})
+            deadline = time.monotonic() + 45
+            while time.monotonic() < deadline:
+                value = rpc('poll', session_id=builtin_id, after=0)
+                if value['session']['status'] == 'completed' and any(
+                    event['event']['kind'] == 'notice' and 'Provider 配置已变化' in event['event'].get('text', '')
+                    for event in value['events']
+                ):
+                    break
+                if value['session']['status'] not in ('running', 'waiting', 'completed'):
+                    raise RuntimeError(json.dumps(value, ensure_ascii=False))
+                time.sleep(.1)
+            else:
+                raise TimeoutError('built-in OpenAI endpoint drift: ' + json.dumps(value, ensure_ascii=False))
+            assert f'openai_base_url="{origin}/builtin-b/v1"' in config.read_text()
+            assert len(title_requests) == before_titles, seen[before:]
+            assert len(seen[before:]) == 1 and seen[-1]['path'] == '/builtin-a/v1/responses', seen[before:]
+            assert value['session']['title'] == prompt[:48], value['session']
+            report['checks'].append('built-in OpenAI top-level endpoint A to B drift declines naming before sending any title request')
             deadline = time.monotonic() + 5
             while not notify.with_suffix('.events').exists():
                 assert time.monotonic() < deadline, 'regular native turns must exercise legacy notify'
@@ -268,9 +301,14 @@ try:
             assert notifications and all('检查 Codex Provider 切换' not in json.dumps(event, ensure_ascii=False) for event in notifications)
             report['checks'].append('title requests expose no tools with inherited stable environment/sleep features and never run legacy notify')
             # Check the durable Server and native rollout files, not transient WAL state alone.
-            for file in root.rglob('*'):
-                if file.is_file() and not file.is_symlink() and file.stat().st_size < 8 * 1024 * 1024:
-                    assert KEY.encode() not in file.read_bytes(), f'credential persisted: {file.relative_to(root)}'
+            for directory, _, files in os.walk(root):
+                for name in files:
+                    file = Path(directory) / name
+                    try:
+                        if file.is_file() and not file.is_symlink() and file.stat().st_size < 8 * 1024 * 1024:
+                            assert KEY.encode() not in file.read_bytes(), f'credential persisted: {file.relative_to(root)}'
+                    except FileNotFoundError:
+                        pass  # Native CLI temporary files may disappear during the scan.
             report['checks'].append('same native identity across automatic provider reconfiguration and explicit close/resume; credential absent from durable files')
         finally:
             if connection:

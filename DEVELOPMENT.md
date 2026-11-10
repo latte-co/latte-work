@@ -1074,9 +1074,10 @@ Failed Claude turns discard their naming context before another request starts.
 Codex has no equivalent generation RPC in CLI 0.162.0. A separately supervised
 app-server creates an ephemeral structured turn with the same selected model,
 reasoning effort and Provider, using the bounded request/reply context above. CLI
-mode pins the first turn's native Provider identity and definition: a later active
-selection cannot redirect the title request, and an endpoint/auth definition change
-declines naming instead of forwarding the transcript to the changed service.
+mode pins the first turn's native Provider identity and definition, including the
+built-in `openai` Provider's top-level `openai_base_url`: a later active selection
+cannot redirect the title request, and an endpoint/auth configuration change declines
+naming instead of forwarding the transcript to the changed service.
 It disables legacy `notify`, inherited stable environment/sleep tools,
 environment access, built-in/extension tools, skills, hooks and every effective
 MCP server, and verifies read-only or preserved custom permissions before sending.
