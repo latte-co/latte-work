@@ -120,6 +120,8 @@ impl Store {
         CREATE TABLE IF NOT EXISTS projects(id TEXT PRIMARY KEY, name TEXT NOT NULL, path TEXT NOT NULL UNIQUE);
         CREATE TABLE IF NOT EXISTS hidden_projects(project_id TEXT PRIMARY KEY REFERENCES projects(id));
         CREATE TABLE IF NOT EXISTS sessions(id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id), data TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS native_title_secrets(session_id TEXT NOT NULL REFERENCES sessions(id), native_id TEXT NOT NULL, secret_hash BLOB NOT NULL, secret_bytes INTEGER NOT NULL, PRIMARY KEY(session_id,native_id,secret_hash));
+        CREATE TABLE IF NOT EXISTS native_session_contexts(session_id TEXT NOT NULL REFERENCES sessions(id), native_id TEXT NOT NULL, fingerprint TEXT, PRIMARY KEY(session_id,native_id));
         CREATE TABLE IF NOT EXISTS events(seq INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT NOT NULL REFERENCES sessions(id), at REAL NOT NULL, data TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS subagents(session_id TEXT NOT NULL REFERENCES sessions(id), id TEXT NOT NULL, native_id TEXT NOT NULL, tool_use_id TEXT, active INTEGER NOT NULL, at REAL NOT NULL, data TEXT NOT NULL, PRIMARY KEY(session_id,id));
         CREATE INDEX IF NOT EXISTS subagents_session ON subagents(session_id,active,at);
@@ -455,6 +457,61 @@ impl Store {
         // rename. AI-generated titles use sync_native_title(..., false).
         self.sync_native_title(id, title, true)
     }
+    /// Bind a one-way credential fingerprint before native output can be imported.
+    /// A title contains at most 200 Unicode characters, hence at most 800 bytes.
+    pub fn remember_title_credential(
+        &self,
+        id: &str,
+        native: &str,
+        credential: &str,
+    ) -> Result<()> {
+        if !credential.is_empty() && credential.len() <= 800 {
+            use sha2::{Digest, Sha256};
+            self.db.execute(
+                "INSERT OR IGNORE INTO native_title_secrets(session_id,native_id,secret_hash,secret_bytes) VALUES (?1,?2,?3,?4)",
+                params![id, native, Sha256::digest(credential.as_bytes()).to_vec(), credential.len() as i64],
+            )?;
+        }
+        Ok(())
+    }
+    fn redact_native_title(&self, session: &Session, title: &str) -> Result<Option<String>> {
+        use sha2::{Digest, Sha256};
+        // Bound both reads and hashing. If an unusually long-lived session has
+        // more matching credential fingerprints, decline the optional import.
+        let secrets = self.db.prepare(
+            "SELECT secret_hash,secret_bytes FROM native_title_secrets WHERE session_id=?1 AND native_id=?2 AND secret_bytes>0 AND secret_bytes<=?3 LIMIT 65",
+        )?.query_map(params![session.id, session.native_id, title.len() as i64], |row| Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, u32>(1)?)))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        if secrets.len() > 64 {
+            return Ok(None);
+        }
+        let mut hidden = vec![false; title.len()];
+        for (hash, length) in secrets {
+            let length = length as usize;
+            for (start, _) in title.char_indices() {
+                let end = start + length;
+                if end <= title.len()
+                    && title.is_char_boundary(end)
+                    && Sha256::digest(&title.as_bytes()[start..end])[..] == hash
+                {
+                    hidden[start..end].fill(true);
+                }
+            }
+        }
+        let mut redacted = String::new();
+        let mut masking = false;
+        for (at, ch) in title.char_indices() {
+            if hidden[at] {
+                if !masking {
+                    redacted.push_str("[redacted]");
+                }
+            } else {
+                redacted.push(ch);
+            }
+            masking = hidden[at];
+        }
+        Ok(Some(redacted))
+    }
     pub fn sync_native_title(&self, id: &str, title: &str, custom: bool) -> Result<Session> {
         let mut session = self.session(id)?;
         if title.trim().is_empty()
@@ -463,11 +520,17 @@ impl Store {
         {
             return Ok(session);
         }
+        let Some(title) = self.redact_native_title(&session, title)? else {
+            return Ok(session);
+        };
+        if title.chars().count() > 200 || title.chars().any(char::is_control) {
+            return Ok(session);
+        }
         if session.custom_title && !custom {
             return Ok(session);
         }
         if session.title != title || (custom && !session.custom_title) {
-            session.title = title.into();
+            session.title = title;
             session.custom_title |= custom;
             self.save(&session)?;
         }
@@ -681,6 +744,42 @@ impl Store {
             params![session_id, fingerprint, allow_legacy_cli],
             |row| row.get(0),
         ).map_err(Into::into)
+    }
+    /// Preserve only the digest of the last verified native launch, never ENV.
+    pub fn remember_native_context(
+        &self,
+        session_id: &str,
+        native_id: &str,
+        fingerprint: Option<&str>,
+    ) -> Result<()> {
+        self.db.execute("INSERT INTO native_session_contexts(session_id,native_id,fingerprint) VALUES (?1,?2,?3) ON CONFLICT(session_id,native_id) DO UPDATE SET fingerprint=excluded.fingerprint", params![session_id, native_id, fingerprint])?;
+        Ok(())
+    }
+    pub fn native_rename_context_matches(
+        &self,
+        session_id: &str,
+        native_id: &str,
+        fingerprint: Option<&str>,
+    ) -> Result<bool> {
+        let saved: Option<Option<String>> = self.db.query_row("SELECT fingerprint FROM native_session_contexts WHERE session_id=?1 AND native_id=?2", params![session_id, native_id], |row| row.get(0)).optional()?;
+        if let Some(saved) = saved {
+            return Ok(saved.as_deref() == fingerprint);
+        }
+        // Older databases can prove the context only through accepted turns.
+        // An empty ledger cannot establish where an open-only session lived.
+        let exists: bool = self.db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM requests WHERE session_id=?1)",
+            [session_id],
+            |row| row.get(0),
+        )?;
+        let cli =
+            crate::providers::turn_fingerprint(Some(&latte_work_protocol::TurnProvider::Cli))?;
+        Ok(exists
+            && self.native_title_context_matches(
+                session_id,
+                fingerprint,
+                fingerprint == cli.as_deref(),
+            )?)
     }
     pub fn child_history_cursor(
         &self,
@@ -1789,6 +1888,189 @@ fn index_source(
 #[cfg(test)]
 mod tests {
     #[test]
+    fn native_rename_context_survives_restart_and_rejects_unknown_or_changed_launches() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("state.sqlite");
+        let store = super::Store::open(&path).unwrap();
+        let project = store.add_project(directory.path()).unwrap();
+        let session = store.create_session(project.id, "claude".into()).unwrap();
+        assert!(
+            !store
+                .native_rename_context_matches(&session.id, "native", Some("B"))
+                .unwrap()
+        );
+        store
+            .remember_native_context(&session.id, "native", Some("B"))
+            .unwrap();
+        drop(store);
+        let store = super::Store::open(&path).unwrap();
+        assert!(
+            store
+                .native_rename_context_matches(&session.id, "native", Some("B"))
+                .unwrap()
+        );
+        assert!(
+            !store
+                .native_rename_context_matches(&session.id, "native", Some("A"))
+                .unwrap()
+        );
+        assert!(
+            !store
+                .native_rename_context_matches(&session.id, "other", Some("B"))
+                .unwrap()
+        );
+        store
+            .remember_native_context(&session.id, "native", Some("C"))
+            .unwrap();
+        assert!(
+            !store
+                .native_rename_context_matches(&session.id, "native", Some("B"))
+                .unwrap()
+        );
+        assert!(
+            store
+                .native_rename_context_matches(&session.id, "native", Some("C"))
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn legacy_handback_history_pages_keep_one_masked_event_per_identity() {
+        use super::*;
+        let directory = tempfile::tempdir().unwrap();
+        let store = Store::open(&directory.path().join("state.sqlite")).unwrap();
+        let project = store.add_project(directory.path()).unwrap();
+        let session = store.create_session(project.id, "claude".into()).unwrap();
+        store
+            .event(
+                &session.id,
+                EventKind::Subagent {
+                    update: SubagentUpdate {
+                        id: "child".into(),
+                        tool_use_id: Some("parent-tool".into()),
+                        agent_type: None,
+                        title: None,
+                        status: Some(SubagentStatus::Completed),
+                        summary: None,
+                        last_tool: None,
+                    },
+                },
+            )
+            .unwrap();
+        let event = |seq, event| Event {
+            seq,
+            session_id: session.id.clone(),
+            at: 0.0,
+            event,
+            content_size: None,
+        };
+        let prefix: Vec<_> = (0..125)
+            .map(|i| {
+                event(
+                    i as f64,
+                    EventKind::Notice {
+                        text: "Earlier activity".into(),
+                    },
+                )
+            })
+            .chain([
+                event(
+                    125.0,
+                    EventKind::Tool {
+                        id: "handback".into(),
+                        name: "SubagentHandback".into(),
+                        input: serde_json::json!({"message":"All tests pass"}),
+                    },
+                ),
+                event(
+                    126.0,
+                    EventKind::ToolResult {
+                        id: "handback".into(),
+                        content: serde_json::json!("{\"success\":true}"),
+                        is_error: false,
+                    },
+                ),
+            ])
+            .collect();
+        for variant in 0..3 {
+            let mut cached = prefix.clone();
+            if variant == 2 {
+                cached.push(event(
+                    126.0 + 1.0 / 64.0,
+                    EventKind::Text {
+                        text: "All tests pass".into(),
+                    },
+                ));
+            }
+            if variant != 0 {
+                cached.push(event(
+                    126.0 + 1.0 / 64.0,
+                    EventKind::Text {
+                        text: "All tests pas[redacted]".into(),
+                    },
+                ));
+            }
+            cached.push(event(
+                127.0,
+                EventKind::Notice {
+                    text: "Later activity".into(),
+                },
+            ));
+            let snapshot = (cached, false);
+            let normalized =
+                crate::agents::normalize_child_transcript("claude", snapshot.clone()).unwrap();
+            assert!(
+                normalized
+                    .0
+                    .windows(2)
+                    .all(|pair| pair[0].seq < pair[1].seq)
+            );
+            store
+                .cache_subagent_transcript(&session.id, "child", &snapshot)
+                .unwrap();
+            let (mut after, mut replay) = (None, Vec::new());
+            loop {
+                let latte_work_protocol::Response::SubagentHistory {
+                    events,
+                    after: cursor,
+                    has_more,
+                    source,
+                    ..
+                } = store
+                    .subagent_history(&session.id, "child", after, Some("legacy"), false)
+                    .unwrap()
+                else {
+                    panic!("history")
+                };
+                assert_eq!(source, "legacy");
+                if after.is_none() {
+                    assert_eq!(events.len(), 128);
+                    assert!(
+                        matches!(&events[127].event, EventKind::Text { text } if text == if variant == 0 { "All tests pass" } else { "All tests pas[redacted]" })
+                    );
+                }
+                replay.extend(events);
+                after = cursor;
+                if !has_more {
+                    break;
+                }
+            }
+            assert_eq!(
+                serde_json::to_value(&replay).unwrap(),
+                serde_json::to_value(&normalized.0).unwrap()
+            );
+            assert_eq!(
+                serde_json::to_value(
+                    crate::agents::normalize_child_transcript("claude", normalized.clone())
+                        .unwrap()
+                )
+                .unwrap(),
+                serde_json::to_value(normalized).unwrap()
+            );
+        }
+    }
+
+    #[test]
     fn native_titles_require_one_known_context_across_the_session() {
         let directory = tempfile::tempdir().unwrap();
         let store = super::Store::open(&directory.path().join("state.sqlite")).unwrap();
@@ -2009,6 +2291,81 @@ mod tests {
                 .unwrap()
                 .title,
             "New manual"
+        );
+    }
+    #[test]
+    fn redacted_native_titles_survive_reimport_and_restart_without_raw_credentials() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("redacted-titles.db");
+        let store = Store::open(&path).unwrap();
+        let project = store.add_project(dir.path()).unwrap();
+        let mut session = store.create_session(project.id, "claude".into()).unwrap();
+        session.native_id = Some("current".into());
+        store.save(&session).unwrap();
+        store
+            .remember_title_credential(&session.id, "current", "private-token")
+            .unwrap();
+        assert_eq!(
+            store
+                .sync_native_title(&session.id, "Fix private-token", false)
+                .unwrap()
+                .title,
+            "Fix [redacted]"
+        );
+        assert_eq!(
+            store
+                .sync_native_title(&session.id, "Other private-token", false)
+                .unwrap()
+                .title,
+            "Other [redacted]"
+        );
+        drop(store);
+        let store = Store::open(&path).unwrap();
+        for custom in [false, true] {
+            assert_eq!(
+                store
+                    .sync_native_title(&session.id, "Fix private-token", custom)
+                    .unwrap()
+                    .title,
+                "Fix [redacted]"
+            );
+        }
+        store
+            .remember_title_credential(&session.id, "current", "密钥🙂")
+            .unwrap();
+        assert_eq!(
+            store
+                .sync_native_title(&session.id, "修复密钥🙂 与 private-token", true)
+                .unwrap()
+                .title,
+            "修复[redacted] 与 [redacted]"
+        );
+        let data: String = store
+            .db
+            .query_row("SELECT group_concat(data) FROM sessions", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        let redactions: String = store
+            .db
+            .query_row(
+                "SELECT group_concat(hex(secret_hash)) FROM native_title_secrets",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(!data.contains("private-token") && !redactions.contains("private-token"));
+        let mut replaced = store.session(&session.id).unwrap();
+        replaced.native_id = Some("other".into());
+        replaced.custom_title = false;
+        store.save(&replaced).unwrap();
+        assert_eq!(
+            store
+                .sync_native_title(&session.id, "Fix private-token", false)
+                .unwrap()
+                .title,
+            "Fix private-token",
+            "a redaction rule belongs only to its original native identity"
         );
     }
     #[test]

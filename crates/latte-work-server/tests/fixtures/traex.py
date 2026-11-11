@@ -4,6 +4,8 @@ import json
 import os
 import pathlib
 import sys
+import threading
+import time
 
 if '--version' in sys.argv:
     print('fixture-traex 0.210.1')
@@ -21,9 +23,12 @@ thread = 'traex-native-thread'
 turn = None
 count = 0
 waiting = None
+title_prompt = None
+output_lock = threading.Lock()
 
 def emit(value):
-    print(json.dumps(value), flush=True)
+    with output_lock:
+        print(json.dumps(value), flush=True)
 
 def reply(value, result):
     emit({'id': value['id'], 'result': result})
@@ -71,6 +76,23 @@ for line in sys.stdin:
             size = int(history_size.read_text())
             saved['turns'] = [{'id': 'past-turn', 'items': [{'type': 'agentMessage', 'text': 'HISTORY_ONLY_MARKER' + 'h' * size}]}]
         reply(value, {'thread': saved})
+    elif method == 'thread/name/generate':
+        assert params == {'threadId': thread, 'requestId': 'latte-generate-title'}
+        with pathlib.Path('traex-title-inputs').open('a') as f:
+            f.write(json.dumps({'prompt': title_prompt}) + '\n')
+        if title_prompt == 'native-auto-title-failed':
+            emit({'id': value['id'], 'error': {'code': -32601, 'message': 'unsupported'}})
+            continue
+        reply(value, {})
+        def finish_title(prompt=title_prompt):
+            if prompt == 'native-auto-title-held':
+                deadline = time.monotonic() + 10
+                while not pathlib.Path('title-release').exists() and time.monotonic() < deadline:
+                    time.sleep(.02)
+            notify('thread/name/generated', {'turnId': 'unrelated-request', 'name': 'wrong'})
+            notify('thread/name/generated', {'turnId': 'latte-generate-title', 'name': '' if prompt == 'native-auto-title-empty' else '修复附件拖入失败'})
+            pathlib.Path('title-response').write_text('sent')
+        threading.Thread(target=finish_title, daemon=True).start()
     elif method == 'thread/name/set':
         notify('thread/name/updated', {'threadName': params['name']})
         reply(value, {})
@@ -78,6 +100,7 @@ for line in sys.stdin:
         count += 1
         turn = 'turn-' + str(count)
         prompt = params['input'][0]['text']
+        title_prompt = prompt
         assert params['threadId'] == thread
         with pathlib.Path('traex-inputs').open('a') as record:
             record.write(json.dumps({'prompt': prompt, 'params': params, 'pid': os.getpid()}) + '\n')

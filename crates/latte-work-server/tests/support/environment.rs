@@ -34,6 +34,141 @@ fn stored_content(host: &Host, table: &str, id: &str) -> Vec<EventKind> {
 }
 
 #[tokio::test]
+async fn closed_environment_session_rename_uses_verified_directory_without_default_fallback() {
+    for duplicate in [false, true] {
+        let host = Host::start().await;
+        let project = tempfile::tempdir().unwrap();
+        let native = tempfile::tempdir().unwrap();
+        let app = tempfile::tempdir().unwrap();
+        let environment = AgentEnvironment(BTreeMap::from([(
+            "CLAUDE_CONFIG_DIR".into(),
+            native.path().to_string_lossy().into_owned(),
+        )]));
+        ProviderStore::open(app.path(), None)
+            .unwrap()
+            .save_environment("target", "claude", environment.clone())
+            .unwrap();
+        let mut client = host.client().await;
+        let id = session(&mut client, project.path()).await;
+        assert!(matches!(
+            ask(
+                &mut client,
+                Request::Send {
+                    session_id: id.clone(),
+                    request_id: "original-context".into(),
+                    text: "native-title".into(),
+                    model: None,
+                    effort: None,
+                    permission_mode: None,
+                    provider: Some(latte_work_protocol::TurnProvider::Configured {
+                        provider: None,
+                        environment
+                    }),
+                }
+            )
+            .await,
+            Response::Accepted { .. }
+        ));
+        wait(&mut client, &id, Status::Completed).await;
+        assert!(matches!(
+            ask(
+                &mut client,
+                Request::CloseAgentSession {
+                    session_id: id.clone(),
+                    only_if_idle: None
+                }
+            )
+            .await,
+            Response::Ok
+        ));
+        let folder: String = project
+            .path()
+            .canonicalize()
+            .unwrap()
+            .to_string_lossy()
+            .chars()
+            .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '-' })
+            .collect();
+        let relative = PathBuf::from("projects")
+            .join(folder)
+            .join("11111111-1111-4111-8111-111111111111.jsonl");
+        let original = native.path().join(&relative);
+        let default = host.directory.path().join("claude-config").join(&relative);
+        let before = std::fs::read(&original).unwrap();
+        if duplicate {
+            std::fs::create_dir_all(default.parent().unwrap()).unwrap();
+            std::fs::write(&default, &before).unwrap();
+        }
+        let rename = || Request::RenameSession {
+            session_id: id.clone(),
+            title: "Closed configured title".into(),
+            provider: None,
+        };
+        // Omitted and changed snapshots cannot write a same-UUID default copy.
+        assert!(matches!(
+            ask(&mut client, rename()).await,
+            Response::Error { .. }
+        ));
+        let target = Mutex::new(client);
+        let app_path = app.path();
+        let resolve = |agent: String| async move {
+            ProviderStore::open(app_path, None)?.launch_for_host("target", &agent)
+        };
+        ProviderStore::open(app.path(), None)
+            .unwrap()
+            .save_environment(
+                "target",
+                "claude",
+                AgentEnvironment(BTreeMap::from([(
+                    "CLAUDE_CONFIG_DIR".into(),
+                    host.directory
+                        .path()
+                        .join("claude-config")
+                        .to_string_lossy()
+                        .into_owned(),
+                )])),
+            )
+            .unwrap();
+        assert!(matches!(
+            request_with_app_agent_config(&target, rename(), resolve)
+                .await
+                .unwrap(),
+            Response::Error { .. }
+        ));
+        assert_eq!(std::fs::read(&original).unwrap(), before);
+        if duplicate {
+            assert_eq!(std::fs::read(&default).unwrap(), before);
+        } else {
+            assert!(!default.exists());
+        }
+        ProviderStore::open(app.path(), None)
+            .unwrap()
+            .save_environment(
+                "target",
+                "claude",
+                AgentEnvironment(BTreeMap::from([(
+                    "CLAUDE_CONFIG_DIR".into(),
+                    native.path().to_string_lossy().into_owned(),
+                )])),
+            )
+            .unwrap();
+        assert!(
+            matches!(request_with_app_agent_config(&target, rename(), resolve).await.unwrap(), Response::Session { session } if session.title == "Closed configured title" && session.custom_title && session.agent_session_open == Some(false))
+        );
+        assert!(
+            std::fs::read_to_string(&original)
+                .unwrap()
+                .contains("Closed configured title")
+        );
+        if duplicate {
+            assert_eq!(std::fs::read(&default).unwrap(), before);
+        } else {
+            assert!(!default.exists());
+        }
+    }
+}
+
+#[tokio::test]
 async fn native_environment_history_and_titles_remain_redacted_after_restart() {
     let mut host = Host::start().await;
     let mut client = host.client().await;
@@ -330,7 +465,7 @@ async fn short_environment_values_preserve_confirmed_stream_reports_without_expo
 #[tokio::test]
 async fn environment_secrets_are_redacted_before_storage_across_json_and_stream_fragments() {
     let host = Host::start().await;
-    for secret in ["fixture-environment-secret", "abc\"def"] {
+    for secret in ["fixture-environment-secret", "abc\"def", "a&b", "A&b<>中🔑"] {
         let project = tempfile::tempdir().unwrap();
         let mut client = host.client().await;
         let id = session(&mut client, project.path()).await;
@@ -396,7 +531,7 @@ async fn environment_secrets_are_redacted_before_storage_across_json_and_stream_
         let events = wait(&mut client, &id, Status::Completed).await;
         assert_eq!(
             text_content(&events),
-            "public before [redacted] public after\n{\"secret\": \"[redacted]\"}\n"
+            "public before [redacted] public after\n{\"secret\": \"[redacted]\"}\n{\"secret\": \"[redacted]\"}\n"
         );
         assert!(
             events

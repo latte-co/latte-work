@@ -622,6 +622,7 @@ async fn host_request(
             | Request::ResumeMessageQueue { .. }
             | Request::OpenAgentSession { .. }
             | Request::SubagentHistory { .. }
+            | Request::RenameSession { .. }
     ) {
         let provider_host = host_id.clone();
         latte_work_client::request_with_app_agent_config(&client, request, |agent| async move {

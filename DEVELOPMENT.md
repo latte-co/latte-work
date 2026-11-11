@@ -437,7 +437,7 @@ remove the status line. Both progress and usage are excluded before text merging
 The App's Connection & Agent settings also save literal `NAME=value` overrides
 per host/Agent in its private Provider configuration. A fresh native configuration
 transaction captures Provider and ENV together for Open, Send, queue operations,
-history redaction and model discovery. `TurnProvider::Configured` transports the
+history redaction, offline rename and model discovery. `TurnProvider::Configured` transports the
 ephemeral snapshot; only its digest enters request/queue identity. Empty overrides
 keep the existing CLI/Snapshot serialization and fingerprints unchanged.
 
@@ -447,7 +447,8 @@ local and SSH hosts apply overrides after the captured shell environment and bef
 adapter/Provider/effort controls. Environment changes participate in process
 configuration comparison: active/background work is preserved, idle processes are
 recreated on the next explicit use. No task is interrupted or replayed on save.
-Codex/Traex model probes and launch-time native selection use the same overrides.
+Codex/Traex model probes, launch-time native selection and Codex's separately
+supervised title process use the same overrides.
 Claude display labels and native child-history paths also use the effective ENV;
 child reads retain the owning launch snapshot and all UUID/symlink/path checks.
 Installation discovery and permission/command probes still use the host shell.
@@ -457,19 +458,28 @@ Names are POSIX-style, at most 255 bytes, with 64 variables / 8 KiB per value /
 Values are not shell-expanded. Debug formatting hides values; credential-named
 variables and authenticated proxy URLs are redacted from persisted Agent events.
 Redaction visits typed content fields, preserving protocol tags and correlation
-IDs. It recognizes raw and JSON-escaped values, including ASCII Unicode escapes.
+IDs. It matches raw content and one decoded JSON string layer, including mixed
+ASCII Unicode escapes, either hex case and surrogate pairs, retaining source
+offsets so unrelated text keeps its original encoding.
 Text streams retain at most one possible secret-prefix suffix per channel, bounded
-by the longest configured pattern and 513 main/child channels. Content boundaries
+by six times the longest secret's byte length and 513 main/child channels. Content boundaries
 mask unfinished prefixes; raw tails never enter storage or replay.
 Native child text blocks also mask unfinished prefixes at every independent
 record/page boundary, including the legacy bounded snapshot. No raw suffix is
 stored in the durable history cursor. Delivery receipts are interpreted before
-their text is redacted; only redacted reports enter full and legacy histories.
+their text is redacted; complete handback reports use the same redaction as their
+Tool message. Compatibility normalization preserves existing report identities
+and collapses previously duplicated identities before legacy pagination.
 Native title reads use the live launch context and its configuration directory.
 Every accepted turn must match that context, and both context ownership and
 fingerprints are checked again before saving. Closed/restarted sessions with an
 unknown custom context retain their saved title; legacy CLI-only titles can still
 refresh without an Agent. Credentials and ENV snapshots are never persisted.
+Each observed native identity records the launch configuration digest. Closed
+session renames require the App's ephemeral snapshot to match that digest (or a
+verified legacy request ledger), then use its effective configuration directory.
+Unknown or changed contexts fail before native writes; they never fall back to
+the host default directory. Existing path/symlink/inode checks remain in force.
 Unsaved ENV drafts remain in App memory per host/Agent across settings navigation
 and reconnects. Refresh replaces clean fields and preserves dirty or invalid input.
 Focused checks: `agentEnvironment` and `AgentSettings` frontend tests, config and
@@ -1097,20 +1107,62 @@ have not been validated; this is not a claim about when individual flags were
 introduced. Platform injection requires native `--append-system-prompt` support,
 and unsupported optional title controls degrade to a notice rather than fail a task.
 
-Agent-generated titles are host metadata, not UI-generated summaries. Claude's
-headless stream mode does not create AI titles automatically. After the first
-successful ordinary turn in each process, Latte sends the native
-`generate_session_title` control with `persist: true` and a bounded description.
-The CLI reuses an existing native name or generates and persists its AI title.
-This optional metadata exchange never creates a chat turn or requires a title
-acknowledgement before subsequent input. Unsupported controls preserve the
-fallback name and emit a notice.
-Successful responses without a valid title also report a notice. A persisted
-manual name suppresses generation on resume without passing `--name` or issuing
-an implicit rename to the existing native session.
+New conversations initially use the prompt prefix. After their first successful
+ordinary turn, the execution host requests a friendly title using the request and
+visible first-turn reply. Titles are saved in host metadata and appear through the
+existing session/list polling on local and SSH hosts. Hidden reasoning is not
+collected. Generation runs once for a newly created native session; reopening or
+resuming does not regenerate names or backfill old history.
+
+Claude uses `generate_session_title` with `persist: true`; its bounded description
+contains up to 2,048 request characters and 4,096 characters of recent visible
+reply, including result-only responses. The CLI persists its AI title. Traex uses
+`thread/name/generate` on the existing native history and correlates the resulting
+`thread/name/generated` notification with its request and thread IDs. The suggestion
+is saved as generated Work metadata, without a native manual rename.
+Failed Claude turns discard their naming context before another request starts.
+
+Codex has no equivalent generation RPC in CLI 0.162.0. A separately supervised
+app-server creates an ephemeral structured turn with the same selected model,
+reasoning effort and Provider, using the bounded request/reply context above. CLI
+mode pins the first turn's native Provider identity and definition, including the
+built-in `openai` Provider's top-level `openai_base_url`: a later active selection
+cannot redirect the title request, and an endpoint/auth configuration change declines
+naming instead of forwarding the transcript to the changed service.
+It disables legacy `notify`, inherited stable environment/sleep tools,
+environment access, built-in/extension tools, skills, hooks and every effective
+MCP server, and verifies read-only or preserved custom permissions before sending.
+The host permits two concurrent jobs, with a 30-second deadline, 256-KiB frames,
+1-MiB total output, 4,096 messages and an 8-KiB structured reply limit. Its process
+group is reaped on completion/failure; closing or replacing the owning session,
+or confirming a manual native name, cancels it and releases its concurrency permit.
+Generated titles remain Work metadata. This adds an optional model
+request using the selected Agent's existing service; no separate Provider is needed.
+
+None of these paths adds a turn to the visible conversation or blocks subsequent
+input on the title response. Rejected, failed or invalid title requests retain
+the prefix and report a notice. Persisted manual names suppress generation on
+resume without implicitly renaming the native session.
 Responses are bound to the native identity, and generated names cannot overwrite
 a manual name. Opening a session, discovery, slash commands, failed turns and
 child results do not trigger generation.
+
+All native title imports redact known Work Provider credentials, including raw
+native records written before the generation callback. Before admitting native
+output, the host stores only an identity-bound SHA-256 credential fingerprint and
+byte length in a private title-guard table; no plaintext credential or raw title is
+stored there. The guards survive closing/reopening and daemon restart, even for
+volatile Provider snapshots. Imports examine at most 64 matching fingerprints
+against the bounded title; excessive guards decline the optional import.
+
+Focused checks: the server `agents::` unit tests and final-binary `titles_e2e`
+tests cover context bounds, correlation, manual-name precedence, failures,
+failed-turn context reset, Provider drift, effort forwarding, permit release,
+native refresh redaction, reconnect and resume without extra visible turns.
+`scripts/smoke-codex-providers.py`, `scripts/smoke-traex-providers.py` and
+`scripts/smoke-claude-queue.py` separately exercise installed CLIs with disposable
+localhost model fixtures. These validate native protocol behavior, not live-model
+title quality, native UI behavior or deployment to a configured SSH host.
 
 Claude's `session_title_changed` reports an explicit native session name (not an AI title).
 It updates the saved custom name without creating a turn, including a native-side

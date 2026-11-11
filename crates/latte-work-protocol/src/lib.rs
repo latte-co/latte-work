@@ -580,6 +580,9 @@ pub enum Request {
     RenameSession {
         session_id: String,
         title: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        provider: Option<TurnProvider>,
     },
     PinSession {
         session_id: String,

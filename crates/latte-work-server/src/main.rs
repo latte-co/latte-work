@@ -396,7 +396,9 @@ async fn dispatch(s: &Service, request: Request) -> Result<Response> {
     // Ordinary turns retain concurrent admission; no request is replayed.
     let exclusive = matches!(
         &request,
-        Request::UndoTurnChanges { .. } | Request::ArchiveSession { archived: true, .. }
+        Request::UndoTurnChanges { .. }
+            | Request::ArchiveSession { archived: true, .. }
+            | Request::RenameSession { .. }
     );
     let _exclusive_guard = if exclusive {
         Some(s.file_admission.write().await)
@@ -713,12 +715,33 @@ async fn dispatch(s: &Service, request: Request) -> Result<Response> {
             let (sessions, next) = db(&s.database, |d| d.recent_sessions(before.as_ref()))?;
             Response::RecentSessions { sessions, next }
         }
-        Request::RenameSession { session_id, title } => {
+        Request::RenameSession {
+            session_id,
+            title,
+            provider,
+        } => {
             let session = db(&s.database, |d| d.session(&session_id))?;
             let project = db(&s.database, |d| d.project(&session.project_id))?;
+            // Omitted snapshots never consult a newly selected host Provider.
+            let config = s
+                .providers
+                .lock()
+                .map_err(|_| anyhow::anyhow!("Provider 配置锁异常"))?
+                .turn_config(
+                    &session.agent,
+                    None,
+                    Some(provider.unwrap_or(latte_work_protocol::TurnProvider::Cli)),
+                )?;
             Response::Session {
-                session: runtime::rename_title(&s.database, &s.runs, session, project.path, title)
-                    .await?,
+                session: runtime::rename_title(
+                    &s.database,
+                    &s.runs,
+                    session,
+                    project.path,
+                    title,
+                    config,
+                )
+                .await?,
             }
         }
         Request::PinSession { session_id, pinned } => Response::Session {

@@ -35,19 +35,27 @@ for line in sys.stdin:
     value=json.loads(line)
     if value['type']=='control_request':
         if value['request']['subtype']=='generate_session_title':
-            description=value['request']['description']
+            description=value['request']['description'].split('\n\nAssistant reply:', 1)[0]
+            if description.startswith('native-auto-title'):
+                pathlib.Path('fixture-title-context').write_text(value['request']['description'])
             if description.startswith('native-auto-title'):
                 with pathlib.Path('fixture-title-requests').open('a') as record: record.write(description+'\n')
             def finish_title(request=value,description=description):
-                if description=='native-auto-title-held':
+                if description in ('native-auto-title-held', 'usage', 'usage-alias'):
                     deadline=time.monotonic()+20
                     while not pathlib.Path('title-release').exists() and time.monotonic()<deadline: time.sleep(.02)
                 if description=='native-auto-title-unsupported':
                     emit({'type':'control_response','response':{'subtype':'error','request_id':request['request_id'],'error':'unsupported generate_session_title'}})
                     return
                 title='Friendly generated title' if description.startswith('native-auto-title') and description!='native-auto-title-empty' else None
+                if description=='native-auto-title-credential':
+                    title='Fix '+os.environ['ANTHROPIC_AUTH_TOKEN']
                 if title and request['request'].get('persist'):
                     metadata({'type':'ai-title','aiTitle':title,'sessionId':native_id})
+                    if description=='native-auto-title-credential':
+                        pathlib.Path('fixture-title-raw').write_text('persisted')
+                        deadline=time.monotonic()+20
+                        while not pathlib.Path('title-callback-release').exists() and time.monotonic()<deadline: time.sleep(.02)
                 emit({'type':'control_response','response':{'subtype':'success','request_id':request['request_id'],'response':{'title':title}}})
                 if description.startswith('native-auto-title'): pathlib.Path('fixture-title-response').write_text('sent')
             threading.Thread(target=finish_title,daemon=True).start()
@@ -183,6 +191,9 @@ for line in sys.stdin:
                 time.sleep(.01)
             delta(secret[split:]+' public after\n')
             encoded=json.dumps({'secret':secret})
+            # Go's standard JSON encoder uses these HTML-safe Unicode escapes.
+            encoded=encoded.replace('&',r'\u0026').replace('<',r'\u003c').replace('>',r'\u003e')
+            delta(encoded+'\n')
             for part in encoded: delta(part)
             delta('\n')
             emit({'type':'assistant','message':{'content':[{'type':'tool_use','id':'text','name':'text','input':{'body':'text'}}]}})

@@ -6,6 +6,8 @@ mod claude_models;
 mod claude_sessions;
 pub(crate) mod claude_skills;
 pub(crate) mod codex;
+pub(crate) mod codex_title;
+mod titles;
 pub(crate) mod traex;
 pub use adapter::{Action, AgentAdapter, AgentCommand, Input};
 use anyhow::{Result, bail};
@@ -286,9 +288,10 @@ pub fn rename_saved_session(
     path: &std::path::Path,
     id: &str,
     title: &str,
+    environment: &latte_work_protocol::AgentEnvironment,
 ) -> Result<String> {
     match agent {
-        "claude" => claude_sessions::rename(path, id, title),
+        "claude" => claude_sessions::rename(path, id, title, environment),
         _ => bail!("此 Agent 尚不支持修改会话标题"),
     }
 }

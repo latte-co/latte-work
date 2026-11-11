@@ -268,7 +268,7 @@ fn count(value: &Value, key: &str) -> Option<f64> {
 #[derive(Default)]
 pub struct Claude {
     initial_title: Option<String>,
-    title_description: Option<String>,
+    title_description: Option<super::titles::Context>,
     title_attempted: bool,
     generating_title_for: Option<String>,
     native_named: bool,
@@ -330,7 +330,7 @@ impl Claude {
             && !prompt.trim().is_empty()
             && !prompt.trim_start().starts_with('/')
         {
-            self.title_description = Some(prompt.chars().take(1024).collect());
+            self.title_description = Some(super::titles::Context::new(prompt));
         }
     }
     fn set_accounting_model(&mut self, model: Option<String>) {
@@ -426,6 +426,7 @@ fn write_action(value: Value) -> Result<Action> {
 impl AgentAdapter for Claude {
     fn set_session_title(&mut self, title: Option<String>, resuming: bool) {
         self.native_named = title.is_some();
+        self.title_attempted = resuming;
         self.initial_title = if resuming { None } else { title };
     }
     fn has_background_work(&self) -> bool {
@@ -601,6 +602,7 @@ impl AgentAdapter for Claude {
                 Ok(vec![write_action(self.initialize())?])
             }
             Input::Interrupt => {
+                self.title_description = None;
                 if !matches!(self.phase, Phase::Running) {
                     return Ok(vec![Action::Interrupted]);
                 }
@@ -1580,16 +1582,23 @@ impl Claude {
                 {
                     output.push(Action::Event(EventKind::Text { text: text.into() }));
                 }
+                if failed {
+                    self.title_description = None;
+                }
                 if !failed
                     && !self.title_attempted
                     && !self.native_named
-                    && let (Some(description), Some(native_session_id)) = (
+                    && let (Some(mut context), Some(native_session_id)) = (
                         self.title_description.take(),
                         self.native_session_id.clone(),
                     )
                 {
                     self.title_attempted = true;
                     self.generating_title_for = Some(native_session_id);
+                    if let Some(reply) = m["result"].as_str() {
+                        context.reply(reply);
+                    }
+                    let description = context.description();
                     let Action::Write(bytes) = write_action(json!({
                         "type": "control_request", "request_id": "latte-generate-title",
                         "request": {"subtype": "generate_session_title", "description": description, "persist": true}
@@ -1603,6 +1612,13 @@ impl Claude {
                 self.last_result = m["result"].as_str().map(str::to_owned);
             }
             _ => {}
+        }
+        if let Some(context) = &mut self.title_description {
+            for action in &output {
+                if let Action::Event(EventKind::Text { text }) = action {
+                    context.reply(text);
+                }
+            }
         }
         Ok(output)
     }
@@ -1826,8 +1842,7 @@ pub(super) fn parse_child_transcript(
             ));
             bytes += size;
             if let Some(report) = report {
-                let EventKind::Text { text } =
-                    redactor.event_at_boundary(EventKind::Text { text: report })
+                let EventKind::Text { text } = redactor.event(EventKind::Text { text: report })
                 else {
                     unreachable!("redaction preserves the event kind")
                 };
@@ -1891,6 +1906,18 @@ pub(super) fn normalize_child_transcript(
 ) -> Result<super::ChildTranscript> {
     use std::collections::VecDeque;
     let (source, mut truncated) = snapshot;
+    // A previously normalized cache may already contain the old raw/masked
+    // pair at one identity. Keep the later public event before pagination.
+    let last: HashMap<_, _> = source
+        .iter()
+        .enumerate()
+        .map(|(i, event)| (event.seq.to_bits(), i))
+        .collect();
+    let source: Vec<_> = source
+        .into_iter()
+        .enumerate()
+        .filter_map(|(i, event)| (last[&event.seq.to_bits()] == i).then_some(event))
+        .collect();
     let mut pending = HashMap::<&str, &str>::new();
     let (mut events, mut bytes) = (VecDeque::new(), 0usize);
     for (index, event) in source.iter().enumerate() {
@@ -1918,9 +1945,14 @@ pub(super) fn normalize_child_transcript(
         if let Some(text) = report {
             let (reports, partial) =
                 report_events(text.into(), event.seq, &event.session_id, event.at);
-            // Any following prose may be a delivery receipt, not the report.
-            // Only an exact existing report sequence makes promotion redundant.
-            let already_present = source.get(index + 1..index + 1 + reports.len())
+            // Promoted report identities remain authoritative even when an
+            // older boundary redactor masked an unfinished secret prefix.
+            let identified = reports.first().is_some_and(|first| {
+                source.iter().any(|actual| {
+                    actual.seq == first.seq && matches!(actual.event, EventKind::Text { .. })
+                })
+            });
+            let already_present = identified || source.get(index + 1..index + 1 + reports.len())
                 .is_some_and(|following| following.iter().zip(&reports).all(|(actual, expected)|
                     matches!((&actual.event, &expected.event), (EventKind::Text { text: a }, EventKind::Text { text: b }) if a == b)
                 ));
@@ -2151,6 +2183,37 @@ mod tests {
             }
         }
     }
+
+    #[test]
+    fn failed_title_context_is_discarded_before_a_different_successful_request() {
+        use super::*;
+        let mut agent = Claude {
+            phase: Phase::Running,
+            native_session_id: Some("native-1".into()),
+            ..Default::default()
+        };
+        agent.remember_title_description("排查登录失败");
+        agent.decode(json!({"type":"assistant","message":{"content":[{"type":"text","text":"登录诊断的部分结果"}]}})).unwrap();
+        let failed = agent
+            .decode(json!({"type":"result","is_error":true,"result":"登录失败"}))
+            .unwrap();
+        assert!(encoded(&failed).is_empty());
+        assert!(agent.title_description.is_none());
+        agent
+            .advance(Input::Start {
+                prompt: "导出 CSV"
+            })
+            .unwrap();
+        agent.decode(json!({"type":"assistant","message":{"content":[{"type":"text","text":"已导出 CSV 文件"}]}})).unwrap();
+        let completed = agent
+            .decode(json!({"type":"result","is_error":false}))
+            .unwrap();
+        assert_eq!(
+            encoded(&completed)[0]["request"]["description"],
+            "导出 CSV\n\nAssistant reply:\n已导出 CSV 文件"
+        );
+    }
+
     #[test]
     fn generated_titles_are_optional_once_per_process_and_never_start_turns() {
         use super::*;
@@ -2160,6 +2223,12 @@ mod tests {
             ..Default::default()
         };
         agent.remember_title_description("修复消息发送后的输入框");
+        agent
+            .decode(json!({"type":"assistant","message":{"content":[
+                {"type":"thinking","thinking":"PRIVATE_REASONING"},
+                {"type":"text","text":"已修复发送后的输入框状态"}
+            ]}}))
+            .unwrap();
         let actions = agent
             .decode(json!({"type":"result","is_error":false}))
             .unwrap();
@@ -2167,7 +2236,7 @@ mod tests {
         assert_eq!(wire.len(), 1);
         assert_eq!(
             wire[0]["request"],
-            json!({"subtype":"generate_session_title","description":"修复消息发送后的输入框","persist":true})
+            json!({"subtype":"generate_session_title","description":"修复消息发送后的输入框\n\nAssistant reply:\n已修复发送后的输入框状态","persist":true})
         );
         assert!(matches!(
             actions.last(),
@@ -2330,9 +2399,12 @@ mod tests {
             wire[0]["request"]["description"]
                 .as_str()
                 .unwrap()
+                .split("\n\nAssistant reply:")
+                .next()
+                .unwrap()
                 .chars()
                 .count(),
-            1024
+            2048
         );
     }
     fn handoff(agent: &mut super::Claude, request_id: &str) -> String {
@@ -2762,6 +2834,52 @@ mod tests {
         );
         assert!(parse_child_transcript(raw(), "other-parent", "a123", "public", &config).is_err());
         assert!(parse_child_transcript(raw(), "parent", "other-child", "public", &config).is_err());
+    }
+
+    #[test]
+    fn complete_handback_report_uses_the_same_redaction_as_its_tool_message() {
+        use super::*;
+        let directory = tempfile::tempdir().unwrap();
+        let config = crate::providers::ProviderStore::open(directory.path())
+            .unwrap()
+            .turn_config(
+                "claude",
+                None,
+                Some(latte_work_protocol::TurnProvider::Configured {
+                    provider: None,
+                    environment: latte_work_protocol::AgentEnvironment(
+                        std::collections::BTreeMap::from([("TOKEN".into(), "s3cr3t".into())]),
+                    ),
+                }),
+            )
+            .unwrap();
+        let raw = [
+            json!({"type":"assistant","sessionId":"parent","agentId":"child","isSidechain":true,"message":{"content":[{"type":"tool_use","id":"report","name":"SubagentHandback","input":{"message":"All tests pass"}}]}}),
+            json!({"type":"user","sessionId":"parent","agentId":"child","isSidechain":true,"message":{"content":[{"type":"tool_result","tool_use_id":"report","content":"{\"success\":true}","is_error":false}]}}),
+        ].iter().map(|v| format!("{v}\n")).collect::<String>();
+        let snapshot = parse_child_transcript(
+            super::super::claude_sessions::ChildBytes {
+                bytes: raw.into_bytes(),
+                start: 0,
+                truncated: false,
+            },
+            "parent",
+            "child",
+            "public",
+            &config,
+        )
+        .unwrap();
+        assert_eq!(snapshot.0.len(), 3);
+        assert!(
+            matches!(&snapshot.0[0].event, EventKind::Tool { input, .. } if input["message"] == "All tests pass")
+        );
+        assert!(
+            matches!(&snapshot.0[2].event, EventKind::Text { text } if text == "All tests pass")
+        );
+        assert_eq!(
+            serde_json::to_value(normalize_child_transcript(snapshot.clone()).unwrap()).unwrap(),
+            serde_json::to_value(snapshot).unwrap()
+        );
     }
 
     #[test]

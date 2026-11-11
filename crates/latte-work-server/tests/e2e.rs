@@ -5,6 +5,8 @@ mod codex_e2e;
 mod environment_e2e;
 #[path = "support/ssh.rs"]
 mod ssh_e2e;
+#[path = "support/titles.rs"]
+mod titles_e2e;
 #[path = "support/traex.rs"]
 mod traex_e2e;
 use latte_work_client::Client;
@@ -1145,7 +1147,7 @@ async fn delayed_automatic_title_preserves_manual_name_and_unsupported_is_nonfat
         }
         if !unsupported {
             assert!(
-                matches!(ask(&mut client, Request::RenameSession {session_id:id.clone(),title:"My manual name".into()}).await, Response::Session {session} if session.custom_title)
+                matches!(ask(&mut client, Request::RenameSession { provider: None,session_id:id.clone(),title:"My manual name".into()}).await, Response::Session {session} if session.custom_title)
             );
             std::fs::write(project.path().join("title-release"), "").unwrap();
         }
@@ -1306,6 +1308,7 @@ async fn native_session_titles_sync_both_ways_without_sending_or_stopping_turns(
         matches!(ask(&mut client,Request::Session{session_id:id.clone()}).await,Response::Session{session} if session.title=="Native session name" && session.custom_title)
     );
     let rename = |title: &str| Request::RenameSession {
+        provider: None,
         session_id: id.clone(),
         title: title.into(),
     };
@@ -1619,7 +1622,7 @@ async fn session_menu_metadata_is_durable_and_host_scoped() {
     let project = tempfile::tempdir().unwrap();
     let id = session(&mut client, project.path()).await;
     assert!(
-        matches!(ask(&mut client, Request::RenameSession { session_id: id.clone(), title: "Renamed".into() }).await,
+        matches!(ask(&mut client, Request::RenameSession { provider: None, session_id: id.clone(), title: "Renamed".into() }).await,
         Response::Session { session } if session.title == "Renamed" && session.custom_title)
     );
     ask(
@@ -1650,6 +1653,7 @@ async fn session_menu_metadata_is_durable_and_host_scoped() {
         ask(
             &mut other,
             Request::RenameSession {
+                provider: None,
                 session_id: id.clone(),
                 title: "wrong host".into()
             }
@@ -3970,6 +3974,32 @@ async fn app_providers_and_native_defaults_only_contact_the_selected_host() {
     );
 }
 
+async fn assert_usage_replayed_after_title_notice(
+    host: &Host,
+    project: &Path,
+    id: &str,
+    events: &[latte_work_protocol::Event],
+) {
+    // Release the title response only after the completed-turn snapshot, so the
+    // replay always contains late metadata rather than relying on scheduler timing.
+    std::fs::write(project.join("title-release"), "release").unwrap();
+    let mut reconnected = host.client().await;
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let replay = loop {
+        let replay = wait(&mut reconnected, id, Status::Completed).await;
+        if replay.iter().any(|e| matches!(&e.event, EventKind::Notice { text } if text.contains("自动命名未返回有效标题"))) {
+            break replay;
+        }
+        assert!(Instant::now() < deadline, "late title notice timeout");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    };
+    assert_eq!(replay.len(), events.len() + 1, "one late title notice");
+    assert_eq!(
+        serde_json::to_value(events).unwrap(),
+        serde_json::to_value(&replay[..events.len()]).unwrap()
+    );
+}
+
 #[tokio::test]
 async fn usage_snapshot_survives_bridge_reconnect_without_billing_inflation() {
     let host = Host::start().await;
@@ -4001,12 +4031,7 @@ async fn usage_snapshot_survives_bridge_reconnect_without_billing_inflation() {
         matches!(&latest.event,EventKind::Usage {context:Some(c),totals:Some(t)} if c.used_tokens == 1000.0 && c.window_tokens == Some(200000.0) && t.input_tokens == Some(200.0) && t.cache_read_tokens == Some(1200.0))
     );
     drop(client);
-    let mut reconnected = host.client().await;
-    let replay = wait(&mut reconnected, &id, Status::Completed).await;
-    assert_eq!(
-        serde_json::to_value(&events).unwrap(),
-        serde_json::to_value(&replay).unwrap()
-    );
+    assert_usage_replayed_after_title_notice(&host, project.path(), &id, &events).await;
 }
 
 #[tokio::test]
@@ -4052,22 +4077,7 @@ async fn usage_alias_capacity_is_persisted_and_replayed() {
         matches!(&latest.event, EventKind::Usage {context:Some(c),..} if c.model == "model_api/experimental_0812" && c.used_tokens == 69692.0 && c.window_tokens == Some(200000.0))
     );
     drop(client);
-    let mut reconnected = host.client().await;
-    let replay = wait(&mut reconnected, &id, Status::Completed).await;
-    // Native title metadata can arrive after Completed. The snapshot's existing
-    // events must replay exactly, and usage must not gain duplicate accounting.
-    assert_eq!(
-        serde_json::to_value(&events).unwrap(),
-        serde_json::to_value(replay.iter().take(events.len()).collect::<Vec<_>>()).unwrap()
-    );
-    let usage = |events: &[latte_work_protocol::Event]| {
-        events
-            .iter()
-            .filter(|e| matches!(e.event, EventKind::Usage { .. }))
-            .map(|e| serde_json::to_value(e).unwrap())
-            .collect::<Vec<_>>()
-    };
-    assert_eq!(usage(&events), usage(&replay));
+    assert_usage_replayed_after_title_notice(&host, project.path(), &id, &events).await;
 }
 
 #[tokio::test]

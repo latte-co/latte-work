@@ -426,7 +426,12 @@ export type Request =
   | { method: "sessions"; project_id: string }
   | { method: "pinned_sessions" }
   | { method: "recent_sessions"; before: RecentCursor | null }
-  | { method: "rename_session"; session_id: string; title: string }
+  | {
+      method: "rename_session";
+      session_id: string;
+      title: string;
+      provider?: TurnProvider;
+    }
   | { method: "pin_session"; session_id: string; pinned: boolean }
   | { method: "mark_session_unread"; session_id: string; unread: boolean }
   | { method: "archive_session"; session_id: string; archived: boolean }

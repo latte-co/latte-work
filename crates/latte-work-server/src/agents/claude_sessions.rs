@@ -134,9 +134,6 @@ pub struct Title {
 fn valid_title(value: &str) -> bool {
     !value.trim().is_empty() && value.chars().count() <= 200 && !value.chars().any(char::is_control)
 }
-fn projects(cwd: &Path) -> Result<PathBuf> {
-    configured_projects(cwd, &Default::default())
-}
 fn configured_projects(
     cwd: &Path,
     environment: &latte_work_protocol::AgentEnvironment,
@@ -419,8 +416,14 @@ fn read_child_page_path(
         has_more,
     }))
 }
-pub fn rename(cwd: &Path, id: &str, title: &str) -> Result<String> {
-    let path = locate_in(&projects(cwd)?, cwd, id)?.context("未找到原生会话，标题未修改")?;
+pub fn rename(
+    cwd: &Path,
+    id: &str,
+    title: &str,
+    environment: &latte_work_protocol::AgentEnvironment,
+) -> Result<String> {
+    let path = locate_in(&configured_projects(cwd, environment)?, cwd, id)?
+        .context("未找到原生会话，标题未修改")?;
     append(&path, id, title)?;
     let actual = read_tail(&path)?.context("原生标题写入后未能确认")?;
     if !actual.custom || actual.text != title.trim() {

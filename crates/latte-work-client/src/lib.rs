@@ -114,6 +114,7 @@ impl Client {
             | Request::DispatchQueuedMessage { provider, .. }
             | Request::ResumeMessageQueue { provider, .. }
             | Request::OpenAgentSession { provider, .. }
+            | Request::RenameSession { provider, .. }
             | Request::SubagentHistory { provider, .. } => matches!(
                 provider,
                 Some(latte_work_protocol::TurnProvider::Configured { .. })
@@ -361,6 +362,7 @@ where
         | Request::DispatchQueuedMessage { session_id, .. }
         | Request::ResumeMessageQueue { session_id, .. }
         | Request::OpenAgentSession { session_id, .. }
+        | Request::RenameSession { session_id, .. }
         | Request::SubagentHistory { session_id, .. } => {
             match target
                 .lock()
@@ -409,6 +411,7 @@ async fn request_with_launch_config(
     let is_models = matches!(&request, Request::Models { .. });
     let is_open = matches!(&request, Request::OpenAgentSession { .. });
     let is_history = matches!(&request, Request::SubagentHistory { .. });
+    let is_rename = matches!(&request, Request::RenameSession { .. });
     let request = match request {
         Request::Models {
             agent,
@@ -488,6 +491,13 @@ async fn request_with_launch_config(
             session_id,
             provider: Some(config),
         },
+        Request::RenameSession {
+            session_id, title, ..
+        } => Request::RenameSession {
+            session_id,
+            title,
+            provider: Some(config),
+        },
         Request::SubagentHistory {
             session_id,
             task_id,
@@ -510,6 +520,7 @@ async fn request_with_launch_config(
         Response::MessageQueue { .. } if is_queue_control => Ok(response),
         Response::Ok if is_open => Ok(response),
         Response::SubagentHistory { .. } if is_history => Ok(response),
+        Response::Session { .. } if is_rename => Ok(response),
         Response::Error { .. } => Ok(response),
         _ => bail!("远程执行响应格式不匹配"),
     }

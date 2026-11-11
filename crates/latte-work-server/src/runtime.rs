@@ -267,6 +267,7 @@ pub async fn rename_title(
     session: Session,
     path: String,
     title: String,
+    config: LaunchConfig,
 ) -> Result<Session> {
     Store::validate_session_title(&title)?;
     let control = runs
@@ -286,12 +287,26 @@ pub async fn rename_title(
         return db(database, |s| s.session(&session.id));
     }
     if let Some(id) = session.native_id.clone() {
+        let fingerprint = config.fingerprint()?;
+        if !db(database, |s| {
+            s.native_rename_context_matches(&session.id, &id, fingerprint.as_deref())
+        })? {
+            bail!("无法确认原生会话的启动配置，标题未修改；请恢复原 Provider 和 ENV 配置后重试");
+        }
         let agent = session.agent.clone();
         let actual = tokio::task::spawn_blocking(move || {
-            agents::rename_saved_session(&agent, std::path::Path::new(&path), &id, &title)
+            agents::rename_saved_session(
+                &agent,
+                std::path::Path::new(&path),
+                &id,
+                &title,
+                &config.environment,
+            )
         })
         .await??;
-        return db(database, |s| s.rename_session(&session.id, &actual));
+        return db(database, |s| {
+            s.sync_native_title(&session.id, &actual, true)
+        });
     }
     // No native session exists yet. Persist the requested initial title, and pass it
     // at native creation; never create a fake transcript or send a naming prompt.
@@ -701,6 +716,7 @@ impl TurnState {
                     })?;
                 }
                 Action::TitleRenamed(_) => bail!("未处理的原生标题确认"),
+                Action::GenerateTitle { .. } => bail!("未处理的标题生成请求"),
                 Action::SourceUsed { id, name } => {
                     db(database, |s| s.observe_tool(session_id, &id, &name))?
                 }
@@ -735,6 +751,10 @@ impl TurnState {
                 })?,
                 Action::NativeSession(id) => db(database, |s| {
                     let mut current = s.session(session_id)?;
+                    s.remember_native_context(session_id, &id, config.fingerprint()?.as_deref())?;
+                    if let Some(provider) = &config.provider {
+                        s.remember_title_credential(session_id, &id, &provider.credential)?;
+                    }
                     current.native_id = Some(id);
                     s.save(&current)
                 })?,
@@ -926,6 +946,8 @@ fn native_output<R: tokio::io::AsyncRead>(reader: R) -> FramedRead<R, LinesCodec
 }
 struct Process {
     adapter: Box<dyn agents::AgentAdapter>,
+    binary: String,
+    title_job: Option<tokio::task::JoinHandle<()>>,
     rename_reply: Option<oneshot::Sender<Result<String, String>>>,
     group: Group,
     input: tokio::process::ChildStdin,
@@ -952,6 +974,9 @@ impl Drop for Process {
     fn drop(&mut self) {
         self.session_open.store(false, Ordering::SeqCst);
         self.drain.abort();
+        if let Some(job) = self.title_job.take() {
+            job.abort();
+        }
     }
 }
 impl Process {
@@ -1004,6 +1029,8 @@ impl Process {
         });
         Ok(Self {
             adapter,
+            binary: binary.into(),
+            title_job: None,
             rename_reply: None,
             group,
             input,
@@ -1027,16 +1054,78 @@ impl Process {
     async fn apply(&mut self, actions: Vec<Action>, database: &Database, id: &str) -> Result<()> {
         let mut remaining = Vec::new();
         for action in actions {
-            if let Action::TitleRenamed(result) = action {
+            if let Action::GenerateTitle {
+                native_session_id,
+                description,
+                model,
+                native_provider,
+            } = action
+            {
+                if self.title_job.is_some()
+                    || self.stopping
+                    || db(database, |s| s.session(id))?.custom_title
+                {
+                    continue;
+                }
+                let database = database.clone();
+                let id = id.to_owned();
+                let binary = self.binary.clone();
+                let path = self.path.clone();
+                let mut config = self.config.clone();
+                config.model = model;
+                self.title_job = Some(tokio::spawn(async move {
+                    let result = agents::codex_title::generate(
+                        &binary,
+                        &path,
+                        &config,
+                        &description,
+                        native_provider.as_ref(),
+                    )
+                    .await;
+                    let _ = db(&database, |s| {
+                        let session = s.session(&id)?;
+                        if session.custom_title
+                            || session.native_id.as_deref() != Some(&native_session_id)
+                        {
+                            return Ok(());
+                        }
+                        match result {
+                            Ok(title) => {
+                                s.sync_native_title(&id, &config.redact(&title), false)?;
+                            }
+                            Err(error) => {
+                                s.event(
+                                    &id,
+                                    EventKind::Notice {
+                                        text: format!(
+                                            "会话自动命名未完成，保留原名称：{}",
+                                            config.redact(&error.to_string())
+                                        ),
+                                    },
+                                )?;
+                            }
+                        }
+                        Ok(())
+                    });
+                }));
+            } else if let Action::TitleRenamed(result) = action {
+                if result.is_ok() {
+                    self.cancel_title().await;
+                }
                 let result = result.and_then(|title| {
-                    db(database, |s| s.sync_native_title(id, &title, true))
-                        .map(|session| session.title)
-                        .map_err(|e| e.to_string())
+                    db(database, |s| {
+                        s.sync_native_title(id, &self.config.redact(&title), true)
+                    })
+                    .map(|session| session.title)
+                    .map_err(|e| e.to_string())
                 });
                 if let Some(reply) = self.rename_reply.take() {
                     let _ = reply.send(result);
                 }
             } else {
+                if matches!(&action, Action::NativeName(_)) {
+                    self.cancel_title().await;
+                }
                 remaining.push(action);
             }
         }
@@ -1099,7 +1188,14 @@ impl Process {
         self.session_open.store(self.state.ready, Ordering::SeqCst);
         Ok(())
     }
+    async fn cancel_title(&mut self) {
+        if let Some(job) = self.title_job.take() {
+            job.abort();
+            let _ = job.await;
+        }
+    }
     async fn close(&mut self) {
+        self.cancel_title().await;
         if let Some(reply) = self.rename_reply.take() {
             let _ = reply.send(Err("原生会话已关闭，标题修改结果待确认".into()));
         }
@@ -2253,6 +2349,76 @@ mod tests {
             .collect();
         assert_eq!(text, "before [redacted] after [redacted]safe [redacted]");
         assert!(state.text_tails.is_empty());
+    }
+
+    #[tokio::test]
+    async fn generated_titles_redact_credentials_and_preserve_identity_and_manual_names() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(&dir.path().join("titles.sqlite")).unwrap();
+        let project = store.add_project(dir.path()).unwrap();
+        let session = store.create_session(project.id, "traex".into()).unwrap();
+        let database = Arc::new(Mutex::new(store));
+        let config = LaunchConfig {
+            environment: Default::default(),
+            traex_model: None, model: None, effort: None, permission_mode: None,
+            settings_dir: dir.path().into(),
+            provider: Some(crate::providers::ResolvedProvider {
+                metadata: serde_json::from_value(serde_json::json!({"id":"fixture","name":"Fixture","protocol":"openai_responses","base_url":"http://localhost:8000/v1","model":"test","auth":"bearer","has_credential":true})).unwrap(),
+                credential: "private-token".into(),
+            }),
+        };
+        let mut state = TurnState::default();
+        let mut sink = tokio::io::sink();
+        state
+            .apply(
+                vec![Action::NativeSession("current".into())],
+                &mut sink,
+                &database,
+                &session.id,
+                &config,
+            )
+            .await
+            .unwrap();
+        for (native, title, expected) in [
+            ("stale", "wrong", "新任务"),
+            ("current", "Fix private-token", "Fix [redacted]"),
+        ] {
+            state
+                .apply(
+                    vec![Action::GeneratedTitle {
+                        native_session_id: native.into(),
+                        title: title.into(),
+                    }],
+                    &mut sink,
+                    &database,
+                    &session.id,
+                    &config,
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                db(&database, |s| s.session(&session.id)).unwrap().title,
+                expected
+            );
+        }
+        db(&database, |s| s.rename_session(&session.id, "Manual")).unwrap();
+        state
+            .apply(
+                vec![Action::GeneratedTitle {
+                    native_session_id: "current".into(),
+                    title: "Late".into(),
+                }],
+                &mut sink,
+                &database,
+                &session.id,
+                &config,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            db(&database, |s| s.session(&session.id)).unwrap().title,
+            "Manual"
+        );
     }
 
     #[tokio::test]
