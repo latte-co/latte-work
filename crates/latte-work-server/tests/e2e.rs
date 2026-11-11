@@ -8285,6 +8285,33 @@ async fn snapshot_legacy_oversized_events_advance_cursor_and_leave_other_session
     // A multibyte payload rejects offsets landing inside a character instead
     // of panicking with the shared database lock held; the other session keeps
     // serving polls afterwards.
+    // Stop the completed producer before fixing the cursor: optional title
+    // responses may otherwise append notices after the Completed snapshot.
+    assert!(matches!(
+        ask(
+            &mut client,
+            Request::CloseAgentSession {
+                session_id: id.clone(),
+                only_if_idle: None,
+            }
+        )
+        .await,
+        Response::Ok
+    ));
+    let Response::Events {
+        events: settled, ..
+    } = ask(
+        &mut client,
+        Request::Poll {
+            session_id: id.clone(),
+            after: 0.0,
+        },
+    )
+    .await
+    else {
+        panic!("settled history")
+    };
+    let cursor = settled.last().unwrap().seq;
     let db = rusqlite::Connection::open(host.directory.path().join("state.sqlite")).unwrap();
     db.execute(
         "INSERT INTO events(session_id,at,data) VALUES (?1,2,?2)",
@@ -8338,7 +8365,6 @@ async fn snapshot_legacy_oversized_events_advance_cursor_and_leave_other_session
             ..
         }
     )));
-    let cursor = events.last().unwrap().seq;
     let Response::Events { events, .. } = ask(
         &mut client,
         Request::Poll {
