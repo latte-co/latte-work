@@ -1677,7 +1677,7 @@ pub(super) fn parse_child_history(
             let Some(event) = event else {
                 continue;
             };
-            let event = redactor.event(event);
+            let event = redactor.event_at_boundary(event);
             let mut report = None;
             match &event {
                 EventKind::Tool { id, name, input } if name == "SubagentHandback" => {
@@ -1810,7 +1810,8 @@ pub(super) fn parse_child_transcript(
             let Some(event) = event else {
                 continue;
             };
-            let (event, partial) = crate::store::bounded_subagent_event(redactor.event(event))?;
+            let (event, partial) =
+                crate::store::bounded_subagent_event(redactor.event_at_boundary(event))?;
             truncated |= partial;
             let size = serde_json::to_vec(&event)?.len() + 128;
             events.push_back((
@@ -1825,7 +1826,8 @@ pub(super) fn parse_child_transcript(
             ));
             bytes += size;
             if let Some(report) = report {
-                let EventKind::Text { text } = redactor.event(EventKind::Text { text: report })
+                let EventKind::Text { text } =
+                    redactor.event_at_boundary(EventKind::Text { text: report })
                 else {
                     unreachable!("redaction preserves the event kind")
                 };
@@ -2049,6 +2051,106 @@ fn parse_commands(value: &Value) -> Result<Vec<latte_work_protocol::AgentSlashCo
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn native_child_text_boundaries_never_persist_reconstructable_secrets() {
+        use super::*;
+        let directory = tempfile::tempdir().unwrap();
+        let providers = crate::providers::ProviderStore::open(directory.path()).unwrap();
+        let text = |events: &[latte_work_protocol::Event]| -> String {
+            events
+                .iter()
+                .filter_map(|e| match &e.event {
+                    EventKind::Text { text } => Some(text.as_str()),
+                    _ => None,
+                })
+                .collect()
+        };
+        let record = |parts: &[&str]| {
+            let content: Vec<_> = parts
+                .iter()
+                .map(|text| json!({"type":"text","text":text}))
+                .collect();
+            format!("{}\n", json!({"type":"assistant","sessionId":"parent","agentId":"child","isSidechain":true,"message":{"content":content}})).into_bytes()
+        };
+        for secret in ["fixture-environment-secret", "abc\"def", "中文🔑"] {
+            let config = providers
+                .turn_config(
+                    "claude",
+                    None,
+                    Some(latte_work_protocol::TurnProvider::Configured {
+                        provider: None,
+                        environment: latte_work_protocol::AgentEnvironment(
+                            std::collections::BTreeMap::from([("SECRET".into(), secret.into())]),
+                        ),
+                    }),
+                )
+                .unwrap();
+            let encoded = serde_json::to_string(secret).unwrap();
+            for value in [secret, &encoded[1..encoded.len() - 1]] {
+                for split in (0..=value.len()).filter(|i| value.is_char_boundary(*i)) {
+                    let parts = [&value[..split], &value[split..]];
+                    let bytes = record(&parts);
+                    let page = parse_child_history(
+                        super::super::claude_sessions::ChildPageBytes {
+                            bytes: bytes.clone(),
+                            cursor: Default::default(),
+                            has_more: false,
+                        },
+                        "parent",
+                        "child",
+                        "public",
+                        &config,
+                    )
+                    .unwrap();
+                    assert!(!text(&page.events).contains(value));
+                    assert!(text(&page.events).contains("[redacted]"));
+                    let (events, _) = parse_child_transcript(
+                        super::super::claude_sessions::ChildBytes {
+                            bytes,
+                            start: 0,
+                            truncated: false,
+                        },
+                        "parent",
+                        "child",
+                        "public",
+                        &config,
+                    )
+                    .unwrap();
+                    assert!(!text(&events).contains(value));
+                    assert!(text(&events).contains("[redacted]"));
+                    let first = parse_child_history(
+                        super::super::claude_sessions::ChildPageBytes {
+                            bytes: record(&parts[..1]),
+                            cursor: Default::default(),
+                            has_more: true,
+                        },
+                        "parent",
+                        "child",
+                        "public",
+                        &config,
+                    )
+                    .unwrap();
+                    let saved_cursor = serde_json::to_string(&first.cursor).unwrap();
+                    assert!(!saved_cursor.contains("fixture-environment-"));
+                    let next = parse_child_history(
+                        super::super::claude_sessions::ChildPageBytes {
+                            bytes: record(&parts[1..]),
+                            cursor: serde_json::from_str(&saved_cursor).unwrap(),
+                            has_more: false,
+                        },
+                        "parent",
+                        "child",
+                        "public",
+                        &config,
+                    )
+                    .unwrap();
+                    assert!(
+                        !format!("{}{}", text(&first.events), text(&next.events)).contains(value)
+                    );
+                }
+            }
+        }
+    }
     #[test]
     fn generated_titles_are_optional_once_per_process_and_never_start_turns() {
         use super::*;

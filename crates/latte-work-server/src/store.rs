@@ -160,6 +160,7 @@ impl Store {
         if !columns.iter().any(|name| name == "permission_mode") {
             db.execute("ALTER TABLE requests ADD COLUMN permission_mode TEXT", [])?;
         }
+        db.execute_batch("CREATE INDEX IF NOT EXISTS requests_session_provider ON requests(session_id,provider_fingerprint);")?;
         crate::message_queue::initialize(&db)?;
         let snapshot_dir = crate::snapshot_storage::prepare(&path.with_extension("snapshots"))?;
         crate::snapshot_migration::migrate(&db, &snapshot_dir)?;
@@ -565,19 +566,49 @@ impl Store {
         tool_use_id: &str,
         event: EventKind,
     ) -> Result<()> {
+        self.store_subagent_event(session_id, tool_use_id, event, |event| event)
+    }
+    pub fn redacted_subagent_event(
+        &self,
+        session_id: &str,
+        tool_use_id: &str,
+        event: EventKind,
+        redactor: &crate::redaction::Redactor,
+    ) -> Result<()> {
+        self.store_subagent_event(session_id, tool_use_id, event, |event| {
+            redactor.event(event)
+        })
+    }
+    fn store_subagent_event(
+        &self,
+        session_id: &str,
+        tool_use_id: &str,
+        event: EventKind,
+        redact: impl FnOnce(EventKind) -> EventKind,
+    ) -> Result<()> {
         let tx = self.db.unchecked_transaction()?;
         let task_id: String = tx.query_row("SELECT id FROM subagents WHERE session_id=?1 AND tool_use_id=?2 ORDER BY at DESC LIMIT 1", params![session_id, tool_use_id], |row| row.get(0)).optional()?.context("子智能体输出无法关联到原生任务")?;
+        // Interpret native delivery receipts before redacting their prose. The
+        // saved tool input already belongs to the redacted public history.
+        let report = if let EventKind::ToolResult { id, .. } = &event {
+            let tool:Option<String>=tx.query_row("SELECT data FROM subagent_history WHERE session_id=?1 AND task_id=?2 AND source='stream' AND json_extract(data,'$.kind')='tool' AND json_extract(data,'$.id')=?3 ORDER BY seq DESC LIMIT 1",params![session_id,task_id,id],|r|r.get(0)).optional()?;
+            tool.map(|tool| -> Result<_> {
+                Ok(crate::agents::confirmed_child_report(
+                    &serde_json::from_str(&tool)?,
+                    &event,
+                ))
+            })
+            .transpose()?
+            .flatten()
+        } else {
+            None
+        };
+        let event = redact(event);
         // Keep the full redacted stream separately from the legacy bounded snapshot.
         let seq: f64 = tx.query_row("SELECT COALESCE(MAX(seq),0)+1 FROM subagent_history WHERE session_id=?1 AND task_id=?2 AND source='stream'",params![session_id,task_id],|row| row.get(0))?;
         tx.execute("INSERT INTO subagent_history(session_id,task_id,source,seq,at,data) VALUES (?1,?2,'stream',?3,?4,?5)",params![session_id,task_id,seq,now(),serde_json::to_string(&event)?])?;
-        if let EventKind::ToolResult { id, .. } = &event {
-            let tool:Option<String>=tx.query_row("SELECT data FROM subagent_history WHERE session_id=?1 AND task_id=?2 AND source='stream' AND json_extract(data,'$.kind')='tool' AND json_extract(data,'$.id')=?3 ORDER BY seq DESC LIMIT 1",params![session_id,task_id,id],|r|r.get(0)).optional()?;
-            if let Some(tool) = tool
-                && let Some(text) =
-                    crate::agents::confirmed_child_report(&serde_json::from_str(&tool)?, &event)
-            {
-                tx.execute("INSERT INTO subagent_history(session_id,task_id,source,seq,at,data) VALUES (?1,?2,'stream',?3,?4,?5)",params![session_id,task_id,seq+1.0,now(),serde_json::to_string(&EventKind::Text{text})?])?;
-            }
+        if let Some(text) = &report {
+            tx.execute("INSERT INTO subagent_history(session_id,task_id,source,seq,at,data) VALUES (?1,?2,'stream',?3,?4,?5)",params![session_id,task_id,seq+1.0,now(),serde_json::to_string(&EventKind::Text{text:text.clone()})?])?;
         }
         let (mut event, mut truncated) = bounded_subagent_event(event)?;
         if let EventKind::Text { text } = &event {
@@ -600,6 +631,10 @@ impl Store {
             }
         }
         tx.execute("INSERT INTO subagent_events(session_id,task_id,at,data,truncated) VALUES (?1,?2,?3,?4,?5)", params![session_id, task_id, now(), serde_json::to_string(&event)?, truncated])?;
+        if let Some(text) = report {
+            let (event, truncated) = bounded_subagent_event(EventKind::Text { text })?;
+            tx.execute("INSERT INTO subagent_events(session_id,task_id,at,data,truncated) VALUES (?1,?2,?3,?4,?5)", params![session_id,task_id,now(),serde_json::to_string(&event)?,truncated])?;
+        }
         tx.commit()?;
         Ok(())
     }
@@ -632,6 +667,20 @@ impl Store {
             return Ok(None);
         };
         self.db.query_row("SELECT r.provider_fingerprint FROM requests r JOIN events e ON e.session_id=r.session_id AND json_extract(e.data,'$.request_id')=r.id WHERE r.session_id=?1 AND json_extract(e.data,'$.kind')='user' AND e.at<=?2 ORDER BY e.seq DESC LIMIT 1",params![session_id,started],|row|row.get(0)).optional().map_err(Into::into)
+    }
+    /// Native title records have no per-turn owner. Only read them when every
+    /// accepted turn belongs to the available context; otherwise retain cache.
+    pub fn native_title_context_matches(
+        &self,
+        session_id: &str,
+        fingerprint: Option<&str>,
+        allow_legacy_cli: bool,
+    ) -> Result<bool> {
+        self.db.query_row(
+            "SELECT NOT EXISTS(SELECT 1 FROM requests WHERE session_id=?1 AND provider_fingerprint IS NOT ?2 AND NOT (?3 AND provider_fingerprint IS NULL))",
+            params![session_id, fingerprint, allow_legacy_cli],
+            |row| row.get(0),
+        ).map_err(Into::into)
     }
     pub fn child_history_cursor(
         &self,
@@ -1739,6 +1788,38 @@ fn index_source(
 }
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn native_titles_require_one_known_context_across_the_session() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = super::Store::open(&directory.path().join("state.sqlite")).unwrap();
+        let project = store.add_project(directory.path()).unwrap();
+        let session = store.create_session(project.id, "claude".into()).unwrap();
+        let cli = crate::providers::turn_fingerprint(Some(&latte_work_protocol::TurnProvider::Cli))
+            .unwrap()
+            .unwrap();
+        let matches = |fingerprint: &str, legacy| {
+            store
+                .native_title_context_matches(&session.id, Some(fingerprint), legacy)
+                .unwrap()
+        };
+        assert!(matches(&cli, true));
+        store.db.execute("INSERT INTO requests(id,session_id,text,provider_fingerprint) VALUES ('legacy',?1,'input',NULL)",[&session.id]).unwrap();
+        assert!(matches(&cli, true));
+        assert!(!matches("configured", false));
+        store
+            .db
+            .execute(
+                "UPDATE requests SET provider_fingerprint='configured' WHERE session_id=?1",
+                [&session.id],
+            )
+            .unwrap();
+        assert!(matches("configured", false));
+        assert!(!matches(&cli, true));
+        store.db.execute("INSERT INTO requests(id,session_id,text,provider_fingerprint) VALUES ('changed',?1,'input','other')",[&session.id]).unwrap();
+        assert!(!matches("configured", false));
+        assert!(!matches("other", false));
+        assert!(!matches(&cli, true));
+    }
     #[test]
     fn concurrent_preview_grants_cannot_exceed_the_limit() {
         use super::*;

@@ -255,8 +255,12 @@ fn read_tail(path: &Path) -> Result<Option<Title>> {
     Ok(titles.title())
 }
 
-pub fn read(cwd: &Path, id: &str) -> Result<Option<Title>> {
-    let Some(path) = locate_in(&projects(cwd)?, cwd, id)? else {
+pub fn read(
+    cwd: &Path,
+    id: &str,
+    environment: &latte_work_protocol::AgentEnvironment,
+) -> Result<Option<Title>> {
+    let Some(path) = locate_in(&configured_projects(cwd, environment)?, cwd, id)? else {
         return Ok(None);
     };
     read_path(&path)

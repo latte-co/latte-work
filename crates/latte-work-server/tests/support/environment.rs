@@ -34,6 +34,300 @@ fn stored_content(host: &Host, table: &str, id: &str) -> Vec<EventKind> {
 }
 
 #[tokio::test]
+async fn native_environment_history_and_titles_remain_redacted_after_restart() {
+    let mut host = Host::start().await;
+    let mut client = host.client().await;
+    let project = tempfile::tempdir().unwrap();
+    let native = tempfile::tempdir().unwrap();
+    let id = session(&mut client, project.path()).await;
+    let secret = "fixture-environment-secret";
+    let provider = latte_work_protocol::TurnProvider::Configured {
+        provider: None,
+        environment: AgentEnvironment(BTreeMap::from([
+            ("LATTE_TEST_SECRET".into(), secret.into()),
+            (
+                "CLAUDE_CONFIG_DIR".into(),
+                native.path().to_string_lossy().into(),
+            ),
+        ])),
+    };
+    assert!(matches!(
+        ask(
+            &mut client,
+            Request::Send {
+                session_id: id.clone(),
+                request_id: "native-secrets".into(),
+                text: "custom-environment-native".into(),
+                model: None,
+                effort: None,
+                permission_mode: None,
+                provider: Some(provider.clone()),
+            }
+        )
+        .await,
+        Response::Accepted { .. }
+    ));
+    wait(&mut client, &id, Status::Completed).await;
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let Response::Session { session } = ask(
+            &mut client,
+            Request::Session {
+                session_id: id.clone(),
+            },
+        )
+        .await
+        else {
+            panic!("session")
+        };
+        assert!(!session.title.contains(secret));
+        if session.title == "Native [redacted] title" {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "configured native title was not refreshed"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let Response::Subagents { tasks, .. } = ask(
+        &mut client,
+        Request::Subagents {
+            session_id: id.clone(),
+        },
+    )
+    .await
+    else {
+        panic!("children")
+    };
+    let task = &tasks[0];
+    let request = Request::SubagentHistory {
+        session_id: id.clone(),
+        task_id: task.id.clone(),
+        after: None,
+        source: None,
+        provider: Some(provider),
+    };
+    let Response::SubagentHistory { events, source, .. } = ask(&mut client, request.clone()).await
+    else {
+        panic!("native history")
+    };
+    assert_eq!(source, "native");
+    let expected = text_content(&events);
+    assert!(expected.starts_with("native before [redacted]"));
+    assert!(expected.ends_with(" native after"));
+    assert!(!expected.contains(secret));
+    let transcript = Request::SubagentTranscript {
+        session_id: id.clone(),
+        task_id: task.id.clone(),
+    };
+    let Response::SubagentTranscript { events, .. } = ask(&mut client, transcript.clone()).await
+    else {
+        panic!("native snapshot")
+    };
+    assert_eq!(text_content(&events), expected);
+    let stored_text: String = stored_content(&host, "subagent_history", &id)
+        .into_iter()
+        .filter_map(|event| match event {
+            EventKind::Text { text } => Some(text),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(stored_text, expected);
+    ask(
+        &mut client,
+        Request::CloseAgentSession {
+            session_id: id.clone(),
+            only_if_idle: None,
+        },
+    )
+    .await;
+    drop(client);
+    // An unknown context must not adopt the host directory's title after restart.
+    let folder: String = project
+        .path()
+        .canonicalize()
+        .unwrap()
+        .to_string_lossy()
+        .chars()
+        .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '-' })
+        .collect();
+    let host_title = host
+        .directory
+        .path()
+        .join("claude-config/projects")
+        .join(folder)
+        .join("11111111-1111-4111-8111-111111111111.jsonl");
+    std::fs::create_dir_all(host_title.parent().unwrap()).unwrap();
+    std::fs::write(
+        host_title,
+        format!(
+            "{}\n",
+            serde_json::json!({"type":"ai-title","aiTitle":format!("Unsafe {secret} title")})
+        ),
+    )
+    .unwrap();
+    host.process.kill().unwrap();
+    host.process.wait().unwrap();
+    host.process = Command::new(env!("CARGO_BIN_EXE_latte-work-server"))
+        .args(["serve", "--state-dir"])
+        .arg(host.directory.path())
+        .env("LATTE_WORK_AGENT_ENV", "inherit")
+        .env(
+            "LATTE_WORK_CLAUDE",
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/claude.py"),
+        )
+        .env(
+            "CLAUDE_CONFIG_DIR",
+            host.directory.path().join("claude-config"),
+        )
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut client = host.client().await;
+    let Response::Session { session } = ask(
+        &mut client,
+        Request::Session {
+            session_id: id.clone(),
+        },
+    )
+    .await
+    else {
+        panic!("restored session")
+    };
+    assert_eq!(session.title, "Native [redacted] title");
+    assert_eq!(session.agent_session_open, Some(false));
+    let Response::SubagentHistory { events, source, .. } = ask(&mut client, request).await else {
+        panic!("native replay")
+    };
+    assert_eq!(source, "native");
+    assert_eq!(text_content(&events), expected);
+    let Response::SubagentTranscript { events, .. } = ask(&mut client, transcript).await else {
+        panic!("snapshot replay")
+    };
+    assert_eq!(text_content(&events), expected);
+    let database = rusqlite::Connection::open(host.directory.path().join("state.sqlite")).unwrap();
+    let saved: String = database
+        .query_row("SELECT data FROM sessions WHERE id=?1", [&id], |r| r.get(0))
+        .unwrap();
+    assert!(!saved.contains(secret));
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&saved).unwrap()["title"],
+        "Native [redacted] title"
+    );
+    assert_eq!(
+        database
+            .query_row(
+                "SELECT count(*) FROM requests WHERE session_id=?1",
+                [&id],
+                |r| r.get::<_, i64>(0)
+            )
+            .unwrap(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn short_environment_values_preserve_confirmed_stream_reports_without_exposing_receipts() {
+    let host = Host::start().await;
+    let mut client = host.client().await;
+    for token in ["success", "true"] {
+        for failed in [false, true] {
+            let project = tempfile::tempdir().unwrap();
+            let id = session(&mut client, project.path()).await;
+            let provider = latte_work_protocol::TurnProvider::Configured {
+                provider: None,
+                environment: AgentEnvironment(BTreeMap::from([
+                    ("TOKEN".into(), token.into()),
+                    (
+                        "LATTE_TEST_SECRET".into(),
+                        "fixture-environment-secret".into(),
+                    ),
+                ])),
+            };
+            ask(
+                &mut client,
+                Request::Send {
+                    session_id: id.clone(),
+                    request_id: format!("handback-{token}-{failed}"),
+                    text: if failed {
+                        "custom-environment-handback-failed"
+                    } else {
+                        "custom-environment-handback"
+                    }
+                    .into(),
+                    model: None,
+                    effort: None,
+                    permission_mode: None,
+                    provider: Some(provider.clone()),
+                },
+            )
+            .await;
+            wait(&mut client, &id, Status::Completed).await;
+            let Response::Subagents { tasks, .. } = ask(
+                &mut client,
+                Request::Subagents {
+                    session_id: id.clone(),
+                },
+            )
+            .await
+            else {
+                panic!("children")
+            };
+            let request = Request::SubagentHistory {
+                session_id: id.clone(),
+                task_id: tasks[0].id.clone(),
+                after: None,
+                source: None,
+                provider: Some(provider),
+            };
+            let Response::SubagentHistory { events, source, .. } =
+                ask(&mut client, request.clone()).await
+            else {
+                panic!("stream history")
+            };
+            assert_eq!(source, "stream");
+            assert_eq!(
+                text_content(&events),
+                if failed {
+                    ""
+                } else {
+                    "Final [redacted] report"
+                }
+            );
+            assert!(events.iter().any(|e| matches!(&e.event,EventKind::ToolResult {content,..} if content.to_string().contains("[redacted]"))));
+            assert!(
+                !serde_json::to_string(&events)
+                    .unwrap()
+                    .contains("fixture-environment-secret")
+            );
+            let Response::SubagentTranscript {
+                events: snapshot, ..
+            } = ask(
+                &mut client,
+                Request::SubagentTranscript {
+                    session_id: id.clone(),
+                    task_id: tasks[0].id.clone(),
+                },
+            )
+            .await
+            else {
+                panic!("legacy stream snapshot")
+            };
+            assert_eq!(text_content(&snapshot), text_content(&events));
+            let mut reconnected = host.client().await;
+            let Response::SubagentHistory { events: replay, .. } =
+                ask(&mut reconnected, request).await
+            else {
+                panic!("stream replay")
+            };
+            assert_eq!(text_content(&replay), text_content(&events));
+        }
+    }
+}
+
+#[tokio::test]
 async fn environment_secrets_are_redacted_before_storage_across_json_and_stream_fragments() {
     let host = Host::start().await;
     for secret in ["fixture-environment-secret", "abc\"def"] {

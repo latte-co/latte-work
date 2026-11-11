@@ -270,9 +270,14 @@ pub async fn skill_info(
 }
 
 pub use claude_sessions::Title as NativeTitle;
-pub fn session_title(agent: &str, path: &std::path::Path, id: &str) -> Result<Option<NativeTitle>> {
+pub fn session_title(
+    agent: &str,
+    path: &std::path::Path,
+    id: &str,
+    environment: &latte_work_protocol::AgentEnvironment,
+) -> Result<Option<NativeTitle>> {
     match agent {
-        "claude" => claude_sessions::read(path, id),
+        "claude" => claude_sessions::read(path, id, environment),
         _ => bail!("此 Agent 尚不支持读取会话标题"),
     }
 }

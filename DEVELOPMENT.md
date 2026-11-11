@@ -461,6 +461,15 @@ IDs. It recognizes raw and JSON-escaped values, including ASCII Unicode escapes.
 Text streams retain at most one possible secret-prefix suffix per channel, bounded
 by the longest configured pattern and 513 main/child channels. Content boundaries
 mask unfinished prefixes; raw tails never enter storage or replay.
+Native child text blocks also mask unfinished prefixes at every independent
+record/page boundary, including the legacy bounded snapshot. No raw suffix is
+stored in the durable history cursor. Delivery receipts are interpreted before
+their text is redacted; only redacted reports enter full and legacy histories.
+Native title reads use the live launch context and its configuration directory.
+Every accepted turn must match that context, and both context ownership and
+fingerprints are checked again before saving. Closed/restarted sessions with an
+unknown custom context retain their saved title; legacy CLI-only titles can still
+refresh without an Agent. Credentials and ENV snapshots are never persisted.
 Unsaved ENV drafts remain in App memory per host/Agent across settings navigation
 and reconnects. Refresh replaces clean fields and preserves dirty or invalid input.
 Focused checks: `agentEnvironment` and `AgentSettings` frontend tests, config and

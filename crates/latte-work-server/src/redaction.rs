@@ -120,6 +120,21 @@ impl Redactor {
         output
     }
 
+    /// Native records/pages have independent lifetimes. Never persist an
+    /// unfinished prefix in either their events or a durable read cursor.
+    pub fn event_at_boundary(&self, event: EventKind) -> EventKind {
+        if let EventKind::Text { text } = event {
+            let mut pending = String::new();
+            let mut text = self.fragment(&text, &mut pending);
+            if !pending.is_empty() {
+                text.push_str(MASK);
+            }
+            EventKind::Text { text }
+        } else {
+            self.event(event)
+        }
+    }
+
     fn json(&self, value: &mut Value) {
         match value {
             Value::String(text) => *text = self.text(text),

@@ -61,6 +61,25 @@ pub struct ResolvedProvider {
     pub credential: String,
 }
 impl LaunchConfig {
+    pub fn fingerprint(&self) -> Result<Option<String>> {
+        let provider = self.provider.as_ref().map(|provider| {
+            Box::new(ProviderSnapshot {
+                provider: provider.metadata.clone(),
+                credential: provider.credential.clone(),
+            })
+        });
+        let snapshot = if self.environment.is_empty() {
+            provider
+                .map(TurnProvider::Snapshot)
+                .unwrap_or(TurnProvider::Cli)
+        } else {
+            TurnProvider::Configured {
+                provider,
+                environment: self.environment.clone(),
+            }
+        };
+        turn_fingerprint(Some(&snapshot))
+    }
     pub fn redactor(&self) -> crate::redaction::Redactor {
         let credentials = self.provider.iter().map(|p| p.credential.clone());
         let environment = self
@@ -631,6 +650,10 @@ mod tests {
             .turn_config("claude", None, Some(context.clone()))
             .unwrap();
         assert_eq!(config.environment, environment);
+        assert_eq!(
+            config.fingerprint().unwrap(),
+            turn_fingerprint(Some(&context)).unwrap()
+        );
         assert!(config.provider.is_none());
         assert_eq!(
             config.redact("http://user:password@proxy.test:7890 fixture-environment-token MODE=1"),

@@ -147,6 +147,29 @@ for line in sys.stdin:
             emit({'type':'assistant','message':{'content':[{'type':'text','text':output}]}})
             emit({'type':'result','subtype':'success','is_error':False})
             continue
+        if text=='custom-environment-native':
+            secret=os.environ['LATTE_TEST_SECRET']
+            metadata({'type':'ai-title','aiTitle':'Native '+secret+' title','sessionId':native_id})
+            split=len(secret)//2
+            child_file=store.with_suffix('')/'subagents/agent-secret-native.jsonl'
+            child_file.parent.mkdir(parents=True,exist_ok=True)
+            def native_record(parts):
+                return {'type':'assistant','sessionId':native_id,'agentId':'secret-native','isSidechain':True,'message':{'content':[{'type':'text','text':part} for part in parts]}}
+            child_file.write_text(json.dumps(native_record(['native before '+secret[:split],secret[split:]+' native after']))+'\n')
+            emit({'type':'assistant','message':{'content':[{'type':'tool_use','id':'native-secret-tool','name':'Agent','input':{'description':'Native secret fixture'}}]}})
+            emit({'type':'system','subtype':'task_started','task_id':'secret-native','task_type':'local_agent','tool_use_id':'native-secret-tool','description':'Native secret fixture'})
+            emit({'type':'system','subtype':'task_notification','task_id':'secret-native','status':'completed','summary':'Complete'})
+            emit({'type':'result','subtype':'success','is_error':False})
+            emit({'type':'system','subtype':'session_state_changed','state':'idle'})
+            continue
+        if text in ('custom-environment-handback','custom-environment-handback-failed'):
+            emit({'type':'assistant','message':{'content':[{'type':'tool_use','id':'handback-agent','name':'Agent','input':{'description':'Handback fixture'}}]}})
+            emit({'type':'system','subtype':'task_started','task_id':'handback-native','task_type':'local_agent','tool_use_id':'handback-agent','description':'Handback fixture'})
+            emit({'type':'assistant','parent_tool_use_id':'handback-agent','message':{'content':[{'type':'tool_use','id':'handback','name':'SubagentHandback','input':{'message':'Final '+os.environ['LATTE_TEST_SECRET']+' report'}}]}})
+            emit({'type':'user','parent_tool_use_id':'handback-agent','message':{'content':[{'type':'tool_result','tool_use_id':'handback','content':'{"success":true}','is_error':text.endswith('-failed')}]}})
+            emit({'type':'system','subtype':'task_notification','task_id':'handback-native','status':'completed','summary':'Delivered'})
+            emit({'type':'result','subtype':'success','is_error':False})
+            continue
         if text=='custom-environment-stream':
             secret=os.environ['LATTE_TEST_SECRET']
             split=len(secret)//2

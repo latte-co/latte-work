@@ -138,6 +138,9 @@ pub enum QueueAction {
     },
 }
 pub enum Control {
+    TitleContext {
+        reply: oneshot::Sender<Option<LaunchConfig>>,
+    },
     Queue {
         action: QueueAction,
         reply: oneshot::Sender<Result<Response, String>>,
@@ -295,6 +298,55 @@ pub async fn rename_title(
     db(database, |s| s.rename_session(&session.id, &title))
 }
 
+struct TitleSource {
+    session: Session,
+    path: String,
+    config: Option<LaunchConfig>,
+    control: Option<mpsc::Sender<Control>>,
+    fingerprint: Option<String>,
+    allow_legacy_cli: bool,
+}
+async fn title_source(
+    database: &Database,
+    session: Session,
+    path: String,
+    control: Option<mpsc::Sender<Control>>,
+) -> Result<Option<TitleSource>> {
+    let config = if let Some(control) = &control {
+        let (reply, receive) = oneshot::channel();
+        if control.try_send(Control::TitleContext { reply }).is_err() {
+            return Ok(None);
+        }
+        let Ok(Ok(Some(config))) = tokio::time::timeout(Duration::from_secs(3), receive).await
+        else {
+            return Ok(None);
+        };
+        Some(config)
+    } else {
+        None
+    };
+    let fingerprint = match &config {
+        Some(config) => config.fingerprint()?,
+        None => crate::providers::turn_fingerprint(Some(&latte_work_protocol::TurnProvider::Cli))?,
+    };
+    let allow_legacy_cli = config
+        .as_ref()
+        .is_none_or(|c| c.provider.is_none() && c.environment.is_empty());
+    if !db(database, |s| {
+        s.native_title_context_matches(&session.id, fingerprint.as_deref(), allow_legacy_cli)
+    })? {
+        return Ok(None);
+    }
+    Ok(Some(TitleSource {
+        session,
+        path,
+        config,
+        control,
+        fingerprint,
+        allow_legacy_cli,
+    }))
+}
+
 pub async fn refresh_titles(
     database: &Database,
     runs: &Runs,
@@ -311,11 +363,11 @@ pub async fn refresh_titles(
         }
         _ => return Ok(()),
     };
-    let open_ids: std::collections::HashSet<String> = runs
+    let controls: HashMap<_, _> = runs
         .lock()
         .map_err(|_| anyhow::anyhow!("执行状态锁异常"))?
-        .keys()
-        .cloned()
+        .iter()
+        .map(|(id, run)| (id.clone(), run.control.clone()))
         .collect();
     let due: Vec<_> = {
         let mut cache = cache
@@ -325,7 +377,7 @@ pub async fn refresh_titles(
         cache.select(
             sessions
                 .into_iter()
-                .filter(|session| !open_ids.contains(&session.id) || !session.custom_title)
+                .filter(|session| !controls.contains_key(&session.id) || !session.custom_title)
                 .collect(),
             now,
         )
@@ -341,18 +393,34 @@ pub async fn refresh_titles(
             })
             .collect::<Result<Vec<_>>>()
     })?;
+    let sources = futures_util::future::join_all(candidates.into_iter().map(|(session, path)| {
+        let control = controls.get(&session.id).cloned();
+        title_source(database, session, path, control)
+    }))
+    .await
+    .into_iter()
+    .collect::<Result<Vec<_>>>()?;
     let titles = tokio::task::spawn_blocking(move || {
-        candidates
+        sources
             .into_iter()
-            .filter_map(|(session, path)| {
-                agents::session_title(
-                    &session.agent,
-                    std::path::Path::new(&path),
-                    session.native_id.as_deref()?,
+            .flatten()
+            .filter_map(|source| {
+                let mut title = agents::session_title(
+                    &source.session.agent,
+                    std::path::Path::new(&source.path),
+                    source.session.native_id.as_deref()?,
+                    &source
+                        .config
+                        .as_ref()
+                        .map(|c| c.environment.clone())
+                        .unwrap_or_default(),
                 )
                 .ok()
-                .flatten()
-                .map(|title| (session, title))
+                .flatten()?;
+                if let Some(config) = &source.config {
+                    title.text = config.redact(&title.text);
+                }
+                Some((source, title))
             })
             .collect::<Vec<_>>()
     })
@@ -360,12 +428,24 @@ pub async fn refresh_titles(
     let current = runs.lock().map_err(|_| anyhow::anyhow!("执行状态锁异常"))?;
     let fresh = db(database, |s| {
         let mut fresh = HashMap::new();
-        for (observed, title) in titles {
+        for (source, title) in titles {
+            let observed = source.session;
             let mut session = s.session(&observed.id)?;
+            let same_owner = match (&source.control, current.get(&observed.id)) {
+                (None, None) => true,
+                (Some(control), Some(run)) => control.same_channel(&run.control),
+                _ => false,
+            };
             // Live native names are authoritative; an on-disk flush can lag a
             // rename acknowledgement. Only unnamed live sessions may adopt file
             // metadata (AI titles are not emitted as native name events).
-            if (!current.contains_key(&session.id) || !observed.custom_title)
+            if same_owner
+                && s.native_title_context_matches(
+                    &session.id,
+                    source.fingerprint.as_deref(),
+                    source.allow_legacy_cli,
+                )?
+                && (!current.contains_key(&session.id) || !observed.custom_title)
                 && session.native_id == observed.native_id
                 && session.title == observed.title
                 && session.custom_title == observed.custom_title
@@ -582,8 +662,14 @@ impl TurnState {
             if !matches!(event, EventKind::Progress { .. } | EventKind::Usage { .. }) {
                 self.flush_text(database, session_id, channel)?;
             }
-            let event = self.redactor.as_ref().expect("initialized").event(event);
-            self.store_event(database, session_id, channel, event)?;
+            let redactor = self.redactor.as_ref().expect("initialized");
+            if channel.is_empty() {
+                self.store_event(database, session_id, channel, redactor.event(event))?;
+            } else {
+                db(database, |s| {
+                    s.redacted_subagent_event(session_id, channel, event, redactor)
+                })?;
+            }
         }
         Ok(())
     }
@@ -1335,6 +1421,10 @@ async fn actor(
         let previous_status = db(&database, |d| Ok(d.session(&session.id)?.status)).ok();
         let result: Result<()> = tokio::select! {
             control = controls.recv() => match control {
+                Some(Control::TitleContext { reply }) => {
+                    let _ = reply.send(process.as_ref().map(|p| p.config.clone()));
+                    Ok(())
+                }
                 Some(Control::RenameTitle {title,reply}) => {
                     safe_to_close.store(false, Ordering::SeqCst);
                     if let Some(p)=process.as_mut().filter(|p|p.state.ready) {
