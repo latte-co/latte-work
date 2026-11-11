@@ -42,11 +42,16 @@ pub struct AppServer {
     steered: HashSet<String>,
     early_completions: HashMap<String, Value>,
     title: Option<String>,
+    native_named: bool,
+    title_attempted: bool,
+    title_context: Option<super::titles::Context>,
+    generating_title: bool,
     pending_prompt: Option<String>,
     platform_instructions: String,
     native_developer_instructions: Option<String>,
     config: Option<LaunchConfig>,
     model_provider: Option<String>,
+    title_provider: Option<super::codex_title::NativeProvider>,
     counter: u64,
     pending: HashMap<String, PendingRequest>,
     approvals: HashMap<String, &'static str>,
@@ -152,6 +157,9 @@ impl AppServer {
             bail!("Agent 尚不支持原生命令，请使用普通消息");
         }
         self.phase = Phase::Starting;
+        if !self.title_attempted && !self.native_named {
+            self.title_context = Some(super::titles::Context::new(prompt));
+        }
         self.early_completions.clear();
         self.streamed.clear();
         self.tools.clear();
@@ -188,6 +196,7 @@ impl AppServer {
         Ok(actions)
     }
     fn interrupt(&mut self) -> Result<Vec<Action>> {
+        self.title_context = None;
         match self.turn.clone() {
             Some(turn) => Ok(vec![self.request(
                 "turn/interrupt",
@@ -247,6 +256,16 @@ impl AppServer {
         let Some(id) = message["id"].as_str() else {
             return Ok(vec![]);
         };
+        if id == "latte-generate-title" {
+            if self.generating_title && message.get("error").is_some() {
+                self.generating_title = false;
+                return Ok(vec![Action::Event(EventKind::Notice {
+                    text: "会话自动命名未完成，当前 Agent 不支持或拒绝了标题请求；保留原名称。"
+                        .into(),
+                })]);
+            }
+            return Ok(vec![]);
+        }
         let Some(request) = self.pending.remove(id) else {
             return Ok(vec![]);
         };
@@ -352,6 +371,12 @@ impl AppServer {
                             .context("Agent 未返回原生 Provider")?
                             .to_owned(),
                     );
+                    if self.codex {
+                        self.title_provider = super::codex_title::NativeProvider::capture(
+                            &result["config"],
+                            self.model_provider.as_deref().expect("resolved provider"),
+                        );
+                    }
                 }
                 if let Some(config) = &mut self.config
                     && config.model.is_none()
@@ -499,7 +524,29 @@ impl AppServer {
             return Ok(vec![]);
         }
         let method = message["method"].as_str().unwrap_or_default();
+        if method == "thread/name/generated" {
+            if !self.generating_title || params["turnId"] != "latte-generate-title" {
+                return Ok(vec![]);
+            }
+            self.generating_title = false;
+            if self.native_named || self.rename.is_some() {
+                return Ok(vec![]);
+            }
+            return Ok(
+                match super::titles::valid(params["name"].as_str().unwrap_or_default()) {
+                    Some(title) => vec![Action::GeneratedTitle {
+                        native_session_id: self.thread.clone().expect("checked thread"),
+                        title: title.into(),
+                    }],
+                    None => vec![Action::Event(EventKind::Notice {
+                        text: "会话自动命名未返回有效标题，保留原名称。".into(),
+                    })],
+                },
+            );
+        }
         if method == "thread/name/updated" {
+            self.native_named = true;
+            self.title_context = None;
             return Ok(params["threadName"]
                 .as_str()
                 .filter(|s| !s.trim().is_empty())
@@ -564,6 +611,9 @@ impl AppServer {
                 }
                 self.streamed.insert(id);
                 let text = params["delta"].as_str().context("Agent 文本增量无效")?;
+                if let Some(context) = &mut self.title_context {
+                    context.reply(text);
+                }
                 Ok(vec![
                     Action::Event(EventKind::Progress {
                         phase: ExecutionPhase::Replying,
@@ -640,6 +690,32 @@ impl AppServer {
                     actions.push(Action::InputsConsumed(self.steered.drain().collect()));
                 }
                 self.steered.clear();
+                if let Some(context) = self.title_context.take()
+                    && !failed
+                    && !self.title_attempted
+                    && !self.native_named
+                    && self.rename.is_none()
+                {
+                    self.title_attempted = true;
+                    if self.codex {
+                        actions.push(Action::GenerateTitle {
+                            native_session_id: self.thread.clone().expect("active thread"),
+                            description: context.description(),
+                            model: self.config.as_ref().and_then(|c| c.model.clone()),
+                            native_provider: self.title_provider.take(),
+                        });
+                    } else {
+                        self.generating_title = true;
+                        let Action::Write(bytes) = write(
+                            json!({"id":"latte-generate-title","method":"thread/name/generate",
+                            "params":{"threadId":self.thread,"requestId":"latte-generate-title"}}),
+                        )?
+                        else {
+                            unreachable!()
+                        };
+                        actions.push(Action::MetadataWrite(bytes));
+                    }
+                }
                 actions.push(Action::Finished { failed, message });
                 Ok(actions)
             }
@@ -682,12 +758,15 @@ impl AppServer {
         }
         if kind == "agentMessage" {
             return Ok(if completed && !self.streamed.contains(&id) {
-                let text = item["text"].as_str().context("Agent 回复无效")?.into();
+                let text = item["text"].as_str().context("Agent 回复无效")?;
+                if let Some(context) = &mut self.title_context {
+                    context.reply(text);
+                }
                 if self.streamed.len() >= 4096 {
                     bail!("Agent 消息数量超出限制");
                 }
                 self.streamed.insert(id);
-                vec![Action::Event(EventKind::Text { text })]
+                vec![Action::Event(EventKind::Text { text: text.into() })]
             } else {
                 vec![]
             });
@@ -865,6 +944,8 @@ impl AgentAdapter for AppServer {
         false
     }
     fn set_session_title(&mut self, title: Option<String>, resuming: bool) {
+        self.native_named = title.is_some();
+        self.title_attempted = resuming || self.native_named;
         self.title = if resuming { None } else { title };
     }
     fn command(
@@ -1099,6 +1180,58 @@ mod tests {
         agent
     }
     #[test]
+    fn generated_titles_are_optional_correlated_and_never_manual_names() {
+        let mut agent = running();
+        let done = message(
+            &mut agent,
+            json!({"method":"turn/completed","params":{"threadId":"t","turn":{"id":"turn","status":"completed"}}}),
+        );
+        assert!(done.iter().any(|a| matches!(a, Action::MetadataWrite(_))));
+        assert!(agent.can_start_turn());
+        for (thread, request) in [("other", "latte-generate-title"), ("t", "other")] {
+            assert!(message(&mut agent, json!({"method":"thread/name/generated","params":{"threadId":thread,"turnId":request,"name":"wrong"}})).is_empty());
+        }
+        let notification = json!({"method":"thread/name/generated","params":{"threadId":"t","turnId":"latte-generate-title","name":"修复附件拖入"}});
+        assert!(
+            matches!(&message(&mut agent, notification.clone())[..], [Action::GeneratedTitle { native_session_id, title }] if native_session_id == "t" && title == "修复附件拖入")
+        );
+        assert!(message(&mut agent, notification).is_empty());
+        assert!(!agent.native_named);
+        assert!(agent.can_start_turn());
+    }
+
+    #[test]
+    fn codex_title_context_uses_visible_reply_once_and_skips_failed_or_named_turns() {
+        for status in ["completed", "failed", "interrupted"] {
+            for named in [false, true] {
+                let mut agent = running();
+                agent.codex = true;
+                agent.native_named = named;
+                message(
+                    &mut agent,
+                    json!({"method":"item/agentMessage/delta","params":{"threadId":"t","turnId":"turn","itemId":"reply","delta":"修复了附件拖入失败"}}),
+                );
+                message(
+                    &mut agent,
+                    json!({"method":"item/reasoning/textDelta","params":{"threadId":"t","turnId":"turn","delta":"PRIVATE_REASONING"}}),
+                );
+                let done = message(
+                    &mut agent,
+                    json!({"method":"turn/completed","params":{"threadId":"t","turn":{"id":"turn","status":status}}}),
+                );
+                let request = done.iter().find_map(|a| match a {
+                    Action::GenerateTitle { description, .. } => Some(description),
+                    _ => None,
+                });
+                assert_eq!(request.is_some(), status == "completed" && !named);
+                if let Some(description) = request {
+                    assert_eq!(description, "hello\n\nAssistant reply:\n修复了附件拖入失败");
+                }
+                assert!(agent.can_start_turn());
+            }
+        }
+    }
+    #[test]
     fn platform_skills_are_thread_local_and_follow_host_preferences_on_start_and_resume() {
         let dir = tempfile::tempdir().unwrap();
         let mut config = config();
@@ -1219,7 +1352,10 @@ mod tests {
         );
         assert!(matches!(
             actions.as_slice(),
-            [Action::Finished { failed: false, .. }]
+            [
+                Action::MetadataWrite(_),
+                Action::Finished { failed: false, .. }
+            ]
         ));
         assert!(agent.can_reconfigure());
     }
@@ -1245,6 +1381,10 @@ mod tests {
                     },
                 );
                 assert!(matches!(actions[0], Action::NativeSession(_)));
+                let actions: Vec<_> = actions
+                    .into_iter()
+                    .filter(|a| !matches!(a, Action::MetadataWrite(_)))
+                    .collect();
                 assert!(matches!(actions[1], Action::Finished { failed: false, .. }));
                 assert_eq!(actions.len(), if stop { 3 } else { 2 });
                 if stop {
@@ -1866,7 +2006,7 @@ mod tests {
             json!({"method":"turn/completed","params":{"threadId":"t","turn":{"id":"turn","status":"completed"}}}),
         );
         assert!(
-            matches!(&done[..],[Action::InputsConsumed(ids),Action::Finished{failed:false,..}] if ids==&["q"])
+            matches!(&done[..],[Action::InputsConsumed(ids),Action::MetadataWrite(_),Action::Finished{failed:false,..}] if ids==&["q"])
         );
     }
     #[test]

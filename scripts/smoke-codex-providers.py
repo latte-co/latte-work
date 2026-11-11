@@ -45,7 +45,9 @@ def kill_agent_groups(server_pid):
         except (ProcessLookupError, PermissionError):
             pass
 seen = []
+title_requests = []
 tool_called = False
+native_config_drift = None
 
 class Handler(http.server.BaseHTTPRequestHandler):
     def log_message(self, *_):
@@ -54,13 +56,26 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def do_POST(self):
         global tool_called
         body = json.loads(self.rfile.read(int(self.headers['Content-Length'])))
+        title_request = 'title' in body.get('text', {}).get('format', {}).get('schema', {}).get('properties', {})
+        if title_request:
+            title_requests.append(body)
+            assert not body.get('tools'), body.get('tools')
+        if not title_request and 'NATIVE_PROVIDER_DRIFT_CHECK' in json.dumps(body.get('input', [])):
+            config, origin = native_config_drift
+            config.write_text(config.read_text().replace('model_provider="cli-fixture"', 'model_provider="changed-fixture"', 1)
+                              + f'\n[model_providers.changed-fixture]\nname="Changed"\nbase_url="{origin}/changed/v1"\nwire_api="responses"\nrequires_openai_auth=false\n')
+        if not title_request and 'BUILTIN_OPENAI_ENDPOINT_DRIFT_CHECK' in json.dumps(body.get('input', [])):
+            config, origin = native_config_drift
+            config.write_text(config.read_text().replace(f'openai_base_url="{origin}/builtin-a/v1"',
+                                                        f'openai_base_url="{origin}/builtin-b/v1"', 1))
         seen.append({'path': self.path, 'model': body.get('model'),
+                     'title_request': title_request, 'reasoning_effort': body.get('reasoning', {}).get('effort'),
                      'authorization': self.headers.get('Authorization'),
                      'api_key': self.headers.get('x-api-key'), 'old_header': self.headers.get('X-Old-Header')})
         self.send_response(200)
         self.send_header('Content-Type', 'text/event-stream')
         self.end_headers()
-        marker = 'PROVIDER_OK'
+        marker = json.dumps({'title': '检查 Codex Provider 切换'}, ensure_ascii=False) if title_request else 'PROVIDER_OK'
         if self.path.endswith('/responses') and 'NATIVE_TOOL_CHECK' in json.dumps(body.get('input', [])) and not tool_called:
             assert any(t.get('name') == 'exec_command' for t in body.get('tools', [])), 'native exec_command not offered'
             tool_called = True
@@ -101,8 +116,12 @@ try:
         native = root / 'codex'
         native.mkdir()
         origin = f'http://127.0.0.1:{httpd.server_port}'
-        (native / 'config.toml').write_text(f'model="cli-model"\nmodel_provider="cli-fixture"\n[model_providers.cli-fixture]\nname="CLI Fixture"\nbase_url="{origin}/cli/v1"\nwire_api="responses"\nrequires_openai_auth=false\n[model_providers.latte-work]\nname="Old"\nbase_url="http://127.0.0.1:1"\nwire_api="responses"\nexperimental_bearer_token="legacy-fixture-token"\nhttp_headers={{X-Old-Header="legacy"}}\n')
-        env = {**os.environ, 'LATTE_WORK_AGENT_ENV': 'inherit', 'LATTE_WORK_CODEX': codex, 'CODEX_HOME': str(native)}
+        notify = root / 'notify.py'
+        notify.write_text('import pathlib,sys\nwith pathlib.Path(__file__).with_suffix(".events").open("a") as f: f.write(sys.argv[-1]+"\\n")\n')
+        (native / 'config.toml').write_text(f'model="cli-model"\nmodel_provider="cli-fixture"\nmodel_reasoning_effort="high"\nnotify=["python3", {json.dumps(str(notify))}]\n[features]\nstable_environment_tools=true\nsleep_tool={{enabled=true,mode="always_on"}}\n[model_providers.cli-fixture]\nname="CLI Fixture"\nbase_url="{origin}/cli/v1"\nwire_api="responses"\nrequires_openai_auth=false\n[model_providers.latte-work]\nname="Old"\nbase_url="http://127.0.0.1:1"\nwire_api="responses"\nexperimental_bearer_token="legacy-fixture-token"\nhttp_headers={{X-Old-Header="legacy"}}\n')
+        env = {**os.environ, 'LATTE_WORK_AGENT_ENV': 'inherit', 'LATTE_WORK_CODEX': codex, 'CODEX_HOME': str(native),
+               'OPENAI_API_KEY': 'latte-builtin-openai-fixture-key'}
+        env.pop('OPENAI_BASE_URL', None)
         server = subprocess.Popen([binary, 'serve', '--state-dir', str(root / 'state')], env=env,
                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
         connection = None
@@ -166,6 +185,19 @@ try:
                 assert actual['api_key'] == (KEY if auth == 'api_key' else None), actual
                 text = ''.join(e['event'].get('text', '') for e in value['events'] if e['event']['kind'] == 'text')
                 assert 'PROVIDER_OK' in text
+                if index == 0:
+                    while time.monotonic() < deadline:
+                        value = rpc('poll', session_id=sid, after=0)
+                        if value['session']['title'] == '检查 Codex Provider 切换':
+                            break
+                        time.sleep(.1)
+                    else:
+                        raise TimeoutError('native automatic title: ' + json.dumps(value, ensure_ascii=False))
+                    assert len(title_requests) == 1 and not value['session']['custom_title']
+                    assert len([e for e in value['events'] if e['event']['kind'] == 'user']) == 1
+                    title_input = json.dumps(title_requests[0]['input'], ensure_ascii=False)
+                    assert 'Assistant reply:' in title_input and 'PROVIDER_OK' in title_input
+                    report['checks'].append('ephemeral automatic title uses first reply, exposes no tools and adds no visible turn')
                 current_native = value['session']['native_id']
                 assert current_native and (native_id is None or current_native == native_id)
                 native_id = current_native
@@ -212,10 +244,71 @@ try:
             assert seen[-1]['path'] == '/cli/v1/responses'
             assert value['session']['native_id'] == native_id
             report['checks'].append('unset CLI model resolves current catalog default on resume')
+            # Changing the active native provider during a turn must not route
+            # its private transcript to the newly selected service for naming.
+            drift_id = rpc('create_session', project_id=pid, agent='codex')['session']['id']
+            native_config_drift = (config, origin)
+            before = len(seen)
+            before_titles = len(title_requests)
+            rpc('send_queued', session_id=drift_id, request_id='native-provider-drift', text='NATIVE_PROVIDER_DRIFT_CHECK. Reply PROVIDER_OK.', model=None, effort='low', permission_mode='default', provider={'kind': 'cli'})
+            deadline = time.monotonic() + 45
+            while time.monotonic() < deadline:
+                value = rpc('poll', session_id=drift_id, after=0)
+                if value['session']['title'] == '检查 Codex Provider 切换' and value['session']['status'] == 'completed':
+                    break
+                if value['session']['status'] not in ('running', 'waiting', 'completed'):
+                    raise RuntimeError(json.dumps(value, ensure_ascii=False))
+                time.sleep(.1)
+            else:
+                raise TimeoutError('native provider snapshot title: ' + json.dumps(value, ensure_ascii=False))
+            assert len(title_requests) == before_titles + 1
+            actual = seen[before:]
+            assert len(actual) == 2 and {item['title_request'] for item in actual} == {True, False}, actual
+            assert all(item['path'] == '/cli/v1/responses' and item['reasoning_effort'] == 'low' for item in actual), actual
+            report['checks'].append('CLI title pins the first-turn provider across native selection changes and forwards low effort over a high native default')
+            # Built-in OpenAI routes via a top-level setting, with no custom
+            # model_providers.openai definition. Changing it must decline naming.
+            config.write_text(f'model={json.dumps(default)}\nmodel_provider="openai"\nopenai_base_url="{origin}/builtin-a/v1"\n')
+            builtin_id = rpc('create_session', project_id=pid, agent='codex')['session']['id']
+            before = len(seen)
+            before_titles = len(title_requests)
+            prompt = 'BUILTIN_OPENAI_ENDPOINT_DRIFT_CHECK. Reply PROVIDER_OK.'
+            rpc('send_queued', session_id=builtin_id, request_id='builtin-openai-endpoint-drift', text=prompt,
+                model=None, effort='low', permission_mode='default', provider={'kind': 'cli'})
+            deadline = time.monotonic() + 45
+            while time.monotonic() < deadline:
+                value = rpc('poll', session_id=builtin_id, after=0)
+                if value['session']['status'] == 'completed' and any(
+                    event['event']['kind'] == 'notice' and 'Provider 配置已变化' in event['event'].get('text', '')
+                    for event in value['events']
+                ):
+                    break
+                if value['session']['status'] not in ('running', 'waiting', 'completed'):
+                    raise RuntimeError(json.dumps(value, ensure_ascii=False))
+                time.sleep(.1)
+            else:
+                raise TimeoutError('built-in OpenAI endpoint drift: ' + json.dumps(value, ensure_ascii=False))
+            assert f'openai_base_url="{origin}/builtin-b/v1"' in config.read_text()
+            assert len(title_requests) == before_titles, seen[before:]
+            assert len(seen[before:]) == 1 and seen[-1]['path'] == '/builtin-a/v1/responses', seen[before:]
+            assert value['session']['title'] == prompt[:48], value['session']
+            report['checks'].append('built-in OpenAI top-level endpoint A to B drift declines naming before sending any title request')
+            deadline = time.monotonic() + 5
+            while not notify.with_suffix('.events').exists():
+                assert time.monotonic() < deadline, 'regular native turns must exercise legacy notify'
+                time.sleep(.05)
+            notifications = [json.loads(line) for line in notify.with_suffix('.events').read_text().splitlines()]
+            assert notifications and all('检查 Codex Provider 切换' not in json.dumps(event, ensure_ascii=False) for event in notifications)
+            report['checks'].append('title requests expose no tools with inherited stable environment/sleep features and never run legacy notify')
             # Check the durable Server and native rollout files, not transient WAL state alone.
-            for file in root.rglob('*'):
-                if file.is_file() and not file.is_symlink() and file.stat().st_size < 8 * 1024 * 1024:
-                    assert KEY.encode() not in file.read_bytes(), f'credential persisted: {file.relative_to(root)}'
+            for directory, _, files in os.walk(root):
+                for name in files:
+                    file = Path(directory) / name
+                    try:
+                        if file.is_file() and not file.is_symlink() and file.stat().st_size < 8 * 1024 * 1024:
+                            assert KEY.encode() not in file.read_bytes(), f'credential persisted: {file.relative_to(root)}'
+                    except FileNotFoundError:
+                        pass  # Native CLI temporary files may disappear during the scan.
             report['checks'].append('same native identity across automatic provider reconfiguration and explicit close/resume; credential absent from durable files')
         finally:
             if connection:

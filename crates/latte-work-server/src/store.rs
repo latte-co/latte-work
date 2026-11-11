@@ -120,6 +120,7 @@ impl Store {
         CREATE TABLE IF NOT EXISTS projects(id TEXT PRIMARY KEY, name TEXT NOT NULL, path TEXT NOT NULL UNIQUE);
         CREATE TABLE IF NOT EXISTS hidden_projects(project_id TEXT PRIMARY KEY REFERENCES projects(id));
         CREATE TABLE IF NOT EXISTS sessions(id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id), data TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS native_title_secrets(session_id TEXT NOT NULL REFERENCES sessions(id), native_id TEXT NOT NULL, secret_hash BLOB NOT NULL, secret_bytes INTEGER NOT NULL, PRIMARY KEY(session_id,native_id,secret_hash));
         CREATE TABLE IF NOT EXISTS events(seq INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT NOT NULL REFERENCES sessions(id), at REAL NOT NULL, data TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS subagents(session_id TEXT NOT NULL REFERENCES sessions(id), id TEXT NOT NULL, native_id TEXT NOT NULL, tool_use_id TEXT, active INTEGER NOT NULL, at REAL NOT NULL, data TEXT NOT NULL, PRIMARY KEY(session_id,id));
         CREATE INDEX IF NOT EXISTS subagents_session ON subagents(session_id,active,at);
@@ -454,6 +455,61 @@ impl Store {
         // rename. AI-generated titles use sync_native_title(..., false).
         self.sync_native_title(id, title, true)
     }
+    /// Bind a one-way credential fingerprint before native output can be imported.
+    /// A title contains at most 200 Unicode characters, hence at most 800 bytes.
+    pub fn remember_title_credential(
+        &self,
+        id: &str,
+        native: &str,
+        credential: &str,
+    ) -> Result<()> {
+        if !credential.is_empty() && credential.len() <= 800 {
+            use sha2::{Digest, Sha256};
+            self.db.execute(
+                "INSERT OR IGNORE INTO native_title_secrets(session_id,native_id,secret_hash,secret_bytes) VALUES (?1,?2,?3,?4)",
+                params![id, native, Sha256::digest(credential.as_bytes()).to_vec(), credential.len() as i64],
+            )?;
+        }
+        Ok(())
+    }
+    fn redact_native_title(&self, session: &Session, title: &str) -> Result<Option<String>> {
+        use sha2::{Digest, Sha256};
+        // Bound both reads and hashing. If an unusually long-lived session has
+        // more matching credential fingerprints, decline the optional import.
+        let secrets = self.db.prepare(
+            "SELECT secret_hash,secret_bytes FROM native_title_secrets WHERE session_id=?1 AND native_id=?2 AND secret_bytes>0 AND secret_bytes<=?3 LIMIT 65",
+        )?.query_map(params![session.id, session.native_id, title.len() as i64], |row| Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, u32>(1)?)))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        if secrets.len() > 64 {
+            return Ok(None);
+        }
+        let mut hidden = vec![false; title.len()];
+        for (hash, length) in secrets {
+            let length = length as usize;
+            for (start, _) in title.char_indices() {
+                let end = start + length;
+                if end <= title.len()
+                    && title.is_char_boundary(end)
+                    && Sha256::digest(&title.as_bytes()[start..end])[..] == hash
+                {
+                    hidden[start..end].fill(true);
+                }
+            }
+        }
+        let mut redacted = String::new();
+        let mut masking = false;
+        for (at, ch) in title.char_indices() {
+            if hidden[at] {
+                if !masking {
+                    redacted.push_str("[redacted]");
+                }
+            } else {
+                redacted.push(ch);
+            }
+            masking = hidden[at];
+        }
+        Ok(Some(redacted))
+    }
     pub fn sync_native_title(&self, id: &str, title: &str, custom: bool) -> Result<Session> {
         let mut session = self.session(id)?;
         if title.trim().is_empty()
@@ -462,11 +518,17 @@ impl Store {
         {
             return Ok(session);
         }
+        let Some(title) = self.redact_native_title(&session, title)? else {
+            return Ok(session);
+        };
+        if title.chars().count() > 200 || title.chars().any(char::is_control) {
+            return Ok(session);
+        }
         if session.custom_title && !custom {
             return Ok(session);
         }
         if session.title != title || (custom && !session.custom_title) {
-            session.title = title.into();
+            session.title = title;
             session.custom_title |= custom;
             self.save(&session)?;
         }
@@ -1928,6 +1990,81 @@ mod tests {
                 .unwrap()
                 .title,
             "New manual"
+        );
+    }
+    #[test]
+    fn redacted_native_titles_survive_reimport_and_restart_without_raw_credentials() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("redacted-titles.db");
+        let store = Store::open(&path).unwrap();
+        let project = store.add_project(dir.path()).unwrap();
+        let mut session = store.create_session(project.id, "claude".into()).unwrap();
+        session.native_id = Some("current".into());
+        store.save(&session).unwrap();
+        store
+            .remember_title_credential(&session.id, "current", "private-token")
+            .unwrap();
+        assert_eq!(
+            store
+                .sync_native_title(&session.id, "Fix private-token", false)
+                .unwrap()
+                .title,
+            "Fix [redacted]"
+        );
+        assert_eq!(
+            store
+                .sync_native_title(&session.id, "Other private-token", false)
+                .unwrap()
+                .title,
+            "Other [redacted]"
+        );
+        drop(store);
+        let store = Store::open(&path).unwrap();
+        for custom in [false, true] {
+            assert_eq!(
+                store
+                    .sync_native_title(&session.id, "Fix private-token", custom)
+                    .unwrap()
+                    .title,
+                "Fix [redacted]"
+            );
+        }
+        store
+            .remember_title_credential(&session.id, "current", "密钥🙂")
+            .unwrap();
+        assert_eq!(
+            store
+                .sync_native_title(&session.id, "修复密钥🙂 与 private-token", true)
+                .unwrap()
+                .title,
+            "修复[redacted] 与 [redacted]"
+        );
+        let data: String = store
+            .db
+            .query_row("SELECT group_concat(data) FROM sessions", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        let redactions: String = store
+            .db
+            .query_row(
+                "SELECT group_concat(hex(secret_hash)) FROM native_title_secrets",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(!data.contains("private-token") && !redactions.contains("private-token"));
+        let mut replaced = store.session(&session.id).unwrap();
+        replaced.native_id = Some("other".into());
+        replaced.custom_title = false;
+        store.save(&replaced).unwrap();
+        assert_eq!(
+            store
+                .sync_native_title(&session.id, "Fix private-token", false)
+                .unwrap()
+                .title,
+            "Fix private-token",
+            "a redaction rule belongs only to its original native identity"
         );
     }
     #[test]
