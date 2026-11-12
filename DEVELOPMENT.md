@@ -462,7 +462,10 @@ IDs. It matches raw content and one decoded JSON string layer, including mixed
 ASCII Unicode escapes, either hex case and surrogate pairs, retaining source
 offsets so unrelated text keeps its original encoding.
 Text streams retain at most one possible secret-prefix suffix per channel, bounded
-by six times the longest secret's byte length and 513 main/child channels. Content boundaries
+by six times the longest secret's byte length plus one incomplete JSON escape
+(12 bytes), across 513 main/child channels. Parsing starts at the content boundary;
+retained tails start before a complete escape token, preserving backslash pairing
+across arbitrarily long runs and delta boundaries. Content boundaries
 mask unfinished prefixes; raw tails never enter storage or replay.
 Native child text blocks also mask unfinished prefixes at every independent
 record/page boundary, including the legacy bounded snapshot. No raw suffix is

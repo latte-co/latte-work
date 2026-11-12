@@ -53,6 +53,27 @@ impl Decoded {
             .get(index.wrapping_sub(1))
             .map_or(offset, |(decoded, source)| offset + source - decoded)
     }
+
+    /// Re-decoding a retained suffix must start before a whole escape, not
+    /// inside a backslash pair, Unicode escape, or surrogate pair.
+    fn source_boundary(&self, offset: usize) -> usize {
+        if let Some(start) = self.partial.filter(|start| *start < offset) {
+            return start;
+        }
+        let index = self.offsets.partition_point(|(_, end)| *end <= offset);
+        if let Some((decoded_end, _)) = self.offsets.get(index) {
+            let width = self.text[..*decoded_end]
+                .chars()
+                .next_back()
+                .expect("decoded escape")
+                .len_utf8();
+            let start = self.source_offset(decoded_end - width);
+            if start < offset {
+                return start;
+            }
+        }
+        offset
+    }
 }
 enum Escape {
     Character(char, usize),
@@ -205,8 +226,9 @@ impl Redactor {
         output
     }
 
-    /// Withhold only the longest suffix that can still become a secret. KMP
-    /// bounds work and retained bytes by the configured patterns, not the stream.
+    /// Withhold possible secret prefixes at JSON escape boundaries. KMP bounds
+    /// suffix matching; retained bytes are at most six times the longest secret
+    /// plus one incomplete escape (12 bytes), independent of stream length.
     pub fn fragment(&self, text: &str, pending: &mut String) -> String {
         let mut input = std::mem::take(pending);
         input.push_str(text);
@@ -222,23 +244,23 @@ impl Redactor {
             output.push_str(remaining);
             return output;
         }
-        let mut start = remaining.len().saturating_sub(max.saturating_mul(6));
-        while !remaining.is_char_boundary(start) {
-            start += 1;
-        }
-        let suffix = &remaining[start..];
-        let decoded = Decoded::new(suffix);
-        let mut tail = decoded.partial.map_or(0, |at| suffix.len() - at);
+        // Decode from the actual content boundary. A raw byte window can cut
+        // into an arbitrarily long backslash run and reverse escape pairing.
+        // KMP still scans only a pattern-sized suffix of the decoded content.
+        let decoded = Decoded::new(remaining);
+        let mut tail = decoded.partial.map_or(0, |at| remaining.len() - at);
         for pattern in &self.patterns {
             tail = tail.max(pattern.suffix_prefix(remaining));
             let length = pattern.suffix_prefix(&decoded.text);
             if length > 0 {
-                tail = tail.max(suffix.len() - decoded.source_offset(decoded.text.len() - length));
+                tail =
+                    tail.max(remaining.len() - decoded.source_offset(decoded.text.len() - length));
             }
         }
-        let safe = remaining.len() - tail;
+        let safe = decoded.source_boundary(remaining.len() - tail);
         output.push_str(&remaining[..safe]);
         pending.push_str(&remaining[safe..]);
+        debug_assert!(pending.len() <= max.saturating_mul(6).saturating_add(12));
         output
     }
 
@@ -364,6 +386,106 @@ mod tests {
     use super::*;
 
     #[test]
+    fn stream_window_never_changes_backslash_pairing() {
+        // A 24-byte window drops the first of 18 backslashes here. Its
+        // remaining 17 decode as eight backslashes and a newline, so the old
+        // window misses the literal backslash+n credential prefix.
+        let secret = r"\nAB";
+        let redactor = Redactor::new([secret.into()]);
+        let first = format!("{{\"secret\":\"{}n\\u0041", "\\".repeat(18));
+        let second = "B\"}";
+        let original = format!("{first}{second}");
+        let decoded: Value = serde_json::from_str(&original).unwrap();
+        assert!(decoded["secret"].as_str().unwrap().ends_with(secret));
+        let mut pending = String::new();
+        let before = redactor.fragment(&first, &mut pending);
+        let after = redactor.fragment(second, &mut pending);
+        let replay: Value = serde_json::from_str(&format!("{before}{after}")).unwrap();
+        assert!(!replay["secret"].as_str().unwrap().contains(secret));
+        assert!(replay["secret"].as_str().unwrap().contains(MASK));
+        assert!(pending.is_empty());
+    }
+
+    #[test]
+    fn retained_suffixes_preserve_escape_boundaries_for_every_stream_split() {
+        for secret in [r"\nAB", "\nAB", "a&b", "中文🔑"] {
+            let redactor = Redactor::new([secret.to_owned()]);
+            for count in [0, 1, 7, 8, 9, 10, 11, 12, 127, 8192] {
+                let source = serde_json::to_string(&format!("{}{secret}", "\\".repeat(count)))
+                    .unwrap()
+                    .replace('A', r"\u0041")
+                    .replace('&', r"\u0026");
+                let expected = redactor.text(&source);
+                assert!(expected.contains(MASK));
+                let splits: Vec<_> = if count < 8192 {
+                    (0..=source.len())
+                        .filter(|at| source.is_char_boundary(*at))
+                        .collect()
+                } else {
+                    // Keep the long-run regression bounded while cutting on
+                    // both sides of the escape and former byte-window edges.
+                    (source.len().saturating_sub(64)..=source.len())
+                        .filter(|at| source.is_char_boundary(*at))
+                        .collect()
+                };
+                for split in splits {
+                    let mut pending = String::new();
+                    let first = redactor.fragment(&source[..split], &mut pending);
+                    assert!(pending.len() <= secret.len() * 6 + 12);
+                    let second = redactor.fragment(&source[split..], &mut pending);
+                    assert_eq!(
+                        format!("{first}{second}"),
+                        expected,
+                        "{secret:?}, {count} slashes, split {split}"
+                    );
+                    assert!(pending.is_empty());
+                }
+                if count < 8192 {
+                    for width in 1..=8 {
+                        let mut pending = String::new();
+                        let mut output = String::new();
+                        let mut at = 0;
+                        while at < source.len() {
+                            let mut end = (at + width).min(source.len());
+                            while !source.is_char_boundary(end) {
+                                end += 1;
+                            }
+                            output.push_str(&redactor.fragment(&source[at..end], &mut pending));
+                            assert!(pending.len() <= secret.len() * 6 + 12);
+                            at = end;
+                        }
+                        assert_eq!(
+                            output, expected,
+                            "{secret:?}, {count} slashes, chunks of {width}"
+                        );
+                        assert!(pending.is_empty());
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn suffix_cuts_keep_json_escape_tokens_whole() {
+        for source in [
+            r"\\\n\u0041",
+            r"\\\uD83D\uDD11",
+            r#"a\t中\u0041\""#,
+            r"\\\uD83D\uDD",
+        ] {
+            let decoded = Decoded::new(source);
+            for cut in (0..=source.len()).filter(|at| source.is_char_boundary(*at)) {
+                let boundary = decoded.source_boundary(cut);
+                assert!(boundary <= cut && cut - boundary < 12);
+                let prefix = Decoded::new(&source[..boundary]);
+                let suffix = Decoded::new(&source[boundary..]);
+                assert!(prefix.partial.is_none());
+                assert_eq!(format!("{}{}", prefix.text, suffix.text), decoded.text);
+            }
+        }
+    }
+
+    #[test]
     fn escaped_values_and_every_stream_split_are_redacted() {
         for secret in [
             "fixture-environment-secret",
@@ -383,7 +505,7 @@ mod tests {
                             <= redactor
                                 .patterns
                                 .iter()
-                                .map(|p| p.text.len() * 6)
+                                .map(|p| p.text.len() * 6 + 12)
                                 .max()
                                 .unwrap()
                     );
@@ -456,7 +578,7 @@ mod tests {
             for split in (0..=input.len()).filter(|i| input.is_char_boundary(*i)) {
                 let mut pending = String::new();
                 let first = redactor.fragment(&input[..split], &mut pending);
-                assert!(pending.len() <= secret.len() * 6);
+                assert!(pending.len() <= secret.len() * 6 + 12);
                 let second = redactor.fragment(&input[split..], &mut pending);
                 assert_eq!(
                     format!("{first}{second}"),

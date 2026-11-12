@@ -178,6 +178,25 @@ for line in sys.stdin:
             emit({'type':'system','subtype':'task_notification','task_id':'handback-native','status':'completed','summary':'Delivered'})
             emit({'type':'result','subtype':'success','is_error':False})
             continue
+        if text in ('custom-environment-escape-window','custom-environment-escape-window-child'):
+            assert os.environ['LATTE_TEST_SECRET']==r'\nAB'
+            parent='escape-window-child' if text.endswith('-child') else None
+            if parent:
+                emit({'type':'assistant','message':{'content':[{'type':'tool_use','id':parent,'name':'Agent','input':{'description':'Escape window fixture'}}]}})
+                emit({'type':'system','subtype':'task_started','task_id':'escape-window-native','task_type':'local_agent','tool_use_id':parent,'description':'Escape window fixture'})
+            def window_delta(part):
+                emit({'type':'stream_event','parent_tool_use_id':parent,'event':{'type':'content_block_delta','delta':{'type':'text_delta','text':part}}})
+            window_delta('{"secret":"'+'\\'*18+r'n\u0041')
+            pathlib.Path('environment-window-ready').touch()
+            deadline=time.monotonic()+15
+            while not pathlib.Path('environment-window-continue').exists():
+                if time.monotonic()>deadline: raise RuntimeError('Escape window rendezvous timed out')
+                time.sleep(.01)
+            window_delta('B"}')
+            if parent:
+                emit({'type':'system','subtype':'task_notification','task_id':'escape-window-native','status':'completed','summary':'Complete'})
+            emit({'type':'result','subtype':'success','is_error':False})
+            continue
         if text=='custom-environment-stream':
             secret=os.environ['LATTE_TEST_SECRET']
             split=len(secret)//2

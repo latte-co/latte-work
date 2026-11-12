@@ -463,6 +463,115 @@ async fn short_environment_values_preserve_confirmed_stream_reports_without_expo
 }
 
 #[tokio::test]
+async fn backslash_window_redaction_precedes_main_and_child_storage_and_replay() {
+    let host = Host::start().await;
+    let secret = r"\nAB";
+    for child in [false, true] {
+        let root = tempfile::tempdir().unwrap();
+        let mut client = host.client().await;
+        let id = session(&mut client, root.path()).await;
+        let provider = latte_work_protocol::TurnProvider::Configured {
+            provider: None,
+            environment: AgentEnvironment(BTreeMap::from([(
+                "LATTE_TEST_SECRET".into(),
+                secret.into(),
+            )])),
+        };
+        assert!(matches!(
+            ask(
+                &mut client,
+                Request::Send {
+                    session_id: id.clone(),
+                    request_id: format!("escape-window-{id}"),
+                    text: format!(
+                        "custom-environment-escape-window{}",
+                        if child { "-child" } else { "" }
+                    ),
+                    model: None,
+                    effort: None,
+                    permission_mode: None,
+                    provider: Some(provider.clone()),
+                }
+            )
+            .await,
+            Response::Accepted { .. }
+        ));
+        let table = if child { "subagent_history" } else { "events" };
+        let text = |events: &[EventKind]| {
+            events
+                .iter()
+                .filter_map(|e| match e {
+                    EventKind::Text { text } => Some(text.as_str()),
+                    _ => None,
+                })
+                .collect::<String>()
+        };
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let before = loop {
+            let value = text(&stored_content(&host, table, &id));
+            if !value.is_empty() {
+                break value;
+            }
+            assert!(Instant::now() < deadline, "first delta was not stored");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        };
+        std::fs::write(root.path().join("environment-window-continue"), "").unwrap();
+        wait(&mut client, &id, Status::Completed).await;
+        let saved = text(&stored_content(&host, table, &id));
+        let decoded: serde_json::Value = serde_json::from_str(&saved).unwrap();
+        assert!(
+            !decoded["secret"].as_str().unwrap().contains(secret),
+            "recoverable credential in {table}"
+        );
+        assert!(decoded["secret"].as_str().unwrap().contains("[redacted]"));
+        assert_eq!(
+            before,
+            format!("{{\"secret\":\"{}", "\\".repeat(16)),
+            "the encoded secret prefix must not reach storage"
+        );
+        let mut reconnected = host.client().await;
+        let replay = if child {
+            let Response::SubagentHistory { events, .. } = ask(
+                &mut reconnected,
+                Request::SubagentHistory {
+                    session_id: id.clone(),
+                    task_id: "tool:escape-window-child".into(),
+                    after: None,
+                    source: None,
+                    provider: Some(provider),
+                },
+            )
+            .await
+            else {
+                panic!("child replay")
+            };
+            let Response::SubagentTranscript { events: legacy, .. } = ask(
+                &mut reconnected,
+                Request::SubagentTranscript {
+                    session_id: id.clone(),
+                    task_id: "tool:escape-window-child".into(),
+                },
+            )
+            .await
+            else {
+                panic!("legacy child replay")
+            };
+            assert_eq!(text_content(&legacy), saved);
+            events
+        } else {
+            wait(&mut reconnected, &id, Status::Completed).await
+        };
+        assert_eq!(text_content(&replay), saved);
+        assert!(
+            !serde_json::from_str::<serde_json::Value>(&text_content(&replay)).unwrap()["secret"]
+                .as_str()
+                .unwrap()
+                .contains(secret)
+        );
+    }
+}
+
+#[tokio::test]
 async fn environment_secrets_are_redacted_before_storage_across_json_and_stream_fragments() {
     let host = Host::start().await;
     for secret in ["fixture-environment-secret", "abc\"def", "a&b", "A&b<>中🔑"] {
