@@ -548,8 +548,12 @@ turns, 128 compacted events / 256 KiB, with a 16,384 raw-event scan cap). Consec
 text fragments are joined for transfer only; original persisted events remain
 unchanged. A raw `before` cursor supports older pages without gaps or duplicate
 text. Split final text and older unresolved approvals in the current live turn
-must be assembled before reveal. Older records load on upward scrolling or explicit
-request, preserving the viewport anchor. Older servers without `history_window`
+must be assembled before reveal. When the visible transcript does not fill its
+viewport, older pages load serially until it becomes scrollable or history ends,
+including after a resize or collapsed content change. Hidden/disconnected views
+do not start reads; failed or non-advancing pages require an explicit retry.
+Older records also load on upward scrolling or explicit request, preserving the
+viewport anchor. Older servers without `history_window`
 still use the compatible full Poll replay. The conversation reveals the latest
 window after positioning at the bottom across two animation frames; later live
 updates retain normal follow behavior and manual reading positions. A scope change cancels
@@ -649,17 +653,18 @@ fragments and `:12` suffixes ride along as line hints, and anchors/unknown
 schemes render as plain text instead of dead blue links. Local-path links and
 chips share one open path and one context menu: project-relative targets (and
 absolute targets under the project root) open in the workspace file tab on
-every host, while other local absolutes fall back to the guarded `open_path`.
+every host, while other local absolutes fall back to `open_path`.
 Project
 files use the bounded `preview_source` read for 另存为 and content copy on
 local and SSH hosts alike; local external paths use desktop commands that
-expand `~/`, require a bounded absolute path and never execute the target
-(`open_path` refuses executable bits plus app bundles and install/script
-targets such as `.app`, `.pkg`, `.dmg`, `.terminal`, `.command`, `.desktop`;
-`reveal_path` is macOS-only reveal; `save_local_file_as` streams a
+expand `~/` and require a bounded absolute path. Explicit `open_path` actions
+resolve the existing target and invoke the platform default handler without
+file-type or executable-bit restrictions, including apps and installers
+(`.app`, `.pkg`, `.dmg`, scripts and executables); OS prompts remain authoritative.
+Other actions keep their own contracts: `reveal_path` is macOS-only reveal; `save_local_file_as` streams a
 dialog-targeted copy, `read_local_text` caps at 2MB and refuses binary
 content, `save_file_as` caps dialog writes at 32MB, and VS Code opens only on
-the local host and only when the project root is known). Copy and save
+the local host and only when the project root is known. Copy and save
 failures surface through the existing status-issue panel; a cancelled dialog
 is silent. Views without workspace actions keep plain code. Ordinary code,
 branch names, commit hashes and shell snippets never become interactive;

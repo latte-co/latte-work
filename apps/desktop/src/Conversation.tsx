@@ -402,6 +402,61 @@ export function Conversation({
   useEffect(() => {
     if (!preparingHistory) onHistoryReady?.();
   }, [preparingHistory, historyScope, onHistoryReady]);
+  const lastViewportFill = useRef<string | null>(null);
+  useEffect(() => {
+    const el = scroller.current;
+    if (
+      !el ||
+      preparingHistory ||
+      settingsOpen ||
+      !connected ||
+      !hasEarlierHistory ||
+      earlierHistoryLoading ||
+      !loadEarlierHistory
+    )
+      return;
+    // Event pages can collapse to just a few visible lines. A short transcript
+    // cannot scroll upwards to request the next page, so fill the viewport here.
+    // Keep a failed/non-advancing cursor attempted until an explicit retry moves
+    // it forward; resize notifications must not cause an automatic retry loop.
+    const cursor = JSON.stringify([positionScope, events[0]?.seq]);
+    let active = true;
+    const fillViewport = () => {
+      if (
+        !active ||
+        document.visibilityState === "hidden" ||
+        el.clientHeight <= 0 ||
+        el.scrollHeight > el.clientHeight + 1 ||
+        lastViewportFill.current === cursor
+      )
+        return;
+      lastViewportFill.current = cursor;
+      void loadEarlierHistory();
+    };
+    fillViewport();
+    const observer =
+      typeof ResizeObserver === "undefined"
+        ? undefined
+        : new ResizeObserver(fillViewport);
+    observer?.observe(el);
+    const content = el.querySelector(".messages");
+    if (content) observer?.observe(content);
+    document.addEventListener("visibilitychange", fillViewport);
+    return () => {
+      active = false;
+      observer?.disconnect();
+      document.removeEventListener("visibilitychange", fillViewport);
+    };
+  }, [
+    preparingHistory,
+    settingsOpen,
+    connected,
+    hasEarlierHistory,
+    earlierHistoryLoading,
+    loadEarlierHistory,
+    positionScope,
+    events,
+  ]);
   async function submit(
     prompt: string,
     uiAction?: "subagents",
