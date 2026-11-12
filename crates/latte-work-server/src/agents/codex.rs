@@ -55,8 +55,9 @@ pub(crate) async fn models(
     binary: &str,
     path: Option<&str>,
     selected: Option<&str>,
+    environment: &latte_work_protocol::AgentEnvironment,
 ) -> Result<Response> {
-    super::traex::models_for_agent(binary, path, selected, true).await
+    super::traex::models_for_agent(binary, path, selected, true, environment).await
 }
 
 pub(crate) async fn validate_selection(
@@ -64,12 +65,13 @@ pub(crate) async fn validate_selection(
     path: Option<&str>,
     selected: Option<&str>,
     effort: Option<Effort>,
+    environment: &latte_work_protocol::AgentEnvironment,
 ) -> Result<()> {
     let Response::Models {
         models,
         effort_levels,
         ..
-    } = models(binary, path, selected).await?
+    } = models(binary, path, selected, environment).await?
     else {
         unreachable!()
     };

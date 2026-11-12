@@ -8,6 +8,7 @@ mod image_preview;
 mod message_queue;
 mod providers;
 mod questions;
+mod redaction;
 mod runtime;
 mod skill_staging;
 mod skill_worker;
@@ -75,6 +76,7 @@ impl Service {
                 Some(path),
                 config.model.as_deref(),
                 config.effort,
+                &config.environment,
             )
             .await?;
             return Ok(());
@@ -84,6 +86,7 @@ impl Service {
             Some(path),
             config.model.as_deref(),
             config.effort,
+            &config.environment,
         )
         .await?;
         Ok(())
@@ -319,6 +322,7 @@ async fn connection(stream: UnixStream, service: Service) -> Result<()> {
                                 .map(|(_, agent)| agent.clone())
                                 .collect(),
                             permission_settings: true,
+                            custom_agent_environment: true,
                             history_window: true,
                             skill_management: true,
                             skill_file_import: true,
@@ -392,7 +396,9 @@ async fn dispatch(s: &Service, request: Request) -> Result<Response> {
     // Ordinary turns retain concurrent admission; no request is replayed.
     let exclusive = matches!(
         &request,
-        Request::UndoTurnChanges { .. } | Request::ArchiveSession { archived: true, .. }
+        Request::UndoTurnChanges { .. }
+            | Request::ArchiveSession { archived: true, .. }
+            | Request::RenameSession { .. }
     );
     let _exclusive_guard = if exclusive {
         Some(s.file_admission.write().await)
@@ -484,6 +490,7 @@ async fn dispatch(s: &Service, request: Request) -> Result<Response> {
                     binary,
                     project.as_ref().map(|p| p.path.as_str()),
                     model.as_deref(),
+                    &Default::default(),
                 )
                 .await?;
             }
@@ -497,6 +504,7 @@ async fn dispatch(s: &Service, request: Request) -> Result<Response> {
                 *model_labels = agents::model_labels(
                     &agent,
                     project.as_ref().map(|p| std::path::Path::new(&p.path)),
+                    &Default::default(),
                 );
             }
             response
@@ -577,7 +585,9 @@ async fn dispatch(s: &Service, request: Request) -> Result<Response> {
             model,
             project_id,
             provider,
+            environment,
         } => {
+            latte_work_config::validate_agent_environment(&environment)?;
             let project = project_id
                 .map(|id| db(&s.database, |d| d.project(&id)))
                 .transpose()?;
@@ -596,6 +606,7 @@ async fn dispatch(s: &Service, request: Request) -> Result<Response> {
                     binary,
                     project.as_ref().map(|p| p.path.as_str()),
                     model.as_deref(),
+                    &environment,
                 )
                 .await?;
             }
@@ -609,6 +620,7 @@ async fn dispatch(s: &Service, request: Request) -> Result<Response> {
                 *model_labels = agents::model_labels(
                     &agent,
                     project.as_ref().map(|p| std::path::Path::new(&p.path)),
+                    &environment,
                 );
             }
             response
@@ -703,12 +715,33 @@ async fn dispatch(s: &Service, request: Request) -> Result<Response> {
             let (sessions, next) = db(&s.database, |d| d.recent_sessions(before.as_ref()))?;
             Response::RecentSessions { sessions, next }
         }
-        Request::RenameSession { session_id, title } => {
+        Request::RenameSession {
+            session_id,
+            title,
+            provider,
+        } => {
             let session = db(&s.database, |d| d.session(&session_id))?;
             let project = db(&s.database, |d| d.project(&session.project_id))?;
+            // Omitted snapshots never consult a newly selected host Provider.
+            let config = s
+                .providers
+                .lock()
+                .map_err(|_| anyhow::anyhow!("Provider 配置锁异常"))?
+                .turn_config(
+                    &session.agent,
+                    None,
+                    Some(provider.unwrap_or(latte_work_protocol::TurnProvider::Cli)),
+                )?;
             Response::Session {
-                session: runtime::rename_title(&s.database, &s.runs, session, project.path, title)
-                    .await?,
+                session: runtime::rename_title(
+                    &s.database,
+                    &s.runs,
+                    session,
+                    project.path,
+                    title,
+                    config,
+                )
+                .await?,
             }
         }
         Request::PinSession { session_id, pinned } => Response::Session {

@@ -1,9 +1,12 @@
 //! App-owned Provider configuration. No Server connection or Agent installation is required.
 pub mod discovery;
+mod environment;
 mod validation;
 use anyhow::{Context, Result, bail};
+pub use environment::validate_agent_environment;
 use latte_work_protocol::{
-    AgentProviderBinding, Provider, ProviderDraft, ProviderSnapshot, Response,
+    AgentEnvironment, AgentProviderBinding, Provider, ProviderDraft, ProviderSnapshot, Response,
+    TurnProvider,
 };
 use serde::{Deserialize, Serialize};
 #[cfg(unix)]
@@ -35,6 +38,8 @@ struct Config {
     active_id: Option<String>,
     #[serde(default)]
     host_bindings: BTreeMap<String, BTreeMap<String, String>>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    agent_environments: BTreeMap<String, BTreeMap<String, AgentEnvironment>>,
     providers: Vec<Record>,
 }
 impl Default for Config {
@@ -44,6 +49,7 @@ impl Default for Config {
             bindings: BTreeMap::new(),
             active_id: None,
             host_bindings: BTreeMap::new(),
+            agent_environments: BTreeMap::new(),
             providers: vec![],
         }
     }
@@ -213,6 +219,62 @@ impl ProviderStore {
             })
             .transpose()
     }
+    pub fn environments_for_host(&self, host: &str) -> Result<BTreeMap<String, AgentEnvironment>> {
+        validate_id(host)?;
+        Ok(self
+            .config
+            .agent_environments
+            .get(host)
+            .cloned()
+            .unwrap_or_default())
+    }
+    pub fn save_environment(
+        &mut self,
+        host: &str,
+        agent: &str,
+        environment: AgentEnvironment,
+    ) -> Result<AgentEnvironment> {
+        validate_id(host)?;
+        validate_id(agent)?;
+        validate_agent_environment(&environment)?;
+        let mut next = self.config.clone();
+        if environment.0.is_empty() {
+            if let Some(agents) = next.agent_environments.get_mut(host) {
+                agents.remove(agent);
+                if agents.is_empty() {
+                    next.agent_environments.remove(host);
+                }
+            }
+        } else {
+            next.agent_environments
+                .entry(host.into())
+                .or_default()
+                .insert(agent.into(), environment.clone());
+        }
+        self.persist(next)?;
+        Ok(environment)
+    }
+    pub fn launch_for_host(&self, host: &str, agent: &str) -> Result<TurnProvider> {
+        let provider = self.snapshot_for_host(host, agent)?;
+        let environment = self
+            .config
+            .agent_environments
+            .get(host)
+            .and_then(|agents| agents.get(agent))
+            .cloned()
+            .unwrap_or_default();
+        // Keep existing identities byte-for-byte when no overrides are configured.
+        Ok(if environment.0.is_empty() {
+            provider
+                .map(|p| TurnProvider::Snapshot(Box::new(p)))
+                .unwrap_or(TurnProvider::Cli)
+        } else {
+            TurnProvider::Configured {
+                provider: provider.map(Box::new),
+                environment,
+            }
+        })
+    }
     pub fn bind(&mut self, host: &str, agent: &str, id: Option<String>) -> Result<Response> {
         validate_id(host)?;
         validate_id(agent)?;
@@ -238,6 +300,7 @@ impl ProviderStore {
         } else {
             next.host_bindings.remove(host);
         }
+        next.agent_environments.remove(host);
         self.persist(next)?;
         Ok(())
     }
@@ -418,6 +481,19 @@ fn validate_config(config: &Config) -> Result<()> {
         validate_id(agent)?;
         if !ids.contains(id) {
             bail!("关联的 Provider 不存在");
+        }
+    }
+    if config.agent_environments.len() > 256 {
+        bail!("环境变量配置的主机数量超出限制");
+    }
+    for (host, agents) in &config.agent_environments {
+        validate_id(host)?;
+        if agents.len() > 64 {
+            bail!("环境变量配置的 Agent 数量超出限制");
+        }
+        for (agent, environment) in agents {
+            validate_id(agent)?;
+            validate_agent_environment(environment)?;
         }
     }
     Ok(())

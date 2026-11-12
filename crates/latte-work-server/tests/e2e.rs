@@ -1,6 +1,8 @@
 //! Final-binary tests: real daemon, real socket/bridge, deterministic native processes.
 #[path = "support/codex.rs"]
 mod codex_e2e;
+#[path = "support/environment.rs"]
+mod environment_e2e;
 #[path = "support/ssh.rs"]
 mod ssh_e2e;
 #[path = "support/titles.rs"]
@@ -1145,7 +1147,7 @@ async fn delayed_automatic_title_preserves_manual_name_and_unsupported_is_nonfat
         }
         if !unsupported {
             assert!(
-                matches!(ask(&mut client, Request::RenameSession {session_id:id.clone(),title:"My manual name".into()}).await, Response::Session {session} if session.custom_title)
+                matches!(ask(&mut client, Request::RenameSession { provider: None,session_id:id.clone(),title:"My manual name".into()}).await, Response::Session {session} if session.custom_title)
             );
             std::fs::write(project.path().join("title-release"), "").unwrap();
         }
@@ -1306,6 +1308,7 @@ async fn native_session_titles_sync_both_ways_without_sending_or_stopping_turns(
         matches!(ask(&mut client,Request::Session{session_id:id.clone()}).await,Response::Session{session} if session.title=="Native session name" && session.custom_title)
     );
     let rename = |title: &str| Request::RenameSession {
+        provider: None,
         session_id: id.clone(),
         title: title.into(),
     };
@@ -1619,7 +1622,7 @@ async fn session_menu_metadata_is_durable_and_host_scoped() {
     let project = tempfile::tempdir().unwrap();
     let id = session(&mut client, project.path()).await;
     assert!(
-        matches!(ask(&mut client, Request::RenameSession { session_id: id.clone(), title: "Renamed".into() }).await,
+        matches!(ask(&mut client, Request::RenameSession { provider: None, session_id: id.clone(), title: "Renamed".into() }).await,
         Response::Session { session } if session.title == "Renamed" && session.custom_title)
     );
     ask(
@@ -1650,6 +1653,7 @@ async fn session_menu_metadata_is_durable_and_host_scoped() {
         ask(
             &mut other,
             Request::RenameSession {
+                provider: None,
                 session_id: id.clone(),
                 title: "wrong host".into()
             }
@@ -1890,6 +1894,7 @@ async fn provider_1m_selection_survives_reopen_and_rejects_removed_capabilities_
         } = ask(
             &mut client,
             Request::ModelsForProvider {
+                environment: Default::default(),
                 agent: "claude".into(),
                 model: Some("gateway/model[1m]".into()),
                 project_id: Some(saved.project_id),
@@ -3180,7 +3185,30 @@ async fn native_child_transcript_is_cached_without_reopening_an_agent_or_replayi
     let mut client = host.client().await;
     let project = tempfile::tempdir().unwrap();
     let id = session(&mut client, project.path()).await;
-    send(&mut client, &id, "native-child-process", "subagent-process").await;
+    let native_directory = tempfile::tempdir().unwrap();
+    let provider = latte_work_protocol::TurnProvider::Configured {
+        provider: None,
+        environment: latte_work_protocol::AgentEnvironment(std::collections::BTreeMap::from([(
+            "CLAUDE_CONFIG_DIR".into(),
+            native_directory.path().to_string_lossy().into(),
+        )])),
+    };
+    assert!(matches!(
+        ask(
+            &mut client,
+            Request::Send {
+                session_id: id.clone(),
+                request_id: "native-child-process".into(),
+                text: "subagent-process".into(),
+                model: None,
+                effort: None,
+                permission_mode: None,
+                provider: Some(provider.clone()),
+            }
+        )
+        .await,
+        Response::Accepted { .. }
+    ));
     wait(&mut client, &id, Status::Completed).await;
     let Response::Subagents { tasks, .. } = ask(
         &mut client,
@@ -3243,6 +3271,53 @@ async fn native_child_transcript_is_cached_without_reopening_an_agent_or_replayi
         panic!("cached child")
     };
     assert_eq!(events.len(), restored.len());
+    // Discard only the test's history index to exercise fallback after the
+    // process has closed. Its original launch fingerprint still owns the read.
+    let database = rusqlite::Connection::open(host.directory.path().join("state.sqlite")).unwrap();
+    database
+        .execute("DELETE FROM subagent_history WHERE session_id=?1", [&id])
+        .unwrap();
+    database
+        .execute(
+            "DELETE FROM subagent_history_sources WHERE session_id=?1",
+            [&id],
+        )
+        .unwrap();
+    drop(database);
+    let Response::SubagentHistory {
+        events: history,
+        source,
+        incomplete,
+        ..
+    } = ask(
+        &mut reconnected,
+        Request::SubagentHistory {
+            session_id: id.clone(),
+            task_id: task.id.clone(),
+            after: None,
+            source: None,
+            provider: Some(provider),
+        },
+    )
+    .await
+    else {
+        panic!("native fallback")
+    };
+    assert_eq!(source, "native");
+    assert!(!incomplete);
+    assert!(history.iter().any(
+        |e| matches!(&e.event, EventKind::Text { text } if text == "text only in native file")
+    ));
+    assert!(
+        history
+            .iter()
+            .any(|e| matches!(&e.event, EventKind::Tool { id, .. } if id == "child-read"))
+    );
+    assert!(
+        history
+            .iter()
+            .any(|e| matches!(&e.event, EventKind::Text { text } if text == "native file final"))
+    );
     assert!(
         matches!(ask(&mut reconnected, Request::Poll { session_id: id, after: 0.0 }).await, Response::Events { session, events, .. } if session.agent_session_open == Some(false) && events.iter().filter(|e| matches!(e.event, EventKind::User { .. })).count() == 1)
     );
@@ -8220,6 +8295,33 @@ async fn snapshot_legacy_oversized_events_advance_cursor_and_leave_other_session
     // A multibyte payload rejects offsets landing inside a character instead
     // of panicking with the shared database lock held; the other session keeps
     // serving polls afterwards.
+    // Stop the completed producer before fixing the cursor: optional title
+    // responses may otherwise append notices after the Completed snapshot.
+    assert!(matches!(
+        ask(
+            &mut client,
+            Request::CloseAgentSession {
+                session_id: id.clone(),
+                only_if_idle: None,
+            }
+        )
+        .await,
+        Response::Ok
+    ));
+    let Response::Events {
+        events: settled, ..
+    } = ask(
+        &mut client,
+        Request::Poll {
+            session_id: id.clone(),
+            after: 0.0,
+        },
+    )
+    .await
+    else {
+        panic!("settled history")
+    };
+    let cursor = settled.last().unwrap().seq;
     let db = rusqlite::Connection::open(host.directory.path().join("state.sqlite")).unwrap();
     db.execute(
         "INSERT INTO events(session_id,at,data) VALUES (?1,2,?2)",
@@ -8273,7 +8375,6 @@ async fn snapshot_legacy_oversized_events_advance_cursor_and_leave_other_session
             ..
         }
     )));
-    let cursor = events.last().unwrap().seq;
     let Response::Events { events, .. } = ask(
         &mut client,
         Request::Poll {

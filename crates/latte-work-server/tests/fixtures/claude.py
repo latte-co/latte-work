@@ -150,6 +150,99 @@ for line in sys.stdin:
             emit({'type':'result','subtype':'success','is_error':False})
             emit({'type':'system','subtype':'session_state_changed','state':'idle'})
             continue
+        if text=='custom-environment':
+            output=json.dumps({'pid':os.getpid(), **{name:os.environ.get(name) for name in ['HTTP_PROXY','HTTPS_PROXY','NO_PROXY','LATTE_TEST_LITERAL','LATTE_TEST_EMPTY','LATTE_TEST_SECRET']}})
+            emit({'type':'assistant','message':{'content':[{'type':'text','text':output}]}})
+            emit({'type':'result','subtype':'success','is_error':False})
+            continue
+        if text=='custom-environment-native':
+            secret=os.environ['LATTE_TEST_SECRET']
+            metadata({'type':'ai-title','aiTitle':'Native '+secret+' title','sessionId':native_id})
+            split=len(secret)//2
+            child_file=store.with_suffix('')/'subagents/agent-secret-native.jsonl'
+            child_file.parent.mkdir(parents=True,exist_ok=True)
+            def native_record(parts):
+                return {'type':'assistant','sessionId':native_id,'agentId':'secret-native','isSidechain':True,'message':{'content':[{'type':'text','text':part} for part in parts]}}
+            child_file.write_text(json.dumps(native_record(['native before '+secret[:split],secret[split:]+' native after']))+'\n')
+            emit({'type':'assistant','message':{'content':[{'type':'tool_use','id':'native-secret-tool','name':'Agent','input':{'description':'Native secret fixture'}}]}})
+            emit({'type':'system','subtype':'task_started','task_id':'secret-native','task_type':'local_agent','tool_use_id':'native-secret-tool','description':'Native secret fixture'})
+            emit({'type':'system','subtype':'task_notification','task_id':'secret-native','status':'completed','summary':'Complete'})
+            emit({'type':'result','subtype':'success','is_error':False})
+            emit({'type':'system','subtype':'session_state_changed','state':'idle'})
+            continue
+        if text in ('custom-environment-handback','custom-environment-handback-failed'):
+            emit({'type':'assistant','message':{'content':[{'type':'tool_use','id':'handback-agent','name':'Agent','input':{'description':'Handback fixture'}}]}})
+            emit({'type':'system','subtype':'task_started','task_id':'handback-native','task_type':'local_agent','tool_use_id':'handback-agent','description':'Handback fixture'})
+            emit({'type':'assistant','parent_tool_use_id':'handback-agent','message':{'content':[{'type':'tool_use','id':'handback','name':'SubagentHandback','input':{'message':'Final '+os.environ['LATTE_TEST_SECRET']+' report'}}]}})
+            emit({'type':'user','parent_tool_use_id':'handback-agent','message':{'content':[{'type':'tool_result','tool_use_id':'handback','content':'{"success":true}','is_error':text.endswith('-failed')}]}})
+            emit({'type':'system','subtype':'task_notification','task_id':'handback-native','status':'completed','summary':'Delivered'})
+            emit({'type':'result','subtype':'success','is_error':False})
+            continue
+        if text.startswith('custom-environment-complete-'):
+            if 'overlap' in text:
+                assert os.environ['LATTE_TEST_TOKEN']=='xab' and os.environ['LATTE_TEST_SECRET']=='aba'
+                payload='xababa!'
+                split=4
+            else:
+                assert os.environ['LATTE_TEST_SECRET']==chr(92)+'n'+chr(92)
+                payload=r'{"secret":"\n\\u005cn\u005c"}'
+                split=14  # The raw match ends inside a backslash pair.
+            parent='complete-child' if text.endswith('-child') else None
+            if parent:
+                emit({'type':'assistant','message':{'content':[{'type':'tool_use','id':parent,'name':'Agent','input':{'description':'Complete match fixture'}}]}})
+                emit({'type':'system','subtype':'task_started','task_id':'complete-native','task_type':'local_agent','tool_use_id':parent,'description':'Complete match fixture'})
+            for part in ([payload[:split],payload[split:]] if '-split' in text else [payload]):
+                emit({'type':'stream_event','parent_tool_use_id':parent,'event':{'type':'content_block_delta','delta':{'type':'text_delta','text':part}}})
+            if parent:
+                emit({'type':'system','subtype':'task_notification','task_id':'complete-native','status':'completed','summary':'Complete'})
+            emit({'type':'result','subtype':'success','is_error':False})
+            continue
+        if text in ('custom-environment-escape-window','custom-environment-escape-window-child'):
+            assert os.environ['LATTE_TEST_SECRET']==r'\nAB'
+            parent='escape-window-child' if text.endswith('-child') else None
+            if parent:
+                emit({'type':'assistant','message':{'content':[{'type':'tool_use','id':parent,'name':'Agent','input':{'description':'Escape window fixture'}}]}})
+                emit({'type':'system','subtype':'task_started','task_id':'escape-window-native','task_type':'local_agent','tool_use_id':parent,'description':'Escape window fixture'})
+            def window_delta(part):
+                emit({'type':'stream_event','parent_tool_use_id':parent,'event':{'type':'content_block_delta','delta':{'type':'text_delta','text':part}}})
+            window_delta('{"secret":"'+'\\'*18+r'n\u0041')
+            pathlib.Path('environment-window-ready').touch()
+            deadline=time.monotonic()+15
+            while not pathlib.Path('environment-window-continue').exists():
+                if time.monotonic()>deadline: raise RuntimeError('Escape window rendezvous timed out')
+                time.sleep(.01)
+            window_delta('B"}')
+            if parent:
+                emit({'type':'system','subtype':'task_notification','task_id':'escape-window-native','status':'completed','summary':'Complete'})
+            emit({'type':'result','subtype':'success','is_error':False})
+            continue
+        if text=='custom-environment-stream':
+            secret=os.environ['LATTE_TEST_SECRET']
+            split=len(secret)//2
+            def delta(part,parent=None):
+                emit({'type':'stream_event','parent_tool_use_id':parent,'event':{'type':'content_block_delta','delta':{'type':'text_delta','text':part}}})
+            delta('public before '+secret[:split])
+            pathlib.Path('environment-stream-ready').touch()
+            deadline=time.monotonic()+15
+            while not pathlib.Path('environment-stream-continue').exists():
+                if time.monotonic()>deadline: raise RuntimeError('ENV fixture rendezvous timed out')
+                time.sleep(.01)
+            delta(secret[split:]+' public after\n')
+            encoded=json.dumps({'secret':secret})
+            # Go's standard JSON encoder uses these HTML-safe Unicode escapes.
+            encoded=encoded.replace('&',r'\u0026').replace('<',r'\u003c').replace('>',r'\u003e')
+            delta(encoded+'\n')
+            for part in encoded: delta(part)
+            delta('\n')
+            emit({'type':'assistant','message':{'content':[{'type':'tool_use','id':'text','name':'text','input':{'body':'text'}}]}})
+            emit({'type':'user','message':{'content':[{'type':'tool_result','tool_use_id':'text','content':[{'type':'text','text':secret}],'is_error':False}]}})
+            emit({'type':'assistant','message':{'content':[{'type':'tool_use','id':'secret-child','name':'Agent','input':{'description':'Secret fixture'}}]}})
+            emit({'type':'system','subtype':'task_started','task_id':'secret-child-native','task_type':'local_agent','tool_use_id':'secret-child','description':'Secret fixture'})
+            delta('child before '+secret[:split],'secret-child')
+            delta(secret[split:]+' child after','secret-child')
+            emit({'type':'system','subtype':'task_notification','task_id':'secret-child-native','status':'completed','summary':'Complete'})
+            emit({'type':'result','subtype':'success','is_error':False})
+            continue
         if text=='environment':
             output=subprocess.check_output(['latte-env-fixture'],text=True)
             emit({'type':'assistant','message':{'content':[{'type':'text','text':output}]}})

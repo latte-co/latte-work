@@ -170,6 +170,7 @@ pub(crate) async fn generate(
         .context("自动命名繁忙，保留原名称")?;
     let mut command = crate::agent_environment::command(binary);
     command.args(["app-server", "--stdio"]).current_dir(cwd);
+    command.envs(&config.environment.0);
     let provider_id = format!("latte-title-{}", uuid::Uuid::new_v4());
     if let Some(provider) = &config.provider {
         super::codex::configure_provider(&mut command, provider, &provider_id)?;

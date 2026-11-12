@@ -4,6 +4,27 @@ use latte_work_config::ProviderStore;
 use latte_work_protocol::{Request, Response};
 use tauri::{Manager, State};
 
+#[tauri::command]
+pub async fn agent_environments(
+    app: tauri::AppHandle,
+    host_id: String,
+) -> Result<std::collections::BTreeMap<String, latte_work_protocol::AgentEnvironment>, String> {
+    with_store(app, move |store| store.environments_for_host(&host_id)).await
+}
+
+#[tauri::command]
+pub async fn save_agent_environment(
+    app: tauri::AppHandle,
+    host_id: String,
+    agent: String,
+    environment: latte_work_protocol::AgentEnvironment,
+) -> Result<latte_work_protocol::AgentEnvironment, String> {
+    with_store(app, move |store| {
+        store.save_environment(&host_id, &agent, environment)
+    })
+    .await
+}
+
 pub async fn with_store<T: Send + 'static>(
     app: tauri::AppHandle,
     operation: impl FnOnce(&mut ProviderStore) -> anyhow::Result<T> + Send + 'static,

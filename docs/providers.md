@@ -12,6 +12,31 @@ OpenAI Responses，直接使用原生协议。
 不会自动把 OpenAI 转换成 Anthropic。前端过滤选项，server 与 Adapter 同时校验。
 未关联 Provider 时沿用 Agent CLI 自己的配置。
 
+## 自定义 Agent 环境变量
+
+在「设置 → 连接与 Agent」选择运行主机，在对应 Agent 卡片的「自定义环境变量（ENV）」
+中逐行填写 `NAME=value`，点击「保存环境变量」。例如：
+
+```text
+HTTPS_PROXY=http://127.0.0.1:7890
+HTTP_PROXY=http://127.0.0.1:7890
+NO_PROXY=localhost,127.0.0.1
+```
+
+配置按主机和 Agent 隔离，不要求关联 Provider。SSH 主机上的 `127.0.0.1` 指远端主机，
+代理地址必须能从执行主机访问。值按原文注入，无需 `export`、引号或变量展开；
+`HTTP_PROXY=` 注入空值，删除该行则恢复继承值。清空并保存可移除该 Agent 的全部覆盖。
+
+保存不停止已有任务。新实例使用最新配置；已有实例在下次消息需要更换配置时，
+沿用原有安全重建规则，后台任务尚未结束时明确报错。模型目录读取也使用最新 ENV。
+覆盖先于 App Provider、显式思考强度和适配器必需变量应用，后者保持优先。
+
+环境变量与 Provider 配置保存在同一个 App 私有文件，不写入远端配置或原生 CLI 设置。
+此编辑器中的值在编辑时可见，不写入 WebView 本地存储；配置文件未加密。
+最多 64 项，每项值最多 8 KiB、总量最多 32 KiB。变量名只能包含字母、数字和下划线，
+不能以数字开头；主机身份、工作目录及 `LATTE_WORK_*` 控制变量不能覆盖。
+执行主机需支持 `custom_agent_environment`；旧 Server 会提示升级后重新连接。
+
 ## 使用
 
 1. 在「设置 → Provider」添加模型服务。
@@ -48,7 +73,7 @@ App 关联。未关联的环境显式沿用 CLI，忽略目标 Server 中的旧 
 
 - `latte-work-config`：App Provider 定义、每主机关联、只读迁移、文件锁与原子持久化；无 Agent 注册表或 Server 依赖。
 - 桌面 `providers.rs`：App 配置命令、目标主机能力校验；凭据不返回 WebView。
-- `latte-work-client::request_with_app_provider`：只通过目标连接查询会话、模型及发送任务。
+- `latte-work-client::request_with_app_agent_config`：只通过目标连接查询会话、模型及发送任务，原子读取 Provider 和 ENV 快照。
 - Server `providers.rs`：执行快照校验、临时启动配置及旧协议管理接口的兼容实现。
 - `agents/mod.rs` / `agents/claude.rs`：Agent 能力、原生配置读取及 CLI 参数映射。
 - `ProviderSettings` / `AgentSettings`：App 配置和每主机选择界面。

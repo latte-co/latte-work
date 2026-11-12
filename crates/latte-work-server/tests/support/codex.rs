@@ -16,6 +16,7 @@ async fn codex_provider_boundary_rejects_unsupported_protocols_and_redacts_crede
             ask(
                 &mut client,
                 Request::ModelsForProvider {
+                    environment: Default::default(),
                     agent: "codex".into(),
                     model: None,
                     project_id: None,

@@ -121,6 +121,7 @@ impl Store {
         CREATE TABLE IF NOT EXISTS hidden_projects(project_id TEXT PRIMARY KEY REFERENCES projects(id));
         CREATE TABLE IF NOT EXISTS sessions(id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id), data TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS native_title_secrets(session_id TEXT NOT NULL REFERENCES sessions(id), native_id TEXT NOT NULL, secret_hash BLOB NOT NULL, secret_bytes INTEGER NOT NULL, PRIMARY KEY(session_id,native_id,secret_hash));
+        CREATE TABLE IF NOT EXISTS native_session_contexts(session_id TEXT NOT NULL REFERENCES sessions(id), native_id TEXT NOT NULL, fingerprint TEXT, PRIMARY KEY(session_id,native_id));
         CREATE TABLE IF NOT EXISTS events(seq INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT NOT NULL REFERENCES sessions(id), at REAL NOT NULL, data TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS subagents(session_id TEXT NOT NULL REFERENCES sessions(id), id TEXT NOT NULL, native_id TEXT NOT NULL, tool_use_id TEXT, active INTEGER NOT NULL, at REAL NOT NULL, data TEXT NOT NULL, PRIMARY KEY(session_id,id));
         CREATE INDEX IF NOT EXISTS subagents_session ON subagents(session_id,active,at);
@@ -161,6 +162,7 @@ impl Store {
         if !columns.iter().any(|name| name == "permission_mode") {
             db.execute("ALTER TABLE requests ADD COLUMN permission_mode TEXT", [])?;
         }
+        db.execute_batch("CREATE INDEX IF NOT EXISTS requests_session_provider ON requests(session_id,provider_fingerprint);")?;
         crate::message_queue::initialize(&db)?;
         let snapshot_dir = crate::snapshot_storage::prepare(&path.with_extension("snapshots"))?;
         crate::snapshot_migration::migrate(&db, &snapshot_dir)?;
@@ -627,19 +629,49 @@ impl Store {
         tool_use_id: &str,
         event: EventKind,
     ) -> Result<()> {
+        self.store_subagent_event(session_id, tool_use_id, event, |event| event)
+    }
+    pub fn redacted_subagent_event(
+        &self,
+        session_id: &str,
+        tool_use_id: &str,
+        event: EventKind,
+        redactor: &crate::redaction::Redactor,
+    ) -> Result<()> {
+        self.store_subagent_event(session_id, tool_use_id, event, |event| {
+            redactor.event(event)
+        })
+    }
+    fn store_subagent_event(
+        &self,
+        session_id: &str,
+        tool_use_id: &str,
+        event: EventKind,
+        redact: impl FnOnce(EventKind) -> EventKind,
+    ) -> Result<()> {
         let tx = self.db.unchecked_transaction()?;
         let task_id: String = tx.query_row("SELECT id FROM subagents WHERE session_id=?1 AND tool_use_id=?2 ORDER BY at DESC LIMIT 1", params![session_id, tool_use_id], |row| row.get(0)).optional()?.context("子智能体输出无法关联到原生任务")?;
+        // Interpret native delivery receipts before redacting their prose. The
+        // saved tool input already belongs to the redacted public history.
+        let report = if let EventKind::ToolResult { id, .. } = &event {
+            let tool:Option<String>=tx.query_row("SELECT data FROM subagent_history WHERE session_id=?1 AND task_id=?2 AND source='stream' AND json_extract(data,'$.kind')='tool' AND json_extract(data,'$.id')=?3 ORDER BY seq DESC LIMIT 1",params![session_id,task_id,id],|r|r.get(0)).optional()?;
+            tool.map(|tool| -> Result<_> {
+                Ok(crate::agents::confirmed_child_report(
+                    &serde_json::from_str(&tool)?,
+                    &event,
+                ))
+            })
+            .transpose()?
+            .flatten()
+        } else {
+            None
+        };
+        let event = redact(event);
         // Keep the full redacted stream separately from the legacy bounded snapshot.
         let seq: f64 = tx.query_row("SELECT COALESCE(MAX(seq),0)+1 FROM subagent_history WHERE session_id=?1 AND task_id=?2 AND source='stream'",params![session_id,task_id],|row| row.get(0))?;
         tx.execute("INSERT INTO subagent_history(session_id,task_id,source,seq,at,data) VALUES (?1,?2,'stream',?3,?4,?5)",params![session_id,task_id,seq,now(),serde_json::to_string(&event)?])?;
-        if let EventKind::ToolResult { id, .. } = &event {
-            let tool:Option<String>=tx.query_row("SELECT data FROM subagent_history WHERE session_id=?1 AND task_id=?2 AND source='stream' AND json_extract(data,'$.kind')='tool' AND json_extract(data,'$.id')=?3 ORDER BY seq DESC LIMIT 1",params![session_id,task_id,id],|r|r.get(0)).optional()?;
-            if let Some(tool) = tool
-                && let Some(text) =
-                    crate::agents::confirmed_child_report(&serde_json::from_str(&tool)?, &event)
-            {
-                tx.execute("INSERT INTO subagent_history(session_id,task_id,source,seq,at,data) VALUES (?1,?2,'stream',?3,?4,?5)",params![session_id,task_id,seq+1.0,now(),serde_json::to_string(&EventKind::Text{text})?])?;
-            }
+        if let Some(text) = &report {
+            tx.execute("INSERT INTO subagent_history(session_id,task_id,source,seq,at,data) VALUES (?1,?2,'stream',?3,?4,?5)",params![session_id,task_id,seq+1.0,now(),serde_json::to_string(&EventKind::Text{text:text.clone()})?])?;
         }
         let (mut event, mut truncated) = bounded_subagent_event(event)?;
         if let EventKind::Text { text } = &event {
@@ -662,6 +694,10 @@ impl Store {
             }
         }
         tx.execute("INSERT INTO subagent_events(session_id,task_id,at,data,truncated) VALUES (?1,?2,?3,?4,?5)", params![session_id, task_id, now(), serde_json::to_string(&event)?, truncated])?;
+        if let Some(text) = report {
+            let (event, truncated) = bounded_subagent_event(EventKind::Text { text })?;
+            tx.execute("INSERT INTO subagent_events(session_id,task_id,at,data,truncated) VALUES (?1,?2,?3,?4,?5)", params![session_id,task_id,now(),serde_json::to_string(&event)?,truncated])?;
+        }
         tx.commit()?;
         Ok(())
     }
@@ -694,6 +730,56 @@ impl Store {
             return Ok(None);
         };
         self.db.query_row("SELECT r.provider_fingerprint FROM requests r JOIN events e ON e.session_id=r.session_id AND json_extract(e.data,'$.request_id')=r.id WHERE r.session_id=?1 AND json_extract(e.data,'$.kind')='user' AND e.at<=?2 ORDER BY e.seq DESC LIMIT 1",params![session_id,started],|row|row.get(0)).optional().map_err(Into::into)
+    }
+    /// Native title records have no per-turn owner. Only read them when every
+    /// accepted turn belongs to the available context; otherwise retain cache.
+    pub fn native_title_context_matches(
+        &self,
+        session_id: &str,
+        fingerprint: Option<&str>,
+        allow_legacy_cli: bool,
+    ) -> Result<bool> {
+        self.db.query_row(
+            "SELECT NOT EXISTS(SELECT 1 FROM requests WHERE session_id=?1 AND provider_fingerprint IS NOT ?2 AND NOT (?3 AND provider_fingerprint IS NULL))",
+            params![session_id, fingerprint, allow_legacy_cli],
+            |row| row.get(0),
+        ).map_err(Into::into)
+    }
+    /// Preserve only the digest of the last verified native launch, never ENV.
+    pub fn remember_native_context(
+        &self,
+        session_id: &str,
+        native_id: &str,
+        fingerprint: Option<&str>,
+    ) -> Result<()> {
+        self.db.execute("INSERT INTO native_session_contexts(session_id,native_id,fingerprint) VALUES (?1,?2,?3) ON CONFLICT(session_id,native_id) DO UPDATE SET fingerprint=excluded.fingerprint", params![session_id, native_id, fingerprint])?;
+        Ok(())
+    }
+    pub fn native_rename_context_matches(
+        &self,
+        session_id: &str,
+        native_id: &str,
+        fingerprint: Option<&str>,
+    ) -> Result<bool> {
+        let saved: Option<Option<String>> = self.db.query_row("SELECT fingerprint FROM native_session_contexts WHERE session_id=?1 AND native_id=?2", params![session_id, native_id], |row| row.get(0)).optional()?;
+        if let Some(saved) = saved {
+            return Ok(saved.as_deref() == fingerprint);
+        }
+        // Older databases can prove the context only through accepted turns.
+        // An empty ledger cannot establish where an open-only session lived.
+        let exists: bool = self.db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM requests WHERE session_id=?1)",
+            [session_id],
+            |row| row.get(0),
+        )?;
+        let cli =
+            crate::providers::turn_fingerprint(Some(&latte_work_protocol::TurnProvider::Cli))?;
+        Ok(exists
+            && self.native_title_context_matches(
+                session_id,
+                fingerprint,
+                fingerprint == cli.as_deref(),
+            )?)
     }
     pub fn child_history_cursor(
         &self,
@@ -1801,6 +1887,221 @@ fn index_source(
 }
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn native_rename_context_survives_restart_and_rejects_unknown_or_changed_launches() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("state.sqlite");
+        let store = super::Store::open(&path).unwrap();
+        let project = store.add_project(directory.path()).unwrap();
+        let session = store.create_session(project.id, "claude".into()).unwrap();
+        assert!(
+            !store
+                .native_rename_context_matches(&session.id, "native", Some("B"))
+                .unwrap()
+        );
+        store
+            .remember_native_context(&session.id, "native", Some("B"))
+            .unwrap();
+        drop(store);
+        let store = super::Store::open(&path).unwrap();
+        assert!(
+            store
+                .native_rename_context_matches(&session.id, "native", Some("B"))
+                .unwrap()
+        );
+        assert!(
+            !store
+                .native_rename_context_matches(&session.id, "native", Some("A"))
+                .unwrap()
+        );
+        assert!(
+            !store
+                .native_rename_context_matches(&session.id, "other", Some("B"))
+                .unwrap()
+        );
+        store
+            .remember_native_context(&session.id, "native", Some("C"))
+            .unwrap();
+        assert!(
+            !store
+                .native_rename_context_matches(&session.id, "native", Some("B"))
+                .unwrap()
+        );
+        assert!(
+            store
+                .native_rename_context_matches(&session.id, "native", Some("C"))
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn legacy_handback_history_pages_keep_one_masked_event_per_identity() {
+        use super::*;
+        let directory = tempfile::tempdir().unwrap();
+        let store = Store::open(&directory.path().join("state.sqlite")).unwrap();
+        let project = store.add_project(directory.path()).unwrap();
+        let session = store.create_session(project.id, "claude".into()).unwrap();
+        store
+            .event(
+                &session.id,
+                EventKind::Subagent {
+                    update: SubagentUpdate {
+                        id: "child".into(),
+                        tool_use_id: Some("parent-tool".into()),
+                        agent_type: None,
+                        title: None,
+                        status: Some(SubagentStatus::Completed),
+                        summary: None,
+                        last_tool: None,
+                    },
+                },
+            )
+            .unwrap();
+        let event = |seq, event| Event {
+            seq,
+            session_id: session.id.clone(),
+            at: 0.0,
+            event,
+            content_size: None,
+        };
+        let prefix: Vec<_> = (0..125)
+            .map(|i| {
+                event(
+                    i as f64,
+                    EventKind::Notice {
+                        text: "Earlier activity".into(),
+                    },
+                )
+            })
+            .chain([
+                event(
+                    125.0,
+                    EventKind::Tool {
+                        id: "handback".into(),
+                        name: "SubagentHandback".into(),
+                        input: serde_json::json!({"message":"All tests pass"}),
+                    },
+                ),
+                event(
+                    126.0,
+                    EventKind::ToolResult {
+                        id: "handback".into(),
+                        content: serde_json::json!("{\"success\":true}"),
+                        is_error: false,
+                    },
+                ),
+            ])
+            .collect();
+        for variant in 0..3 {
+            let mut cached = prefix.clone();
+            if variant == 2 {
+                cached.push(event(
+                    126.0 + 1.0 / 64.0,
+                    EventKind::Text {
+                        text: "All tests pass".into(),
+                    },
+                ));
+            }
+            if variant != 0 {
+                cached.push(event(
+                    126.0 + 1.0 / 64.0,
+                    EventKind::Text {
+                        text: "All tests pas[redacted]".into(),
+                    },
+                ));
+            }
+            cached.push(event(
+                127.0,
+                EventKind::Notice {
+                    text: "Later activity".into(),
+                },
+            ));
+            let snapshot = (cached, false);
+            let normalized =
+                crate::agents::normalize_child_transcript("claude", snapshot.clone()).unwrap();
+            assert!(
+                normalized
+                    .0
+                    .windows(2)
+                    .all(|pair| pair[0].seq < pair[1].seq)
+            );
+            store
+                .cache_subagent_transcript(&session.id, "child", &snapshot)
+                .unwrap();
+            let (mut after, mut replay) = (None, Vec::new());
+            loop {
+                let latte_work_protocol::Response::SubagentHistory {
+                    events,
+                    after: cursor,
+                    has_more,
+                    source,
+                    ..
+                } = store
+                    .subagent_history(&session.id, "child", after, Some("legacy"), false)
+                    .unwrap()
+                else {
+                    panic!("history")
+                };
+                assert_eq!(source, "legacy");
+                if after.is_none() {
+                    assert_eq!(events.len(), 128);
+                    assert!(
+                        matches!(&events[127].event, EventKind::Text { text } if text == if variant == 0 { "All tests pass" } else { "All tests pas[redacted]" })
+                    );
+                }
+                replay.extend(events);
+                after = cursor;
+                if !has_more {
+                    break;
+                }
+            }
+            assert_eq!(
+                serde_json::to_value(&replay).unwrap(),
+                serde_json::to_value(&normalized.0).unwrap()
+            );
+            assert_eq!(
+                serde_json::to_value(
+                    crate::agents::normalize_child_transcript("claude", normalized.clone())
+                        .unwrap()
+                )
+                .unwrap(),
+                serde_json::to_value(normalized).unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn native_titles_require_one_known_context_across_the_session() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = super::Store::open(&directory.path().join("state.sqlite")).unwrap();
+        let project = store.add_project(directory.path()).unwrap();
+        let session = store.create_session(project.id, "claude".into()).unwrap();
+        let cli = crate::providers::turn_fingerprint(Some(&latte_work_protocol::TurnProvider::Cli))
+            .unwrap()
+            .unwrap();
+        let matches = |fingerprint: &str, legacy| {
+            store
+                .native_title_context_matches(&session.id, Some(fingerprint), legacy)
+                .unwrap()
+        };
+        assert!(matches(&cli, true));
+        store.db.execute("INSERT INTO requests(id,session_id,text,provider_fingerprint) VALUES ('legacy',?1,'input',NULL)",[&session.id]).unwrap();
+        assert!(matches(&cli, true));
+        assert!(!matches("configured", false));
+        store
+            .db
+            .execute(
+                "UPDATE requests SET provider_fingerprint='configured' WHERE session_id=?1",
+                [&session.id],
+            )
+            .unwrap();
+        assert!(matches("configured", false));
+        assert!(!matches(&cli, true));
+        store.db.execute("INSERT INTO requests(id,session_id,text,provider_fingerprint) VALUES ('changed',?1,'input','other')",[&session.id]).unwrap();
+        assert!(!matches("configured", false));
+        assert!(!matches("other", false));
+        assert!(!matches(&cli, true));
+    }
     #[test]
     fn concurrent_preview_grants_cannot_exceed_the_limit() {
         use super::*;

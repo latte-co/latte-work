@@ -593,6 +593,7 @@ async fn traex_discovery_open_stream_reconnect_resume_and_queue_use_the_selected
     } = ask(
         &mut client,
         Request::ModelsForProvider {
+            environment: Default::default(),
             agent: "traex".into(),
             model: Some("seed-test".into()),
             project_id: None,
@@ -1217,6 +1218,7 @@ async fn traex_provider_snapshots_drive_catalog_resume_redaction_and_cli_restora
         } = ask(
             &mut client,
             Request::ModelsForProvider {
+                environment: Default::default(),
                 agent: "traex".into(),
                 model: None,
                 project_id: None,

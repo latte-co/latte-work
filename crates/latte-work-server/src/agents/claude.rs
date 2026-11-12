@@ -462,6 +462,7 @@ impl AgentAdapter for Claude {
                 .or_else(|| config.provider.as_ref().map(|p| p.metadata.model.clone())),
         );
         let mut command = crate::agent_environment::command(binary);
+        command.envs(&config.environment.0);
         let instructions = crate::skills::platform_instructions(&config.settings_dir);
         if !instructions.is_empty() {
             command.arg("--append-system-prompt").arg(instructions);
@@ -1644,6 +1645,7 @@ pub(super) fn parse_child_history(
 ) -> Result<super::ChildHistoryPage> {
     let mut cursor = raw.cursor;
     let mut events = Vec::new();
+    let redactor = config.redactor();
     let at = crate::store::now();
     for line in raw.bytes.split_inclusive(|b| *b == b'\n') {
         let base = cursor.offset;
@@ -1691,7 +1693,7 @@ pub(super) fn parse_child_history(
             let Some(event) = event else {
                 continue;
             };
-            let event = config.redact_event(event)?;
+            let event = redactor.event_at_boundary(event);
             let mut report = None;
             match &event {
                 EventKind::Tool { id, name, input } if name == "SubagentHandback" => {
@@ -1751,6 +1753,7 @@ pub(super) fn parse_child_transcript(
         (VecDeque::new(), 0usize, raw.start, raw.truncated);
     let at = crate::store::now();
     let mut handbacks = HashMap::<String, String>::new();
+    let redactor = config.redactor();
     for line in raw.bytes.split_inclusive(|b| *b == b'\n') {
         let base = offset;
         offset += line.len() as u64;
@@ -1824,7 +1827,7 @@ pub(super) fn parse_child_transcript(
                 continue;
             };
             let (event, partial) =
-                crate::store::bounded_subagent_event(config.redact_event(event)?)?;
+                crate::store::bounded_subagent_event(redactor.event_at_boundary(event))?;
             truncated |= partial;
             let size = serde_json::to_vec(&event)?.len() + 128;
             events.push_back((
@@ -1839,8 +1842,7 @@ pub(super) fn parse_child_transcript(
             ));
             bytes += size;
             if let Some(report) = report {
-                let EventKind::Text { text } =
-                    config.redact_event(EventKind::Text { text: report })?
+                let EventKind::Text { text } = redactor.event(EventKind::Text { text: report })
                 else {
                     unreachable!("redaction preserves the event kind")
                 };
@@ -1904,6 +1906,18 @@ pub(super) fn normalize_child_transcript(
 ) -> Result<super::ChildTranscript> {
     use std::collections::VecDeque;
     let (source, mut truncated) = snapshot;
+    // A previously normalized cache may already contain the old raw/masked
+    // pair at one identity. Keep the later public event before pagination.
+    let last: HashMap<_, _> = source
+        .iter()
+        .enumerate()
+        .map(|(i, event)| (event.seq.to_bits(), i))
+        .collect();
+    let source: Vec<_> = source
+        .into_iter()
+        .enumerate()
+        .filter_map(|(i, event)| (last[&event.seq.to_bits()] == i).then_some(event))
+        .collect();
     let mut pending = HashMap::<&str, &str>::new();
     let (mut events, mut bytes) = (VecDeque::new(), 0usize);
     for (index, event) in source.iter().enumerate() {
@@ -1931,9 +1945,14 @@ pub(super) fn normalize_child_transcript(
         if let Some(text) = report {
             let (reports, partial) =
                 report_events(text.into(), event.seq, &event.session_id, event.at);
-            // Any following prose may be a delivery receipt, not the report.
-            // Only an exact existing report sequence makes promotion redundant.
-            let already_present = source.get(index + 1..index + 1 + reports.len())
+            // Promoted report identities remain authoritative even when an
+            // older boundary redactor masked an unfinished secret prefix.
+            let identified = reports.first().is_some_and(|first| {
+                source.iter().any(|actual| {
+                    actual.seq == first.seq && matches!(actual.event, EventKind::Text { .. })
+                })
+            });
+            let already_present = identified || source.get(index + 1..index + 1 + reports.len())
                 .is_some_and(|following| following.iter().zip(&reports).all(|(actual, expected)|
                     matches!((&actual.event, &expected.event), (EventKind::Text { text: a }, EventKind::Text { text: b }) if a == b)
                 ));
@@ -2064,6 +2083,107 @@ fn parse_commands(value: &Value) -> Result<Vec<latte_work_protocol::AgentSlashCo
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn native_child_text_boundaries_never_persist_reconstructable_secrets() {
+        use super::*;
+        let directory = tempfile::tempdir().unwrap();
+        let providers = crate::providers::ProviderStore::open(directory.path()).unwrap();
+        let text = |events: &[latte_work_protocol::Event]| -> String {
+            events
+                .iter()
+                .filter_map(|e| match &e.event {
+                    EventKind::Text { text } => Some(text.as_str()),
+                    _ => None,
+                })
+                .collect()
+        };
+        let record = |parts: &[&str]| {
+            let content: Vec<_> = parts
+                .iter()
+                .map(|text| json!({"type":"text","text":text}))
+                .collect();
+            format!("{}\n", json!({"type":"assistant","sessionId":"parent","agentId":"child","isSidechain":true,"message":{"content":content}})).into_bytes()
+        };
+        for secret in ["fixture-environment-secret", "abc\"def", "中文🔑"] {
+            let config = providers
+                .turn_config(
+                    "claude",
+                    None,
+                    Some(latte_work_protocol::TurnProvider::Configured {
+                        provider: None,
+                        environment: latte_work_protocol::AgentEnvironment(
+                            std::collections::BTreeMap::from([("SECRET".into(), secret.into())]),
+                        ),
+                    }),
+                )
+                .unwrap();
+            let encoded = serde_json::to_string(secret).unwrap();
+            for value in [secret, &encoded[1..encoded.len() - 1]] {
+                for split in (0..=value.len()).filter(|i| value.is_char_boundary(*i)) {
+                    let parts = [&value[..split], &value[split..]];
+                    let bytes = record(&parts);
+                    let page = parse_child_history(
+                        super::super::claude_sessions::ChildPageBytes {
+                            bytes: bytes.clone(),
+                            cursor: Default::default(),
+                            has_more: false,
+                        },
+                        "parent",
+                        "child",
+                        "public",
+                        &config,
+                    )
+                    .unwrap();
+                    assert!(!text(&page.events).contains(value));
+                    assert!(text(&page.events).contains("[redacted]"));
+                    let (events, _) = parse_child_transcript(
+                        super::super::claude_sessions::ChildBytes {
+                            bytes,
+                            start: 0,
+                            truncated: false,
+                        },
+                        "parent",
+                        "child",
+                        "public",
+                        &config,
+                    )
+                    .unwrap();
+                    assert!(!text(&events).contains(value));
+                    assert!(text(&events).contains("[redacted]"));
+                    let first = parse_child_history(
+                        super::super::claude_sessions::ChildPageBytes {
+                            bytes: record(&parts[..1]),
+                            cursor: Default::default(),
+                            has_more: true,
+                        },
+                        "parent",
+                        "child",
+                        "public",
+                        &config,
+                    )
+                    .unwrap();
+                    let saved_cursor = serde_json::to_string(&first.cursor).unwrap();
+                    assert!(!saved_cursor.contains("fixture-environment-"));
+                    let next = parse_child_history(
+                        super::super::claude_sessions::ChildPageBytes {
+                            bytes: record(&parts[1..]),
+                            cursor: serde_json::from_str(&saved_cursor).unwrap(),
+                            has_more: false,
+                        },
+                        "parent",
+                        "child",
+                        "public",
+                        &config,
+                    )
+                    .unwrap();
+                    assert!(
+                        !format!("{}{}", text(&first.events), text(&next.events)).contains(value)
+                    );
+                }
+            }
+        }
+    }
+
     #[test]
     fn failed_title_context_is_discarded_before_a_different_successful_request() {
         use super::*;
@@ -2207,6 +2327,7 @@ mod tests {
         use super::*;
         let directory = tempfile::tempdir().unwrap();
         let config = LaunchConfig {
+            environment: Default::default(),
             traex_model: None,
             provider: None,
             model: None,
@@ -2593,6 +2714,7 @@ mod tests {
     fn bounded_child_window_keeps_a_complete_first_record_at_a_nonzero_offset() {
         use super::*;
         let config = LaunchConfig {
+            environment: Default::default(),
             traex_model: None,
             provider: None,
             settings_dir: PathBuf::from("/tmp"),
@@ -2627,6 +2749,7 @@ mod tests {
     fn complete_child_history_preserves_long_reports_and_cross_page_confirmation() {
         use super::*;
         let config = LaunchConfig {
+            environment: Default::default(),
             traex_model: None,
             provider: None,
             settings_dir: PathBuf::from("/tmp"),
@@ -2670,6 +2793,7 @@ mod tests {
         use super::*;
         let secret = "fixture-provider-secret";
         let config = LaunchConfig {
+            environment: Default::default(),
             traex_model: None,
             provider: Some(crate::providers::ResolvedProvider { metadata: serde_json::from_value(json!({"id":"p","name":"fixture","protocol":"anthropic_messages","base_url":"http://127.0.0.1","model":"m","models":[],"model_labels":{},"auth":"bearer","has_credential":true,"revision":"1"})).unwrap(), credential: secret.into() }),
             settings_dir: PathBuf::from("/tmp"), model: None, effort: None, permission_mode: None,
@@ -2713,9 +2837,56 @@ mod tests {
     }
 
     #[test]
+    fn complete_handback_report_uses_the_same_redaction_as_its_tool_message() {
+        use super::*;
+        let directory = tempfile::tempdir().unwrap();
+        let config = crate::providers::ProviderStore::open(directory.path())
+            .unwrap()
+            .turn_config(
+                "claude",
+                None,
+                Some(latte_work_protocol::TurnProvider::Configured {
+                    provider: None,
+                    environment: latte_work_protocol::AgentEnvironment(
+                        std::collections::BTreeMap::from([("TOKEN".into(), "s3cr3t".into())]),
+                    ),
+                }),
+            )
+            .unwrap();
+        let raw = [
+            json!({"type":"assistant","sessionId":"parent","agentId":"child","isSidechain":true,"message":{"content":[{"type":"tool_use","id":"report","name":"SubagentHandback","input":{"message":"All tests pass"}}]}}),
+            json!({"type":"user","sessionId":"parent","agentId":"child","isSidechain":true,"message":{"content":[{"type":"tool_result","tool_use_id":"report","content":"{\"success\":true}","is_error":false}]}}),
+        ].iter().map(|v| format!("{v}\n")).collect::<String>();
+        let snapshot = parse_child_transcript(
+            super::super::claude_sessions::ChildBytes {
+                bytes: raw.into_bytes(),
+                start: 0,
+                truncated: false,
+            },
+            "parent",
+            "child",
+            "public",
+            &config,
+        )
+        .unwrap();
+        assert_eq!(snapshot.0.len(), 3);
+        assert!(
+            matches!(&snapshot.0[0].event, EventKind::Tool { input, .. } if input["message"] == "All tests pass")
+        );
+        assert!(
+            matches!(&snapshot.0[2].event, EventKind::Text { text } if text == "All tests pass")
+        );
+        assert_eq!(
+            serde_json::to_value(normalize_child_transcript(snapshot.clone()).unwrap()).unwrap(),
+            serde_json::to_value(snapshot).unwrap()
+        );
+    }
+
+    #[test]
     fn native_handback_promotes_only_confirmed_report_before_tool_input_clipping() {
         use super::*;
         let config = LaunchConfig {
+            environment: Default::default(),
             traex_model: None,
             provider: None,
             settings_dir: PathBuf::from("/tmp"),
@@ -3069,6 +3240,7 @@ mod tests {
     fn usage_matches_explicit_launch_alias_without_using_child_capacity() {
         let dir = tempfile::tempdir().unwrap();
         let config = crate::providers::LaunchConfig {
+            environment: Default::default(),
             traex_model: None,
             provider: None,
             model: Some("relay/seed-0812".into()),
@@ -3218,6 +3390,7 @@ mod tests {
     fn permission_launch_omits_inheritance_and_passes_explicit_modes_on_resume() {
         let dir = tempfile::tempdir().unwrap();
         let mut config = crate::providers::LaunchConfig {
+            environment: Default::default(),
             traex_model: None,
             provider: None,
             model: None,
@@ -3434,6 +3607,7 @@ mod tests {
     fn platform_skills_are_only_child_arguments_and_respect_host_preferences() {
         let dir = tempfile::tempdir().unwrap();
         let config = LaunchConfig {
+            environment: Default::default(),
             settings_dir: dir.path().into(),
             traex_model: None,
             provider: None,
@@ -3467,6 +3641,7 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().unwrap();
         let mut config = LaunchConfig {
+            environment: Default::default(),
             traex_model: None,
             provider: None,
             model: None,
@@ -3566,6 +3741,7 @@ mod tests {
                 (Some("small".into()), None, None),
             ] {
                 let config = LaunchConfig {
+                    environment: Default::default(),
                     traex_model: None,
                     settings_dir: directory.path().into(),
                     model,

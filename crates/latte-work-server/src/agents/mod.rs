@@ -84,7 +84,14 @@ pub async fn child_history(
         std::time::Duration::from_secs(3),
         tokio::task::spawn_blocking(move || {
             let _permit = permit;
-            let Some(raw) = claude_sessions::read_child_page(&cwd, &parent, &child, cursor)? else {
+            let Some(raw) = claude_sessions::read_child_page(
+                &cwd,
+                &parent,
+                &child,
+                &config.environment,
+                cursor,
+            )?
+            else {
                 return Ok(None);
             };
             claude::parse_child_history(raw, &parent, &child, &session_id, &config).map(Some)
@@ -125,7 +132,9 @@ pub async fn child_transcript(
         std::time::Duration::from_secs(3),
         tokio::task::spawn_blocking(move || {
             let _permit = permit;
-            let Some(bytes) = claude_sessions::read_child(&cwd, &parent, &child)? else {
+            let Some(bytes) =
+                claude_sessions::read_child(&cwd, &parent, &child, &config.environment)?
+            else {
                 return Ok(None);
             };
             claude::parse_child_transcript(bytes, &parent, &child, &session_id, &config).map(Some)
@@ -172,10 +181,11 @@ pub async fn native_models(
     binary: &str,
     path: Option<&str>,
     selected: Option<&str>,
+    environment: &latte_work_protocol::AgentEnvironment,
 ) -> Result<latte_work_protocol::Response> {
     match agent {
-        "codex" => codex::models(binary, path, selected).await,
-        "traex" => traex::models(binary, path, selected).await,
+        "codex" => codex::models(binary, path, selected, environment).await,
+        "traex" => traex::models(binary, path, selected, environment).await,
         _ => bail!("此 Agent 尚未实现原生模型目录：{agent}"),
     }
 }
@@ -213,9 +223,10 @@ pub async fn permission_modes(
 pub fn model_labels(
     agent: &str,
     project: Option<&std::path::Path>,
+    environment: &latte_work_protocol::AgentEnvironment,
 ) -> std::collections::BTreeMap<String, String> {
     match agent {
-        "claude" => claude_models::labels(project),
+        "claude" => claude_models::labels(project, environment),
         _ => std::collections::BTreeMap::new(),
     }
 }
@@ -261,9 +272,14 @@ pub async fn skill_info(
 }
 
 pub use claude_sessions::Title as NativeTitle;
-pub fn session_title(agent: &str, path: &std::path::Path, id: &str) -> Result<Option<NativeTitle>> {
+pub fn session_title(
+    agent: &str,
+    path: &std::path::Path,
+    id: &str,
+    environment: &latte_work_protocol::AgentEnvironment,
+) -> Result<Option<NativeTitle>> {
     match agent {
-        "claude" => claude_sessions::read(path, id),
+        "claude" => claude_sessions::read(path, id, environment),
         _ => bail!("此 Agent 尚不支持读取会话标题"),
     }
 }
@@ -272,9 +288,10 @@ pub fn rename_saved_session(
     path: &std::path::Path,
     id: &str,
     title: &str,
+    environment: &latte_work_protocol::AgentEnvironment,
 ) -> Result<String> {
     match agent {
-        "claude" => claude_sessions::rename(path, id, title),
+        "claude" => claude_sessions::rename(path, id, title, environment),
         _ => bail!("此 Agent 尚不支持修改会话标题"),
     }
 }

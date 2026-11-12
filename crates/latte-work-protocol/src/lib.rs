@@ -347,11 +347,30 @@ impl std::fmt::Debug for ProviderSnapshot {
     }
 }
 /// An explicit per-turn override, independent of the receiving host's saved bindings.
+#[derive(Clone, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct AgentEnvironment(pub std::collections::BTreeMap<String, String>);
+impl AgentEnvironment {
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+}
+impl std::fmt::Debug for AgentEnvironment {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AgentEnvironment")
+            .field("names", &self.0.keys().collect::<Vec<_>>())
+            .finish_non_exhaustive()
+    }
+}
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[serde(tag = "kind", content = "snapshot", rename_all = "snake_case")]
 pub enum TurnProvider {
     Cli,
     Snapshot(Box<ProviderSnapshot>),
+    /// App-owned launch settings, transported privately and never persisted by the host.
+    Configured {
+        provider: Option<Box<ProviderSnapshot>>,
+        environment: AgentEnvironment,
+    },
 }
 #[derive(Clone, Serialize, Deserialize, TS)]
 pub struct ProviderDraft {
@@ -526,6 +545,8 @@ pub enum Request {
         model: Option<String>,
         project_id: Option<String>,
         provider: Option<Provider>,
+        #[serde(default, skip_serializing_if = "AgentEnvironment::is_empty")]
+        environment: AgentEnvironment,
     },
     Session {
         session_id: String,
@@ -559,6 +580,9 @@ pub enum Request {
     RenameSession {
         session_id: String,
         title: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        provider: Option<TurnProvider>,
     },
     PinSession {
         session_id: String,
@@ -1177,6 +1201,8 @@ pub enum Response {
         #[serde(default)]
         permission_settings: bool,
         #[serde(default)]
+        custom_agent_environment: bool,
+        #[serde(default)]
         history_window: bool,
         #[serde(default)]
         skill_management: bool,
@@ -1267,6 +1293,33 @@ pub enum Response {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn configured_agent_environment_round_trips_and_debug_hides_values() {
+        let value = serde_json::json!({"kind":"configured","snapshot":{
+            "provider":null,"environment":{"HTTP_PROXY":"http://proxy.test:7890","TOKEN":"hidden-credential"}
+        }});
+        let config: TurnProvider = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(serde_json::to_value(&config).unwrap(), value);
+        assert!(!format!("{config:?}").contains("hidden-credential"));
+        assert!(!format!("{config:?}").contains("proxy.test"));
+        let old: Response = serde_json::from_value(serde_json::json!({
+            "kind":"hello","version":1,"server_id":"old","agents":[]
+        }))
+        .unwrap();
+        assert!(matches!(
+            old,
+            Response::Hello {
+                custom_agent_environment: false,
+                ..
+            }
+        ));
+        let request: Request = serde_json::from_value(serde_json::json!({
+            "method":"models_for_provider","agent":"codex","provider":null,"model":null,"project_id":null
+        })).unwrap();
+        assert!(
+            matches!(request, Request::ModelsForProvider { environment, .. } if environment.is_empty())
+        );
+    }
     #[test]
     fn skill_capability_is_explicit_and_defaults_to_unsupported_for_older_servers() {
         let legacy =

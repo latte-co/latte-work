@@ -434,6 +434,64 @@ remove the status line. Both progress and usage are excluded before text merging
 
 ## Agent Shell environment
 
+The App's Connection & Agent settings also save literal `NAME=value` overrides
+per host/Agent in its private Provider configuration. A fresh native configuration
+transaction captures Provider and ENV together for Open, Send, queue operations,
+history redaction, offline rename and model discovery. `TurnProvider::Configured` transports the
+ephemeral snapshot; only its digest enters request/queue identity. Empty overrides
+keep the existing CLI/Snapshot serialization and fingerprints unchanged.
+
+The `custom_agent_environment` Hello capability defaults to false. Both the UI and
+native client reject custom ENV on older hosts before sending the request. Updated
+local and SSH hosts apply overrides after the captured shell environment and before
+adapter/Provider/effort controls. Environment changes participate in process
+configuration comparison: active/background work is preserved, idle processes are
+recreated on the next explicit use. No task is interrupted or replayed on save.
+Codex/Traex model probes, launch-time native selection and Codex's separately
+supervised title process use the same overrides.
+Claude display labels and native child-history paths also use the effective ENV;
+child reads retain the owning launch snapshot and all UUID/symlink/path checks.
+Installation discovery and permission/command probes still use the host shell.
+
+Names are POSIX-style, at most 255 bytes, with 64 variables / 8 KiB per value /
+32 KiB total. NUL, host identity/cwd names and `LATTE_WORK_*` controls are rejected.
+Values are not shell-expanded. Debug formatting hides values; credential-named
+variables and authenticated proxy URLs are redacted from persisted Agent events.
+Redaction visits typed content fields, preserving protocol tags and correlation
+IDs. It matches raw content and one decoded JSON string layer, including mixed
+ASCII Unicode escapes, either hex case and surrogate pairs, retaining source
+offsets so unrelated text keeps its original encoding.
+All overlapping matches contribute to the masked coverage. Raw replacements
+expand to whole JSON escape tokens at both ends; an unfinished token touched by
+a raw match stays buffered until its boundary is known. This preserves decoding
+of retained content as well as the escape boundaries used by stream carry.
+Text streams retain at most one possible secret-prefix suffix per channel, bounded
+by six times the longest secret's byte length plus one incomplete JSON escape
+(12 bytes), across 513 main/child channels. Parsing starts at the content boundary;
+retained tails start before a complete escape token, preserving backslash pairing
+across arbitrarily long runs and delta boundaries. Content boundaries
+mask unfinished prefixes; raw tails never enter storage or replay.
+Native child text blocks also mask unfinished prefixes at every independent
+record/page boundary, including the legacy bounded snapshot. No raw suffix is
+stored in the durable history cursor. Delivery receipts are interpreted before
+their text is redacted; complete handback reports use the same redaction as their
+Tool message. Compatibility normalization preserves existing report identities
+and collapses previously duplicated identities before legacy pagination.
+Native title reads use the live launch context and its configuration directory.
+Every accepted turn must match that context, and both context ownership and
+fingerprints are checked again before saving. Closed/restarted sessions with an
+unknown custom context retain their saved title; legacy CLI-only titles can still
+refresh without an Agent. Credentials and ENV snapshots are never persisted.
+Each observed native identity records the launch configuration digest. Closed
+session renames require the App's ephemeral snapshot to match that digest (or a
+verified legacy request ledger), then use its effective configuration directory.
+Unknown or changed contexts fail before native writes; they never fall back to
+the host default directory. Existing path/symlink/inode checks remain in force.
+Unsaved ENV drafts remain in App memory per host/Agent across settings navigation
+and reconnects. Refresh replaces clean fields and preserves dirty or invalid input.
+Focused checks: `agentEnvironment` and `AgentSettings` frontend tests, config and
+protocol tests, `redaction` server tests, and final-binary `environment_e2e` tests.
+
 At daemon startup, the host Server captures exported variables from the user's
 default shell (`SHELL`, falling back to the account shell), using `-ilc` in the
 home directory. zsh, bash, sh/dash and fish are supported; each shell follows its

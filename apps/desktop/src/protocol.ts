@@ -348,8 +348,17 @@ export type AgentProviderBinding = {
   provider_revision: string;
 };
 export type ProviderSnapshot = { provider: Provider; credential: string };
+export type AgentEnvironment = { [key in string]?: string };
 export type TurnProvider =
-  { kind: "cli" } | { kind: "snapshot"; snapshot: ProviderSnapshot };
+  | { kind: "cli" }
+  | { kind: "snapshot"; snapshot: ProviderSnapshot }
+  | {
+      kind: "configured";
+      snapshot: {
+        provider: ProviderSnapshot | null;
+        environment: AgentEnvironment;
+      };
+    };
 export type Request =
   | { method: "hello"; version: number }
   | { method: "projects" }
@@ -402,6 +411,7 @@ export type Request =
       model: string | null;
       project_id: string | null;
       provider: Provider | null;
+      environment?: AgentEnvironment;
     }
   | { method: "session"; session_id: string }
   | {
@@ -416,7 +426,12 @@ export type Request =
   | { method: "sessions"; project_id: string }
   | { method: "pinned_sessions" }
   | { method: "recent_sessions"; before: RecentCursor | null }
-  | { method: "rename_session"; session_id: string; title: string }
+  | {
+      method: "rename_session";
+      session_id: string;
+      title: string;
+      provider?: TurnProvider;
+    }
   | { method: "pin_session"; session_id: string; pinned: boolean }
   | { method: "mark_session_unread"; session_id: string; unread: boolean }
   | { method: "archive_session"; session_id: string; archived: boolean }
@@ -729,6 +744,7 @@ export type Response =
       server_id: string;
       agents: Array<AgentInfo>;
       permission_settings: boolean;
+      custom_agent_environment: boolean;
       history_window: boolean;
       skill_management: boolean;
       skill_file_import: boolean;

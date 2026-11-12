@@ -126,6 +126,9 @@ for line in sys.stdin:
             for _ in range(2):
                 notify('item/completed', {'item': {'id': 'msg-' + turn, 'type': 'agentMessage', 'text': 'ONCE'}})
             complete()
+        elif prompt == 'custom-environment':
+            text(json.dumps({'pid':os.getpid(), **{name:os.environ.get(name) for name in ['HTTP_PROXY','HTTPS_PROXY','NO_PROXY','LATTE_TEST_LITERAL','LATTE_TEST_EMPTY','LATTE_TEST_SECRET']}}))
+            complete()
         elif prompt == 'credential':
             text(os.environ['LATTE_WORK_TRAEX_PROVIDER_TOKEN'])
             complete()

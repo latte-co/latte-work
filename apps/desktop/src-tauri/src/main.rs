@@ -246,7 +246,7 @@ async fn connect_host(
             let target = host.id.clone();
             // Open is idempotent and contains no prompt. A surviving daemon keeps
             // the exact process; a restarted daemon resumes the persisted native ID.
-            let _ = latte_work_client::request_with_app_provider(
+            let _ = latte_work_client::request_with_app_agent_config(
                 &client,
                 Request::OpenAgentSession {
                     session_id: key.1,
@@ -254,7 +254,7 @@ async fn connect_host(
                 },
                 |agent| async {
                     providers::with_store(app.clone(), move |store| {
-                        store.snapshot_for_host(&target, &agent)
+                        store.launch_for_host(&target, &agent)
                     })
                     .await
                     .map_err(anyhow::Error::msg)
@@ -622,11 +622,12 @@ async fn host_request(
             | Request::ResumeMessageQueue { .. }
             | Request::OpenAgentSession { .. }
             | Request::SubagentHistory { .. }
+            | Request::RenameSession { .. }
     ) {
         let provider_host = host_id.clone();
-        latte_work_client::request_with_app_provider(&client, request, |agent| async move {
+        latte_work_client::request_with_app_agent_config(&client, request, |agent| async move {
             providers::with_store(app, move |store| {
-                store.snapshot_for_host(&provider_host, &agent)
+                store.launch_for_host(&provider_host, &agent)
             })
             .await
             .map_err(anyhow::Error::msg)
@@ -1309,6 +1310,8 @@ fn main() {
             disconnect_host,
             host_request,
             providers::provider_request,
+            providers::agent_environments,
+            providers::save_agent_environment,
             providers::fetch_provider_models,
             providers::bind_agent_provider,
             providers::agent_providers,

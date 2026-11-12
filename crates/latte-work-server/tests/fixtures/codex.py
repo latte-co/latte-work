@@ -60,6 +60,10 @@ for line in sys.stdin:
         reply(value, {'config': json.loads(config_file.read_text()) if config_file.exists() else {'model_provider': None, 'model': None, 'developer_instructions': 'NATIVE_CODEX_INSTRUCTIONS'}})
     elif method in ('thread/start', 'thread/resume'):
         if params.get('ephemeral'):
+            expected_env = pathlib.Path('title-environment.json')
+            if expected_env.exists():
+                for key, expected in json.loads(expected_env.read_text()).items():
+                    assert os.environ.get(key) == expected
             assert params['sandbox'] == 'read-only'
             assert params['config']['features.shell_tool'] is False
             assert params['config']['features.plugins'] is False
@@ -136,7 +140,10 @@ for line in sys.stdin:
         reply(value, {'turn': {'id': turn, 'status': 'inProgress'}})
         if prompt == 'eof':
             sys.exit(0)
-        if prompt == 'failed':
+        if prompt == 'custom-environment':
+            text(json.dumps({'pid':os.getpid(), **{name:os.environ.get(name) for name in ['HTTP_PROXY','HTTPS_PROXY','NO_PROXY','LATTE_TEST_LITERAL','LATTE_TEST_EMPTY','LATTE_TEST_SECRET']}}))
+            complete()
+        elif prompt == 'failed':
             complete('failed')
         elif prompt == 'wait':
             text('WAITING')

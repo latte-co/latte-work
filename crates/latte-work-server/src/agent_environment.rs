@@ -61,6 +61,18 @@ pub fn variable(name: &str) -> Option<OsString> {
         .or_else(|| std::env::var_os(name))
 }
 
+/// Per-instance App overrides are applied after the host shell snapshot.
+pub fn configured_variable(
+    name: &str,
+    environment: &latte_work_protocol::AgentEnvironment,
+) -> Option<OsString> {
+    environment
+        .0
+        .get(name)
+        .map(OsString::from)
+        .or_else(|| variable(name))
+}
+
 pub fn command(binary: impl AsRef<std::ffi::OsStr>) -> Command {
     let mut cmd = Command::new(binary);
     if let Some(env) = ENVIRONMENT.get() {

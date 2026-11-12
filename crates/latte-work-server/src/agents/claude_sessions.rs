@@ -134,14 +134,17 @@ pub struct Title {
 fn valid_title(value: &str) -> bool {
     !value.trim().is_empty() && value.chars().count() <= 200 && !value.chars().any(char::is_control)
 }
-fn projects() -> Result<PathBuf> {
-    let config = crate::agent_environment::variable("CLAUDE_CONFIG_DIR")
+fn configured_projects(
+    cwd: &Path,
+    environment: &latte_work_protocol::AgentEnvironment,
+) -> Result<PathBuf> {
+    let config = crate::agent_environment::configured_variable("CLAUDE_CONFIG_DIR", environment)
         .map(PathBuf::from)
         .or_else(|| {
             crate::agent_environment::variable("HOME").map(|p| PathBuf::from(p).join(".claude"))
         })
         .context("无法确定 Claude 会话目录")?;
-    Ok(config.join("projects"))
+    Ok(cwd.join(config).join("projects"))
 }
 fn locate_in(projects: &Path, cwd: &Path, id: &str) -> Result<Option<PathBuf>> {
     uuid::Uuid::parse_str(id).context("原生会话 ID 无效")?;
@@ -249,8 +252,12 @@ fn read_tail(path: &Path) -> Result<Option<Title>> {
     Ok(titles.title())
 }
 
-pub fn read(cwd: &Path, id: &str) -> Result<Option<Title>> {
-    let Some(path) = locate_in(&projects()?, cwd, id)? else {
+pub fn read(
+    cwd: &Path,
+    id: &str,
+    environment: &latte_work_protocol::AgentEnvironment,
+) -> Result<Option<Title>> {
+    let Some(path) = locate_in(&configured_projects(cwd, environment)?, cwd, id)? else {
         return Ok(None);
     };
     read_path(&path)
@@ -263,7 +270,12 @@ pub(super) struct ChildBytes {
 }
 
 /// Construct the native child path from registered identities, never output_file.
-pub(super) fn read_child(cwd: &Path, parent: &str, child: &str) -> Result<Option<ChildBytes>> {
+pub(super) fn read_child(
+    cwd: &Path,
+    parent: &str,
+    child: &str,
+    environment: &latte_work_protocol::AgentEnvironment,
+) -> Result<Option<ChildBytes>> {
     if child.is_empty()
         || child.len() > 128
         || !child
@@ -272,7 +284,7 @@ pub(super) fn read_child(cwd: &Path, parent: &str, child: &str) -> Result<Option
     {
         return Ok(None);
     }
-    let Some(parent_path) = locate_in(&projects()?, cwd, parent)? else {
+    let Some(parent_path) = locate_in(&configured_projects(cwd, environment)?, cwd, parent)? else {
         return Ok(None);
     };
     read_child_path(&parent_path, child)
@@ -340,6 +352,7 @@ pub(super) fn read_child_page(
     cwd: &Path,
     parent: &str,
     child: &str,
+    environment: &latte_work_protocol::AgentEnvironment,
     cursor: super::ChildHistoryCursor,
 ) -> Result<Option<ChildPageBytes>> {
     if child.is_empty()
@@ -350,7 +363,7 @@ pub(super) fn read_child_page(
     {
         return Ok(None);
     }
-    let Some(parent_path) = locate_in(&projects()?, cwd, parent)? else {
+    let Some(parent_path) = locate_in(&configured_projects(cwd, environment)?, cwd, parent)? else {
         return Ok(None);
     };
     read_child_page_path(&parent_path, child, cursor)
@@ -403,8 +416,14 @@ fn read_child_page_path(
         has_more,
     }))
 }
-pub fn rename(cwd: &Path, id: &str, title: &str) -> Result<String> {
-    let path = locate_in(&projects()?, cwd, id)?.context("未找到原生会话，标题未修改")?;
+pub fn rename(
+    cwd: &Path,
+    id: &str,
+    title: &str,
+    environment: &latte_work_protocol::AgentEnvironment,
+) -> Result<String> {
+    let path = locate_in(&configured_projects(cwd, environment)?, cwd, id)?
+        .context("未找到原生会话，标题未修改")?;
     append(&path, id, title)?;
     let actual = read_tail(&path)?.context("原生标题写入后未能确认")?;
     if !actual.custom || actual.text != title.trim() {
@@ -454,6 +473,89 @@ fn append(path: &Path, id: &str, title: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn configured_child_reads_keep_scope_and_symlink_guards() {
+        let dir = tempfile::tempdir().unwrap();
+        let cwd = dir.path().canonicalize().unwrap();
+        let parent = "11111111-1111-4111-8111-111111111111";
+        let project: String = cwd
+            .to_string_lossy()
+            .chars()
+            .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '-' })
+            .collect();
+        let mut environments = Vec::new();
+        for scope in ["host", "session"] {
+            let config = cwd.join(scope);
+            let path = config
+                .join("projects")
+                .join(&project)
+                .join(format!("{parent}.jsonl"));
+            let children = path.with_extension("").join("subagents");
+            std::fs::create_dir_all(&children).unwrap();
+            std::fs::write(&path, "").unwrap();
+            std::fs::write(children.join("agent-child.jsonl"), format!("{scope}\n")).unwrap();
+            environments.push(latte_work_protocol::AgentEnvironment(
+                std::collections::BTreeMap::from([(
+                    "CLAUDE_CONFIG_DIR".into(),
+                    config.to_string_lossy().into(),
+                )]),
+            ));
+        }
+        for (environment, expected) in environments
+            .iter()
+            .zip([b"host\n".as_slice(), b"session\n"])
+        {
+            assert_eq!(
+                super::read_child(&cwd, parent, "child", environment)
+                    .unwrap()
+                    .unwrap()
+                    .bytes,
+                expected
+            );
+            assert_eq!(
+                super::read_child_page(&cwd, parent, "child", environment, Default::default())
+                    .unwrap()
+                    .unwrap()
+                    .bytes,
+                expected
+            );
+            assert!(
+                super::read_child_page(&cwd, parent, "../child", environment, Default::default())
+                    .unwrap()
+                    .is_none()
+            );
+        }
+        let relative = latte_work_protocol::AgentEnvironment(std::collections::BTreeMap::from([(
+            "CLAUDE_CONFIG_DIR".into(),
+            "session".into(),
+        )]));
+        assert_eq!(
+            super::read_child(&cwd, parent, "child", &relative)
+                .unwrap()
+                .unwrap()
+                .bytes,
+            b"session\n"
+        );
+        let child = cwd
+            .join("session/projects")
+            .join(&project)
+            .join(parent)
+            .join("subagents/agent-child.jsonl");
+        std::fs::remove_file(&child).unwrap();
+        std::os::unix::fs::symlink(
+            cwd.join("host/projects")
+                .join(project)
+                .join(parent)
+                .join("subagents/agent-child.jsonl"),
+            &child,
+        )
+        .unwrap();
+        assert!(super::read_child(&cwd, parent, "child", &environments[1]).is_err());
+        assert!(
+            super::read_child_page(&cwd, parent, "child", &environments[1], Default::default())
+                .is_err()
+        );
+    }
+    #[test]
     fn child_record_reads_are_bounded_and_reject_symlink_files_and_directories() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().canonicalize().unwrap();
@@ -475,7 +577,7 @@ mod tests {
         std::os::unix::fs::symlink(&root, &child_dir).unwrap();
         assert!(super::read_child_path(&parent, "a123").is_err());
         assert!(
-            super::read_child(&root, "parent", "../../secret")
+            super::read_child(&root, "parent", "../../secret", &Default::default())
                 .unwrap()
                 .is_none()
         );

@@ -162,6 +162,20 @@ export async function agentProviders(hostId: string): Promise<Response> {
   return response;
 }
 
+export function agentEnvironments(
+  hostId: string,
+): Promise<Record<string, import("./protocol").AgentEnvironment>> {
+  return invoke("agent_environments", { hostId });
+}
+
+export function saveAgentEnvironment(
+  hostId: string,
+  agent: string,
+  environment: import("./protocol").AgentEnvironment,
+): Promise<import("./protocol").AgentEnvironment> {
+  return invoke("save_agent_environment", { hostId, agent, environment });
+}
+
 export type ProviderRequest = Extract<
   Request,
   { method: "providers" | "save_provider" | "delete_provider" }

@@ -49,6 +49,43 @@ async fn title(client: &mut Client, id: &str, expected: &str) {
 }
 
 #[tokio::test]
+async fn codex_generated_title_process_uses_the_owning_environment() {
+    let host = Host::start().await;
+    let root = tempfile::tempdir().unwrap();
+    let mut client = host.client().await;
+    let id = create(&mut client, root.path(), "codex").await;
+    let environment = std::collections::BTreeMap::from([(
+        "HTTP_PROXY".into(),
+        "http://title-proxy.test:7890".into(),
+    )]);
+    std::fs::write(
+        root.path().join("title-environment.json"),
+        serde_json::to_vec(&environment).unwrap(),
+    )
+    .unwrap();
+    assert!(matches!(
+        ask(
+            &mut client,
+            Request::Send {
+                session_id: id.clone(),
+                request_id: "title-environment".into(),
+                text: "native-auto-title".into(),
+                model: None,
+                effort: None,
+                permission_mode: None,
+                provider: Some(latte_work_protocol::TurnProvider::Configured {
+                    provider: None,
+                    environment: latte_work_protocol::AgentEnvironment(environment)
+                }),
+            }
+        )
+        .await,
+        Response::Accepted { .. }
+    ));
+    title(&mut client, &id, "修复附件拖入失败").await;
+}
+
+#[tokio::test]
 async fn automatic_titles_all_agents_persist_without_extra_turns_or_resume_generation() {
     for agent in ["claude", "traex", "codex"] {
         let host = Host::start().await;
@@ -154,7 +191,7 @@ async fn automatic_titles_app_servers_do_not_block_input_or_overwrite_manual_nam
         ));
         wait(&mut client, &id, Status::Completed).await;
         assert!(
-            matches!(ask(&mut client, Request::RenameSession { session_id: id.clone(), title: "My name".into() }).await, Response::Session { session } if session.custom_title)
+            matches!(ask(&mut client, Request::RenameSession { provider: None, session_id: id.clone(), title: "My name".into() }).await, Response::Session { session } if session.custom_title)
         );
         if agent == "codex" {
             let input: serde_json::Value = serde_json::from_str(
@@ -233,7 +270,7 @@ async fn manual_names_release_both_title_permits_for_the_next_session() {
     }
     for (id, pid) in &held {
         assert!(
-            matches!(ask(&mut client, Request::RenameSession { session_id: id.clone(), title: "Manual".into() }).await, Response::Session { session } if session.custom_title)
+            matches!(ask(&mut client, Request::RenameSession { provider: None, session_id: id.clone(), title: "Manual".into() }).await, Response::Session { session } if session.custom_title)
         );
         gone(*pid).await;
     }

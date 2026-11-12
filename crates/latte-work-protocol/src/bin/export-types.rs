@@ -59,6 +59,7 @@ fn main() {
         ProviderTarget::decl(),
         AgentProviderBinding::decl(),
         ProviderSnapshot::decl(),
+        AgentEnvironment::decl(),
         TurnProvider::decl(),
         Request::decl(),
         Response::decl(),

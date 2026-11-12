@@ -138,6 +138,9 @@ pub enum QueueAction {
     },
 }
 pub enum Control {
+    TitleContext {
+        reply: oneshot::Sender<Option<LaunchConfig>>,
+    },
     Queue {
         action: QueueAction,
         reply: oneshot::Sender<Result<Response, String>>,
@@ -264,6 +267,7 @@ pub async fn rename_title(
     session: Session,
     path: String,
     title: String,
+    config: LaunchConfig,
 ) -> Result<Session> {
     Store::validate_session_title(&title)?;
     let control = runs
@@ -283,9 +287,21 @@ pub async fn rename_title(
         return db(database, |s| s.session(&session.id));
     }
     if let Some(id) = session.native_id.clone() {
+        let fingerprint = config.fingerprint()?;
+        if !db(database, |s| {
+            s.native_rename_context_matches(&session.id, &id, fingerprint.as_deref())
+        })? {
+            bail!("无法确认原生会话的启动配置，标题未修改；请恢复原 Provider 和 ENV 配置后重试");
+        }
         let agent = session.agent.clone();
         let actual = tokio::task::spawn_blocking(move || {
-            agents::rename_saved_session(&agent, std::path::Path::new(&path), &id, &title)
+            agents::rename_saved_session(
+                &agent,
+                std::path::Path::new(&path),
+                &id,
+                &title,
+                &config.environment,
+            )
         })
         .await??;
         return db(database, |s| {
@@ -295,6 +311,55 @@ pub async fn rename_title(
     // No native session exists yet. Persist the requested initial title, and pass it
     // at native creation; never create a fake transcript or send a naming prompt.
     db(database, |s| s.rename_session(&session.id, &title))
+}
+
+struct TitleSource {
+    session: Session,
+    path: String,
+    config: Option<LaunchConfig>,
+    control: Option<mpsc::Sender<Control>>,
+    fingerprint: Option<String>,
+    allow_legacy_cli: bool,
+}
+async fn title_source(
+    database: &Database,
+    session: Session,
+    path: String,
+    control: Option<mpsc::Sender<Control>>,
+) -> Result<Option<TitleSource>> {
+    let config = if let Some(control) = &control {
+        let (reply, receive) = oneshot::channel();
+        if control.try_send(Control::TitleContext { reply }).is_err() {
+            return Ok(None);
+        }
+        let Ok(Ok(Some(config))) = tokio::time::timeout(Duration::from_secs(3), receive).await
+        else {
+            return Ok(None);
+        };
+        Some(config)
+    } else {
+        None
+    };
+    let fingerprint = match &config {
+        Some(config) => config.fingerprint()?,
+        None => crate::providers::turn_fingerprint(Some(&latte_work_protocol::TurnProvider::Cli))?,
+    };
+    let allow_legacy_cli = config
+        .as_ref()
+        .is_none_or(|c| c.provider.is_none() && c.environment.is_empty());
+    if !db(database, |s| {
+        s.native_title_context_matches(&session.id, fingerprint.as_deref(), allow_legacy_cli)
+    })? {
+        return Ok(None);
+    }
+    Ok(Some(TitleSource {
+        session,
+        path,
+        config,
+        control,
+        fingerprint,
+        allow_legacy_cli,
+    }))
 }
 
 pub async fn refresh_titles(
@@ -313,11 +378,11 @@ pub async fn refresh_titles(
         }
         _ => return Ok(()),
     };
-    let open_ids: std::collections::HashSet<String> = runs
+    let controls: HashMap<_, _> = runs
         .lock()
         .map_err(|_| anyhow::anyhow!("执行状态锁异常"))?
-        .keys()
-        .cloned()
+        .iter()
+        .map(|(id, run)| (id.clone(), run.control.clone()))
         .collect();
     let due: Vec<_> = {
         let mut cache = cache
@@ -327,7 +392,7 @@ pub async fn refresh_titles(
         cache.select(
             sessions
                 .into_iter()
-                .filter(|session| !open_ids.contains(&session.id) || !session.custom_title)
+                .filter(|session| !controls.contains_key(&session.id) || !session.custom_title)
                 .collect(),
             now,
         )
@@ -343,18 +408,34 @@ pub async fn refresh_titles(
             })
             .collect::<Result<Vec<_>>>()
     })?;
+    let sources = futures_util::future::join_all(candidates.into_iter().map(|(session, path)| {
+        let control = controls.get(&session.id).cloned();
+        title_source(database, session, path, control)
+    }))
+    .await
+    .into_iter()
+    .collect::<Result<Vec<_>>>()?;
     let titles = tokio::task::spawn_blocking(move || {
-        candidates
+        sources
             .into_iter()
-            .filter_map(|(session, path)| {
-                agents::session_title(
-                    &session.agent,
-                    std::path::Path::new(&path),
-                    session.native_id.as_deref()?,
+            .flatten()
+            .filter_map(|source| {
+                let mut title = agents::session_title(
+                    &source.session.agent,
+                    std::path::Path::new(&source.path),
+                    source.session.native_id.as_deref()?,
+                    &source
+                        .config
+                        .as_ref()
+                        .map(|c| c.environment.clone())
+                        .unwrap_or_default(),
                 )
                 .ok()
-                .flatten()
-                .map(|title| (session, title))
+                .flatten()?;
+                if let Some(config) = &source.config {
+                    title.text = config.redact(&title.text);
+                }
+                Some((source, title))
             })
             .collect::<Vec<_>>()
     })
@@ -362,12 +443,24 @@ pub async fn refresh_titles(
     let current = runs.lock().map_err(|_| anyhow::anyhow!("执行状态锁异常"))?;
     let fresh = db(database, |s| {
         let mut fresh = HashMap::new();
-        for (observed, title) in titles {
+        for (source, title) in titles {
+            let observed = source.session;
             let mut session = s.session(&observed.id)?;
+            let same_owner = match (&source.control, current.get(&observed.id)) {
+                (None, None) => true,
+                (Some(control), Some(run)) => control.same_channel(&run.control),
+                _ => false,
+            };
             // Live native names are authoritative; an on-disk flush can lag a
             // rename acknowledgement. Only unnamed live sessions may adopt file
             // metadata (AI titles are not emitted as native name events).
-            if (!current.contains_key(&session.id) || !observed.custom_title)
+            if same_owner
+                && s.native_title_context_matches(
+                    &session.id,
+                    source.fingerprint.as_deref(),
+                    source.allow_legacy_cli,
+                )?
+                && (!current.contains_key(&session.id) || !observed.custom_title)
                 && session.native_id == observed.native_id
                 && session.title == observed.title
                 && session.custom_title == observed.custom_title
@@ -512,6 +605,8 @@ type Outcome = (Status, Option<String>);
 #[derive(Default)]
 struct TurnState {
     ready: bool,
+    redactor: Option<crate::redaction::Redactor>,
+    text_tails: HashMap<String, String>,
     pending: HashMap<
         String,
         (
@@ -522,6 +617,77 @@ struct TurnState {
     >,
 }
 impl TurnState {
+    fn flush_text(&mut self, database: &Database, session_id: &str, channel: &str) -> Result<()> {
+        // An unfinished prefix is never written in clear, including on an
+        // explicit content boundary. It cannot be reconstructed after replay.
+        if self.text_tails.remove(channel).is_some() {
+            self.store_event(
+                database,
+                session_id,
+                channel,
+                EventKind::Text {
+                    text: "[redacted]".into(),
+                },
+            )?;
+        }
+        Ok(())
+    }
+    fn store_event(
+        &self,
+        database: &Database,
+        session_id: &str,
+        channel: &str,
+        event: EventKind,
+    ) -> Result<()> {
+        db(database, |s| {
+            if channel.is_empty() {
+                s.event(session_id, event).map(|_| ())
+            } else {
+                s.subagent_event(session_id, channel, event)
+            }
+        })
+    }
+    fn event(
+        &mut self,
+        database: &Database,
+        session_id: &str,
+        channel: &str,
+        event: EventKind,
+    ) -> Result<()> {
+        if let EventKind::Text { text } = event {
+            let mut pending = self.text_tails.remove(channel).unwrap_or_default();
+            let mut text = self
+                .redactor
+                .as_ref()
+                .expect("initialized")
+                .fragment(&text, &mut pending);
+            if !pending.is_empty() {
+                // Keep at most one main stream and the adapter's bounded child
+                // stream quota. Extra pending suffixes are masked immediately.
+                if self.text_tails.len() < 513 {
+                    self.text_tails.insert(channel.into(), pending);
+                } else {
+                    text.push_str("[redacted]");
+                }
+            }
+            if !text.is_empty() {
+                self.store_event(database, session_id, channel, EventKind::Text { text })?;
+            }
+        } else {
+            if !matches!(event, EventKind::Progress { .. } | EventKind::Usage { .. }) {
+                self.flush_text(database, session_id, channel)?;
+            }
+            let redactor = self.redactor.as_ref().expect("initialized");
+            if channel.is_empty() {
+                self.store_event(database, session_id, channel, redactor.event(event))?;
+            } else {
+                db(database, |s| {
+                    s.redacted_subagent_event(session_id, channel, event, redactor)
+                })?;
+            }
+        }
+        Ok(())
+    }
     async fn apply(
         &mut self,
         actions: Vec<Action>,
@@ -530,6 +696,7 @@ impl TurnState {
         session_id: &str,
         config: &LaunchConfig,
     ) -> Result<Option<Outcome>> {
+        self.redactor.get_or_insert_with(|| config.redactor());
         for action in actions {
             match action {
                 Action::NativeName(title) => {
@@ -584,6 +751,7 @@ impl TurnState {
                 })?,
                 Action::NativeSession(id) => db(database, |s| {
                     let mut current = s.session(session_id)?;
+                    s.remember_native_context(session_id, &id, config.fingerprint()?.as_deref())?;
                     if let Some(provider) = &config.provider {
                         s.remember_title_credential(session_id, &id, &provider.credential)?;
                     }
@@ -591,6 +759,12 @@ impl TurnState {
                     s.save(&current)
                 })?,
                 Action::Event(event) => {
+                    if let EventKind::Subagent { update } = &event
+                        && update.status.is_some_and(|status| !status.active())
+                        && let Some(channel) = &update.tool_use_id
+                    {
+                        self.flush_text(database, session_id, channel)?;
+                    }
                     let terminal_child = match &event {
                         EventKind::Subagent { update }
                             if update.status.is_some_and(|status| !status.active()) =>
@@ -599,9 +773,7 @@ impl TurnState {
                         }
                         _ => None,
                     };
-                    db(database, |s| {
-                        s.event(session_id, config.redact_event(event)?)
-                    })?;
+                    self.event(database, session_id, "", event)?;
                     // Capture a completed child's full native output before this
                     // process/redaction context can be replaced by a later turn.
                     if let Some(native_id) = terminal_child
@@ -686,15 +858,16 @@ impl TurnState {
                         }
                     }
                 }
-                Action::SubagentEvent { tool_use_id, event } => db(database, |s| {
-                    s.subagent_event(session_id, &tool_use_id, config.redact_event(event)?)
-                })?,
+                Action::SubagentEvent { tool_use_id, event } => {
+                    self.event(database, session_id, &tool_use_id, event)?;
+                }
                 Action::Question {
                     id,
                     tool_use_id,
                     input,
                     questions,
                 } => {
+                    self.flush_text(database, session_id, "")?;
                     if self.pending.len() >= 32 {
                         bail!("待处理交互数量超出限制");
                     }
@@ -719,6 +892,7 @@ impl TurnState {
                     tool,
                     input: original,
                 } => {
+                    self.flush_text(database, session_id, "")?;
                     if self.pending.len() >= 32 {
                         bail!("待审批工具数量超出限制");
                     }
@@ -739,6 +913,7 @@ impl TurnState {
                     })?;
                 }
                 Action::Finished { failed, message } => {
+                    self.flush_text(database, session_id, "")?;
                     return Ok(Some((
                         if failed {
                             Status::Failed
@@ -1081,6 +1256,7 @@ async fn finish_turn(
 }
 fn same_config(a: &LaunchConfig, b: &LaunchConfig) -> bool {
     a.model == b.model
+        && a.environment == b.environment
         && a.traex_model == b.traex_model
         && a.effort == b.effort
         && a.permission_mode == b.permission_mode
@@ -1341,6 +1517,10 @@ async fn actor(
         let previous_status = db(&database, |d| Ok(d.session(&session.id)?.status)).ok();
         let result: Result<()> = tokio::select! {
             control = controls.recv() => match control {
+                Some(Control::TitleContext { reply }) => {
+                    let _ = reply.send(process.as_ref().map(|p| p.config.clone()));
+                    Ok(())
+                }
                 Some(Control::RenameTitle {title,reply}) => {
                     safe_to_close.store(false, Ordering::SeqCst);
                     if let Some(p)=process.as_mut().filter(|p|p.state.ready) {
@@ -1984,6 +2164,7 @@ mod tests {
                     model: None,
                     fingerprint: None,
                     config: LaunchConfig {
+                        environment: Default::default(),
                         traex_model: None,
                         provider: None,
                         model: None,
@@ -2027,6 +2208,7 @@ mod tests {
             model: None,
             fingerprint: None,
             config: LaunchConfig {
+                environment: Default::default(),
                 traex_model: None,
                 provider: None,
                 model: None,
@@ -2103,6 +2285,73 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn streaming_redaction_masks_pending_prefixes_at_content_and_turn_boundaries() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(&dir.path().join("state.sqlite")).unwrap();
+        let project = store.add_project(dir.path()).unwrap();
+        let session = store.create_session(project.id, "claude".into()).unwrap();
+        let database = Arc::new(Mutex::new(store));
+        let config = crate::providers::ProviderStore::open(dir.path())
+            .unwrap()
+            .turn_config(
+                "claude",
+                None,
+                Some(latte_work_protocol::TurnProvider::Configured {
+                    provider: None,
+                    environment: latte_work_protocol::AgentEnvironment(
+                        std::collections::BTreeMap::from([
+                            ("TOKEN".into(), "text".into()),
+                            ("SECRET".into(), "fixture-environment-secret".into()),
+                        ]),
+                    ),
+                }),
+            )
+            .unwrap();
+        let (mut input, _reader) = tokio::io::duplex(1024);
+        let mut state = TurnState::default();
+        let actions = vec![
+            Action::Event(EventKind::Text {
+                text: "before fixture-environment-".into(),
+            }),
+            Action::Event(EventKind::Progress {
+                phase: latte_work_protocol::ExecutionPhase::Thinking,
+            }),
+            Action::Event(EventKind::Text {
+                text: "secret after fixture-".into(),
+            }),
+            Action::Event(EventKind::Tool {
+                id: "text".into(),
+                name: "text".into(),
+                input: Value::Null,
+            }),
+            Action::Event(EventKind::Text {
+                text: "safe fi".into(),
+            }),
+            Action::Finished {
+                failed: false,
+                message: None,
+            },
+        ];
+        assert_eq!(
+            state
+                .apply(actions, &mut input, &database, &session.id, &config)
+                .await
+                .unwrap(),
+            Some((Status::Completed, None))
+        );
+        let (events, _) = db(&database, |s| s.events(&session.id, 0.0)).unwrap();
+        let text: String = events
+            .iter()
+            .filter_map(|e| match &e.event {
+                EventKind::Text { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(text, "before [redacted] after [redacted]safe [redacted]");
+        assert!(state.text_tails.is_empty());
+    }
+
+    #[tokio::test]
     async fn generated_titles_redact_credentials_and_preserve_identity_and_manual_names() {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open(&dir.path().join("titles.sqlite")).unwrap();
@@ -2110,6 +2359,7 @@ mod tests {
         let session = store.create_session(project.id, "traex".into()).unwrap();
         let database = Arc::new(Mutex::new(store));
         let config = LaunchConfig {
+            environment: Default::default(),
             traex_model: None, model: None, effort: None, permission_mode: None,
             settings_dir: dir.path().into(),
             provider: Some(crate::providers::ResolvedProvider {
@@ -2178,6 +2428,7 @@ mod tests {
             Store::open(&dir.path().join("state.sqlite")).unwrap(),
         ));
         let config = LaunchConfig {
+            environment: Default::default(),
             traex_model: None,
             provider: None,
             model: None,
@@ -2399,6 +2650,7 @@ mod tests {
             Store::open(&dir.path().join("state.sqlite")).unwrap(),
         ));
         let config = LaunchConfig {
+            environment: Default::default(),
             traex_model: None,
             provider: None,
             model: None,
