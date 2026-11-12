@@ -31,6 +31,18 @@ type Gallery = {
   update: () => void;
 };
 const Context = createContext<Gallery | null>(null);
+const ItemIdentity = createContext<number | null>(null);
+
+/** Event identity survives transcript regrouping when older pages are prepended. */
+export function ImageGalleryItem({
+  id,
+  children,
+}: {
+  id: number;
+  children: ReactNode;
+}) {
+  return <ItemIdentity.Provider value={id}>{children}</ItemIdentity.Provider>;
+}
 
 function ImageDialog({
   entry,
@@ -45,6 +57,15 @@ function ImageDialog({
   count?: number;
   move?: (direction: number) => void;
 }) {
+  const stage = useRef<HTMLDivElement>(null);
+  const closeButton = useRef<HTMLButtonElement>(null);
+  const navigate = (direction: number) => {
+    // The keyed stage removes retry controls. Move focus before replacing it,
+    // so subsequent arrow/Escape events continue to reach this same dialog.
+    if (stage.current?.contains(document.activeElement))
+      closeButton.current?.focus();
+    move?.(direction);
+  };
   const previous = index > 0;
   const next = index < count - 1;
   return createPortal(
@@ -73,7 +94,7 @@ function ImageDialog({
             event.preventDefault();
             event.stopPropagation();
             if (event.key === "ArrowLeft" ? previous : next)
-              move?.(event.key === "ArrowLeft" ? -1 : 1);
+              navigate(event.key === "ArrowLeft" ? -1 : 1);
           }
         }}
       >
@@ -83,12 +104,13 @@ function ImageDialog({
             type="button"
             className="icon-button"
             aria-label="关闭图片预览"
+            ref={closeButton}
             onClick={close}
           >
             <X size={18} />
           </button>
         </header>
-        <div className="attachment-image-stage">
+        <div className="attachment-image-stage" ref={stage}>
           <Fragment key={entry.id}>{entry.content}</Fragment>
         </div>
         {count > 1 && (
@@ -100,7 +122,7 @@ function ImageDialog({
               title="上一张图片（←）"
               aria-disabled={!previous}
               onClick={() => {
-                if (previous) move?.(-1);
+                if (previous) navigate(-1);
               }}
             >
               <ChevronLeft size={20} />
@@ -115,7 +137,7 @@ function ImageDialog({
               title="下一张图片（→）"
               aria-disabled={!next}
               onClick={() => {
-                if (next) move?.(1);
+                if (next) navigate(1);
               }}
             >
               <ChevronRight size={20} />
@@ -146,24 +168,45 @@ export function ImageGallery({
   const update = useCallback(() => {
     if (selection.current !== null) invalidate();
   }, []);
-  const close = useCallback(() => select(null), []);
-  useLayoutEffect(close, [scope, active, close]);
+  const origin = useRef<string | null>(null);
+  const show = useCallback((id: string) => {
+    origin.current = id;
+    select(id);
+  }, []);
+  const close = useCallback(() => {
+    const trigger =
+      selection.current !== null && origin.current !== null
+        ? entries.current.get(origin.current)?.current.trigger.current
+        : null;
+    select(null);
+    // Modal restores the original DOM node normally. A prepended page may
+    // replace that node; restore its current event/image counterpart instead.
+    queueMicrotask(() => {
+      if (trigger?.isConnected && !trigger.closest("[hidden], [inert]"))
+        trigger.focus();
+    });
+  }, []);
+  useLayoutEffect(() => select(null), [scope, active]);
   const register = useCallback(
     (entry: RefObject<Entry>) => {
       const id = entry.current.id;
       entries.current.set(id, entry);
       update();
       return () => {
-        entries.current.delete(id);
-        select((current) => (current === id ? null : current));
+        if (entries.current.get(id) === entry) entries.current.delete(id);
         update();
       };
     },
     [update],
   );
+  // Child layout effects finish unregistering/re-registering before this
+  // check. Only close if the selected image is absent from the committed tree.
+  useLayoutEffect(() => {
+    if (selected !== null && !entries.current.has(selected)) close();
+  });
   const context = useMemo(
-    () => ({ active, selected, show: select, register, update }),
-    [active, selected, register, update],
+    () => ({ active, selected, show, register, update }),
+    [active, selected, show, register, update],
   );
   // Registration order can differ from transcript order after lazy reads or
   // prepended pages. Use the actual trigger order, without reading more history.
@@ -209,9 +252,15 @@ export function useImagePreview(
   identity: unknown,
   enabled: boolean,
   trigger: RefObject<HTMLElement | null>,
+  imageKey?: string,
 ) {
   const gallery = useContext(Context);
-  const id = useId();
+  const item = useContext(ItemIdentity);
+  const localId = useId();
+  const id =
+    item !== null && imageKey !== undefined
+      ? JSON.stringify([item, imageKey])
+      : localId;
   const [localOpen, setLocalOpen] = useState(false);
   const active = enabled && (gallery?.active ?? true);
   useLayoutEffect(() => setLocalOpen(false), [identity, active]);

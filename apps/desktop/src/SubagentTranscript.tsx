@@ -1,3 +1,4 @@
+import { ImageGalleryItem } from "./ImageGallery";
 import { Fragment, useRef } from "react";
 import { ChevronRight } from "lucide-react";
 import {
@@ -111,7 +112,9 @@ export function SubagentTranscript({
             {() => (
               <div className="turn-process-content">
                 {segment.items.map((item) => (
-                  <Fragment key={item.key}>{renderItem(item)}</Fragment>
+                  <ImageGalleryItem key={item.key} id={item.key}>
+                    {renderItem(item)}
+                  </ImageGalleryItem>
                 ))}
               </div>
             )}
@@ -119,7 +122,9 @@ export function SubagentTranscript({
         ) : (
           <Fragment key={`${task.id}:visible:${segment.items[0].key}`}>
             {segment.items.map((item) => (
-              <Fragment key={item.key}>{renderItem(item)}</Fragment>
+              <ImageGalleryItem key={item.key} id={item.key}>
+                {renderItem(item)}
+              </ImageGalleryItem>
             ))}
           </Fragment>
         ),

@@ -75,7 +75,12 @@ export function AttachmentImage({
     reference.path,
     enabled,
   ]);
-  const previewDialog = useImagePreview(identity, enabled, target);
+  const previewDialog = useImagePreview(
+    identity,
+    enabled,
+    target,
+    `attachment:${reference.path}`,
+  );
   const { open, active } = previewDialog;
   useEffect(() => {
     if (!active || variant !== "thumbnail" || !target.current) return;

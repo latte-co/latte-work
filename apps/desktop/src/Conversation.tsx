@@ -100,6 +100,8 @@ interface Props {
     answers: import("./protocol").QuestionAnswer[] | null,
   ) => Promise<void>;
 }
+const FOLLOW_THRESHOLD = 90;
+
 export function Conversation({
   openSubagents,
   openTurnChanges,
@@ -417,7 +419,8 @@ export function Conversation({
     )
       return;
     // Event pages can collapse to just a few visible lines. A short transcript
-    // cannot scroll upwards to request the next page, so fill the viewport here.
+    // cannot scroll out of the follow threshold to request a page. Fill enough
+    // space for an upward scroll to enter history-reading mode.
     // Keep a failed/non-advancing cursor attempted until an explicit retry moves
     // it forward; resize notifications must not cause an automatic retry loop.
     const cursor = JSON.stringify([positionScope, events[0]?.seq]);
@@ -427,7 +430,7 @@ export function Conversation({
         !active ||
         document.visibilityState === "hidden" ||
         el.clientHeight <= 0 ||
-        el.scrollHeight > el.clientHeight + 1 ||
+        el.scrollHeight - el.clientHeight >= FOLLOW_THRESHOLD ||
         lastViewportFill.current === cursor
       )
         return;
@@ -614,7 +617,8 @@ export function Conversation({
             if (preparingHistory) return;
             const el = scroller.current!;
             follow.current =
-              el.scrollHeight - el.scrollTop - el.clientHeight < 90;
+              el.scrollHeight - el.scrollTop - el.clientHeight <
+              FOLLOW_THRESHOLD;
             positions.set(positionScope, {
               top: el.scrollTop,
               follow: follow.current,

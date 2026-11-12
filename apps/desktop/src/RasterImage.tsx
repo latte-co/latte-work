@@ -5,17 +5,19 @@ export function RasterImage({
   bytes,
   mime,
   name,
+  imageKey,
   active: enabled = true,
 }: {
   bytes: Uint8Array;
   mime: string;
   name: string;
+  imageKey?: string;
   active?: boolean;
 }) {
   const trigger = useRef<HTMLButtonElement>(null);
   const [near, setNear] = useState(false);
   const identity = useMemo(() => ({ bytes, mime }), [bytes, mime]);
-  const preview = useImagePreview(identity, enabled, trigger);
+  const preview = useImagePreview(identity, enabled, trigger, imageKey);
   const { open, active } = preview;
   const [resource, setResource] = useState<{
     bytes: Uint8Array;

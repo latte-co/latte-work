@@ -11,7 +11,10 @@ import {
   useState,
   type ReactNode,
 } from "react";
-import ReactMarkdown, { defaultUrlTransform } from "react-markdown";
+import ReactMarkdown, {
+  defaultUrlTransform,
+  type ExtraProps,
+} from "react-markdown";
 import remarkGfm from "remark-gfm";
 import {
   Check,
@@ -424,12 +427,27 @@ function InlineCodeRef({ children }: { children?: ReactNode }) {
 function MarkdownLink({
   href,
   children,
+  node,
 }: {
   href?: string;
   children?: ReactNode;
-}) {
+} & ExtraProps) {
   const actions = useContext(MessageActionsContext);
   const [point, setPoint] = useState<{ x: number; y: number } | null>(null);
+  // A local image is itself an interactive preview. Keep it outside the
+  // destination control (including images nested in emphasis/strong markup).
+  const containsImage = (element: NonNullable<ExtraProps["node"]>): boolean =>
+    element.tagName === "img" ||
+    element.children.some(
+      (child) => child.type === "element" && containsImage(child),
+    );
+  if (node && containsImage(node))
+    return (
+      <span className="markdown-linked-image">
+        {children}
+        <MarkdownLink href={href}>{href}</MarkdownLink>
+      </span>
+    );
   if (href && webLink(href)) return <WebLink href={href}>{children}</WebLink>;
   const reference = href ? classifyLinkHref(href) : ({ kind: "text" } as const);
   const provided =

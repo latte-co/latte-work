@@ -548,8 +548,9 @@ turns, 128 compacted events / 256 KiB, with a 16,384 raw-event scan cap). Consec
 text fragments are joined for transfer only; original persisted events remain
 unchanged. A raw `before` cursor supports older pages without gaps or duplicate
 text. Split final text and older unresolved approvals in the current live turn
-must be assembled before reveal. When the visible transcript does not fill its
-viewport, older pages load serially until it becomes scrollable or history ends,
+must be assembled before reveal. When the visible transcript cannot scroll
+beyond the 90px bottom-follow threshold, older pages load serially until upward
+scrolling can leave follow mode or history ends,
 including after a resize or collapsed content change. Hidden/disconnected views
 do not start reads; failed or non-advancing pages require an explicit retry.
 Older records also load on upward scrolling or explicit request, preserving the
@@ -912,6 +913,13 @@ activates that image, and changing selection fences its unfinished read. Local
 Markdown images join after their existing lazy reader has loaded them. Scope/hide
 changes and removal of the selected image close the dialog; focus returns to the
 original trigger, including after navigation. Standalone groups use the same viewer.
+Transcript entries provide event/image keys independent of turn grouping, so a
+prepended page can replace a tool image owner without clearing the selection.
+Registration removals are reconciled after child layout effects complete. Arrow
+navigation moves focus out of replaceable error/retry content before selection;
+closing resolves the original trigger again if its DOM node was replaced.
+Linked Markdown images render their preview and destination as sibling controls,
+so enlargement never bubbles into the system/file/browser opener.
 Tool-use IDs deduplicate calls, including child calls. MCP tool names identify
 connector groups; installed-but-unused connectors are never fabricated. Source
 inventories return at most 128 entries with a truncation flag.

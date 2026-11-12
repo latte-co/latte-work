@@ -1983,3 +1983,76 @@ it("a stale IME-style input event cannot refill the composer after submission", 
   expect(restored.value).toBe("");
   expect(p.drafts.get(key).text).toBe("");
 });
+
+it("keeps the selected tool image open when paging into the middle of its turn", async () => {
+  URL.createObjectURL = vi.fn(() => "blob:history-image");
+  URL.revokeObjectURL = vi.fn();
+  const image: Event = {
+    seq: 300,
+    session_id: "a",
+    at: 0,
+    event: {
+      kind: "tool_result",
+      id: "image-tool",
+      is_error: false,
+      content: [
+        { type: "image", mime_type: "image/png", data_base64: "iVBORw0KGgo=" },
+      ],
+    },
+  };
+  const p = { ...props(), session: session("a"), hasEarlierHistory: true };
+  const view = render(
+    <Conversation {...p} events={[image]} earlierHistoryLoading />,
+  );
+  const el = view.container.querySelector(".conversation-scroll")!;
+  await waitFor(() => expect(el.getAttribute("aria-busy")).toBe("false"));
+  fireEvent.click(
+    screen.getByRole("button", { name: "放大图片 工具输出图片 1" }),
+  );
+  const modal = screen.getByRole("dialog");
+  await within(modal).findByRole("img");
+  view.rerender(<Conversation {...p} events={[historyRow(100), image]} />);
+  expect(screen.queryByRole("dialog")).toBe(modal);
+  await within(modal).findByRole("img");
+  fireEvent.keyDown(document.activeElement!, { key: "Escape" });
+  expect(screen.queryByRole("dialog")).toBeNull();
+  await waitFor(() =>
+    expect(document.activeElement).toBe(
+      screen.getByRole("button", { name: "放大图片 工具输出图片 1" }),
+    ),
+  );
+});
+
+it("continues filling history until upward scrolling can leave the follow threshold", async () => {
+  const p = { ...props(), session: session("a"), hasEarlierHistory: true };
+  const load = vi.fn().mockResolvedValue(undefined);
+  let rows = [historyRow(300)];
+  const view = render(
+    <Conversation {...p} events={rows} loadEarlierHistory={load} />,
+  );
+  const el = view.container.querySelector(
+    ".conversation-scroll",
+  ) as HTMLDivElement;
+  let height = 400;
+  Object.defineProperties(el, {
+    scrollHeight: { configurable: true, get: () => height },
+    clientHeight: { configurable: true, value: 400 },
+  });
+  await waitFor(() => expect(load).toHaveBeenCalledTimes(1));
+  height = 440;
+  rows = [historyRow(200), ...rows];
+  view.rerender(
+    <Conversation {...p} events={rows} loadEarlierHistory={load} />,
+  );
+  await waitFor(() => expect(load).toHaveBeenCalledTimes(2));
+  height = 490;
+  rows = [historyRow(100), ...rows];
+  view.rerender(
+    <Conversation {...p} events={rows} loadEarlierHistory={load} />,
+  );
+  expect(load).toHaveBeenCalledTimes(2);
+  el.scrollTop = 0;
+  fireEvent.scroll(el);
+  expect(load).toHaveBeenCalledTimes(3);
+  expect(screen.getByRole("button", { name: "回到最新" })).toBeTruthy();
+});

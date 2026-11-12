@@ -121,12 +121,17 @@ it("reads only the selected attachment, fences late data and allows leaving a fa
   await act(async () => finish(data));
   expect(URL.createObjectURL).not.toHaveBeenCalled();
   expect(within(dialog()).queryByRole("img", { name: "one.png" })).toBeNull();
-  fireEvent.keyDown(screen.getByRole("button", { name: "重试" }), {
+  screen.getByRole("button", { name: "重试" }).focus();
+  fireEvent.keyDown(document.activeElement!, {
     key: "ArrowRight",
   });
   await within(dialog()).findByRole("img", { name: "three.png" });
   expect(mocks.load).toHaveBeenCalledTimes(3);
-  fireEvent.keyDown(dialog(), { key: "Escape" });
+  expect(dialog().contains(document.activeElement)).toBe(true);
+  fireEvent.keyDown(document.activeElement!, { key: "ArrowLeft" });
+  await within(dialog()).findByRole("img", { name: "two.png" });
+  fireEvent.keyDown(document.activeElement!, { key: "Escape" });
+  expect(screen.queryByRole("dialog")).toBeNull();
   expect(URL.revokeObjectURL).toHaveBeenCalledWith("blob:image-1");
 });
 

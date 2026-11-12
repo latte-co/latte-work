@@ -1,3 +1,4 @@
+import type { ExtraProps } from "react-markdown";
 import { ImagePreview, useImagePreview } from "./ImageGallery";
 import { useContext, useEffect, useRef, useState } from "react";
 import { Image as ImageIcon, ImageOff, LoaderCircle } from "lucide-react";
@@ -32,15 +33,17 @@ function LoadedMessageImage({
   url,
   alt,
   path,
+  imageKey,
   onError,
 }: {
   url: string;
   alt: string;
   path: string;
+  imageKey: string;
   onError: () => void;
 }) {
   const trigger = useRef<HTMLButtonElement>(null);
-  const preview = useImagePreview(path, true, trigger);
+  const preview = useImagePreview(path, true, trigger, imageKey);
   const name = alt || path.split("/").at(-1) || "图片";
   return (
     <>
@@ -49,7 +52,11 @@ function LoadedMessageImage({
         type="button"
         className="message-image-button"
         aria-label={`放大图片 ${name}`}
-        onClick={preview.show}
+        onClick={(event) => {
+          event.preventDefault();
+          event.stopPropagation();
+          preview.show();
+        }}
       >
         <img
           className="message-image"
@@ -71,10 +78,12 @@ function MessageLocalImage({
   path,
   alt,
   granted,
+  imageKey,
 }: {
   path: string;
   alt: string;
   granted: boolean;
+  imageKey: string;
 }) {
   const actions = useContext(MessageActionsContext);
   // Project paths read through the existing bounded project reader; absolute
@@ -165,6 +174,7 @@ function MessageLocalImage({
         url={state.url}
         alt={alt}
         path={path}
+        imageKey={imageKey}
         onError={() => {
           release();
           setState({ error: "图片格式无法解码" });
@@ -234,7 +244,11 @@ function decodeLocalTarget(path: string): string {
  * place — project paths through the bounded project reader, absolute paths
  * through the display-only message-image reader.
  */
-export function MarkdownImage({ src, alt }: { src?: string; alt?: string }) {
+export function MarkdownImage({
+  src,
+  alt,
+  node,
+}: { src?: string; alt?: string } & ExtraProps) {
   const reference = src ? classifyLinkHref(src) : ({ kind: "text" } as const);
   if (reference.kind !== "projectPath" && reference.kind !== "externalPath")
     return <img src={src} alt={alt} />;
@@ -253,6 +267,11 @@ export function MarkdownImage({ src, alt }: { src?: string; alt?: string }) {
       path={path}
       alt={alt ?? ""}
       granted={reference.kind === "projectPath"}
+      imageKey={JSON.stringify([
+        "markdown",
+        path,
+        node?.position?.start.offset,
+      ])}
     />
   );
 }
