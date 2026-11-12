@@ -910,16 +910,21 @@ keys select images in DOM order. Main/child transcripts, draft attachments and
 before/after comparisons have separate scopes. Image owners retain their existing
 bounded readers and object URL lifetime; selecting an off-screen attachment only
 activates that image, and changing selection fences its unfinished read. Local
-Markdown images join after their existing lazy reader has loaded them. Scope/hide
+Markdown images join after their existing lazy reader has loaded them; a selected
+image registers with its logical owner even while a replacement owner reloads
+asynchronously, and selection resumes that read outside the viewport. Scope/hide
 changes and removal of the selected image close the dialog; focus returns to the
 original trigger, including after navigation. Standalone groups use the same viewer.
 Transcript entries provide event/image keys independent of turn grouping, so a
-prepended page can replace a tool image owner without clearing the selection.
+prepended page can replace a tool or Markdown image owner without clearing the selection.
 Registration removals are reconciled after child layout effects complete. Arrow
 navigation moves focus out of replaceable error/retry content before selection;
+async retry replacement also returns focus to the persistent close control;
 closing resolves the original trigger again if its DOM node was replaced.
-Linked Markdown images render their preview and destination as sibling controls,
-so enlargement never bubbles into the system/file/browser opener.
+Linked local Markdown images with preview/retry controls render their preview
+and destination as siblings, so enlargement never bubbles into the
+system/file/browser opener. Plain remote images and their original labels remain
+inside the destination link.
 Tool-use IDs deduplicate calls, including child calls. MCP tool names identify
 connector groups; installed-but-unused connectors are never fabricated. Source
 inventories return at most 128 entries with a truncation flag.

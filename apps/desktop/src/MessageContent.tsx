@@ -36,7 +36,7 @@ import {
 } from "./inlineReferences";
 import { InlineRefMenu, type InlineRefMenuItem } from "./InlineRefMenu";
 import { InlineRefTooltip } from "./InlineRefTooltip";
-import { MarkdownImage } from "./MessageImage";
+import { MarkdownImage, markdownImageTarget } from "./MessageImage";
 import { MessageActionsContext, type MessageActions } from "./messageActions";
 import type { SourceData } from "./sourceLoader";
 import { webLink } from "./browserLinks";
@@ -437,7 +437,12 @@ function MarkdownLink({
   // A local image is itself an interactive preview. Keep it outside the
   // destination control (including images nested in emphasis/strong markup).
   const containsImage = (element: NonNullable<ExtraProps["node"]>): boolean =>
-    element.tagName === "img" ||
+    (element.tagName === "img" &&
+      markdownImageTarget(
+        typeof element.properties.src === "string"
+          ? element.properties.src
+          : undefined,
+      ).kind === "local") ||
     element.children.some(
       (child) => child.type === "element" && containsImage(child),
     );

@@ -2023,6 +2023,106 @@ it("keeps the selected tool image open when paging into the middle of its turn",
   );
 });
 
+it.each(["finish", "close", "remove", "switch"] as const)(
+  "preserves a pending Markdown image dialog across history paging: %s",
+  async (ending) => {
+    URL.createObjectURL = vi.fn(() => "blob:markdown-history");
+    URL.revokeObjectURL = vi.fn();
+    const response = {
+      kind: "source_preview",
+      data: [137, 80, 78, 71],
+      mime_type: "image/png",
+      size: 4,
+      next: 4,
+      has_more: false,
+    };
+    let finish!: (value: typeof response) => void;
+    let reads = 0;
+    mocks.request.mockImplementation((_host, request) => {
+      if (request.method !== "preview_source")
+        return Promise.resolve({ kind: "files", entries: [] });
+      reads++;
+      return reads === 1
+        ? Promise.resolve(response)
+        : new Promise<typeof response>((resolve) => {
+            finish = resolve;
+          });
+    });
+    const image: Event = {
+      seq: 300,
+      at: 0,
+      session_id: "a",
+      event: { kind: "text", text: "![graph](./graph.png)" },
+    };
+    const notice: Event = {
+      seq: 100,
+      at: 0,
+      session_id: "a",
+      event: { kind: "notice", text: "Earlier history" },
+    };
+    const p = { ...props(), session: session("a"), hasEarlierHistory: true };
+    const view = render(
+      <Conversation {...p} events={[image]} earlierHistoryLoading />,
+    );
+    const trigger = await screen.findByRole("button", {
+      name: "放大图片 graph",
+    });
+    fireEvent.click(trigger);
+    const modal = screen.getByRole("dialog");
+    // The replacement owner is off-screen: selection must resume its read
+    // without waiting for an intersection callback.
+    vi.stubGlobal(
+      "IntersectionObserver",
+      class {
+        observe() {}
+        disconnect() {}
+      },
+    );
+    view.rerender(<Conversation {...p} events={[notice, image]} />);
+    expect(screen.queryByRole("dialog")).toBe(modal);
+    await waitFor(() => expect(reads).toBe(2));
+    expect(within(modal).getByText("正在读取图片…")).toBeTruthy();
+    if (ending !== "finish") {
+      if (ending === "close") {
+        const placeholder = view.container.querySelector(
+          ".message-image-placeholder",
+        )!.parentElement;
+        fireEvent.keyDown(document.activeElement!, { key: "Escape" });
+        await waitFor(() => expect(document.activeElement).toBe(placeholder));
+      } else {
+        view.rerender(
+          <Conversation
+            {...p}
+            session={session(ending === "switch" ? "b" : "a")}
+            events={ending === "switch" ? [notice, image] : [notice]}
+          />,
+        );
+      }
+      expect(screen.queryByRole("dialog")).toBeNull();
+      await act(async () => finish(response));
+      expect(screen.queryByRole("dialog")).toBeNull();
+      expect(URL.createObjectURL).toHaveBeenCalledTimes(1);
+      expect(URL.revokeObjectURL).toHaveBeenCalledWith("blob:markdown-history");
+      return;
+    }
+    await act(async () => finish(response));
+    expect(screen.getByRole("dialog")).toBe(modal);
+    expect(within(modal).getByRole("img").getAttribute("src")).toBe(
+      "blob:markdown-history",
+    );
+    fireEvent.keyDown(document.activeElement!, { key: "Escape" });
+    await waitFor(() =>
+      expect(document.activeElement).toBe(
+        screen.getByRole("button", { name: "放大图片 graph" }),
+      ),
+    );
+    expect(document.activeElement).not.toBe(trigger);
+    fireEvent.click(document.activeElement!);
+    view.rerender(<Conversation {...p} events={[notice]} />);
+    expect(screen.queryByRole("dialog")).toBeNull();
+  },
+);
+
 it("continues filling history until upward scrolling can leave the follow threshold", async () => {
   const p = { ...props(), session: session("a"), hasEarlierHistory: true };
   const load = vi.fn().mockResolvedValue(undefined);

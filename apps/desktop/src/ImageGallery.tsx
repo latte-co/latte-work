@@ -59,6 +59,15 @@ function ImageDialog({
 }) {
   const stage = useRef<HTMLDivElement>(null);
   const closeButton = useRef<HTMLButtonElement>(null);
+  const stageFocus = useRef<HTMLElement | null>(null);
+  useLayoutEffect(() => {
+    // Async reads can also replace a focused retry button without navigation.
+    if (stageFocus.current && !stageFocus.current.isConnected) {
+      if (document.activeElement === document.body)
+        closeButton.current?.focus();
+      stageFocus.current = null;
+    }
+  });
   const navigate = (direction: number) => {
     // The keyed stage removes retry controls. Move focus before replacing it,
     // so subsequent arrow/Escape events continue to reach this same dialog.
@@ -110,7 +119,13 @@ function ImageDialog({
             <X size={18} />
           </button>
         </header>
-        <div className="attachment-image-stage" ref={stage}>
+        <div
+          className="attachment-image-stage"
+          ref={stage}
+          onFocusCapture={(event) => {
+            stageFocus.current = event.target;
+          }}
+        >
           <Fragment key={entry.id}>{entry.content}</Fragment>
         </div>
         {count > 1 && (
