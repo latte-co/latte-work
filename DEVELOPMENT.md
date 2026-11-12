@@ -904,6 +904,14 @@ the existing host-scoped preview reader. No new preview protocol or filesystem
 permission is added. Visible image reads share a two-reader/64-waiter bound;
 hidden/off-screen readers stop starting chunks and release object URLs. The image
 dialog traps/restores focus, closes on scope changes and uses sniffed raster MIME.
+`ImageGallery` keeps a single dialog mounted while arrow buttons or Left/Right
+keys select images in DOM order. Main/child transcripts, draft attachments and
+before/after comparisons have separate scopes. Image owners retain their existing
+bounded readers and object URL lifetime; selecting an off-screen attachment only
+activates that image, and changing selection fences its unfinished read. Local
+Markdown images join after their existing lazy reader has loaded them. Scope/hide
+changes and removal of the selected image close the dialog; focus returns to the
+original trigger, including after navigation. Standalone groups use the same viewer.
 Tool-use IDs deduplicate calls, including child calls. MCP tool names identify
 connector groups; installed-but-unused connectors are never fabricated. Source
 inventories return at most 128 entries with a truncation flag.

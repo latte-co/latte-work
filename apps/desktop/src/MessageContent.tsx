@@ -1,3 +1,4 @@
+import { ImageGalleryBoundary } from "./ImageGallery";
 import { WebLink } from "./LinkHandling";
 import { copyText } from "./clipboard";
 import {
@@ -475,7 +476,7 @@ function preserveLocalTargets(url: string): string {
 }
 export function MessageContent({ text }: { text: string }) {
   return (
-    <>
+    <ImageGalleryBoundary>
       <ReactMarkdown
         remarkPlugins={[remarkGfm]}
         urlTransform={preserveLocalTargets}
@@ -488,7 +489,7 @@ export function MessageContent({ text }: { text: string }) {
       >
         {text}
       </ReactMarkdown>
-    </>
+    </ImageGalleryBoundary>
   );
 }
 export function MessageActionsProvider({

@@ -1,3 +1,4 @@
+import { ImageGallery } from "./ImageGallery";
 import { Select } from "./Select";
 import { referenceMessage } from "./referenceMessage";
 import { MessageQueue } from "./MessageQueue";
@@ -673,152 +674,162 @@ export function Conversation({
                   </button>
                 </div>
               )}
-              <MessageActionsProvider
-                value={{
-                  openFile,
-                  localHost: hostId === "local",
-                  projectRoot: project?.path,
-                  readProjectFile: projectId
-                    ? (path, valid = () => true) =>
-                        loadSource(
-                          hostId,
-                          projectId,
-                          undefined,
-                          path,
-                          valid,
-                          true,
-                        )
-                    : undefined,
-                  loadExternalImage: projectId
-                    ? createExternalImageLoader(hostId, projectId)
-                    : undefined,
-                  reportError: setInlineRefError,
-                }}
+              <ImageGallery
+                scope={historyScope}
+                active={!settingsOpen && !preparingHistory}
               >
-                <TurnTranscript
-                  key={JSON.stringify([hostId, session?.id])}
-                  events={events}
-                  turns={turns}
+                <MessageActionsProvider
+                  value={{
+                    openFile,
+                    localHost: hostId === "local",
+                    projectRoot: project?.path,
+                    readProjectFile: projectId
+                      ? (path, valid = () => true) =>
+                          loadSource(
+                            hostId,
+                            projectId,
+                            undefined,
+                            path,
+                            valid,
+                            true,
+                          )
+                      : undefined,
+                    loadExternalImage: projectId
+                      ? createExternalImageLoader(hostId, projectId)
+                      : undefined,
+                    reportError: setInlineRefError,
+                  }}
                 >
-                  {(item) =>
-                    item.type === "user" ? (
-                      <UserMessage
-                        key={item.key}
-                        text={item.text}
-                        at={item.at}
-                        hostId={hostId}
-                        projectId={projectId}
-                        sessionId={session?.id}
-                        connected={connected}
-                        active={!settingsOpen && !preparingHistory}
-                      />
-                    ) : item.type === "assistant" ? (
-                      <article
-                        className="assistant-message markdown"
-                        key={item.key}
-                      >
-                        <MessageContent text={item.text} />
-                      </article>
-                    ) : item.type === "tool_images" ? (
-                      <ToolImages
-                        key={item.key}
-                        images={item.images}
-                        active={!settingsOpen && !preparingHistory}
-                      />
-                    ) : item.type === "tool" ? (
-                      <ToolRow
-                        key={item.key}
-                        tool={item}
-                        loadContext={
-                          session
-                            ? { hostId, sessionId: session.id }
-                            : undefined
-                        }
-                      />
-                    ) : item.type === "tools" ? (
-                      <ToolGroup
-                        key={item.key}
-                        tools={item.tools}
-                        loadContext={
-                          session
-                            ? { hostId, sessionId: session.id }
-                            : undefined
-                        }
-                      />
-                    ) : (
-                      (() => {
-                        const v = item.value;
-                        if (v.kind === "turn_changes" && openTurnChanges)
-                          return (
-                            <TurnChangesCard
-                              key={`${hostId}:${session?.id}:${item.key}`}
-                              hostId={hostId}
-                              sessionId={session?.id ?? ""}
-                              canUndo={
-                                connected &&
-                                !!session &&
-                                !["running", "waiting"].includes(
-                                  session.status,
-                                ) &&
-                                latestRequestId(events) === v.changes.request_id
-                              }
-                              changes={v.changes}
-                              open={(path) => openTurnChanges(v.changes, path)}
-                            />
-                          );
-                        if (v.kind === "question")
-                          return (
-                            <QuestionCard
-                              key={item.key}
-                              request={v}
-                              resolved={item.resolved}
-                              answers={
-                                item.type === "event" ? item.answers : undefined
-                              }
-                              record
-                              onAnswer={() => {}}
-                            />
-                          );
-                        if (v.kind === "approval")
-                          return (
-                            <ApprovalCard
-                              key={item.key}
-                              request={v}
-                              resolved={item.resolved}
-                              decision={item.decision}
-                              tool={item.approvalTool}
-                              presentation="record"
-                              loadContext={
-                                session
-                                  ? { hostId, sessionId: session.id }
-                                  : undefined
-                              }
-                              onDecision={(allow) =>
-                                void decide(v.request_id, allow)
-                              }
-                            />
-                          );
-                        if (v.kind === "state" && v.message)
-                          return (
-                            <div
-                              className={`notice ${v.status === "failed" ? "failure" : ""}`}
-                              key={item.key}
-                            >
-                              {v.message}
-                            </div>
-                          );
-                        if (v.kind === "notice")
-                          return (
-                            <div className="notice" key={item.key}>
-                              {v.text}
-                            </div>
-                          );
-                        return null;
-                      })()
-                    )
-                  }
-                </TurnTranscript>
-              </MessageActionsProvider>
+                  <TurnTranscript
+                    key={JSON.stringify([hostId, session?.id])}
+                    events={events}
+                    turns={turns}
+                  >
+                    {(item) =>
+                      item.type === "user" ? (
+                        <UserMessage
+                          key={item.key}
+                          text={item.text}
+                          at={item.at}
+                          hostId={hostId}
+                          projectId={projectId}
+                          sessionId={session?.id}
+                          connected={connected}
+                          active={!settingsOpen && !preparingHistory}
+                        />
+                      ) : item.type === "assistant" ? (
+                        <article
+                          className="assistant-message markdown"
+                          key={item.key}
+                        >
+                          <MessageContent text={item.text} />
+                        </article>
+                      ) : item.type === "tool_images" ? (
+                        <ToolImages
+                          key={item.key}
+                          images={item.images}
+                          active={!settingsOpen && !preparingHistory}
+                        />
+                      ) : item.type === "tool" ? (
+                        <ToolRow
+                          key={item.key}
+                          tool={item}
+                          loadContext={
+                            session
+                              ? { hostId, sessionId: session.id }
+                              : undefined
+                          }
+                        />
+                      ) : item.type === "tools" ? (
+                        <ToolGroup
+                          key={item.key}
+                          tools={item.tools}
+                          loadContext={
+                            session
+                              ? { hostId, sessionId: session.id }
+                              : undefined
+                          }
+                        />
+                      ) : (
+                        (() => {
+                          const v = item.value;
+                          if (v.kind === "turn_changes" && openTurnChanges)
+                            return (
+                              <TurnChangesCard
+                                key={`${hostId}:${session?.id}:${item.key}`}
+                                hostId={hostId}
+                                sessionId={session?.id ?? ""}
+                                canUndo={
+                                  connected &&
+                                  !!session &&
+                                  !["running", "waiting"].includes(
+                                    session.status,
+                                  ) &&
+                                  latestRequestId(events) ===
+                                    v.changes.request_id
+                                }
+                                changes={v.changes}
+                                open={(path) =>
+                                  openTurnChanges(v.changes, path)
+                                }
+                              />
+                            );
+                          if (v.kind === "question")
+                            return (
+                              <QuestionCard
+                                key={item.key}
+                                request={v}
+                                resolved={item.resolved}
+                                answers={
+                                  item.type === "event"
+                                    ? item.answers
+                                    : undefined
+                                }
+                                record
+                                onAnswer={() => {}}
+                              />
+                            );
+                          if (v.kind === "approval")
+                            return (
+                              <ApprovalCard
+                                key={item.key}
+                                request={v}
+                                resolved={item.resolved}
+                                decision={item.decision}
+                                tool={item.approvalTool}
+                                presentation="record"
+                                loadContext={
+                                  session
+                                    ? { hostId, sessionId: session.id }
+                                    : undefined
+                                }
+                                onDecision={(allow) =>
+                                  void decide(v.request_id, allow)
+                                }
+                              />
+                            );
+                          if (v.kind === "state" && v.message)
+                            return (
+                              <div
+                                className={`notice ${v.status === "failed" ? "failure" : ""}`}
+                                key={item.key}
+                              >
+                                {v.message}
+                              </div>
+                            );
+                          if (v.kind === "notice")
+                            return (
+                              <div className="notice" key={item.key}>
+                                {v.text}
+                              </div>
+                            );
+                          return null;
+                        })()
+                      )
+                    }
+                  </TurnTranscript>
+                </MessageActionsProvider>
+              </ImageGallery>
               {workingStatus && (
                 <WorkingStatus
                   label={workingStatus}

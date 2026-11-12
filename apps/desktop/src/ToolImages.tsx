@@ -1,3 +1,4 @@
+import { ImageGalleryBoundary } from "./ImageGallery";
 import { useMemo } from "react";
 import { imageBytes, type ToolImage } from "./toolOutput";
 import { RasterImage } from "./RasterImage";
@@ -36,15 +37,17 @@ export function ToolImages({
   active?: boolean;
 }) {
   return (
-    <div className="tool-images">
-      {images.map((image, i) => (
-        <ToolImagePreview
-          key={i}
-          image={image}
-          name={`工具输出图片 ${i + 1}`}
-          active={active}
-        />
-      ))}
-    </div>
+    <ImageGalleryBoundary>
+      <div className="tool-images">
+        {images.map((image, i) => (
+          <ToolImagePreview
+            key={i}
+            image={image}
+            name={`工具输出图片 ${i + 1}`}
+            active={active}
+          />
+        ))}
+      </div>
+    </ImageGalleryBoundary>
   );
 }

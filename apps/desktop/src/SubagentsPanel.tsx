@@ -1,3 +1,4 @@
+import { ImageGallery } from "./ImageGallery";
 import {
   useEffect,
   useId,
@@ -178,23 +179,25 @@ export function SubagentsPanel({
             }}
           >
             <div className="messages">
-              {sessionId ? (
-                <SubagentTranscript
-                  key={readingScope}
-                  task={selected}
-                  events={transcript.events}
-                  prompt={transcript.prompt}
-                  elapsed={age(selected)}
-                  incomplete={transcript.incomplete}
-                  readingMore={transcript.readingMore}
-                />
-              ) : selected.summary ? (
-                <article className="markdown subagent-result">
-                  <MessageContent text={selected.summary} />
-                </article>
-              ) : !working ? (
-                <p className="subagent-empty">尚未上报结果</p>
-              ) : null}
+              <ImageGallery scope={readingScope} active={active}>
+                {sessionId ? (
+                  <SubagentTranscript
+                    key={readingScope}
+                    task={selected}
+                    events={transcript.events}
+                    prompt={transcript.prompt}
+                    elapsed={age(selected)}
+                    incomplete={transcript.incomplete}
+                    readingMore={transcript.readingMore}
+                  />
+                ) : selected.summary ? (
+                  <article className="markdown subagent-result">
+                    <MessageContent text={selected.summary} />
+                  </article>
+                ) : !working ? (
+                  <p className="subagent-empty">尚未上报结果</p>
+                ) : null}
+              </ImageGallery>
               {!selected.summary &&
                 ["failed", "stopped"].includes(selected.status) && (
                   <div

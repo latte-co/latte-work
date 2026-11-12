@@ -216,7 +216,10 @@ describe("MessageContent markdown images", () => {
       expect.any(Function),
     );
     expect(container.querySelector("img[src='blob:mock']")).not.toBeNull();
-    expect(screen.queryByRole("button")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "放大图片 流程图" }));
+    expect(
+      screen.getByRole("dialog", { name: "图片预览 流程图" }),
+    ).toBeTruthy();
   });
 
   it("degrades project images to a placeholder without the project reader", () => {

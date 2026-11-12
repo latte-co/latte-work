@@ -1,3 +1,4 @@
+import { ImagePreview, useImagePreview } from "./ImageGallery";
 import { useContext, useEffect, useRef, useState } from "react";
 import { Image as ImageIcon, ImageOff, LoaderCircle } from "lucide-react";
 import { message } from "./api";
@@ -24,6 +25,44 @@ function UnavailableImage({ path, hint }: { path: string; hint: string }) {
       <span>{path}</span>
       <span className="message-image-hint">{hint}</span>
     </span>
+  );
+}
+
+function LoadedMessageImage({
+  url,
+  alt,
+  path,
+  onError,
+}: {
+  url: string;
+  alt: string;
+  path: string;
+  onError: () => void;
+}) {
+  const trigger = useRef<HTMLButtonElement>(null);
+  const preview = useImagePreview(path, true, trigger);
+  const name = alt || path.split("/").at(-1) || "图片";
+  return (
+    <>
+      <button
+        ref={trigger}
+        type="button"
+        className="message-image-button"
+        aria-label={`放大图片 ${name}`}
+        onClick={preview.show}
+      >
+        <img
+          className="message-image"
+          src={url}
+          alt={alt}
+          title={path}
+          onError={onError}
+        />
+      </button>
+      <ImagePreview preview={preview} name={name} title={path}>
+        <img src={url} alt={name} onError={onError} />
+      </ImagePreview>
+    </>
   );
 }
 
@@ -122,11 +161,10 @@ function MessageLocalImage({
   }, [path, enabled, revision]);
   if (state.url) {
     return (
-      <img
-        className="message-image"
-        src={state.url}
+      <LoadedMessageImage
+        url={state.url}
         alt={alt}
-        title={path}
+        path={path}
         onError={() => {
           release();
           setState({ error: "图片格式无法解码" });
