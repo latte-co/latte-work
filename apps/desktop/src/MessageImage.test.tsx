@@ -5,6 +5,7 @@ import {
   fireEvent,
   render,
   screen,
+  within,
 } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { MessageActionsProvider, MessageContent } from "./MessageContent";
@@ -188,6 +189,35 @@ describe("MessageContent markdown images", () => {
     }
   });
 
+  it("keeps the open dialog and keyboard focus through a failed image retry", async () => {
+    renderMarkdown("![graph](graph.png)");
+    fireEvent.click(
+      await screen.findByRole("button", { name: "放大图片 graph" }),
+    );
+    const modal = screen.getByRole("dialog");
+    fireEvent.error(within(modal).getByRole("img"));
+    expect(screen.getByRole("dialog")).toBe(modal);
+    let finish!: (data: SourceData) => void;
+    readProjectFile.mockImplementationOnce(
+      () =>
+        new Promise<SourceData>((resolve) => {
+          finish = resolve;
+        }),
+    );
+    const retry = within(modal).getByRole("button", { name: "重试" });
+    retry.focus();
+    fireEvent.click(retry);
+    expect(within(modal).getByText("正在读取图片…")).toBeTruthy();
+    expect(document.activeElement).toBe(
+      within(modal).getByRole("button", { name: "关闭图片预览" }),
+    );
+    await act(async () => finish(pngData));
+    expect(screen.getByRole("dialog")).toBe(modal);
+    expect(within(modal).getByRole("img")).toBeTruthy();
+    fireEvent.keyDown(document.activeElement!, { key: "Escape" });
+    expect(screen.queryByRole("dialog")).toBeNull();
+  });
+
   it("rejects non-image payloads with an error placeholder", async () => {
     loadExternal.mockResolvedValue(textData);
     renderMarkdown("![二维码](/tmp/notes.txt)");
@@ -216,7 +246,10 @@ describe("MessageContent markdown images", () => {
       expect.any(Function),
     );
     expect(container.querySelector("img[src='blob:mock']")).not.toBeNull();
-    expect(screen.queryByRole("button")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "放大图片 流程图" }));
+    expect(
+      screen.getByRole("dialog", { name: "图片预览 流程图" }),
+    ).toBeTruthy();
   });
 
   it("degrades project images to a placeholder without the project reader", () => {

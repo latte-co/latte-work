@@ -1,3 +1,4 @@
+import { ImageGallery } from "./ImageGallery";
 import {
   useEffect,
   useLayoutEffect,
@@ -1116,56 +1117,58 @@ export function Composer(props: Props) {
         </div>
       )}
       {!!attached.length && !concealSubmitted && (
-        <div className="composer-references" aria-label="已添加附件和引用">
-          {attached.map((entry) => (
-            <span key={entry.path} title={entry.path}>
-              <small className="composer-reference-kind">
-                {entry.attachmentKind ? "附件" : "引用"}
-              </small>
-              {!entry.directory && referenceKind(entry) === "image" ? (
-                <AttachmentImage
-                  reference={entry}
-                  variant="chip"
-                  hostId={hostId}
-                  projectId={projectId}
-                  sessionId={sessionId}
-                  connected={connected}
-                  active={!hidden}
-                  onOpen={close}
-                />
-              ) : (
-                <>
-                  {entry.directory ? (
-                    <Folder size={14} />
-                  ) : entry.attachmentKind === "video" ? (
-                    <FileVideo size={14} />
-                  ) : (
-                    <FileText size={14} />
-                  )}
-                  <span>
-                    {entry.attachmentKind && !entry.directory
-                      ? entry.name
-                      : entry.path}
-                  </span>
-                </>
-              )}
-              <button
-                disabled={sending || pasting}
-                aria-label={`${entry.attachmentKind ? "移除附件" : "移除引用"} ${entry.path}`}
-                onClick={() =>
-                  setReferences({
-                    scope,
-                    entries: attached.filter(
-                      (item) => item.path !== entry.path,
-                    ),
-                  })
-                }
-              >
-                <X size={13} />
-              </button>
-            </span>
-          ))}
-        </div>
+        <ImageGallery scope={scope} active={!hidden}>
+          <div className="composer-references" aria-label="已添加附件和引用">
+            {attached.map((entry) => (
+              <span key={entry.path} title={entry.path}>
+                <small className="composer-reference-kind">
+                  {entry.attachmentKind ? "附件" : "引用"}
+                </small>
+                {!entry.directory && referenceKind(entry) === "image" ? (
+                  <AttachmentImage
+                    reference={entry}
+                    variant="chip"
+                    hostId={hostId}
+                    projectId={projectId}
+                    sessionId={sessionId}
+                    connected={connected}
+                    active={!hidden}
+                    onOpen={close}
+                  />
+                ) : (
+                  <>
+                    {entry.directory ? (
+                      <Folder size={14} />
+                    ) : entry.attachmentKind === "video" ? (
+                      <FileVideo size={14} />
+                    ) : (
+                      <FileText size={14} />
+                    )}
+                    <span>
+                      {entry.attachmentKind && !entry.directory
+                        ? entry.name
+                        : entry.path}
+                    </span>
+                  </>
+                )}
+                <button
+                  disabled={sending || pasting}
+                  aria-label={`${entry.attachmentKind ? "移除附件" : "移除引用"} ${entry.path}`}
+                  onClick={() =>
+                    setReferences({
+                      scope,
+                      entries: attached.filter(
+                        (item) => item.path !== entry.path,
+                      ),
+                    })
+                  }
+                >
+                  <X size={13} />
+                </button>
+              </span>
+            ))}
+          </div>
+        </ImageGallery>
       )}
       <textarea
         ref={input}

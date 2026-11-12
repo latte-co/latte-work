@@ -478,3 +478,75 @@ describe("MessageContent markdown file URLs", () => {
     expect(document.querySelectorAll("a[href]")).toHaveLength(0);
   });
 });
+
+it.each(["README.md", "https://example.com/docs"])(
+  "keeps a remote image and its original label inside the link to %s",
+  (href) => {
+    const openFile = vi.fn();
+    render(
+      <MessageActionsProvider value={{ openFile, localHost: true }}>
+        <MessageContent
+          text={`[**![文档图标](https://example.com/favicon.ico)** 查看说明](${href})`}
+        />
+      </MessageActionsProvider>,
+    );
+    const image = screen.getByRole("img", { name: "文档图标" });
+    const link = screen.getByRole(href === "README.md" ? "button" : "link", {
+      name: "文档图标 查看说明",
+    });
+    expect(link.contains(image)).toBe(true);
+    expect(screen.queryByText(href)).toBeNull();
+    fireEvent.click(image);
+    fireEvent.click(screen.getByText("查看说明"));
+    if (href === "README.md") {
+      expect(openFile).toHaveBeenCalledTimes(2);
+      expect(openFile).toHaveBeenLastCalledWith("README.md");
+    } else {
+      expect(link.getAttribute("href")).toBe(href);
+    }
+    expect(screen.queryByRole("dialog")).toBeNull();
+  },
+);
+
+it.each(["/tmp/report.command", "report.md", "https://example.com/report"])(
+  "separates image enlargement from its enclosing link to %s",
+  async (href) => {
+    URL.createObjectURL = vi.fn(() => "blob:linked-image");
+    URL.revokeObjectURL = vi.fn();
+    const openFile = vi.fn();
+    const { container } = render(
+      <MessageActionsProvider
+        value={{
+          localHost: true,
+          openFile,
+          readProjectFile: async () => ({
+            bytes: new Uint8Array([137, 80, 78, 71]),
+            mime: "image/png",
+            size: 4,
+            truncated: false,
+          }),
+        }}
+      >
+        <MessageContent text={`[**![缩略图](./thumb.png)**](${href})`} />
+      </MessageActionsProvider>,
+    );
+    const preview = await screen.findByRole("button", {
+      name: "放大图片 缩略图",
+    });
+    fireEvent.click(preview);
+    expect(mocks.invoke).not.toHaveBeenCalled();
+    expect(openFile).not.toHaveBeenCalled();
+    expect(screen.getByRole("dialog")).toBeTruthy();
+    expect(container.querySelector("button button, a button")).toBeNull();
+    fireEvent.keyDown(document.activeElement!, { key: "Escape" });
+    const target = screen.getByRole(
+      href.startsWith("https:") ? "link" : "button",
+      { name: href },
+    );
+    fireEvent.click(target);
+    if (href.startsWith("/tmp/"))
+      expect(mocks.invoke).toHaveBeenCalledWith("open_path", { path: href });
+    if (href === "report.md") expect(openFile).toHaveBeenCalledWith(href);
+    expect(screen.queryByRole("dialog")).toBeNull();
+  },
+);

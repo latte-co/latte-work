@@ -548,8 +548,13 @@ turns, 128 compacted events / 256 KiB, with a 16,384 raw-event scan cap). Consec
 text fragments are joined for transfer only; original persisted events remain
 unchanged. A raw `before` cursor supports older pages without gaps or duplicate
 text. Split final text and older unresolved approvals in the current live turn
-must be assembled before reveal. Older records load on upward scrolling or explicit
-request, preserving the viewport anchor. Older servers without `history_window`
+must be assembled before reveal. When the visible transcript cannot scroll
+beyond the 90px bottom-follow threshold, older pages load serially until upward
+scrolling can leave follow mode or history ends,
+including after a resize or collapsed content change. Hidden/disconnected views
+do not start reads; failed or non-advancing pages require an explicit retry.
+Older records also load on upward scrolling or explicit request, preserving the
+viewport anchor. Older servers without `history_window`
 still use the compatible full Poll replay. The conversation reveals the latest
 window after positioning at the bottom across two animation frames; later live
 updates retain normal follow behavior and manual reading positions. A scope change cancels
@@ -649,17 +654,18 @@ fragments and `:12` suffixes ride along as line hints, and anchors/unknown
 schemes render as plain text instead of dead blue links. Local-path links and
 chips share one open path and one context menu: project-relative targets (and
 absolute targets under the project root) open in the workspace file tab on
-every host, while other local absolutes fall back to the guarded `open_path`.
+every host, while other local absolutes fall back to `open_path`.
 Project
 files use the bounded `preview_source` read for 另存为 and content copy on
 local and SSH hosts alike; local external paths use desktop commands that
-expand `~/`, require a bounded absolute path and never execute the target
-(`open_path` refuses executable bits plus app bundles and install/script
-targets such as `.app`, `.pkg`, `.dmg`, `.terminal`, `.command`, `.desktop`;
-`reveal_path` is macOS-only reveal; `save_local_file_as` streams a
+expand `~/` and require a bounded absolute path. Explicit `open_path` actions
+resolve the existing target and invoke the platform default handler without
+file-type or executable-bit restrictions, including apps and installers
+(`.app`, `.pkg`, `.dmg`, scripts and executables); OS prompts remain authoritative.
+Other actions keep their own contracts: `reveal_path` is macOS-only reveal; `save_local_file_as` streams a
 dialog-targeted copy, `read_local_text` caps at 2MB and refuses binary
 content, `save_file_as` caps dialog writes at 32MB, and VS Code opens only on
-the local host and only when the project root is known). Copy and save
+the local host and only when the project root is known. Copy and save
 failures surface through the existing status-issue panel; a cancelled dialog
 is silent. Views without workspace actions keep plain code. Ordinary code,
 branch names, commit hashes and shell snippets never become interactive;
@@ -899,6 +905,29 @@ the existing host-scoped preview reader. No new preview protocol or filesystem
 permission is added. Visible image reads share a two-reader/64-waiter bound;
 hidden/off-screen readers stop starting chunks and release object URLs. The image
 dialog traps/restores focus, closes on scope changes and uses sniffed raster MIME.
+`ImageGallery` keeps a single dialog mounted while arrow buttons or Left/Right
+keys select images in DOM order. Main/child transcripts, draft attachments and
+before/after comparisons have separate scopes. Image owners retain their existing
+bounded readers and object URL lifetime; selecting an off-screen attachment only
+activates that image, and changing selection fences its unfinished read. Local
+Markdown images join after their existing lazy reader has loaded them; a selected
+image registers with its logical owner even while a replacement owner reloads
+asynchronously, and selection resumes that read outside the viewport. A successful
+read latches activation before replacing the observed placeholder, so a later
+decode failure can still be retried from the transcript after closing the dialog.
+Closing before that read completes still cancels the selection-only read. Scope/hide
+changes and removal of the selected image close the dialog; focus returns to the
+original trigger, including after navigation. Standalone groups use the same viewer.
+Transcript entries provide event/image keys independent of turn grouping, so a
+prepended page can replace a tool or Markdown image owner without clearing the selection.
+Registration removals are reconciled after child layout effects complete. Arrow
+navigation moves focus out of replaceable error/retry content before selection;
+async retry replacement also returns focus to the persistent close control;
+closing resolves the original trigger again if its DOM node was replaced.
+Linked local Markdown images with preview/retry controls render their preview
+and destination as siblings, so enlargement never bubbles into the
+system/file/browser opener. Plain remote images and their original labels remain
+inside the destination link.
 Tool-use IDs deduplicate calls, including child calls. MCP tool names identify
 connector groups; installed-but-unused connectors are never fabricated. Source
 inventories return at most 128 entries with a truncation flag.

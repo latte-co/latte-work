@@ -1,3 +1,5 @@
+import type { ExtraProps } from "react-markdown";
+import { ImagePreview, useImagePreview } from "./ImageGallery";
 import { useContext, useEffect, useRef, useState } from "react";
 import { Image as ImageIcon, ImageOff, LoaderCircle } from "lucide-react";
 import { message } from "./api";
@@ -32,10 +34,12 @@ function MessageLocalImage({
   path,
   alt,
   granted,
+  imageKey,
 }: {
   path: string;
   alt: string;
   granted: boolean;
+  imageKey: string;
 }) {
   const actions = useContext(MessageActionsContext);
   // Project paths read through the existing bounded project reader; absolute
@@ -54,7 +58,9 @@ function MessageLocalImage({
   const [revision, retry] = useState(0);
   const [state, setState] = useState<LoadState>({});
   const resource = useRef<{ url: string } | undefined>(undefined);
-  const target = useRef<HTMLSpanElement>(null);
+  const target = useRef<HTMLElement>(null);
+  const preview = useImagePreview(path, true, target, imageKey);
+  const name = alt || path.split("/").at(-1) || "图片";
   // Images load lazily once they approach the viewport: the async read and
   // its in-place loading state never delay the rest of the message flow, and
   // off-screen images in a long reply cost no reads at all. The state
@@ -90,7 +96,9 @@ function MessageLocalImage({
     resource.current = undefined;
   }
   useEffect(() => release, []);
-  const enabled = hasLoader && visible;
+  // A selected owner can remount during history regrouping. Resume its read
+  // even if the replacement placeholder is outside the viewport.
+  const enabled = hasLoader && (visible || preview.open);
   useEffect(() => {
     if (!enabled || !loaderRef.current) return;
     let disposed = false;
@@ -108,6 +116,10 @@ function MessageLocalImage({
           new Blob([data.bytes as BlobPart], { type: data.mime }),
         );
         resource.current = { url };
+        // Selection can load an off-screen owner before any intersection.
+        // Latch activation before replacing its observed placeholder, so
+        // decode retries remain enabled after the dialog closes.
+        setVisible(true);
         setState({ url });
       })
       .catch((error) => {
@@ -120,25 +132,14 @@ function MessageLocalImage({
       disposed = true;
     };
   }, [path, enabled, revision]);
-  if (state.url) {
-    return (
-      <img
-        className="message-image"
-        src={state.url}
-        alt={alt}
-        title={path}
-        onError={() => {
-          release();
-          setState({ error: "图片格式无法解码" });
-        }}
-      />
-    );
-  }
+  const onError = () => {
+    release();
+    setState({ error: "图片格式无法解码" });
+  };
   const error = state.error;
   const loading = !error && state.loading;
-  return (
+  const placeholder = (
     <span
-      ref={target}
       className="message-image-placeholder"
       role={error ? "alert" : loading ? "status" : undefined}
       title={path}
@@ -171,6 +172,53 @@ function MessageLocalImage({
       )}
     </span>
   );
+  return (
+    <>
+      {state.url ? (
+        <button
+          ref={(element) => {
+            target.current = element;
+          }}
+          type="button"
+          className="message-image-button"
+          aria-label={`放大图片 ${name}`}
+          onClick={(event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            preview.show();
+          }}
+        >
+          <img
+            className="message-image"
+            src={state.url}
+            alt={alt}
+            title={path}
+            onError={onError}
+          />
+        </button>
+      ) : (
+        <span
+          ref={(element) => {
+            target.current = element;
+          }}
+          tabIndex={-1}
+        >
+          {placeholder}
+        </span>
+      )}
+      {/* Keep the selected logical owner registered during async reloads;
+          unviewed lazy images still join only after loading. */}
+      {(state.url || preview.open) && (
+        <ImagePreview preview={preview} name={name} title={path}>
+          {state.url ? (
+            <img src={state.url} alt={name} onError={onError} />
+          ) : (
+            placeholder
+          )}
+        </ImagePreview>
+      )}
+    </>
+  );
 }
 
 /**
@@ -196,25 +244,54 @@ function decodeLocalTarget(path: string): string {
  * place — project paths through the bounded project reader, absolute paths
  * through the display-only message-image reader.
  */
-export function MarkdownImage({ src, alt }: { src?: string; alt?: string }) {
+export function markdownImageTarget(src?: string) {
   const reference = src ? classifyLinkHref(src) : ({ kind: "text" } as const);
   if (reference.kind !== "projectPath" && reference.kind !== "externalPath")
-    return <img src={src} alt={alt} />;
+    return { kind: "plain" } as const;
   const path = decodeLocalTarget(reference.path);
   if (reference.kind === "externalPath") {
     // The display-only reader reads concrete files: home-relative paths
     // never resolve (absolute paths only) and directories carry no raster
     // payload, so both render an explanation instead of a doomed request.
     if (!path.startsWith("/"))
-      return <UnavailableImage path={path} hint="需要使用绝对路径才能加载" />;
+      return {
+        kind: "unavailable",
+        path,
+        hint: "需要使用绝对路径才能加载",
+      } as const;
     if (path.endsWith("/"))
-      return <UnavailableImage path={path} hint="目录不能作为图片预览" />;
+      return {
+        kind: "unavailable",
+        path,
+        hint: "目录不能作为图片预览",
+      } as const;
   }
+  return {
+    kind: "local",
+    path,
+    granted: reference.kind === "projectPath",
+  } as const;
+}
+
+export function MarkdownImage({
+  src,
+  alt,
+  node,
+}: { src?: string; alt?: string } & ExtraProps) {
+  const target = markdownImageTarget(src);
+  if (target.kind === "plain") return <img src={src} alt={alt} />;
+  if (target.kind === "unavailable")
+    return <UnavailableImage path={target.path} hint={target.hint} />;
   return (
     <MessageLocalImage
-      path={path}
+      path={target.path}
       alt={alt ?? ""}
-      granted={reference.kind === "projectPath"}
+      granted={target.granted}
+      imageKey={JSON.stringify([
+        "markdown",
+        target.path,
+        node?.position?.start.offset,
+      ])}
     />
   );
 }

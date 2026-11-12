@@ -1318,6 +1318,48 @@ button.recent-notice {
   height: 100%;
   object-fit: contain;
 }
+.image-gallery-navigation {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  gap: var(--space-4);
+  flex: none;
+  padding-top: var(--space-3);
+  color: var(--color-text-secondary);
+  font-size: var(--text-sm);
+  font-variant-numeric: tabular-nums;
+}
+.image-gallery-navigation > button {
+  width: 36px;
+  height: 36px;
+}
+.image-gallery-navigation > button[aria-disabled="true"] {
+  color: var(--color-disabled-text);
+  cursor: default;
+  background: transparent;
+}
+.image-gallery-navigation > button:focus-visible {
+  background: var(--color-focus-background);
+}
+.markdown-linked-image {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--space-2);
+  max-width: 100%;
+}
+.markdown .message-image-button {
+  display: inline-block;
+  max-width: 100%;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  vertical-align: middle;
+  cursor: zoom-in;
+}
+.markdown .message-image-button:focus-visible {
+  background: var(--color-focus-background);
+}
 .attachment-image-error,
 .attachment-image-loading {
   display: flex;

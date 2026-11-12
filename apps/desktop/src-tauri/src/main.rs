@@ -911,60 +911,12 @@ fn local_target(raw: &str) -> Result<PathBuf, String> {
     }
     Ok(path)
 }
-fn is_executable(path: &std::path::Path) -> bool {
-    use std::os::unix::fs::PermissionsExt;
-    path.metadata()
-        .map(|meta| meta.permissions().mode() & 0o111 != 0)
-        .unwrap_or(false)
-}
-/// Directory suffixes whose `open` target is an app bundle or system plugin:
-/// launching it, not showing it. `.app`/`.workflow` are directories, so the
-/// executable-bit guard never sees them.
-const OPEN_LAUNCH_BUNDLES: [&str; 12] = [
-    ".app",
-    ".appex",
-    ".bundle",
-    ".framework",
-    ".kext",
-    ".plugin",
-    ".prefPane",
-    ".qlgenerator",
-    ".service",
-    ".wdgt",
-    ".workflow",
-    ".xpc",
-];
-/// File suffixes whose default `open` handler installs or executes a script
-/// regardless of any executable bit.
-const OPEN_LAUNCH_FILES: [&str; 6] = [".command", ".desktop", ".dmg", ".mpkg", ".pkg", ".terminal"];
-/// Whether `open` would launch or install this target instead of showing it.
-fn open_launches_target(path: &std::path::Path) -> bool {
-    let Some(suffix) = path
-        .extension()
-        .map(|ext| format!(".{}", ext.to_string_lossy().to_lowercase()))
-    else {
-        return false;
-    };
-    if path.is_dir() {
-        OPEN_LAUNCH_BUNDLES.contains(&suffix.as_str())
-    } else {
-        OPEN_LAUNCH_FILES.contains(&suffix.as_str())
-    }
-}
-/// Resolve symlinks and judge the open target on its real identity: a plain
-/// `report.txt` link pointing at `Tool.app` must not slip past the bundle
-/// guard through its link name. The resolved target is what gets opened.
-fn open_guard(path: &std::path::Path) -> Result<PathBuf, String> {
-    let resolved = path
+/// Keep path validation and symlink resolution, while letting the OS choose how
+/// to open every existing target (including apps, installers and executables).
+fn resolve_open_target(raw: &str) -> Result<PathBuf, String> {
+    local_target(raw)?
         .canonicalize()
-        .map_err(|_| "无法解析路径".to_string())?;
-    if resolved.is_file() && is_executable(&resolved) {
-        return Err("可执行文件不支持直接打开，请在访达中操作".into());
-    }
-    if open_launches_target(&resolved) {
-        return Err("应用包与安装包不支持直接打开，请在访达中显示".into());
-    }
-    Ok(resolved)
+        .map_err(|_| "无法解析路径".to_string())
 }
 /// Refuse saving onto the source itself: `fs::copy` truncates same-inode
 /// targets (plain duplicates, hard links and symlinks alike), and a
@@ -996,11 +948,10 @@ async fn run_bounded(mut command: tokio::process::Command, failure: &str) -> Res
     }
     Ok(())
 }
-/// Open one local path with its platform default application, never a bare
-/// executable, app bundle or installer, judged on the resolved target.
+/// Open the explicitly selected local path with its platform default handler.
 #[tauri::command]
 async fn open_path(path: String) -> Result<(), String> {
-    let path = open_guard(&local_target(&path)?)?;
+    let path = resolve_open_target(&path)?;
     #[cfg(target_os = "macos")]
     let command = {
         let mut command = tokio::process::Command::new("/usr/bin/open");
@@ -1107,20 +1058,6 @@ mod reveal_path_tests {
     use super::resolve_reveal_path;
     use std::path::PathBuf;
     #[test]
-    fn detects_executable_bits_for_the_open_guard() {
-        use std::os::unix::fs::PermissionsExt;
-        let dir = std::env::temp_dir().join(format!("latte-open-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let file = dir.join("probe.bin");
-        std::fs::write(&file, b"x").unwrap();
-        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o644)).unwrap();
-        assert!(!super::is_executable(&file));
-        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o755)).unwrap();
-        assert!(super::is_executable(&file));
-        let _ = std::fs::remove_file(&file);
-        let _ = std::fs::remove_dir(dir);
-    }
-    #[test]
     fn expands_home_and_keeps_absolute_paths() {
         let home = std::path::Path::new("/Users/dev");
         assert_eq!(
@@ -1149,37 +1086,43 @@ mod reveal_path_tests {
         }
     }
     #[test]
-    fn flags_launch_targets_for_the_open_guard() {
-        let dir = std::env::temp_dir().join(format!("latte-guard-{}", std::process::id()));
+    fn resolves_open_targets_without_file_type_restrictions() {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+        let dir = std::env::temp_dir().join(format!("latte-open-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(dir.join("Tool.app/Contents")).unwrap();
-        std::fs::write(dir.join("installer.pkg"), b"x").unwrap();
-        std::fs::write(dir.join("installer.PKG"), b"x").unwrap();
-        std::fs::write(dir.join("job.terminal"), b"x").unwrap();
-        std::fs::write(dir.join("notes.txt"), b"x").unwrap();
-        assert!(super::open_launches_target(&dir.join("Tool.app")));
-        assert!(super::open_launches_target(&dir.join("installer.pkg")));
-        assert!(super::open_launches_target(&dir.join("installer.PKG")));
-        assert!(super::open_launches_target(&dir.join("job.terminal")));
-        assert!(!super::open_launches_target(&dir.join("notes.txt")));
-        assert!(!super::open_launches_target(&dir));
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-    #[test]
-    fn guards_symlinked_bundles_behind_plain_names() {
-        let dir = std::env::temp_dir().join(format!("latte-link-{}", std::process::id()));
-        std::fs::create_dir_all(dir.join("Tool.app/Contents")).unwrap();
-        std::os::unix::fs::symlink(dir.join("Tool.app"), dir.join("report.txt")).unwrap();
-        assert!(
-            super::open_guard(&dir.join("report.txt")).is_err(),
-            "链接名 .txt 不得绕过已解析目标的应用包守卫"
-        );
-        std::os::unix::fs::symlink(dir.join("notes.txt"), dir.join("alias.txt")).unwrap();
-        std::fs::write(dir.join("notes.txt"), b"body").unwrap();
-        assert_eq!(
-            super::open_guard(&dir.join("alias.txt")).unwrap(),
-            dir.join("notes.txt").canonicalize().unwrap()
-        );
-        let _ = std::fs::remove_dir_all(&dir);
+        for name in [
+            "installer.dmg",
+            "installer.pkg",
+            "installer.PKG",
+            "job.terminal",
+            "job.command",
+            "job.desktop",
+            "notes.txt",
+            "executable",
+        ] {
+            let file = dir.join(name);
+            std::fs::write(&file, b"fixture only; never launched").unwrap();
+            if name == "executable" {
+                std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o755)).unwrap();
+            }
+            assert_eq!(
+                super::resolve_open_target(file.to_str().unwrap()).unwrap(),
+                file.canonicalize().unwrap(),
+            );
+        }
+        symlink(dir.join("Tool.app"), dir.join("report.txt")).unwrap();
+        for name in ["Tool.app", "report.txt", ""] {
+            let path = dir.join(name);
+            assert_eq!(
+                super::resolve_open_target(path.to_str().unwrap()).unwrap(),
+                path.canonicalize().unwrap(),
+            );
+        }
+        symlink(dir.join("missing"), dir.join("broken.txt")).unwrap();
+        for name in ["missing", "broken.txt"] {
+            assert!(super::resolve_open_target(dir.join(name).to_str().unwrap()).is_err());
+        }
+        std::fs::remove_dir_all(dir).unwrap();
     }
     #[test]
     fn saves_refuse_the_source_identity() {

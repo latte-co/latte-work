@@ -501,6 +501,10 @@ it.each(["request_failed", "unsupported"])(
     mocks.request.mockImplementation(normal);
     fireEvent.click(screen.getByRole("button", { name: "重试" }));
     await screen.findByRole("button", { name: /分支变更.*1 个文件/ });
-    expect(screen.queryByText("任务摘要变更暂不可用")).toBeNull();
+    // The branch row renders before the status store's effect publishes its
+    // cleared notice. Wait for both user-visible results of the retry.
+    await waitFor(() =>
+      expect(screen.queryByText("任务摘要变更暂不可用")).toBeNull(),
+    );
   },
 );

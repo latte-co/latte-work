@@ -1,5 +1,6 @@
 import { Fragment, useMemo, useRef, useState, type ReactNode } from "react";
 import { ChevronRight } from "lucide-react";
+import { ImageGalleryItem } from "./ImageGallery";
 import { ReplyActions } from "./ReplyActions";
 import type { Event } from "./protocol";
 import {
@@ -119,7 +120,11 @@ export function TurnTranscript({
       key={turn.key}
       data-turn-key={turn.user ? turn.key : undefined}
     >
-      {turn.user && !turn.user.hidden && children(turn.user)}
+      {turn.user && !turn.user.hidden && (
+        <ImageGalleryItem id={turn.user.key}>
+          {children(turn.user)}
+        </ImageGalleryItem>
+      )}
       {turn.stopped && turn.processCount !== 1 && (
         <div className="turn-stop-summary" title="已执行的文件改动不会撤销。">
           {turn.elapsed}
@@ -139,7 +144,9 @@ export function TurnTranscript({
             {() => (
               <div className="turn-process-content">
                 {segment.items.map((item) => (
-                  <Fragment key={item.key}>{children(item)}</Fragment>
+                  <ImageGalleryItem key={item.key} id={item.key}>
+                    {children(item)}
+                  </ImageGalleryItem>
                 ))}
               </div>
             )}
@@ -147,12 +154,12 @@ export function TurnTranscript({
         ) : (
           <Fragment key={segment.items[0].key}>
             {segment.items.map((item) => (
-              <Fragment key={item.key}>
+              <ImageGalleryItem key={item.key} id={item.key}>
                 {children(item)}
                 {item.key === turn.finalKey && item.type === "assistant" && (
                   <ReplyActions text={turn.finalText!} at={turn.finalAt} />
                 )}
-              </Fragment>
+              </ImageGalleryItem>
             ))}
           </Fragment>
         ),

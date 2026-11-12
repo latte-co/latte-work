@@ -70,7 +70,10 @@ beforeEach(() => {
     entries: [{ name: "note.md", path: "note.md", directory: false }],
   });
 });
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  vi.unstubAllGlobals();
+});
 it.each(["opening", "restoring"] as const)(
   "places %s feedback in the return-to-latest slot",
   (phase) => {
@@ -794,6 +797,195 @@ it("keeps the reading anchor when older history is prepended without concealing 
   expect(el.scrollTop).toBe(1000);
   expect(positions.get("a")).toEqual({ top: 1000, follow: false });
   expect(el.getAttribute("aria-busy")).toBe("false");
+});
+
+const historyRow = (seq: number): Event => ({
+  seq,
+  at: 0,
+  session_id: "a",
+  event: { kind: "text", text: `History ${seq}` },
+});
+
+it("loads older pages serially until the visible history fills the viewport", async () => {
+  const p = { ...props(), session: session("a"), hasEarlierHistory: true };
+  const load = vi.fn().mockResolvedValue(undefined);
+  let rows = [historyRow(300)];
+  const view = render(
+    <Conversation {...p} events={rows} loadEarlierHistory={load} />,
+  );
+  const el = view.container.querySelector(
+    ".conversation-scroll",
+  ) as HTMLDivElement;
+  let height = 400;
+  Object.defineProperties(el, {
+    scrollHeight: { configurable: true, get: () => height },
+    clientHeight: { configurable: true, value: 400 },
+  });
+  await waitFor(() => expect(load).toHaveBeenCalledTimes(1));
+  view.rerender(
+    <Conversation
+      {...p}
+      events={rows}
+      loadEarlierHistory={load}
+      earlierHistoryLoading
+    />,
+  );
+  expect(load).toHaveBeenCalledTimes(1);
+  rows = [historyRow(200), ...rows];
+  view.rerender(
+    <Conversation {...p} events={rows} loadEarlierHistory={load} />,
+  );
+  await waitFor(() => expect(load).toHaveBeenCalledTimes(2));
+  height = 700;
+  rows = [historyRow(100), ...rows];
+  view.rerender(
+    <Conversation {...p} events={rows} loadEarlierHistory={load} />,
+  );
+  expect(load).toHaveBeenCalledTimes(2);
+  expect(el.scrollTo).toHaveBeenLastCalledWith({ top: 700 });
+  expect(screen.queryByRole("button", { name: "回到最新" })).toBeNull();
+  expect(el.getAttribute("aria-busy")).toBe("false");
+});
+
+it("stops automatic filling on a failed cursor but keeps an explicit retry", async () => {
+  const p = { ...props(), session: session("a"), hasEarlierHistory: true };
+  const load = vi.fn().mockResolvedValue(undefined);
+  const rows = [historyRow(300)];
+  const view = render(
+    <Conversation {...p} events={rows} loadEarlierHistory={load} />,
+  );
+  const el = view.container.querySelector(
+    ".conversation-scroll",
+  ) as HTMLDivElement;
+  Object.defineProperties(el, {
+    scrollHeight: { configurable: true, value: 400 },
+    clientHeight: { configurable: true, value: 400 },
+  });
+  await waitFor(() => expect(load).toHaveBeenCalledTimes(1));
+  view.rerender(
+    <Conversation
+      {...p}
+      events={rows}
+      loadEarlierHistory={load}
+      earlierHistoryLoading
+    />,
+  );
+  // The loader reports failures through the status center and returns no new page.
+  view.rerender(
+    <Conversation
+      {...p}
+      events={[...rows, historyRow(301)]}
+      loadEarlierHistory={load}
+    />,
+  );
+  fireEvent(document, new Event("visibilitychange"));
+  expect(load).toHaveBeenCalledTimes(1);
+  fireEvent.click(screen.getByRole("button", { name: "加载之前的记录" }));
+  expect(load).toHaveBeenCalledTimes(2);
+  view.rerender(
+    <Conversation
+      {...p}
+      events={[historyRow(100), ...rows]}
+      loadEarlierHistory={load}
+      hasEarlierHistory={false}
+    />,
+  );
+  expect(load).toHaveBeenCalledTimes(2);
+  expect(screen.queryByRole("button", { name: "加载之前的记录" })).toBeNull();
+});
+
+it.each([
+  { settingsOpen: true },
+  { connected: false },
+  { historyLoading: true },
+  { earlierHistoryLoading: true },
+  { hasEarlierHistory: false },
+])("does not fill an unavailable history view: %j", async (blocked) => {
+  const p = {
+    ...props(),
+    session: session("a"),
+    hasEarlierHistory: true,
+    events: [historyRow(300)],
+    loadEarlierHistory: vi.fn().mockResolvedValue(undefined),
+  };
+  const view = render(<Conversation {...p} {...blocked} />);
+  const el = view.container.querySelector(
+    ".conversation-scroll",
+  ) as HTMLDivElement;
+  Object.defineProperties(el, {
+    scrollHeight: { configurable: true, value: 400 },
+    clientHeight: { configurable: true, value: 400 },
+  });
+  await act(async () => {
+    await new Promise(requestAnimationFrame);
+    await new Promise(requestAnimationFrame);
+  });
+  expect(p.loadEarlierHistory).not.toHaveBeenCalled();
+  view.rerender(<Conversation {...p} />);
+  await waitFor(() => expect(p.loadEarlierHistory).toHaveBeenCalledTimes(1));
+});
+
+it("rechecks the viewport after resize or visibility changes and fences old observers", async () => {
+  const callbacks = new Set<() => void>();
+  vi.stubGlobal(
+    "ResizeObserver",
+    class {
+      constructor(private callback: () => void) {
+        callbacks.add(callback);
+      }
+      observe() {}
+      disconnect() {
+        callbacks.delete(this.callback);
+      }
+    },
+  );
+  const visibility = vi.spyOn(document, "visibilityState", "get");
+  visibility.mockReturnValue("visible");
+  try {
+    const p = {
+      ...props(),
+      session: session("a"),
+      hasEarlierHistory: true,
+      events: [historyRow(300)],
+      loadEarlierHistory: vi.fn().mockResolvedValue(undefined),
+    };
+    const view = render(<Conversation {...p} />);
+    const el = view.container.querySelector(
+      ".conversation-scroll",
+    ) as HTMLDivElement;
+    let viewport = 0;
+    Object.defineProperties(el, {
+      scrollHeight: { configurable: true, get: () => Math.max(600, viewport) },
+      clientHeight: { configurable: true, get: () => viewport },
+    });
+    await waitFor(() => expect(el.getAttribute("aria-busy")).toBe("false"));
+    expect(p.loadEarlierHistory).not.toHaveBeenCalled();
+    viewport = 400;
+    act(() => callbacks.forEach((callback) => callback()));
+    expect(p.loadEarlierHistory).not.toHaveBeenCalled();
+    visibility.mockReturnValue("hidden");
+    viewport = 800;
+    act(() => callbacks.forEach((callback) => callback()));
+    expect(p.loadEarlierHistory).not.toHaveBeenCalled();
+    visibility.mockReturnValue("visible");
+    fireEvent(document, new Event("visibilitychange"));
+    expect(p.loadEarlierHistory).toHaveBeenCalledTimes(1);
+    act(() => callbacks.forEach((callback) => callback()));
+    expect(p.loadEarlierHistory).toHaveBeenCalledTimes(1);
+    const staleCallbacks = [...callbacks];
+    view.rerender(
+      <Conversation
+        {...p}
+        session={session("b")}
+        events={[{ ...historyRow(200), session_id: "b" }]}
+        historyLoading
+      />,
+    );
+    act(() => staleCallbacks.forEach((callback) => callback()));
+    expect(p.loadEarlierHistory).toHaveBeenCalledTimes(1);
+  } finally {
+    visibility.mockRestore();
+  }
 });
 
 it("pauses follow when jumping to a turn and removes the old rail during a conversation switch", async () => {
@@ -1790,4 +1982,198 @@ it("a stale IME-style input event cannot refill the composer after submission", 
   expect(restored).not.toBe(concealed);
   expect(restored.value).toBe("");
   expect(p.drafts.get(key).text).toBe("");
+});
+
+it("keeps the selected tool image open when paging into the middle of its turn", async () => {
+  URL.createObjectURL = vi.fn(() => "blob:history-image");
+  URL.revokeObjectURL = vi.fn();
+  const image: Event = {
+    seq: 300,
+    session_id: "a",
+    at: 0,
+    event: {
+      kind: "tool_result",
+      id: "image-tool",
+      is_error: false,
+      content: [
+        { type: "image", mime_type: "image/png", data_base64: "iVBORw0KGgo=" },
+      ],
+    },
+  };
+  const p = { ...props(), session: session("a"), hasEarlierHistory: true };
+  const view = render(
+    <Conversation {...p} events={[image]} earlierHistoryLoading />,
+  );
+  const el = view.container.querySelector(".conversation-scroll")!;
+  await waitFor(() => expect(el.getAttribute("aria-busy")).toBe("false"));
+  fireEvent.click(
+    screen.getByRole("button", { name: "放大图片 工具输出图片 1" }),
+  );
+  const modal = screen.getByRole("dialog");
+  await within(modal).findByRole("img");
+  view.rerender(<Conversation {...p} events={[historyRow(100), image]} />);
+  expect(screen.queryByRole("dialog")).toBe(modal);
+  await within(modal).findByRole("img");
+  fireEvent.keyDown(document.activeElement!, { key: "Escape" });
+  expect(screen.queryByRole("dialog")).toBeNull();
+  await waitFor(() =>
+    expect(document.activeElement).toBe(
+      screen.getByRole("button", { name: "放大图片 工具输出图片 1" }),
+    ),
+  );
+});
+
+it.each(["finish", "close", "remove", "switch", "retry"] as const)(
+  "preserves a pending Markdown image dialog across history paging: %s",
+  async (ending) => {
+    URL.createObjectURL = vi.fn(() => "blob:markdown-history");
+    URL.revokeObjectURL = vi.fn();
+    const response = {
+      kind: "source_preview",
+      data: [137, 80, 78, 71],
+      mime_type: "image/png",
+      size: 4,
+      next: 4,
+      has_more: false,
+    };
+    let finish!: (value: typeof response) => void;
+    let reads = 0;
+    mocks.request.mockImplementation((_host, request) => {
+      if (request.method !== "preview_source")
+        return Promise.resolve({ kind: "files", entries: [] });
+      reads++;
+      return reads === 1
+        ? Promise.resolve(response)
+        : new Promise<typeof response>((resolve) => {
+            finish = resolve;
+          });
+    });
+    const image: Event = {
+      seq: 300,
+      at: 0,
+      session_id: "a",
+      event: { kind: "text", text: "![graph](./graph.png)" },
+    };
+    const notice: Event = {
+      seq: 100,
+      at: 0,
+      session_id: "a",
+      event: { kind: "notice", text: "Earlier history" },
+    };
+    const p = { ...props(), session: session("a"), hasEarlierHistory: true };
+    const view = render(
+      <Conversation {...p} events={[image]} earlierHistoryLoading />,
+    );
+    const trigger = await screen.findByRole("button", {
+      name: "放大图片 graph",
+    });
+    fireEvent.click(trigger);
+    const modal = screen.getByRole("dialog");
+    // The replacement owner is off-screen: selection must resume its read
+    // without waiting for an intersection callback.
+    vi.stubGlobal(
+      "IntersectionObserver",
+      class {
+        observe() {}
+        disconnect() {}
+      },
+    );
+    view.rerender(<Conversation {...p} events={[notice, image]} />);
+    expect(screen.queryByRole("dialog")).toBe(modal);
+    await waitFor(() => expect(reads).toBe(2));
+    expect(within(modal).getByText("正在读取图片…")).toBeTruthy();
+    if (ending !== "finish" && ending !== "retry") {
+      if (ending === "close") {
+        const placeholder = view.container.querySelector(
+          ".message-image-placeholder",
+        )!.parentElement;
+        fireEvent.keyDown(document.activeElement!, { key: "Escape" });
+        await waitFor(() => expect(document.activeElement).toBe(placeholder));
+      } else {
+        view.rerender(
+          <Conversation
+            {...p}
+            session={session(ending === "switch" ? "b" : "a")}
+            events={ending === "switch" ? [notice, image] : [notice]}
+          />,
+        );
+      }
+      expect(screen.queryByRole("dialog")).toBeNull();
+      await act(async () => finish(response));
+      expect(screen.queryByRole("dialog")).toBeNull();
+      expect(URL.createObjectURL).toHaveBeenCalledTimes(1);
+      expect(URL.revokeObjectURL).toHaveBeenCalledWith("blob:markdown-history");
+      return;
+    }
+    await act(async () => finish(response));
+    expect(screen.getByRole("dialog")).toBe(modal);
+    expect(within(modal).getByRole("img").getAttribute("src")).toBe(
+      "blob:markdown-history",
+    );
+    if (ending === "retry") {
+      fireEvent.error(within(modal).getByRole("img"));
+      fireEvent.keyDown(document.activeElement!, { key: "Escape" });
+      expect(screen.queryByRole("dialog")).toBeNull();
+      const retry = within(view.container).getByRole("button", {
+        name: "重试",
+      });
+      expect(within(view.container).getByRole("alert").textContent).toContain(
+        "图片格式无法解码",
+      );
+      expect(reads).toBe(2);
+      fireEvent.click(retry);
+      await waitFor(() => expect(reads).toBe(3));
+      await act(async () => finish(response));
+      expect(
+        within(view.container).getByRole("button", { name: "放大图片 graph" }),
+      ).toBeTruthy();
+      expect(URL.createObjectURL).toHaveBeenCalledTimes(3);
+      expect(screen.queryByRole("dialog")).toBeNull();
+      return;
+    }
+    fireEvent.keyDown(document.activeElement!, { key: "Escape" });
+    await waitFor(() =>
+      expect(document.activeElement).toBe(
+        screen.getByRole("button", { name: "放大图片 graph" }),
+      ),
+    );
+    expect(document.activeElement).not.toBe(trigger);
+    fireEvent.click(document.activeElement!);
+    view.rerender(<Conversation {...p} events={[notice]} />);
+    expect(screen.queryByRole("dialog")).toBeNull();
+  },
+);
+
+it("continues filling history until upward scrolling can leave the follow threshold", async () => {
+  const p = { ...props(), session: session("a"), hasEarlierHistory: true };
+  const load = vi.fn().mockResolvedValue(undefined);
+  let rows = [historyRow(300)];
+  const view = render(
+    <Conversation {...p} events={rows} loadEarlierHistory={load} />,
+  );
+  const el = view.container.querySelector(
+    ".conversation-scroll",
+  ) as HTMLDivElement;
+  let height = 400;
+  Object.defineProperties(el, {
+    scrollHeight: { configurable: true, get: () => height },
+    clientHeight: { configurable: true, value: 400 },
+  });
+  await waitFor(() => expect(load).toHaveBeenCalledTimes(1));
+  height = 440;
+  rows = [historyRow(200), ...rows];
+  view.rerender(
+    <Conversation {...p} events={rows} loadEarlierHistory={load} />,
+  );
+  await waitFor(() => expect(load).toHaveBeenCalledTimes(2));
+  height = 490;
+  rows = [historyRow(100), ...rows];
+  view.rerender(
+    <Conversation {...p} events={rows} loadEarlierHistory={load} />,
+  );
+  expect(load).toHaveBeenCalledTimes(2);
+  el.scrollTop = 0;
+  fireEvent.scroll(el);
+  expect(load).toHaveBeenCalledTimes(3);
+  expect(screen.getByRole("button", { name: "回到最新" })).toBeTruthy();
 });

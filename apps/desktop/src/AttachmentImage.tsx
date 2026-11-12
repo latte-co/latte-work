@@ -1,9 +1,8 @@
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
-import { createPortal } from "react-dom";
-import { Image, LoaderCircle, X } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
+import { Image, LoaderCircle } from "lucide-react";
 import { message } from "./api";
 import { loadSource } from "./sourceLoader";
-import { Modal } from "./Modal";
+import { ImagePreview, useImagePreview } from "./ImageGallery";
 import type { ComposerReference } from "./pasteAttachments";
 
 // A conversation can contain many images. Queue reads only for visible images,
@@ -46,7 +45,7 @@ export function AttachmentImage({
   projectId,
   sessionId,
   connected,
-  active = true,
+  active: enabled = true,
   variant,
   onOpen,
 }: {
@@ -61,7 +60,6 @@ export function AttachmentImage({
 }) {
   const target = useRef<HTMLButtonElement>(null);
   const [visible, setVisible] = useState(false);
-  const [open, setOpen] = useState(false);
   const [revision, retry] = useState(0);
   const scope = JSON.stringify([
     hostId,
@@ -75,11 +73,15 @@ export function AttachmentImage({
     projectId,
     sessionId,
     reference.path,
-    active,
+    enabled,
   ]);
-  useLayoutEffect(() => {
-    setOpen(false);
-  }, [identity]);
+  const previewDialog = useImagePreview(
+    identity,
+    enabled,
+    target,
+    `attachment:${reference.path}`,
+  );
+  const { open, active } = previewDialog;
   useEffect(() => {
     if (!active || variant !== "thumbnail" || !target.current) return;
     if (typeof IntersectionObserver === "undefined") {
@@ -100,7 +102,7 @@ export function AttachmentImage({
       observer.disconnect();
     };
   }, [identity, variant, active]);
-  const enabled = active && (open || (variant === "thumbnail" && visible));
+  const reading = active && (open || (variant === "thumbnail" && visible));
   const [state, setState] = useState<{
     scope: string;
     url?: string;
@@ -115,14 +117,14 @@ export function AttachmentImage({
     resource.current = undefined;
   }
   useEffect(() => {
-    if (!enabled) {
+    if (!reading) {
       setState({ scope });
       return;
     }
     return release;
-  }, [scope, enabled]);
+  }, [scope, reading]);
   useEffect(() => {
-    if (!enabled || resource.current?.scope === scope) return;
+    if (!reading || resource.current?.scope === scope) return;
     if (!connected || !projectId) {
       setState({
         scope,
@@ -158,8 +160,8 @@ export function AttachmentImage({
     return () => {
       disposed = true;
     };
-  }, [scope, enabled, connected, projectId, hostId, sessionId, reference.path]);
-  const preview = state.scope === scope && enabled ? state : { scope };
+  }, [scope, reading, connected, projectId, hostId, sessionId, reference.path]);
+  const preview = state.scope === scope && reading ? state : { scope };
   function failedImage() {
     release();
     setState({ scope, error: "图片格式无法解码，请重试" });
@@ -178,8 +180,7 @@ export function AttachmentImage({
         aria-label={`预览图片 ${reference.name}`}
         onClick={() => {
           onOpen?.();
-          target.current?.focus();
-          setOpen(true);
+          previewDialog.show();
         }}
       >
         {variant === "thumbnail" && preview.url ? (
@@ -195,66 +196,32 @@ export function AttachmentImage({
           )
         )}
       </button>
-      {open &&
-        active &&
-        createPortal(
-          <div
-            className="modal-backdrop attachment-image-backdrop"
-            onClick={(event) => {
-              if (event.target === event.currentTarget) setOpen(false);
-            }}
-          >
-            <Modal
-              className="modal attachment-image-dialog"
-              aria-label={`图片预览 ${reference.name}`}
-              onKeyDown={(event) => {
-                if (event.key === "Escape" && !event.defaultPrevented) {
-                  event.preventDefault();
-                  event.stopPropagation();
-                  setOpen(false);
-                }
-              }}
+      <ImagePreview
+        preview={previewDialog}
+        name={reference.name}
+        title={reference.path}
+      >
+        {preview.url ? (
+          <img src={preview.url} alt={reference.name} onError={failedImage} />
+        ) : preview.error ? (
+          <div className="attachment-image-error" role="alert">
+            <Image size={28} />
+            <p>{preview.error}</p>
+            <button
+              className="secondary small"
+              disabled={!connected || !projectId}
+              onClick={() => retry((value) => value + 1)}
             >
-              <header>
-                <span title={reference.path}>{reference.name}</span>
-                <button
-                  className="icon-button"
-                  aria-label="关闭图片预览"
-                  onClick={() => setOpen(false)}
-                >
-                  <X size={18} />
-                </button>
-              </header>
-              <div className="attachment-image-stage">
-                {preview.url ? (
-                  <img
-                    src={preview.url}
-                    alt={reference.name}
-                    onError={failedImage}
-                  />
-                ) : preview.error ? (
-                  <div className="attachment-image-error" role="alert">
-                    <Image size={28} />
-                    <p>{preview.error}</p>
-                    <button
-                      className="secondary small"
-                      disabled={!connected || !projectId}
-                      onClick={() => retry((value) => value + 1)}
-                    >
-                      重试
-                    </button>
-                  </div>
-                ) : (
-                  <div className="attachment-image-loading" role="status">
-                    <LoaderCircle size={22} className="spin" />
-                    正在读取图片…
-                  </div>
-                )}
-              </div>
-            </Modal>
-          </div>,
-          document.body,
+              重试
+            </button>
+          </div>
+        ) : (
+          <div className="attachment-image-loading" role="status">
+            <LoaderCircle size={22} className="spin" />
+            正在读取图片…
+          </div>
         )}
+      </ImagePreview>
     </>
   );
 }

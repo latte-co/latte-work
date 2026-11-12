@@ -1,3 +1,4 @@
+import { ImageGallery } from "./ImageGallery";
 import { Select } from "./Select";
 import { referenceMessage } from "./referenceMessage";
 import { MessageQueue } from "./MessageQueue";
@@ -99,6 +100,8 @@ interface Props {
     answers: import("./protocol").QuestionAnswer[] | null,
   ) => Promise<void>;
 }
+const FOLLOW_THRESHOLD = 90;
+
 export function Conversation({
   openSubagents,
   openTurnChanges,
@@ -402,6 +405,62 @@ export function Conversation({
   useEffect(() => {
     if (!preparingHistory) onHistoryReady?.();
   }, [preparingHistory, historyScope, onHistoryReady]);
+  const lastViewportFill = useRef<string | null>(null);
+  useEffect(() => {
+    const el = scroller.current;
+    if (
+      !el ||
+      preparingHistory ||
+      settingsOpen ||
+      !connected ||
+      !hasEarlierHistory ||
+      earlierHistoryLoading ||
+      !loadEarlierHistory
+    )
+      return;
+    // Event pages can collapse to just a few visible lines. A short transcript
+    // cannot scroll out of the follow threshold to request a page. Fill enough
+    // space for an upward scroll to enter history-reading mode.
+    // Keep a failed/non-advancing cursor attempted until an explicit retry moves
+    // it forward; resize notifications must not cause an automatic retry loop.
+    const cursor = JSON.stringify([positionScope, events[0]?.seq]);
+    let active = true;
+    const fillViewport = () => {
+      if (
+        !active ||
+        document.visibilityState === "hidden" ||
+        el.clientHeight <= 0 ||
+        el.scrollHeight - el.clientHeight >= FOLLOW_THRESHOLD ||
+        lastViewportFill.current === cursor
+      )
+        return;
+      lastViewportFill.current = cursor;
+      void loadEarlierHistory();
+    };
+    fillViewport();
+    const observer =
+      typeof ResizeObserver === "undefined"
+        ? undefined
+        : new ResizeObserver(fillViewport);
+    observer?.observe(el);
+    const content = el.querySelector(".messages");
+    if (content) observer?.observe(content);
+    document.addEventListener("visibilitychange", fillViewport);
+    return () => {
+      active = false;
+      observer?.disconnect();
+      document.removeEventListener("visibilitychange", fillViewport);
+    };
+  }, [
+    preparingHistory,
+    settingsOpen,
+    connected,
+    hasEarlierHistory,
+    earlierHistoryLoading,
+    loadEarlierHistory,
+    positionScope,
+    events,
+  ]);
   async function submit(
     prompt: string,
     uiAction?: "subagents",
@@ -558,7 +617,8 @@ export function Conversation({
             if (preparingHistory) return;
             const el = scroller.current!;
             follow.current =
-              el.scrollHeight - el.scrollTop - el.clientHeight < 90;
+              el.scrollHeight - el.scrollTop - el.clientHeight <
+              FOLLOW_THRESHOLD;
             positions.set(positionScope, {
               top: el.scrollTop,
               follow: follow.current,
@@ -618,152 +678,162 @@ export function Conversation({
                   </button>
                 </div>
               )}
-              <MessageActionsProvider
-                value={{
-                  openFile,
-                  localHost: hostId === "local",
-                  projectRoot: project?.path,
-                  readProjectFile: projectId
-                    ? (path, valid = () => true) =>
-                        loadSource(
-                          hostId,
-                          projectId,
-                          undefined,
-                          path,
-                          valid,
-                          true,
-                        )
-                    : undefined,
-                  loadExternalImage: projectId
-                    ? createExternalImageLoader(hostId, projectId)
-                    : undefined,
-                  reportError: setInlineRefError,
-                }}
+              <ImageGallery
+                scope={historyScope}
+                active={!settingsOpen && !preparingHistory}
               >
-                <TurnTranscript
-                  key={JSON.stringify([hostId, session?.id])}
-                  events={events}
-                  turns={turns}
+                <MessageActionsProvider
+                  value={{
+                    openFile,
+                    localHost: hostId === "local",
+                    projectRoot: project?.path,
+                    readProjectFile: projectId
+                      ? (path, valid = () => true) =>
+                          loadSource(
+                            hostId,
+                            projectId,
+                            undefined,
+                            path,
+                            valid,
+                            true,
+                          )
+                      : undefined,
+                    loadExternalImage: projectId
+                      ? createExternalImageLoader(hostId, projectId)
+                      : undefined,
+                    reportError: setInlineRefError,
+                  }}
                 >
-                  {(item) =>
-                    item.type === "user" ? (
-                      <UserMessage
-                        key={item.key}
-                        text={item.text}
-                        at={item.at}
-                        hostId={hostId}
-                        projectId={projectId}
-                        sessionId={session?.id}
-                        connected={connected}
-                        active={!settingsOpen && !preparingHistory}
-                      />
-                    ) : item.type === "assistant" ? (
-                      <article
-                        className="assistant-message markdown"
-                        key={item.key}
-                      >
-                        <MessageContent text={item.text} />
-                      </article>
-                    ) : item.type === "tool_images" ? (
-                      <ToolImages
-                        key={item.key}
-                        images={item.images}
-                        active={!settingsOpen && !preparingHistory}
-                      />
-                    ) : item.type === "tool" ? (
-                      <ToolRow
-                        key={item.key}
-                        tool={item}
-                        loadContext={
-                          session
-                            ? { hostId, sessionId: session.id }
-                            : undefined
-                        }
-                      />
-                    ) : item.type === "tools" ? (
-                      <ToolGroup
-                        key={item.key}
-                        tools={item.tools}
-                        loadContext={
-                          session
-                            ? { hostId, sessionId: session.id }
-                            : undefined
-                        }
-                      />
-                    ) : (
-                      (() => {
-                        const v = item.value;
-                        if (v.kind === "turn_changes" && openTurnChanges)
-                          return (
-                            <TurnChangesCard
-                              key={`${hostId}:${session?.id}:${item.key}`}
-                              hostId={hostId}
-                              sessionId={session?.id ?? ""}
-                              canUndo={
-                                connected &&
-                                !!session &&
-                                !["running", "waiting"].includes(
-                                  session.status,
-                                ) &&
-                                latestRequestId(events) === v.changes.request_id
-                              }
-                              changes={v.changes}
-                              open={(path) => openTurnChanges(v.changes, path)}
-                            />
-                          );
-                        if (v.kind === "question")
-                          return (
-                            <QuestionCard
-                              key={item.key}
-                              request={v}
-                              resolved={item.resolved}
-                              answers={
-                                item.type === "event" ? item.answers : undefined
-                              }
-                              record
-                              onAnswer={() => {}}
-                            />
-                          );
-                        if (v.kind === "approval")
-                          return (
-                            <ApprovalCard
-                              key={item.key}
-                              request={v}
-                              resolved={item.resolved}
-                              decision={item.decision}
-                              tool={item.approvalTool}
-                              presentation="record"
-                              loadContext={
-                                session
-                                  ? { hostId, sessionId: session.id }
-                                  : undefined
-                              }
-                              onDecision={(allow) =>
-                                void decide(v.request_id, allow)
-                              }
-                            />
-                          );
-                        if (v.kind === "state" && v.message)
-                          return (
-                            <div
-                              className={`notice ${v.status === "failed" ? "failure" : ""}`}
-                              key={item.key}
-                            >
-                              {v.message}
-                            </div>
-                          );
-                        if (v.kind === "notice")
-                          return (
-                            <div className="notice" key={item.key}>
-                              {v.text}
-                            </div>
-                          );
-                        return null;
-                      })()
-                    )
-                  }
-                </TurnTranscript>
-              </MessageActionsProvider>
+                  <TurnTranscript
+                    key={JSON.stringify([hostId, session?.id])}
+                    events={events}
+                    turns={turns}
+                  >
+                    {(item) =>
+                      item.type === "user" ? (
+                        <UserMessage
+                          key={item.key}
+                          text={item.text}
+                          at={item.at}
+                          hostId={hostId}
+                          projectId={projectId}
+                          sessionId={session?.id}
+                          connected={connected}
+                          active={!settingsOpen && !preparingHistory}
+                        />
+                      ) : item.type === "assistant" ? (
+                        <article
+                          className="assistant-message markdown"
+                          key={item.key}
+                        >
+                          <MessageContent text={item.text} />
+                        </article>
+                      ) : item.type === "tool_images" ? (
+                        <ToolImages
+                          key={item.key}
+                          images={item.images}
+                          active={!settingsOpen && !preparingHistory}
+                        />
+                      ) : item.type === "tool" ? (
+                        <ToolRow
+                          key={item.key}
+                          tool={item}
+                          loadContext={
+                            session
+                              ? { hostId, sessionId: session.id }
+                              : undefined
+                          }
+                        />
+                      ) : item.type === "tools" ? (
+                        <ToolGroup
+                          key={item.key}
+                          tools={item.tools}
+                          loadContext={
+                            session
+                              ? { hostId, sessionId: session.id }
+                              : undefined
+                          }
+                        />
+                      ) : (
+                        (() => {
+                          const v = item.value;
+                          if (v.kind === "turn_changes" && openTurnChanges)
+                            return (
+                              <TurnChangesCard
+                                key={`${hostId}:${session?.id}:${item.key}`}
+                                hostId={hostId}
+                                sessionId={session?.id ?? ""}
+                                canUndo={
+                                  connected &&
+                                  !!session &&
+                                  !["running", "waiting"].includes(
+                                    session.status,
+                                  ) &&
+                                  latestRequestId(events) ===
+                                    v.changes.request_id
+                                }
+                                changes={v.changes}
+                                open={(path) =>
+                                  openTurnChanges(v.changes, path)
+                                }
+                              />
+                            );
+                          if (v.kind === "question")
+                            return (
+                              <QuestionCard
+                                key={item.key}
+                                request={v}
+                                resolved={item.resolved}
+                                answers={
+                                  item.type === "event"
+                                    ? item.answers
+                                    : undefined
+                                }
+                                record
+                                onAnswer={() => {}}
+                              />
+                            );
+                          if (v.kind === "approval")
+                            return (
+                              <ApprovalCard
+                                key={item.key}
+                                request={v}
+                                resolved={item.resolved}
+                                decision={item.decision}
+                                tool={item.approvalTool}
+                                presentation="record"
+                                loadContext={
+                                  session
+                                    ? { hostId, sessionId: session.id }
+                                    : undefined
+                                }
+                                onDecision={(allow) =>
+                                  void decide(v.request_id, allow)
+                                }
+                              />
+                            );
+                          if (v.kind === "state" && v.message)
+                            return (
+                              <div
+                                className={`notice ${v.status === "failed" ? "failure" : ""}`}
+                                key={item.key}
+                              >
+                                {v.message}
+                              </div>
+                            );
+                          if (v.kind === "notice")
+                            return (
+                              <div className="notice" key={item.key}>
+                                {v.text}
+                              </div>
+                            );
+                          return null;
+                        })()
+                      )
+                    }
+                  </TurnTranscript>
+                </MessageActionsProvider>
+              </ImageGallery>
               {workingStatus && (
                 <WorkingStatus
                   label={workingStatus}
