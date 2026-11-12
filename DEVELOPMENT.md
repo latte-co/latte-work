@@ -912,7 +912,10 @@ bounded readers and object URL lifetime; selecting an off-screen attachment only
 activates that image, and changing selection fences its unfinished read. Local
 Markdown images join after their existing lazy reader has loaded them; a selected
 image registers with its logical owner even while a replacement owner reloads
-asynchronously, and selection resumes that read outside the viewport. Scope/hide
+asynchronously, and selection resumes that read outside the viewport. A successful
+read latches activation before replacing the observed placeholder, so a later
+decode failure can still be retried from the transcript after closing the dialog.
+Closing before that read completes still cancels the selection-only read. Scope/hide
 changes and removal of the selected image close the dialog; focus returns to the
 original trigger, including after navigation. Standalone groups use the same viewer.
 Transcript entries provide event/image keys independent of turn grouping, so a

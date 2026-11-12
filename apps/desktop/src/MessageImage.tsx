@@ -116,6 +116,10 @@ function MessageLocalImage({
           new Blob([data.bytes as BlobPart], { type: data.mime }),
         );
         resource.current = { url };
+        // Selection can load an off-screen owner before any intersection.
+        // Latch activation before replacing its observed placeholder, so
+        // decode retries remain enabled after the dialog closes.
+        setVisible(true);
         setState({ url });
       })
       .catch((error) => {

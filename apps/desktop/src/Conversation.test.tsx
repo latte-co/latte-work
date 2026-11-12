@@ -2023,7 +2023,7 @@ it("keeps the selected tool image open when paging into the middle of its turn",
   );
 });
 
-it.each(["finish", "close", "remove", "switch"] as const)(
+it.each(["finish", "close", "remove", "switch", "retry"] as const)(
   "preserves a pending Markdown image dialog across history paging: %s",
   async (ending) => {
     URL.createObjectURL = vi.fn(() => "blob:markdown-history");
@@ -2082,7 +2082,7 @@ it.each(["finish", "close", "remove", "switch"] as const)(
     expect(screen.queryByRole("dialog")).toBe(modal);
     await waitFor(() => expect(reads).toBe(2));
     expect(within(modal).getByText("正在读取图片…")).toBeTruthy();
-    if (ending !== "finish") {
+    if (ending !== "finish" && ending !== "retry") {
       if (ending === "close") {
         const placeholder = view.container.querySelector(
           ".message-image-placeholder",
@@ -2110,6 +2110,27 @@ it.each(["finish", "close", "remove", "switch"] as const)(
     expect(within(modal).getByRole("img").getAttribute("src")).toBe(
       "blob:markdown-history",
     );
+    if (ending === "retry") {
+      fireEvent.error(within(modal).getByRole("img"));
+      fireEvent.keyDown(document.activeElement!, { key: "Escape" });
+      expect(screen.queryByRole("dialog")).toBeNull();
+      const retry = within(view.container).getByRole("button", {
+        name: "重试",
+      });
+      expect(within(view.container).getByRole("alert").textContent).toContain(
+        "图片格式无法解码",
+      );
+      expect(reads).toBe(2);
+      fireEvent.click(retry);
+      await waitFor(() => expect(reads).toBe(3));
+      await act(async () => finish(response));
+      expect(
+        within(view.container).getByRole("button", { name: "放大图片 graph" }),
+      ).toBeTruthy();
+      expect(URL.createObjectURL).toHaveBeenCalledTimes(3);
+      expect(screen.queryByRole("dialog")).toBeNull();
+      return;
+    }
     fireEvent.keyDown(document.activeElement!, { key: "Escape" });
     await waitFor(() =>
       expect(document.activeElement).toBe(
