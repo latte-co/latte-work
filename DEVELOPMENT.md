@@ -461,6 +461,10 @@ Redaction visits typed content fields, preserving protocol tags and correlation
 IDs. It matches raw content and one decoded JSON string layer, including mixed
 ASCII Unicode escapes, either hex case and surrogate pairs, retaining source
 offsets so unrelated text keeps its original encoding.
+All overlapping matches contribute to the masked coverage. Raw replacements
+expand to whole JSON escape tokens at both ends; an unfinished token touched by
+a raw match stays buffered until its boundary is known. This preserves decoding
+of retained content as well as the escape boundaries used by stream carry.
 Text streams retain at most one possible secret-prefix suffix per channel, bounded
 by six times the longest secret's byte length plus one incomplete JSON escape
 (12 bytes), across 513 main/child channels. Parsing starts at the content boundary;

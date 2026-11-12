@@ -463,6 +463,113 @@ async fn short_environment_values_preserve_confirmed_stream_reports_without_expo
 }
 
 #[tokio::test]
+async fn complete_matches_redact_overlaps_and_escape_boundaries_before_storage_and_replay() {
+    let host = Host::start().await;
+    for (mode, secrets) in [("overlap", vec!["xab", "aba"]), ("escape", vec![r"\n\"])] {
+        for child in [false, true] {
+            for split in [false, true] {
+                let root = tempfile::tempdir().unwrap();
+                let mut client = host.client().await;
+                let id = session(&mut client, root.path()).await;
+                let mut environment = BTreeMap::from([(
+                    "LATTE_TEST_SECRET".into(),
+                    secrets.last().unwrap().to_string(),
+                )]);
+                if mode == "overlap" {
+                    environment.insert("LATTE_TEST_TOKEN".into(), secrets[0].into());
+                }
+                let provider = latte_work_protocol::TurnProvider::Configured {
+                    provider: None,
+                    environment: AgentEnvironment(environment),
+                };
+                assert!(matches!(
+                    ask(
+                        &mut client,
+                        Request::Send {
+                            session_id: id.clone(),
+                            request_id: format!("complete-match-{id}"),
+                            text: format!(
+                                "custom-environment-complete-{mode}{}{}",
+                                if split { "-split" } else { "" },
+                                if child { "-child" } else { "" }
+                            ),
+                            model: None,
+                            effort: None,
+                            permission_mode: None,
+                            provider: Some(provider.clone()),
+                        }
+                    )
+                    .await,
+                    Response::Accepted { .. }
+                ));
+                wait(&mut client, &id, Status::Completed).await;
+                let table = if child { "subagent_history" } else { "events" };
+                let saved: String = stored_content(&host, table, &id)
+                    .iter()
+                    .filter_map(|e| match e {
+                        EventKind::Text { text } => Some(text.as_str()),
+                        _ => None,
+                    })
+                    .collect();
+                let assert_safe = |output: &str| {
+                    assert!(output.contains("[redacted]"));
+                    for secret in &secrets {
+                        assert!(!output.contains(secret), "{table}: {output:?}");
+                    }
+                    if mode == "escape" {
+                        let decoded: serde_json::Value = serde_json::from_str(output).unwrap();
+                        let value = decoded["secret"].as_str().unwrap();
+                        assert!(value.contains("[redacted]"));
+                        for secret in &secrets {
+                            assert!(
+                                !value.contains(secret),
+                                "recoverable from {table}: {value:?}"
+                            );
+                        }
+                    }
+                };
+                assert_safe(&saved);
+                let mut reconnected = host.client().await;
+                let replay = if child {
+                    let Response::SubagentHistory { events, .. } = ask(
+                        &mut reconnected,
+                        Request::SubagentHistory {
+                            session_id: id.clone(),
+                            task_id: "tool:complete-child".into(),
+                            after: None,
+                            source: None,
+                            provider: Some(provider),
+                        },
+                    )
+                    .await
+                    else {
+                        panic!("child replay")
+                    };
+                    let Response::SubagentTranscript { events: legacy, .. } = ask(
+                        &mut reconnected,
+                        Request::SubagentTranscript {
+                            session_id: id.clone(),
+                            task_id: "tool:complete-child".into(),
+                        },
+                    )
+                    .await
+                    else {
+                        panic!("legacy child replay")
+                    };
+                    assert_eq!(text_content(&legacy), saved);
+                    assert_safe(&text_content(&legacy));
+                    events
+                } else {
+                    wait(&mut reconnected, &id, Status::Completed).await
+                };
+                assert_eq!(text_content(&replay), saved);
+                assert_safe(&text_content(&replay));
+            }
+        }
+    }
+}
+
+#[tokio::test]
 async fn backslash_window_redaction_precedes_main_and_child_storage_and_replay() {
     let host = Host::start().await;
     let secret = r"\nAB";

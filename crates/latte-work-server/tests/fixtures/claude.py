@@ -178,6 +178,25 @@ for line in sys.stdin:
             emit({'type':'system','subtype':'task_notification','task_id':'handback-native','status':'completed','summary':'Delivered'})
             emit({'type':'result','subtype':'success','is_error':False})
             continue
+        if text.startswith('custom-environment-complete-'):
+            if 'overlap' in text:
+                assert os.environ['LATTE_TEST_TOKEN']=='xab' and os.environ['LATTE_TEST_SECRET']=='aba'
+                payload='xababa!'
+                split=4
+            else:
+                assert os.environ['LATTE_TEST_SECRET']==chr(92)+'n'+chr(92)
+                payload=r'{"secret":"\n\\u005cn\u005c"}'
+                split=14  # The raw match ends inside a backslash pair.
+            parent='complete-child' if text.endswith('-child') else None
+            if parent:
+                emit({'type':'assistant','message':{'content':[{'type':'tool_use','id':parent,'name':'Agent','input':{'description':'Complete match fixture'}}]}})
+                emit({'type':'system','subtype':'task_started','task_id':'complete-native','task_type':'local_agent','tool_use_id':parent,'description':'Complete match fixture'})
+            for part in ([payload[:split],payload[split:]] if '-split' in text else [payload]):
+                emit({'type':'stream_event','parent_tool_use_id':parent,'event':{'type':'content_block_delta','delta':{'type':'text_delta','text':part}}})
+            if parent:
+                emit({'type':'system','subtype':'task_notification','task_id':'complete-native','status':'completed','summary':'Complete'})
+            emit({'type':'result','subtype':'success','is_error':False})
+            continue
         if text in ('custom-environment-escape-window','custom-environment-escape-window-child'):
             assert os.environ['LATTE_TEST_SECRET']==r'\nAB'
             parent='escape-window-child' if text.endswith('-child') else None

@@ -74,6 +74,16 @@ impl Decoded {
         }
         offset
     }
+
+    fn source_boundary_after(&self, offset: usize, source_len: usize) -> usize {
+        if self.source_boundary(offset) == offset {
+            return offset;
+        }
+        let index = self.offsets.partition_point(|(_, end)| *end < offset);
+        // Closed values can consume an incomplete escape through EOF. Streaming
+        // defers such matches until the whole token arrives.
+        self.offsets.get(index).map_or(source_len, |(_, end)| *end)
+    }
 }
 enum Escape {
     Character(char, usize),
@@ -171,30 +181,52 @@ impl Redactor {
         }
     }
 
-    /// Merge raw/decoded matches with one iterator per pattern. Offset metadata
-    /// is bounded by the input record, rather than the number of secret matches.
-    fn complete(&self, text: &str) -> (String, usize) {
+    /// Merge all overlapping raw/decoded matches at whole escape boundaries.
+    /// The third offset bounds emission when a raw match touches an unfinished
+    /// escape: streaming must wait for that token before replacing the match.
+    /// Metadata is bounded by the input record, not the number of matches.
+    fn complete(&self, text: &str, streaming: bool) -> (String, usize, usize) {
         if self.patterns.is_empty() {
-            return (String::new(), 0);
+            return (String::new(), 0, text.len());
         }
         let decoded = text.contains('\\').then(|| Decoded::new(text));
+        let limit = decoded
+            .as_ref()
+            .filter(|_| streaming)
+            .and_then(|decoded| {
+                let partial = decoded.partial?;
+                self.patterns
+                    .iter()
+                    .filter_map(|pattern| {
+                        // Only this bounded tail can contain a raw match that
+                        // extends into the incomplete token.
+                        let from = partial.saturating_sub(pattern.text.len() - 1);
+                        pattern
+                            .matches(&text.as_bytes()[from..])
+                            .find(|(_, end)| from + end > partial)
+                            .map(|(start, _)| decoded.source_boundary(from + start))
+                    })
+                    .min()
+            })
+            .unwrap_or(text.len());
         let mut matches = Vec::new();
         for pattern in &self.patterns {
-            let raw: Box<dyn Iterator<Item = (usize, usize)>> = Box::new(
-                text.match_indices(&pattern.text)
-                    .map(|(start, value)| (start, start + value.len())),
-            );
+            let raw: Box<dyn Iterator<Item = (usize, usize)>> =
+                Box::new(pattern.matches(text.as_bytes()).map(|(start, end)| {
+                    decoded.as_ref().map_or((start, end), |decoded| {
+                        (
+                            decoded.source_boundary(start),
+                            decoded.source_boundary_after(end, text.len()),
+                        )
+                    })
+                }));
             matches.push(raw.peekable());
             if let Some(decoded) = &decoded {
                 let escaped: Box<dyn Iterator<Item = (usize, usize)>> = Box::new(
-                    decoded
-                        .text
-                        .match_indices(&pattern.text)
-                        .map(|(start, value)| {
-                            (
-                                decoded.source_offset(start),
-                                decoded.source_offset(start + value.len()),
-                            )
+                    pattern
+                        .matches(decoded.text.as_bytes())
+                        .map(|(start, end)| {
+                            (decoded.source_offset(start), decoded.source_offset(end))
                         }),
                 );
                 matches.push(escaped.peekable());
@@ -208,20 +240,30 @@ impl Redactor {
                 .filter_map(|m| m.peek().copied())
                 .min_by_key(|(start, end)| (*start, std::cmp::Reverse(*end)));
             let Some((start, next_end)) = next else { break };
+            if start >= limit {
+                break;
+            }
             output.push_str(&text[end..start]);
             output.push_str(MASK);
-            end = next_end;
-            for matches in &mut matches {
-                while matches.peek().is_some_and(|(start, _)| *start < end) {
-                    matches.next();
+            end = next_end.min(limit);
+            loop {
+                let previous = end;
+                for matches in &mut matches {
+                    while matches.peek().is_some_and(|(start, _)| *start < end) {
+                        let (_, next_end) = matches.next().expect("peeked match");
+                        end = end.max(next_end.min(limit));
+                    }
+                }
+                if end == previous {
+                    break;
                 }
             }
         }
-        (output, end)
+        (output, end, limit)
     }
 
     pub fn text(&self, text: &str) -> String {
-        let (mut output, end) = self.complete(text);
+        let (mut output, end, _) = self.complete(text, false);
         output.push_str(&text[end..]);
         output
     }
@@ -232,7 +274,7 @@ impl Redactor {
     pub fn fragment(&self, text: &str, pending: &mut String) -> String {
         let mut input = std::mem::take(pending);
         input.push_str(text);
-        let (mut output, end) = self.complete(&input);
+        let (mut output, end, limit) = self.complete(&input, true);
         let remaining = &input[end..];
         let max = self
             .patterns
@@ -257,7 +299,9 @@ impl Redactor {
                     tail.max(remaining.len() - decoded.source_offset(decoded.text.len() - length));
             }
         }
-        let safe = decoded.source_boundary(remaining.len() - tail);
+        let safe = decoded
+            .source_boundary(remaining.len() - tail)
+            .min(limit - end);
         output.push_str(&remaining[..safe]);
         pending.push_str(&remaining[safe..]);
         debug_assert!(pending.len() <= max.saturating_mul(6).saturating_add(12));
@@ -365,6 +409,30 @@ impl Redactor {
 }
 
 impl Pattern {
+    fn matches<'a>(&'a self, text: &'a [u8]) -> impl Iterator<Item = (usize, usize)> + 'a {
+        let bytes = self.text.as_bytes();
+        let mut at = 0;
+        let mut length = 0;
+        std::iter::from_fn(move || {
+            while let Some(&byte) = text.get(at) {
+                at += 1;
+                while length > 0 && byte != bytes[length] {
+                    length = self.prefixes[length - 1];
+                }
+                if byte == bytes[length] {
+                    length += 1;
+                }
+                if length == bytes.len() {
+                    // Keep the matched suffix so the next occurrence may
+                    // overlap this one, unlike str::match_indices.
+                    length = self.prefixes[length - 1];
+                    return Some((at - bytes.len(), at));
+                }
+            }
+            None
+        })
+    }
+
     fn suffix_prefix(&self, text: &str) -> usize {
         let bytes = self.text.as_bytes();
         let suffix = text.as_bytes();
@@ -384,6 +452,137 @@ impl Pattern {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn complete_matches_cover_every_overlapping_secret() {
+        for (secrets, source) in [
+            (["xab", "aba", "bab"], "xababa!"),
+            (["中ab", "aba", "bab"], "中ababa!"),
+            (["xab", "aba", "bab"], r"x\u0061baba!"),
+            (["abc", "cde", "efg"], "abcdefg!"),
+        ] {
+            let redactor = Redactor::new(secrets.map(str::to_owned));
+            let assert_safe = |output: &str| {
+                assert!(output.contains(MASK), "{source:?}: {output:?}");
+                for secret in secrets {
+                    assert!(!output.contains(secret), "{source:?}: {output:?}");
+                    let decoded: String = serde_json::from_str(&format!("\"{output}\"")).unwrap();
+                    assert!(!decoded.contains(secret), "decoded {source:?}: {output:?}");
+                }
+            };
+            let output = redactor.text(source);
+            assert_safe(&output);
+            assert_eq!(output, "[redacted]!");
+            for split in (0..=source.len()).filter(|at| source.is_char_boundary(*at)) {
+                let mut pending = String::new();
+                let mut output = redactor.fragment(&source[..split], &mut pending);
+                output.push_str(&redactor.fragment(&source[split..], &mut pending));
+                assert!(pending.is_empty());
+                assert_safe(&output);
+            }
+        }
+    }
+
+    #[test]
+    fn complete_raw_matches_preserve_json_escape_pairing() {
+        for (secret, source) in [
+            (r"\n\", r#"{"secret":"\n\\u005cn\u005c"}"#),
+            ("cAB", r#"{"secret":"\u005cAB"}"#),
+            ("1Z", r#"{"secret":"\uD83D\uDD11Z"}"#),
+            (r"A\u", r#"{"secret":"A\u0042"}"#),
+        ] {
+            assert!(source.contains(secret));
+            let redactor = Redactor::new([secret.to_owned()]);
+            let assert_safe = |output: &str| {
+                assert!(!output.contains(secret), "raw {output:?}");
+                let decoded: Value = serde_json::from_str(output).unwrap();
+                let value = decoded["secret"].as_str().unwrap();
+                assert!(!value.contains(secret), "recoverable credential: {value:?}");
+                assert!(value.contains(MASK));
+            };
+            assert_safe(&redactor.text(source));
+            for split in 0..=source.len() {
+                let mut pending = String::new();
+                let mut output = redactor.fragment(&source[..split], &mut pending);
+                assert!(pending.len() <= secret.len() * 6 + 12);
+                output.push_str(&redactor.fragment(&source[split..], &mut pending));
+                assert!(pending.is_empty());
+                assert_safe(&output);
+            }
+            for width in 1..=8 {
+                let mut pending = String::new();
+                let mut output = String::new();
+                for chunk in source.as_bytes().chunks(width) {
+                    output.push_str(
+                        &redactor.fragment(std::str::from_utf8(chunk).unwrap(), &mut pending),
+                    );
+                    assert!(pending.len() <= secret.len() * 6 + 12);
+                }
+                assert!(pending.is_empty());
+                assert_safe(&output);
+            }
+        }
+    }
+
+    #[test]
+    fn raw_and_decoded_credentials_are_absent_in_an_independent_json_matrix() {
+        let tokens = [
+            r"\\",
+            r"\n",
+            r"\u005c",
+            r"\u006e",
+            r"\uD83D\uDD11",
+            "n",
+            "u005c",
+        ];
+        for first in tokens {
+            for second in tokens {
+                for third in tokens {
+                    let body = format!("{first}{second}{third}");
+                    let source = format!("\"{body}\"");
+                    let value: String = serde_json::from_str(&source).unwrap();
+                    let mut secrets = BTreeSet::new();
+                    for value in [&body, &value] {
+                        for (start, _) in value.char_indices() {
+                            for end in start + 1..=(start + 4).min(value.len()) {
+                                if value.is_char_boundary(end) && !MASK.contains(&value[start..end])
+                                {
+                                    secrets.insert(value[start..end].to_owned());
+                                }
+                            }
+                        }
+                    }
+                    for secret in secrets {
+                        let redactor = Redactor::new([secret.clone()]);
+                        let assert_safe = |output: &str| {
+                            assert!(!output.contains(&secret), "{secret:?} in {output:?}");
+                            let decoded: String = serde_json::from_str(output).unwrap();
+                            assert!(
+                                !decoded.contains(&secret),
+                                "{source:?} restores {secret:?} from {output:?}"
+                            );
+                        };
+                        assert_safe(&redactor.text(&source));
+                        for width in [1, 3] {
+                            let mut pending = String::new();
+                            let mut output = String::new();
+                            for chunk in source.as_bytes().chunks(width) {
+                                output.push_str(
+                                    &redactor.fragment(
+                                        std::str::from_utf8(chunk).unwrap(),
+                                        &mut pending,
+                                    ),
+                                );
+                                assert!(pending.len() <= secret.len() * 6 + 12);
+                            }
+                            assert!(pending.is_empty());
+                            assert_safe(&output);
+                        }
+                    }
+                }
+            }
+        }
+    }
 
     #[test]
     fn stream_window_never_changes_backslash_pairing() {
@@ -417,6 +616,12 @@ mod tests {
                     .replace('&', r"\u0026");
                 let expected = redactor.text(&source);
                 assert!(expected.contains(MASK));
+                let assert_safe = |output: &str| {
+                    assert!(!output.contains(secret));
+                    let decoded: String = serde_json::from_str(output).unwrap();
+                    assert!(!decoded.contains(secret), "recoverable from {output:?}");
+                };
+                assert_safe(&expected);
                 let splits: Vec<_> = if count < 8192 {
                     (0..=source.len())
                         .filter(|at| source.is_char_boundary(*at))
@@ -433,6 +638,7 @@ mod tests {
                     let first = redactor.fragment(&source[..split], &mut pending);
                     assert!(pending.len() <= secret.len() * 6 + 12);
                     let second = redactor.fragment(&source[split..], &mut pending);
+                    assert_safe(&format!("{first}{second}"));
                     assert_eq!(
                         format!("{first}{second}"),
                         expected,
@@ -458,6 +664,7 @@ mod tests {
                             output, expected,
                             "{secret:?}, {count} slashes, chunks of {width}"
                         );
+                        assert_safe(&output);
                         assert!(pending.is_empty());
                     }
                 }
@@ -477,6 +684,13 @@ mod tests {
             for cut in (0..=source.len()).filter(|at| source.is_char_boundary(*at)) {
                 let boundary = decoded.source_boundary(cut);
                 assert!(boundary <= cut && cut - boundary < 12);
+                let after = decoded.source_boundary_after(cut, source.len());
+                assert!(after >= cut && after - cut < 12);
+                if decoded.partial.is_some_and(|start| start < cut) {
+                    assert_eq!(after, source.len());
+                } else {
+                    assert_eq!(decoded.source_boundary(after), after);
+                }
                 let prefix = Decoded::new(&source[..boundary]);
                 let suffix = Decoded::new(&source[boundary..]);
                 assert!(prefix.partial.is_none());
