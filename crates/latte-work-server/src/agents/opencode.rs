@@ -351,6 +351,36 @@ impl OpenCode {
             }
             return Ok(vec![]);
         }
+        let session = data["sessionID"].as_str();
+        if kind == "question"
+            && self.saved
+            && (session == self.session.as_deref() && (self.running() || self.followup)
+                || session.is_some_and(|id| self.children.get(id) == Some(&true)))
+        {
+            let id = string(data, "id")?;
+            let questions = question::native_questions(&data["prompts"]);
+            let Some(questions) = questions.filter(|_| !self.cancelling) else {
+                return Ok(vec![self.sideband_request(
+                    "answer",
+                    id,
+                    json!({"questionID":id,"answers":null}),
+                )?]);
+            };
+            ensure!(
+                self.native_questions.len() < 32 && self.native_questions.insert(id.into()),
+                "OpenCode 问题重复或数量超出限制"
+            );
+            return Ok(vec![Action::Question {
+                id: id.into(),
+                tool_use_id: data["toolCallId"].as_str().map(|tool| {
+                    session
+                        .filter(|session| Some(*session) != self.session.as_deref())
+                        .map_or_else(|| tool.to_owned(), |child| format!("{child}:{tool}"))
+                }),
+                input: json!({}),
+                questions,
+            }]);
+        }
         if let Some(child) = data["sessionID"]
             .as_str()
             .filter(|id| self.children.contains_key(*id))
@@ -388,27 +418,6 @@ impl OpenCode {
         }
         match kind {
             "session.renamed" => Ok(self.generated_title(&data["title"])),
-            "question" if self.running() || self.followup => {
-                let id = string(data, "id")?;
-                let questions = question::native_questions(&data["prompts"]);
-                let Some(questions) = questions.filter(|_| !self.cancelling) else {
-                    return Ok(vec![self.sideband_request(
-                        "answer",
-                        id,
-                        json!({"questionID":id,"answers":null}),
-                    )?]);
-                };
-                ensure!(
-                    self.native_questions.len() < 32 && self.native_questions.insert(id.into()),
-                    "OpenCode 问题重复或数量超出限制"
-                );
-                Ok(vec![Action::Question {
-                    id: id.into(),
-                    tool_use_id: data["toolCallId"].as_str().map(str::to_owned),
-                    input: json!({}),
-                    questions,
-                }])
-            }
             "session.inbox.delivered" => {
                 if self
                     .steering
@@ -1092,7 +1101,13 @@ impl OpenCode {
 
     fn permission(&mut self, id: &Value, params: &Value) -> Result<Vec<Action>> {
         let tool = &params["toolCall"];
-        let child = tool["_meta"][CHILD_META]["id"].as_str();
+        let child = tool["_meta"][CHILD_META]["id"].as_str().or_else(|| {
+            tool["toolCallId"]
+                .as_str()
+                .and_then(|id| id.split_once(':'))
+                .map(|(child, _)| child)
+                .filter(|child| self.children.contains_key(*child))
+        });
         let belongs = self
             .session
             .as_deref()
@@ -1187,7 +1202,10 @@ impl OpenCode {
             .session
             .as_deref()
             .is_some_and(|session| params["sessionId"] == session);
-        if !belongs || self.cancelling || !(self.running() || self.possible_followup) {
+        if !belongs
+            || self.cancelling
+            || !(self.running() || self.followup || self.has_background_work())
+        {
             return Ok(vec![question_result(id, None)?]);
         }
         let Some((form, questions)) = question::Form::parse(id, params) else {

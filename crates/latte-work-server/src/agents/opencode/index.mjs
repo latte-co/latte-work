@@ -165,10 +165,12 @@ export default {
             bridgeQuestions.delete(sessionID);
           }
         } else if (action === "permission" && ctx.permission.reply) {
+          const decision = request.allow ? "once" : "reject";
           await ctx.permission.reply({
             sessionID,
             requestID: request.requestID,
-            reply: request.allow ? "once" : "reject",
+            decision,
+            reply: decision,
           });
         } else if (action === "interrupt") {
           await ctx.session.interrupt({ sessionID });

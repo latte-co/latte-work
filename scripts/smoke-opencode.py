@@ -62,10 +62,24 @@ class Model(BaseHTTPRequestHandler):
             if not self.steering_release.wait(8):
                 self.send_error(504)
                 return
-        if last["role"] == "user" and "subagent child sentinel" in str(last["content"]):
-            time.sleep(.35)
+        if last["role"] == "tool" and any(
+            message["role"] == "user" and "subagent child sentinel" in str(message["content"])
+            for message in request["messages"]
+        ):
             delta = {"role": "assistant", "content": "CHILD_SMOKE_OK"}
             finish = "stop"
+        elif last["role"] == "user" and "subagent child sentinel" in str(last["content"]):
+            time.sleep(.35)
+            delta = {"role": "assistant", "tool_calls": [{
+                "index": 0, "id": "call_child_question", "type": "function",
+                "function": {"name": "question", "arguments": json.dumps({"questions": [{
+                    "header": "Child", "question": "Which child mode?", "options": [
+                        {"label": "One", "description": "First choice"},
+                        {"label": "Two", "description": "Second choice"},
+                    ],
+                }]})},
+            }]}
+            finish = "tool_calls"
         elif "<subagent" in str(last["content"]):
             delta = {"role": "assistant", "content": "PARENT_FOLLOWUP_OK"}
             finish = "stop"
@@ -76,7 +90,7 @@ class Model(BaseHTTPRequestHandler):
             delta = {"role": "assistant", "tool_calls": [{
                 "index": 0, "id": "call_child", "type": "function",
                 "function": {"name": "subagent", "arguments": json.dumps({
-                    "agent": "general", "description": "Smoke child", "prompt": "subagent child sentinel",
+                    "agent": "smoke-child", "description": "Smoke child", "prompt": "subagent child sentinel",
                     "background": True,
                 })},
             }]}
@@ -166,6 +180,8 @@ def run(binary, cli, llm, root):
     }))
     (project / "opencode.json").write_text(json.dumps({
         "permission": {"shell": "ask", "bash": "ask"},
+        "agents": {"smoke-child": {"mode": "subagent", "description": "Smoke child",
+            "permissions": [{"action": "question", "resource": "*", "effect": "allow"}]}},
         "commands": {"check": {"template": "Native slash smoke $ARGUMENTS", "description": "Smoke native command"}},
     }))
     skill = project / ".opencode/skills/smoke-latte-skill"
@@ -307,7 +323,11 @@ def run(binary, cli, llm, root):
                 rpc("approve", session_id=sid, request_id=approval["request_id"], allow=True)
                 final = wait("completed")
                 assert "TOOL_SMOKE_OK" in text(final) and marker.read_text() == "OC_EXECUTED", final
-                print(version + ": native permission gates an actual shell call", flush=True)
+                diff = rpc("turn_change_diff", session_id=sid, request_id="permission", path=marker.name)
+                assert "+OC_EXECUTED" in diff["text"]
+                undone = rpc("undo_turn_changes", session_id=sid, request_id="permission")
+                assert undone["changes"]["undo"] == "reverted" and not marker.exists()
+                print(version + ": native shell approval, turn diff and undo", flush=True)
                 send("cancel", "cancel sentinel")
                 wait("waiting")
                 rpc("cancel", session_id=sid)
@@ -326,7 +346,6 @@ def run(binary, cli, llm, root):
                 wait("completed")
                 assert "Two" in json.dumps(Model.calls[-1]["messages"][-1])
                 print(version + ": native question and answer", flush=True)
-                marker.unlink()
                 send("bypass", "permission sentinel", "bypass_permissions")
                 wait("completed")
                 assert marker.read_text() == "OC_EXECUTED"
@@ -370,6 +389,14 @@ def run(binary, cli, llm, root):
                 send("native-command", "/check example", "bypass_permissions")
                 wait("completed")
                 assert "Native slash smoke example" in json.dumps(Model.calls[-1]["messages"][-1])
+                marker.unlink()
+                send("native-command-permission", "/check permission sentinel", "default")
+                pending = wait("waiting")
+                approval = next(e["event"] for e in reversed(pending["events"]) if e["event"]["kind"] == "approval")
+                assert not marker.exists()
+                rpc("approve", session_id=sid, request_id=approval["request_id"], allow=True)
+                wait("completed")
+                assert marker.read_text() == "OC_EXECUTED"
                 print(version + ": project slash command finished", flush=True)
                 send("skill", "skill sentinel", "bypass_permissions")
                 result = wait("completed")
@@ -387,21 +414,32 @@ def run(binary, cli, llm, root):
                     print(version + ": native Skill slash shortcut", flush=True)
                 send("subagent", "launch subagent sentinel", "bypass_permissions")
                 deadline = time.monotonic() + 10
+                answered_child = False
                 while time.monotonic() < deadline:
                     result = rpc("poll", session_id=sid, after=0)
                     children = rpc("subagents", session_id=sid)["tasks"]
+                    if not answered_child and result["session"]["status"] == "waiting":
+                        question = next(
+                            e["event"] for e in reversed(result["events"])
+                            if e["event"]["kind"] == "question"
+                        )
+                        assert question["questions"][0]["text"] == "Which child mode?"
+                        rpc("answer_question", session_id=sid, request_id=question["request_id"],
+                            answers=[{"question_id": question["questions"][0]["id"], "option_indices": [0]}])
+                        answered_child = True
                     if ("PARENT_FOLLOWUP_OK" in text(result) and result["session"]["status"] == "completed"
                             and children and children[0]["status"] == "completed"):
                         break
                     time.sleep(.05)
                 else:
                     raise AssertionError(result["events"][-8:])
+                assert answered_child
                 children = rpc("subagents", session_id=sid)["tasks"]
                 assert children and children[0]["status"] == "completed", children
                 history = rpc("subagent_history", session_id=sid, task_id=children[0]["id"])
                 assert "CHILD_SMOKE_OK" in json.dumps(history)
                 assert "CHILD_SMOKE_OK" not in text(result)
-                print(version + ": child transcript and autonomous parent follow-up", flush=True)
+                print(version + ": child question, transcript and autonomous parent follow-up", flush=True)
                 rpc("close_agent_session", session_id=sid, only_if_idle=True)
                 before = len(Model.calls)
                 other_context = {"kind": "configured", "snapshot": {
