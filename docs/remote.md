@@ -1,7 +1,7 @@
 # SSH host setup
 
 The remote host needs OpenSSH, the matching `latte-work-server` executable and an
-installed/authenticated Claude Code CLI. No browser runtime, Node frontend,
+installed and configured Agent CLI. No browser runtime, Node frontend,
 public service port, or Tauri dependency is needed for the server.
 
 Build on the target OS/architecture from this source checkout (Rust 1.97 and a C
@@ -21,6 +21,11 @@ service with an explicit absolute CLI path:
 LATTE_WORK_CLAUDE=/absolute/path/to/claude \
   ~/.local/bin/latte-work-server serve
 ```
+
+For OpenCode, verify `opencode --version` reports 2.x and configure its model or
+run `opencode auth login` on the remote host. The server looks up `opencode` on
+the host PATH; `LATTE_WORK_OPENCODE` can override it with an absolute path.
+Install a server build that advertises OpenCode before creating a remote task.
 
 Normally no manual service start is needed: the Desktop's `connect` bridge
 starts it on demand, detached from that SSH connection. To diagnose startup,
@@ -46,7 +51,7 @@ private key, and **密码** asks for a password. Save verifies the connection. Y
 can also reach this page from **创建项目 → 源文件夹 → 添加远程**. Then select the
 saved host in the project form. Use **添加** to browse its folders, or enter an
 absolute path, then create the project. Local and remote projects share the
-sidebar; selecting a project routes files, Git and Claude to its host.
+sidebar; selecting a project routes files, Git and Agent execution to its host.
 
 This build uses protocol v1 (including model selection, Provider configuration and
 directory browsing). Build the desktop and remote server from the same source revision;

@@ -1,0 +1,161 @@
+#!/usr/bin/env python3
+"""Deterministic ACP peer. The two 2.x command notification orders are deliberate."""
+import json
+import os
+from pathlib import Path
+import sys
+import uuid
+
+if sys.argv[1:] == ["--version"]:
+    print(f"opencode v{os.environ.get('LATTE_TEST_OPENCODE_VERSION', '2.3.0')}")
+    sys.exit(0)
+assert sys.argv[1:] == ["acp"], sys.argv
+
+session = None
+model = "test/default"
+effort = "default"
+prompt_id = None
+permission_id = None
+rounds = 0
+
+
+def send(**message):
+    print(json.dumps({"jsonrpc": "2.0", **message}), flush=True)
+
+
+def reply(id, **result):
+    send(id=id, result=result)
+
+
+def update(update_type, session_id=None, **content):
+    send(method="session/update", params={
+        "sessionId": session if session_id is None else session_id,
+        "update": {"sessionUpdate": update_type, **content},
+    })
+
+
+def commands():
+    update("available_commands_update", availableCommands=[
+        {"name": "project:check", "description": "Run project checks"},
+        {"name": "compact", "description": "Compact the session"},
+    ])
+
+
+def options():
+    levels = ["default", "low"] if model == "test/default" else ["default", "medium", "max", "native-extra"]
+    return [
+        {"id": "model", "type": "select", "currentValue": model,
+         "options": [{"value": "test/default", "name": "Fixture default"},
+                     {"value": "test/other", "name": os.environ.get("OPENCODE_FIXTURE_LABEL", "Other")}]},
+        {"id": "effort", "type": "select", "currentValue": effort,
+         "options": [{"value": value, "name": value} for value in levels]},
+    ]
+
+
+def complete(text):
+    update("agent_thought_chunk", content={"type": "text", "text": "private reasoning"})
+    update("agent_message_chunk", content={"type": "text", "text": "wrong session"}, session_id="other")
+    for fragment in text.split("|"):
+        update("agent_message_chunk", content={"type": "text", "text": fragment})
+    update("usage_update", used=28, size=10000)
+    reply(prompt_id, stopReason="end_turn", usage={"inputTokens": 25, "outputTokens": 3})
+
+
+for line in sys.stdin:
+    message = json.loads(line)
+    assert message["jsonrpc"] == "2.0"
+    method = message.get("method")
+    id = message.get("id")
+    params = message.get("params", {})
+    if method == "initialize":
+        assert params["protocolVersion"] == 1
+        assert "fs" not in params["clientCapabilities"]
+        assert params["clientCapabilities"]["_meta"]["opencode/child-session-updates"] is True
+        reply(id, protocolVersion=1, agentInfo={"name": "OpenCode", "version": "2.3.0"},
+              agentCapabilities={"sessionCapabilities": {"resume": {}, "close": {}, "delete": {}}})
+    elif method in ("session/new", "session/resume"):
+        assert Path(params["cwd"]) == Path.cwd()
+        assert params["mcpServers"] == []
+        if method == "session/new":
+            session = "ses_" + uuid.uuid4().hex
+            Path(session).write_text("unprompted")
+            commands()
+            reply(id, sessionId=session, configOptions=options())
+        else:
+            session = params["sessionId"]
+            if not Path(session).exists():
+                send(id=id, error={"code": -32602, "message": "Session not found"})
+                continue
+            assert Path(session).read_text() == "prompted"
+            reply(id, configOptions=options())
+            commands()
+    elif method == "session/set_config_option":
+        assert params["sessionId"] == session
+        key, value = params["configId"], params["value"]
+        assert value in [row["value"] for opt in options() if opt["id"] == key for row in opt["options"]]
+        if key == "model":
+            model = value
+            effort = "default"
+        else:
+            assert key == "effort"
+            effort = value
+        reply(id, configOptions=options())
+    elif method == "session/delete":
+        assert params["sessionId"] == session
+        assert Path(session).read_text() == "unprompted"
+        Path(session).unlink()
+        reply(id)
+    elif method == "session/close":
+        assert params["sessionId"] == session
+        if Path(session).read_text() == "unprompted":
+            Path(session).unlink()
+        reply(id)
+    elif method == "session/prompt":
+        assert params["sessionId"] == session
+        prompt_id = id
+        text = params["prompt"][0]["text"]
+        Path(session).write_text("prompted")
+        with Path("prompts").open("a") as log:
+            log.write(f"{session}:{model}:{effort}:{text}\n")
+        rounds += 1
+        if text.startswith("permission"):
+            permission_id = f"permission:{rounds}" if text == "permission-deny" else -rounds
+            update("tool_call", toolCallId=f"call-{rounds}", title="shell", kind="execute", status="pending")
+            tool = {"toolCallId": f"call-{rounds}", "title": "printf fixture", "kind": "execute",
+                    "rawInput": {"command": "printf fixture"}}
+            update("tool_call_update", status="in_progress", **tool)
+            send(id=permission_id, method="session/request_permission", params={
+                "sessionId": session, "toolCall": tool,
+                "options": [{"optionId": "permanent", "kind": "allow_always"},
+                            {"optionId": "once", "kind": "allow_once"},
+                            {"optionId": "no", "kind": "reject_once"}],
+            })
+        elif text == "unexpected-eof":
+            sys.exit(0)
+        elif text == "background":
+            child = {"rootSessionId": session, "childSessionId": "ses_child", "parentSessionId": session, "depth": 1}
+            send(method="opencode/session/child_update", params={**child, "type": "status", "status": "created"})
+            send(method="opencode/session/child_update", params={**child, "type": "update", "update": {
+                "sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "child only"}
+            }})
+            complete("main only")
+        elif text != "await-cancel":
+            complete("fixture |reply")
+    elif method == "session/cancel":
+        assert params["sessionId"] == session
+        reply(prompt_id, stopReason="cancelled")
+        prompt_id = None
+    elif method is None and id == permission_id:
+        outcome = message["result"]["outcome"]
+        if prompt_id is None:
+            assert outcome == {"outcome": "cancelled"}
+            permission_id = None
+            continue
+        expected = "no" if isinstance(id, str) else "once"
+        assert outcome == {"outcome": "selected", "optionId": expected}, outcome
+        update("tool_call_update", toolCallId=f"call-{rounds}", status="completed" if expected == "once" else "failed",
+               content=[{"type": "content", "content": {"type": "text", "text": "fixture output"}}])
+        complete("decision:" + expected)
+        permission_id = None
+    else:
+        raise AssertionError(message)

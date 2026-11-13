@@ -3,6 +3,8 @@
 mod codex_e2e;
 #[path = "support/environment.rs"]
 mod environment_e2e;
+#[path = "support/opencode.rs"]
+mod opencode_e2e;
 #[path = "support/ssh.rs"]
 mod ssh_e2e;
 #[path = "support/titles.rs"]
@@ -47,6 +49,10 @@ impl Host {
             .env(
                 "LATTE_WORK_CODEX",
                 PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/codex.py"),
+            )
+            .env(
+                "LATTE_WORK_OPENCODE",
+                PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/opencode.py"),
             )
             .env("CLAUDE_CONFIG_DIR", directory.path().join("claude-config"))
             .envs(env.iter().copied())
@@ -283,10 +289,16 @@ async fn wait(c: &mut Client, id: &str, status: Status) -> Vec<latte_work_protoc
             Response::Events {
                 session, events, ..
             } if session.status == status => return events,
-            Response::Events { session, .. } => assert!(
+            Response::Events {
+                session, events, ..
+            } => assert!(
                 Instant::now() < deadline,
-                "expected {status:?}, got {:?}",
-                session.status
+                "expected {status:?}, got {:?}: {:?}",
+                session.status,
+                events
+                    .iter()
+                    .rev()
+                    .find(|event| matches!(event.event, EventKind::State { .. }))
             ),
             r => panic!("{r:?}"),
         };
@@ -460,7 +472,7 @@ async fn denies_permissions_and_bounds_paths_and_failures() {
             &mut c,
             Request::CreateSession {
                 project_id,
-                agent: "opencode".into()
+                agent: "unknown".into()
             }
         )
         .await,
@@ -3128,7 +3140,7 @@ async fn agent_commands_discovery_dispatch_resume_and_unsupported_are_native() {
     assert!(
         matches!(ask(&mut client, Request::Sessions { project_id: project_id.clone() }).await, Response::Sessions { sessions } if sessions.is_empty())
     );
-    for (agent, project) in [("opencode", project_id.as_str()), ("claude", "missing")] {
+    for (agent, project) in [("unknown", project_id.as_str()), ("claude", "missing")] {
         assert!(matches!(
             ask(
                 &mut client,
@@ -3588,7 +3600,7 @@ async fn permission_discovery_launch_resume_reset_and_approval_stay_native() {
         ask(
             &mut client,
             Request::AgentPermissions {
-                agent: "opencode".into()
+                agent: "unknown".into()
             }
         )
         .await,

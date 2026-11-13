@@ -135,6 +135,21 @@ pub trait AgentAdapter: Send {
         resume: Option<&str>,
         config: &LaunchConfig,
     ) -> Result<AgentCommand>;
+    /// Optional native read bound for one stdio frame.
+    fn frame_limit(&self) -> Option<usize> {
+        None
+    }
+    /// Optional JSON-RPC detach request for an owned process. Shutdown stays bounded.
+    fn close_request(&self) -> Result<Option<Vec<u8>>> {
+        Ok(None)
+    }
+    fn close_ack(&self, _line: &str) -> bool {
+        false
+    }
+    /// Whether this adapter can cancel a pending prompt before startup completes.
+    fn can_interrupt_startup(&self) -> bool {
+        false
+    }
     /// Return ordered, bounded actions in response to a host or protocol input.
     fn advance(&mut self, input: Input<'_>) -> Result<Vec<Action>>;
 }

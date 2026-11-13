@@ -7,10 +7,12 @@ mod claude_sessions;
 pub(crate) mod claude_skills;
 pub(crate) mod codex;
 pub(crate) mod codex_title;
+mod opencode;
 mod titles;
 pub(crate) mod traex;
 pub use adapter::{Action, AgentAdapter, AgentCommand, Input};
 use anyhow::{Result, bail};
+pub(crate) use opencode::commands as opencode_commands;
 pub type ChildTranscript = (Vec<latte_work_protocol::Event>, bool);
 pub fn normalize_history_event(
     agent: &str,
@@ -106,6 +108,7 @@ pub fn normalize_child_transcript(
 ) -> Result<ChildTranscript> {
     match agent {
         "claude" => claude::normalize_child_transcript(snapshot),
+        "opencode" => Ok(snapshot),
         _ => bail!("此 Agent 尚未实现子智能体过程：{agent}"),
     }
 }
@@ -150,15 +153,20 @@ pub fn create(agent: &str) -> Result<Box<dyn AgentAdapter>> {
         "claude" => Ok(Box::<claude::Claude>::default()),
         "traex" => Ok(Box::<traex::Traex>::default()),
         "codex" => Ok(Box::new(app_server::AppServer::codex())),
+        "opencode" => Ok(Box::<opencode::OpenCode>::default()),
         _ => bail!("此 Agent 尚未实现：{agent}"),
     }
 }
 
 /// Discovery and CLI identities stay implementation-owned.
 pub async fn discover() -> Vec<(String, latte_work_protocol::AgentInfo)> {
-    let (claude, traex, codex) =
-        tokio::join!(claude::discover(), traex::discover(), codex::discover());
-    vec![claude, traex, codex]
+    let (claude, traex, codex, opencode) = tokio::join!(
+        claude::discover(),
+        traex::discover(),
+        codex::discover(),
+        opencode::discover()
+    );
+    vec![claude, traex, codex, opencode]
 }
 
 /// Protocol compatibility belongs to the adapter registry, never to presentation code.
@@ -171,8 +179,13 @@ pub fn provider_protocols(agent: &str) -> Option<&'static [latte_work_protocol::
             latte_work_protocol::ProviderProtocol::OpenaiChat,
             latte_work_protocol::ProviderProtocol::OpenaiResponses,
         ]),
+        "opencode" => Some(&[]),
         _ => None,
     }
+}
+
+pub fn has_native_models(agent: &str) -> bool {
+    matches!(agent, "codex" | "traex" | "opencode")
 }
 
 /// Prompt-free catalogs share probe bounds; each adapter owns its model semantics.
@@ -186,6 +199,7 @@ pub async fn native_models(
     match agent {
         "codex" => codex::models(binary, path, selected, environment).await,
         "traex" => traex::models(binary, path, selected, environment).await,
+        "opencode" => opencode::models(binary, path, selected, environment).await,
         _ => bail!("此 Agent 尚未实现原生模型目录：{agent}"),
     }
 }
@@ -215,6 +229,7 @@ pub async fn permission_modes(
         "claude" => claude::permission_modes(binary).await,
         "traex" => traex::permission_modes(binary).await,
         "codex" => codex::permission_modes(binary).await,
+        "opencode" => Ok(vec![]),
         _ => bail!("此 Agent 尚未实现权限设置：{agent}"),
     }
 }
@@ -300,7 +315,7 @@ pub fn rename_saved_session(
 mod tests {
     #[test]
     fn unimplemented_agents_do_not_inherit_claude_effort() {
-        for agent in ["opencode", "unknown", ""] {
+        for agent in ["unknown", ""] {
             assert!(super::create(agent).is_err());
             assert!(super::effort_levels(agent, Some("opus")).is_empty());
             assert!(super::effort_levels(agent, None).is_empty());

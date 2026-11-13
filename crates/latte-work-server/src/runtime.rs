@@ -270,6 +270,11 @@ pub async fn rename_title(
     config: LaunchConfig,
 ) -> Result<Session> {
     Store::validate_session_title(&title)?;
+    // OpenCode ACP cannot rename the native session. Keep the manual name
+    // in Latte consistently, whether or not the OpenCode child is running.
+    if session.agent == "opencode" {
+        return db(database, |s| s.rename_session(&session.id, &title));
+    }
     let control = runs
         .lock()
         .map_err(|_| anyhow::anyhow!("执行状态锁异常"))?
@@ -777,6 +782,7 @@ impl TurnState {
                     // Capture a completed child's full native output before this
                     // process/redaction context can be replaced by a later turn.
                     if let Some(native_id) = terminal_child
+                        && db(database, |d| Ok(d.session(session_id)?.agent == "claude"))?
                         && let Ok(permit) = agents::child_read_permit()
                     {
                         let source = db(database, |d| {
@@ -1017,7 +1023,11 @@ impl Process {
         let pid = child.id().context("Agent PID missing")? as i32;
         let mut group = Group { child, pid };
         let input = group.child.stdin.take().context("Agent stdin missing")?;
-        let output = native_output(group.child.stdout.take().context("Agent stdout missing")?);
+        let stdout = group.child.stdout.take().context("Agent stdout missing")?;
+        let output = match adapter.frame_limit() {
+            Some(limit) => FramedRead::new(stdout, LinesCodec::new_with_max_length(limit)),
+            None => native_output(stdout),
+        };
         let mut stderr = group.child.stderr.take().context("Agent stderr missing")?;
         let drain = tokio::spawn(async move {
             let mut buf = [0; 4096];
@@ -1200,6 +1210,22 @@ impl Process {
             let _ = reply.send(Err("原生会话已关闭，标题修改结果待确认".into()));
         }
         self.session_open.store(false, Ordering::SeqCst);
+        if let Ok(Some(bytes)) = self.adapter.close_request() {
+            let (adapter, input, output) = (&mut self.adapter, &mut self.input, &mut self.output);
+            let _ = tokio::time::timeout(Duration::from_millis(750), async move {
+                write(input, &bytes).await?;
+                for _ in 0..64 {
+                    let Some(Ok(line)) = output.next().await else {
+                        break;
+                    };
+                    if adapter.close_ack(&line) {
+                        break;
+                    }
+                }
+                Ok::<_, anyhow::Error>(())
+            })
+            .await;
+        }
         // Closing stdin alone lets some CLI versions wait indefinitely for background work.
         // Explicit stop/shutdown terminates and reaps the entire owned process group.
         let _ = killpg(Pid::from_raw(self.group.pid), Signal::SIGTERM);
@@ -1577,7 +1603,7 @@ async fn actor(
                             p.stopping = true;
                             p.stop_reply = Some(reply);
                             p.turn_deadline = tokio::time::Instant::now() + Duration::from_secs(10);
-                            if !p.state.ready {
+                            if !p.state.ready && !p.adapter.can_interrupt_startup() {
                                 Ok(())
                             } else {
                                 p.interrupt_sent = true;
@@ -1794,7 +1820,7 @@ async fn actor(
                 Some(Control::Approval { id, allow, reply }) => {
                     let valid = process
                         .as_ref()
-                        .is_some_and(|p| p.state.pending.get(&id).is_some_and(|(_, _, questions)| questions.is_none()));
+                        .is_some_and(|p| !p.stopping && p.state.pending.get(&id).is_some_and(|(_, _, questions)| questions.is_none()));
                     if !valid {
                         let _ = reply.send(Err("审批已过期或不属于当前执行".into()));
                         Ok(())
@@ -2079,6 +2105,9 @@ pub async fn commands(
     path: &str,
     config: &LaunchConfig,
 ) -> Result<Vec<latte_work_protocol::AgentSlashCommand>> {
+    if agent == "opencode" {
+        return agents::opencode_commands(binary, path, &config.environment).await;
+    }
     let mut adapter = agents::create(agent)?;
     let start = adapter.advance(Input::DiscoverCommands)?;
     let mut prepared = adapter.command(binary, path, None, config)?;

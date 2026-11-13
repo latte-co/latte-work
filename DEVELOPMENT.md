@@ -1696,3 +1696,54 @@ tool execution in the disposable project without a paid
 model API. `smoke-codex.py --live` optionally sends two small actual model turns;
 `--live-tools` also requests a file write in its disposable project. Fixture,
 localhost-upstream, actual model, native desktop and real SSH evidence are separate.
+
+## OpenCode integration
+
+Install OpenCode 2.x on each execution host, configure its providers or run
+`opencode auth login`, and restart Latte Work Server. Discovery uses the host
+PATH or `LATTE_WORK_OPENCODE` and rejects 1.x. The desktop uses the host's
+advertised Agent list, including over SSH.
+
+The host launches a private `opencode acp` process per open conversation, using
+newline-delimited JSON-RPC on stdio. ACP initialization checks the protocol,
+agent version and resume capability. Open and resume do not submit a prompt;
+resume skips native transcript replay and uses the original session ID and
+project. Latte persists the user request before starting the agent and saves
+the native session ID before the first prompt write. Explicit ACP prompt
+completion settles the turn; process exit and unrelated notifications cannot
+complete it. Cancellation sends `session/cancel` and waits for the prompt result.
+Close attempts the native detach before terminating the owned process group.
+
+Bounded metadata probes use a separate disposable native session without
+prompting, and delete it afterwards. Model labels and supported effort values
+come from the current project and effective host environment. An explicit
+selection is validated against the live session before sending the prompt.
+The adapter exposes `/compact` when OpenCode advertises it and checks again
+before dispatch. Other slash commands are rejected: ACP can acknowledge
+their dispatch while native work is still running, without a completion
+notification that Latte can use to settle the turn.
+
+OpenCode's own permissions apply. When ACP asks the client, Latte exposes only
+allow-once and reject, scoped to that session and pending request. No filesystem
+or terminal methods are granted to the ACP peer. OpenCode uses native Provider
+configuration; App Provider binding, permission mode overrides, ACP forms,
+and mid-turn delivery of queued input are unavailable. Queued turns can run
+after the current turn. Manual session names are saved in Latte.
+
+OpenCode child text and tools are stored separately from the main answer.
+Child lifecycle can outlive the ACP prompt response. OpenCode 2.3 can then
+start a parent follow-up without sending an ACP completion marker. Latte does
+not present that activity as a completed submitted turn; it conservatively
+blocks idle close, reconfiguration and undo until a foreground turn settles
+with no active children, or the user explicitly closes the Agent session.
+Detached shell work reported as still running also requires an explicit close
+because ACP does not publish a completion event for it. Latte preserves the
+captured child activity across reconnect and restart; it does not import native
+history that it did not observe.
+
+The implementation follows the [OpenCode ACP contract](https://opencode.ai/docs/cli/acp/).
+The final-binary tests use a deterministic ACP peer. For an installed CLI,
+`python3 scripts/smoke-opencode.py --opencode /path/to/opencode` uses an isolated
+host and a loopback Chat Completions fixture to exercise prompt-free metadata,
+streaming, resume and permission-gated tool execution without external model
+calls. Native desktop, real SSH and live model acceptance are separate checks.

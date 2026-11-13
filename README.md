@@ -2,8 +2,8 @@
 
 A small desktop workspace for coding agents, with local and SSH projects.
 
-**Tauri 2 · React · Rust**. Integrates installed **Claude Code**, **Traex** and
-**Codex** CLIs through native protocols and session history.
+**Tauri 2 · React · Rust**. Integrates installed **Claude Code**, **Traex**, **Codex**, and
+**OpenCode 2.x** CLIs through native protocols and session history.
 
 ## Start
 
@@ -12,8 +12,9 @@ make setup
 make dev
 ```
 
-Install and sign in to the selected CLI (`claude`, `traex` or `codex`) on each
-execution host, or bind a compatible App Provider, before sending a task.
+Install and sign in to the selected CLI (`claude`, `traex`, `codex`, or
+`opencode`) on each execution host, or bind a compatible App Provider before
+sending a task. OpenCode uses its own host configuration and sign-in.
 Create a project, select this computer or an SSH host, and choose its folder
 (local system picker or remote directory browser). Then create a task and send
 a prompt. You can also enter an absolute path. File
@@ -33,9 +34,8 @@ stop host tasks. The same server binary and protocol are used over SSH.
 - Read-only text files and staged/unstaged Git diff, with bounded output.
 - macOS desktop bundle; headless server for macOS/Linux.
 
-The UI displays permission requests made by Claude; the CLI's existing allow
-rules still apply. Register only projects you trust: print mode loads their
-Claude configuration. The app does not bypass CLI permissions or manage login.
+The UI displays permission requests made by the selected Agent; its existing allow
+rules still apply. Register only projects you trust: Agents load project configuration. The app does not bypass CLI permissions or manage login.
 
 ## Build and verify
 
@@ -57,7 +57,8 @@ Windows support, or guaranteed continuation after a host daemon crashes.
 模型服务在「设置 → Provider」统一管理，支持 Anthropic Messages、
 OpenAI Chat Completions、OpenAI Responses 配置。在「设置 → 连接与 Agent」中关联兼容的
 Provider；Claude Code 仅接受 Anthropic Messages，Codex 仅接受 OpenAI Responses。
-Codex 使用主机原生配置与登录；`LATTE_WORK_CODEX` 可指定 CLI 路径。
+`LATTE_WORK_CODEX` 和 `LATTE_WORK_OPENCODE` 分别可指定对应的 CLI 路径。
+OpenCode 使用执行主机的原生模型和权限配置，支持 [OpenCode 2.x ACP](https://opencode.ai/docs/cli/acp/)。
 详见 [Provider 与 Agent 配置](docs/providers.md)。
 
 Provider 可配置默认模型和多个可选模型。在输入框底部选择本轮模型，下一次发送时生效；

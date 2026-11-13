@@ -63,7 +63,12 @@ impl Service {
         path: &str,
         config: &mut providers::LaunchConfig,
     ) -> Result<()> {
-        if !matches!(agent, "traex" | "codex") || config.provider.is_some() {
+        if !agents::has_native_models(agent) || config.provider.is_some() {
+            return Ok(());
+        }
+        // OpenCode validates its selection in the same ACP session that will
+        // run the prompt, before writing session/prompt. No second launch.
+        if agent == "opencode" {
             return Ok(());
         }
         let _permit = self
@@ -477,7 +482,7 @@ async fn dispatch(s: &Service, request: Request) -> Result<Response> {
                 .lock()
                 .map_err(|_| anyhow::anyhow!("Provider 配置锁异常"))?
                 .models(&agent, model.as_deref())?;
-            if matches!(agent.as_str(), "traex" | "codex")
+            if agents::has_native_models(&agent)
                 && matches!(&response, Response::Models { provider: None, .. })
             {
                 let binary = s.agent_binary(&agent)?;
@@ -494,7 +499,7 @@ async fn dispatch(s: &Service, request: Request) -> Result<Response> {
                 )
                 .await?;
             }
-            if !matches!(agent.as_str(), "traex" | "codex")
+            if !agents::has_native_models(&agent)
                 && let Response::Models {
                     provider: None,
                     model_labels,
@@ -593,7 +598,7 @@ async fn dispatch(s: &Service, request: Request) -> Result<Response> {
                 .transpose()?;
             let mut response =
                 providers::ProviderStore::models_for_provider(&agent, model.as_deref(), provider)?;
-            if matches!(agent.as_str(), "traex" | "codex")
+            if agents::has_native_models(&agent)
                 && matches!(&response, Response::Models { provider: None, .. })
             {
                 let binary = s.agent_binary(&agent)?;
@@ -610,7 +615,7 @@ async fn dispatch(s: &Service, request: Request) -> Result<Response> {
                 )
                 .await?;
             }
-            if !matches!(agent.as_str(), "traex" | "codex")
+            if !agents::has_native_models(&agent)
                 && let Response::Models {
                     provider: None,
                     model_labels,
@@ -781,7 +786,7 @@ async fn dispatch(s: &Service, request: Request) -> Result<Response> {
                 .map_err(|_| anyhow::anyhow!("Provider 配置锁异常"))?
                 .open_config(&session.agent, session.model.as_deref(), provider)?;
             config.effort = session.effort.filter(|level| {
-                (matches!(session.agent.as_str(), "traex" | "codex") && config.provider.is_none())
+                (agents::has_native_models(&session.agent) && config.provider.is_none())
                     || agents::effort_levels(&session.agent, config.model.as_deref())
                         .contains(level)
             });
@@ -854,7 +859,7 @@ async fn dispatch(s: &Service, request: Request) -> Result<Response> {
                     .as_ref()
                     .map(|p| p.metadata.model.as_str())
             });
-            if (!matches!(agent_id.as_str(), "traex" | "codex") || launch_config.provider.is_some())
+            if (!agents::has_native_models(&agent_id) || launch_config.provider.is_some())
                 && effort.is_some_and(|level| {
                     !agents::effort_levels(&agent_id, selected_model).contains(&level)
                 })
@@ -1090,12 +1095,15 @@ async fn dispatch(s: &Service, request: Request) -> Result<Response> {
             let cursor = db(&s.database, |d| {
                 d.child_history_cursor(&session_id, &task_id)
             })?;
-            if !source_has_more && (cursor.identity.is_empty() || cursor.has_more) {
+            let session = db(&s.database, |d| d.session(&session_id))?;
+            if session.agent == "claude"
+                && !source_has_more
+                && (cursor.identity.is_empty() || cursor.has_more)
+            {
                 let fingerprint = providers::turn_fingerprint(provider.as_ref())?;
                 let accepted = db(&s.database, |d| {
                     d.child_provider_fingerprint(&session_id, &task_id)
                 })?;
-                let session = db(&s.database, |d| d.session(&session_id))?;
                 let config = s
                     .providers
                     .lock()

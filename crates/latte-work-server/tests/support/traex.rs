@@ -580,7 +580,7 @@ async fn traex_discovery_open_stream_reconnect_resume_and_queue_use_the_selected
     };
     assert_eq!(
         agents.iter().map(|a| a.id.as_str()).collect::<Vec<_>>(),
-        ["claude", "traex", "codex"]
+        ["claude", "traex", "codex", "opencode"]
     );
     assert!(agents[1].available);
     assert_eq!(agents[1].provider_protocols.len(), 3);
