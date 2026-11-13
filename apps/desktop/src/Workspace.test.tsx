@@ -490,6 +490,7 @@ it("collapses the workspace after last close and persists the empty state", asyn
   expect(screen.queryAllByRole("tab")).toHaveLength(0);
   expect(screen.queryByRole("button", { name: "添加工作区标签" })).toBeNull();
   expect(screen.getByLabelText("工作区入口")).toBeTruthy();
+  expect(screen.queryByRole("button", { name: "侧边聊天" })).toBeNull();
   fireEvent.click(screen.getByRole("button", { name: "文件" }));
   expect(screen.getByRole("tab", { name: "文件" })).toBeTruthy();
   await act(async () => {
@@ -740,6 +741,18 @@ it("focuses task information after pinning and closes its tab without host mutat
   expect(screen.getByText("任务摘要内容")).toBeTruthy();
   fireEvent.click(screen.getByRole("button", { name: "关闭任务摘要" }));
   expect(screen.queryByRole("tab", { name: "任务摘要" })).toBeNull();
+  expect(mocks.request).not.toHaveBeenCalled();
+});
+
+it("opens a side chat draft from the empty workspace without creating a session", () => {
+  render(<Workspace {...props} sessionId="parent" canOpenSideChat />);
+  const launcher = within(screen.getByLabelText("工作区入口"));
+  expect(launcher.getAllByRole("button")[0].textContent).toBe("侧边聊天");
+  fireEvent.click(launcher.getByRole("button", { name: "侧边聊天" }));
+  expect(screen.getByRole("tab", { name: "侧边聊天" })).toBeTruthy();
+  expect(readWorkspace(props.workspaceId).tabs).toMatchObject([
+    { kind: "sideChat", draft: true },
+  ]);
   expect(mocks.request).not.toHaveBeenCalled();
 });
 

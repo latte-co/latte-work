@@ -69,7 +69,16 @@ function ConversationTab({
   );
 }
 
-type Kind = "terminal" | "files" | "diff" | "subagents" | "browser";
+const workspaceKinds = [
+  "sideChat",
+  "diff",
+  "terminal",
+  "files",
+  "subagents",
+  "browser",
+] as const;
+type Kind = (typeof workspaceKinds)[number];
+type WorkspaceOption = { kind: Kind; disabled: boolean };
 type SideTab = Extract<Tab, { kind: "sideChat" }>;
 
 const labels = {
@@ -386,6 +395,10 @@ function WorkspacePage({
   async function add(kind: Kind) {
     setMenu(false);
     setError("");
+    if (kind === "sideChat") {
+      openSideChatTab(workspaceId, crypto.randomUUID(), true);
+      return;
+    }
     if (kind === "browser") {
       try {
         openBrowser(workspaceId);
@@ -475,6 +488,14 @@ function WorkspacePage({
     }
   }
   const sideTabs = tabs.filter((tab) => tab.kind === "sideChat");
+  const options: WorkspaceOption[] = workspaceKinds
+    .filter((kind) => kind !== "sideChat" || canOpenSideChat)
+    .map((kind) => ({
+      kind,
+      disabled:
+        busy ||
+        (kind !== "browser" && kind !== "sideChat" && (!connected || !project)),
+    }));
   const title = (tab: Tab) =>
     tab.kind === "sideChat" && sideTabs.length > 1
       ? `侧边聊天 ${sideTabs.indexOf(tab) + 1}`
@@ -609,15 +630,7 @@ function WorkspacePage({
       {menu && trigger.current && (
         <AddMenu
           trigger={trigger.current}
-          connected={connected && !!project}
-          newSideChat={
-            canOpenSideChat
-              ? () => {
-                  setMenu(false);
-                  openSideChatTab(workspaceId, crypto.randomUUID(), true);
-                }
-              : undefined
-          }
+          options={options}
           close={() => {
             setMenu(false);
             trigger.current?.focus();
@@ -758,16 +771,12 @@ function WorkspacePage({
       {!tabs.length && !conversationActive && (
         <div className="workspace-empty" aria-label="工作区入口">
           <div className="workspace-launchers">
-            {(
-              ["diff", "terminal", "files", "subagents", "browser"] as const
-            ).map((kind) => {
+            {options.map(({ kind, disabled }) => {
               const Icon = icons[kind];
               return (
                 <button
                   key={kind}
-                  disabled={
-                    busy || (kind !== "browser" && (!connected || !project))
-                  }
+                  disabled={disabled}
                   onClick={() => void add(kind)}
                 >
                   <Icon size={18} />
@@ -784,14 +793,12 @@ function WorkspacePage({
 
 function AddMenu({
   trigger,
-  connected,
-  newSideChat,
+  options,
   close,
   choose,
 }: {
   trigger: HTMLButtonElement;
-  connected: boolean;
-  newSideChat?: () => void;
+  options: WorkspaceOption[];
   close: () => void;
   choose: (kind: Kind) => void;
 }) {
@@ -857,28 +864,20 @@ function AddMenu({
         maxHeight: Math.max(92, window.innerHeight - rect.bottom - 14),
       }}
     >
-      {newSideChat && (
-        <button role="menuitem" onClick={newSideChat}>
-          <MessageCircle size={18} />
-          <span>{labels.sideChat}</span>
-        </button>
-      )}
-      {(["diff", "terminal", "files", "subagents", "browser"] as const).map(
-        (kind) => {
-          const Icon = icons[kind];
-          return (
-            <button
-              key={kind}
-              role="menuitem"
-              disabled={kind !== "browser" && !connected}
-              onClick={() => choose(kind)}
-            >
-              <Icon size={18} />
-              <span>{labels[kind]}</span>
-            </button>
-          );
-        },
-      )}
+      {options.map(({ kind, disabled }) => {
+        const Icon = icons[kind];
+        return (
+          <button
+            key={kind}
+            role="menuitem"
+            disabled={disabled}
+            onClick={() => choose(kind)}
+          >
+            <Icon size={18} />
+            <span>{labels[kind]}</span>
+          </button>
+        );
+      })}
     </div>,
     document.body,
   );
