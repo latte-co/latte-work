@@ -52,6 +52,8 @@ export const statusNames = {
   unknown: "状态待确认",
 };
 interface Props {
+  openSideChat?: (draft?: string) => boolean | Promise<boolean>;
+  quoteInSideChat?: (text: string) => void;
   openSubagents?: () => void;
   openTurnChanges?: (changes: TurnChanges, path?: string) => void;
   openFile?: (path: string) => void;
@@ -104,6 +106,8 @@ const FOLLOW_THRESHOLD = 90;
 
 export function Conversation({
   openSubagents,
+  openSideChat,
+  quoteInSideChat,
   openTurnChanges,
   openFile,
   drafts,
@@ -708,6 +712,7 @@ export function Conversation({
                     key={JSON.stringify([hostId, session?.id])}
                     events={events}
                     turns={turns}
+                    askInSideChat={quoteInSideChat}
                   >
                     {(item) =>
                       item.type === "user" ? (
@@ -1072,6 +1077,7 @@ export function Conversation({
           onChange={setText}
           onSubmit={submit}
           onOpenSubagents={openSubagents}
+          onOpenSideChat={openSideChat}
           onOpenModelSettings={(target) =>
             modelPicker.current?.openMenu(target) ??
             (modelPicker.current ? null : "无法打开模型设置。")
@@ -1133,15 +1139,17 @@ export function Conversation({
               <ComposerAction
                 active={!!active && !hasContent && !localNavigation}
                 label={
-                  localNavigation === "subagents"
-                    ? "打开子智能体"
-                    : localNavigation === "model"
-                      ? "选择模型"
-                      : localNavigation === "effort"
-                        ? "思考强度"
-                        : active && hasContent
-                          ? "加入队列"
-                          : undefined
+                  localNavigation === "side"
+                    ? "打开侧边聊天"
+                    : localNavigation === "subagents"
+                      ? "打开子智能体"
+                      : localNavigation === "model"
+                        ? "选择模型"
+                        : localNavigation === "effort"
+                          ? "思考强度"
+                          : active && hasContent
+                            ? "加入队列"
+                            : undefined
                 }
                 sending={sending}
                 disabled={

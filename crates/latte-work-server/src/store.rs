@@ -120,6 +120,7 @@ impl Store {
         CREATE TABLE IF NOT EXISTS projects(id TEXT PRIMARY KEY, name TEXT NOT NULL, path TEXT NOT NULL UNIQUE);
         CREATE TABLE IF NOT EXISTS hidden_projects(project_id TEXT PRIMARY KEY REFERENCES projects(id));
         CREATE TABLE IF NOT EXISTS sessions(id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id), data TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS side_chats(parent_id TEXT NOT NULL REFERENCES sessions(id), session_id TEXT PRIMARY KEY REFERENCES sessions(id), parent_native_id TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS native_title_secrets(session_id TEXT NOT NULL REFERENCES sessions(id), native_id TEXT NOT NULL, secret_hash BLOB NOT NULL, secret_bytes INTEGER NOT NULL, PRIMARY KEY(session_id,native_id,secret_hash));
         CREATE TABLE IF NOT EXISTS native_session_contexts(session_id TEXT NOT NULL REFERENCES sessions(id), native_id TEXT NOT NULL, fingerprint TEXT, PRIMARY KEY(session_id,native_id));
         CREATE TABLE IF NOT EXISTS events(seq INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT NOT NULL REFERENCES sessions(id), at REAL NOT NULL, data TEXT NOT NULL);
@@ -140,7 +141,19 @@ impl Store {
         CREATE TABLE IF NOT EXISTS reference_access(project_id TEXT NOT NULL REFERENCES projects(id), path TEXT NOT NULL, directory INTEGER NOT NULL, PRIMARY KEY(project_id,path));
         CREATE TABLE IF NOT EXISTS requests(id TEXT PRIMARY KEY,session_id TEXT NOT NULL,text TEXT NOT NULL);")?;
         let migration = db.unchecked_transaction()?;
-        migration.execute_batch("CREATE INDEX IF NOT EXISTS events_recent_activity_v2 ON events(session_id,seq DESC) WHERE json_extract(data,'$.kind') IN ('user','queued_message_sent','text','tool','tool_result','approval','approval_resolved','subagent');
+        let legacy_side_chat = migration.query_row(
+            "SELECT pk FROM pragma_table_info('side_chats') WHERE name='parent_id'",
+            [],
+            |row| row.get::<_, u32>(0),
+        )? != 0;
+        if legacy_side_chat {
+            migration.execute_batch("ALTER TABLE side_chats RENAME TO side_chats_legacy;
+                CREATE TABLE side_chats(parent_id TEXT NOT NULL REFERENCES sessions(id), session_id TEXT PRIMARY KEY REFERENCES sessions(id), parent_native_id TEXT NOT NULL);
+                INSERT INTO side_chats SELECT parent_id,session_id,parent_native_id FROM side_chats_legacy;
+                DROP TABLE side_chats_legacy;")?;
+        }
+        migration.execute_batch("CREATE INDEX IF NOT EXISTS side_chats_parent ON side_chats(parent_id);
+        CREATE INDEX IF NOT EXISTS events_recent_activity_v2 ON events(session_id,seq DESC) WHERE json_extract(data,'$.kind') IN ('user','queued_message_sent','text','tool','tool_result','approval','approval_resolved','subagent');
         DROP INDEX IF EXISTS events_recent_activity;")?;
         migration.commit()?;
         let columns = db
@@ -355,12 +368,11 @@ impl Store {
     }
     pub fn sessions(&self, project: &str) -> Result<Vec<Session>> {
         self.project(project)?;
-        Ok(self
-            .all_sessions()?
-            .into_iter()
-            .filter(|s| s.project_id == project)
-            .take(500)
-            .collect())
+        let mut query = self.db.prepare("SELECT data FROM sessions WHERE project_id=?1 AND id NOT IN (SELECT session_id FROM side_chats) ORDER BY rowid DESC LIMIT 500")?;
+        query
+            .query_map([project], |row| row.get::<_, String>(0))?
+            .map(|row| Ok(serde_json::from_str(&row?)?))
+            .collect()
     }
     pub fn recent_sessions(
         &self,
@@ -380,7 +392,7 @@ impl Store {
             SELECT s.id,s.data,COALESCE((SELECT e.at FROM events e WHERE e.session_id=s.id
                 AND json_extract(e.data,'$.kind') IN ('user','queued_message_sent','text','tool','tool_result','approval','approval_resolved','subagent')
                 ORDER BY e.seq DESC LIMIT 1),json_extract(s.data,'$.created_at')) AS updated_at
-            FROM sessions s WHERE COALESCE(json_extract(s.data,'$.archived'),0)=0
+            FROM sessions s WHERE COALESCE(json_extract(s.data,'$.archived'),0)=0 AND s.id NOT IN (SELECT session_id FROM side_chats)
                 AND s.project_id NOT IN (SELECT project_id FROM hidden_projects))
             SELECT data,updated_at FROM recent
             WHERE ?1 IS NULL OR updated_at<?1 OR (updated_at=?1 AND id<?2)
@@ -415,9 +427,17 @@ impl Store {
         Ok(serde_json::from_str(&data)?)
     }
     pub fn create_session(&self, project_id: String, agent: String) -> Result<Session> {
+        self.create_session_with_id(project_id, agent, Uuid::new_v4())
+    }
+    fn create_session_with_id(
+        &self,
+        project_id: String,
+        agent: String,
+        id: Uuid,
+    ) -> Result<Session> {
         self.project(&project_id)?;
         let session = Session {
-            id: Uuid::new_v4().to_string(),
+            id: id.to_string(),
             project_id,
             title: "新任务".into(),
             agent,
@@ -444,8 +464,80 @@ impl Store {
         )?;
         Ok(session)
     }
+    pub fn side_parent(&self, child: &str) -> Result<Option<(String, String)>> {
+        Ok(self
+            .db
+            .query_row(
+                "SELECT parent_id,parent_native_id FROM side_chats WHERE session_id=?1",
+                [child],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?)
+    }
+    pub fn side_chats(&self, parent_id: &str) -> Result<Vec<Session>> {
+        let mut query = self.db.prepare(
+            "SELECT s.data FROM side_chats c JOIN sessions s ON s.id=c.session_id
+             WHERE c.parent_id=?1 ORDER BY c.rowid DESC LIMIT 100",
+        )?;
+        query
+            .query_map([parent_id], |row| row.get::<_, String>(0))?
+            .map(|row| Ok(serde_json::from_str(&row?)?))
+            .collect()
+    }
+    pub fn side_chat_ids(&self, parent_id: &str) -> Result<Vec<String>> {
+        let mut query = self
+            .db
+            .prepare("SELECT session_id FROM side_chats WHERE parent_id=?1")?;
+        Ok(query
+            .query_map([parent_id], |row| row.get(0))?
+            .collect::<rusqlite::Result<_>>()?)
+    }
+    pub fn open_side_chat(&self, parent_id: &str, side_id: Option<&str>) -> Result<Session> {
+        let parent = self.session(parent_id)?;
+        if !matches!(parent.agent.as_str(), "codex" | "traex")
+            || self.side_parent(parent_id)?.is_some()
+        {
+            bail!("仅 Codex 和 Traex 主会话支持侧边聊天");
+        }
+        let id = if let Some(id) = side_id {
+            let id = Uuid::parse_str(id).context("侧边聊天 ID 无效")?;
+            if let Some((owner, _)) = self.side_parent(&id.to_string())? {
+                if owner != parent_id {
+                    bail!("侧边聊天不属于此主会话");
+                }
+                return self.session(&id.to_string());
+            }
+            id
+        } else {
+            if let Some(id) = self.db.query_row(
+                "SELECT session_id FROM side_chats WHERE parent_id=?1 ORDER BY rowid DESC LIMIT 1",
+                [parent_id], |row| row.get::<_, String>(0),
+            ).optional()? {
+                return self.session(&id);
+            }
+            Uuid::new_v4()
+        };
+        if parent.archived {
+            bail!("请先取消主会话归档");
+        }
+        let native = parent
+            .native_id
+            .context("主会话尚未开始，请先发送一条消息")?;
+        let tx = self.db.unchecked_transaction()?;
+        let mut side = self.create_session_with_id(parent.project_id, parent.agent, id)?;
+        side.title = "侧边聊天".into();
+        side.model = parent.model;
+        side.effort = parent.effort;
+        self.save(&side)?;
+        tx.execute(
+            "INSERT INTO side_chats(parent_id,session_id,parent_native_id) VALUES (?1,?2,?3)",
+            params![parent_id, side.id, native],
+        )?;
+        tx.commit()?;
+        Ok(side)
+    }
     pub fn pinned_sessions(&self) -> Result<Vec<Session>> {
-        let rows = self.db.prepare("SELECT data FROM sessions WHERE json_extract(data, '$.pinned_at') IS NOT NULL AND COALESCE(json_extract(data, '$.archived'),0)=0 AND project_id NOT IN (SELECT project_id FROM hidden_projects) ORDER BY json_extract(data, '$.pinned_at') DESC LIMIT 100")?
+        let rows = self.db.prepare("SELECT data FROM sessions WHERE id NOT IN (SELECT session_id FROM side_chats) AND json_extract(data, '$.pinned_at') IS NOT NULL AND COALESCE(json_extract(data, '$.archived'),0)=0 AND project_id NOT IN (SELECT project_id FROM hidden_projects) ORDER BY json_extract(data, '$.pinned_at') DESC LIMIT 100")?
             .query_map([], |r| r.get::<_, String>(0))?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         rows.into_iter()
@@ -1191,6 +1283,36 @@ impl Store {
             .map(|request_id| self.turn_changes(id, &request_id))
             .transpose()
     }
+    /// A writable side chat shares the project directory with the main task.
+    /// Use durable event sequence boundaries so this still works after restart.
+    pub fn overlaps_writable_side_chat(&self, session_id: &str, request_id: &str) -> Result<bool> {
+        Ok(self.db.query_row(
+            "WITH main_turn AS (
+                SELECT
+                    (SELECT MIN(seq) FROM events WHERE session_id=?1 AND json_extract(data,'$.kind')='user'
+                        AND json_extract(data,'$.request_id')=?2) AS start_seq,
+                    (SELECT MIN(seq) FROM events WHERE session_id=?1 AND json_extract(data,'$.kind')='turn_changes'
+                        AND json_extract(data,'$.changes.request_id')=?2) AS end_seq
+            )
+            SELECT EXISTS(
+                SELECT 1 FROM sessions owner
+                JOIN sessions child ON child.project_id=owner.project_id AND child.id!=owner.id
+                JOIN side_chats side ON side.session_id=child.id
+                JOIN events admitted ON admitted.session_id=child.id AND json_extract(admitted.data,'$.kind')='user'
+                JOIN requests r ON r.session_id=child.id AND r.id=json_extract(admitted.data,'$.request_id')
+                CROSS JOIN main_turn
+                WHERE owner.id=?1 AND r.permission_mode IS NOT NULL AND admitted.seq < main_turn.end_seq
+                AND (admitted.seq > main_turn.start_seq OR NOT EXISTS (
+                    SELECT 1 FROM events ended WHERE ended.session_id=child.id
+                        AND ended.seq > admitted.seq AND ended.seq < main_turn.start_seq
+                        AND json_extract(ended.data,'$.kind')='state'
+                        AND json_extract(ended.data,'$.status') IN ('completed','failed','stopped','unknown')
+                ))
+            )",
+            params![session_id, request_id],
+            |row| row.get(0),
+        )?)
+    }
     pub fn latest_request(&self, id: &str) -> Result<String> {
         self.db
             .query_row(
@@ -1442,6 +1564,19 @@ impl Store {
         session.permission_mode = permission_mode.map(str::to_owned);
         if !session.custom_title && session.title == "新任务" {
             session.title = text.chars().take(48).collect();
+        } else if !session.custom_title
+            && session.title == "侧边聊天"
+            && session.native_id.is_none()
+            && self.side_parent(id)?.is_some()
+        {
+            session.title = text
+                .lines()
+                .map(str::trim)
+                .find(|line| !line.is_empty() && !line.starts_with('>'))
+                .unwrap_or(text.trim())
+                .chars()
+                .take(48)
+                .collect();
         }
         let tx = self.db.transaction()?;
         tx.execute(
@@ -1887,6 +2022,42 @@ fn index_source(
 }
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn side_chat_relationship_survives_restart_and_an_interrupted_turn_stays_unknown() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("state.sqlite");
+        let mut store = super::Store::open(&path).unwrap();
+        let project = store.add_project(directory.path()).unwrap();
+        let mut parent = store
+            .create_session(project.id.clone(), "codex".into())
+            .unwrap();
+        parent.native_id = Some("native-main".into());
+        store.save(&parent).unwrap();
+        let side = store.open_side_chat(&parent.id, None).unwrap();
+        store
+            .begin(&side.id, "lost", "side question", None, None, None, None)
+            .unwrap();
+        store.db.execute_batch("ALTER TABLE side_chats RENAME TO side_chats_current;
+            CREATE TABLE side_chats(parent_id TEXT PRIMARY KEY REFERENCES sessions(id), session_id TEXT NOT NULL UNIQUE REFERENCES sessions(id), parent_native_id TEXT NOT NULL);
+            INSERT INTO side_chats SELECT parent_id,session_id,parent_native_id FROM side_chats_current;
+            DROP TABLE side_chats_current;").unwrap();
+        drop(store);
+        let store = super::Store::open(&path).unwrap();
+        let restored = store.open_side_chat(&parent.id, None).unwrap();
+        assert_eq!(restored.id, side.id);
+        assert_eq!(restored.status, super::Status::Unknown);
+        assert_eq!(
+            store.session(&parent.id).unwrap().status,
+            super::Status::Ready
+        );
+        let second_id = uuid::Uuid::new_v4().to_string();
+        let second = store.open_side_chat(&parent.id, Some(&second_id)).unwrap();
+        assert_ne!(restored.id, second.id);
+        assert_eq!(store.side_chats(&parent.id).unwrap().len(), 2);
+        assert_eq!(store.sessions(&project.id).unwrap().len(), 1);
+        assert!(store.events(&parent.id, 0.0).unwrap().0.is_empty());
+    }
+
     #[test]
     fn native_rename_context_survives_restart_and_rejects_unknown_or_changed_launches() {
         let directory = tempfile::tempdir().unwrap();

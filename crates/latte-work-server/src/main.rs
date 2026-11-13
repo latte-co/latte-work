@@ -327,6 +327,8 @@ async fn connection(stream: UnixStream, service: Service) -> Result<()> {
                             skill_management: true,
                             skill_file_import: true,
                             change_preview: true,
+                            side_chat: true,
+                            side_chat_controls: true,
                         }
                     } else {
                         Response::Error {
@@ -755,6 +757,17 @@ async fn dispatch(s: &Service, request: Request) -> Result<Response> {
             archived,
         } => Response::Session {
             session: runtime::archive(&s.database, &s.runs, &session_id, archived).await?,
+        },
+        Request::OpenSideChat {
+            session_id,
+            side_id,
+        } => Response::Session {
+            session: db(&s.database, |d| {
+                d.open_side_chat(&session_id, side_id.as_deref())
+            })?,
+        },
+        Request::SideChats { session_id } => Response::Sessions {
+            sessions: db(&s.database, |d| d.side_chats(&session_id))?,
         },
         Request::CreateSession { project_id, agent } => {
             s.agent_binary(&agent)?;
@@ -1457,6 +1470,11 @@ async fn dispatch(s: &Service, request: Request) -> Result<Response> {
                     .is_empty()
             {
                 bail!("此主机仍有运行任务、后台 Agent 或终端；请结束后再撤销");
+            }
+            if db(&s.database, |d| {
+                d.overlaps_writable_side_chat(&session_id, &request_id)
+            })? {
+                bail!("本轮与具备写权限的侧边聊天同时执行，无法安全撤销，请核对工作区改动");
             }
             let session = db(&s.database, |d| d.session(&session_id))?;
             let project = db(&s.database, |d| d.project(&session.project_id))?;

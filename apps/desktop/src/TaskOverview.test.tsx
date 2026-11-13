@@ -144,3 +144,44 @@ it("pins the overview into task information and dismisses the popover", () => {
   expect(openInfo).toHaveBeenCalledOnce();
   expect(screen.queryByRole("dialog")).toBeNull();
 });
+
+it("opens a historical side chat from the main conversation overview", async () => {
+  const openSideChat = vi.fn();
+  const title = "排查长对话切换到侧边聊天后的上下文恢复";
+  mocks.request.mockImplementation(async (_host, request) => {
+    if (request.method === "side_chats")
+      return {
+        kind: "sessions",
+        sessions: [
+          { id: "old", title, created_at: Date.now(), status: "waiting" },
+        ],
+      };
+    return { kind: "git_review", review: { entries: [] } };
+  });
+  render(
+    <TaskOverview
+      hostId="local"
+      project={project}
+      connected
+      subagents={state}
+      openChanges={vi.fn()}
+      openSubagents={vi.fn()}
+      openInfo={vi.fn()}
+      sideChatHistory={{
+        hostId: "local",
+        parentId: "parent",
+        onOpen: openSideChat,
+      }}
+    />,
+  );
+  fireEvent.click(screen.getByRole("button", { name: "任务概览" }));
+  const entry = await screen.findByRole("button", { name: /排查长对话/ });
+  expect(entry.getAttribute("title")).toBe(title);
+  expect(entry.textContent).toContain("等待回应");
+  expect(entry.querySelector("time")?.textContent).toMatch(
+    /^今天 \d{2}:\d{2}$/,
+  );
+  fireEvent.click(entry);
+  expect(openSideChat).toHaveBeenCalledWith("old");
+  expect(screen.queryByRole("dialog")).toBeNull();
+});

@@ -6,8 +6,9 @@ import { StatusCenter } from "./StatusCenter";
 import { useStatusNotices, type StatusNotice } from "./statusNotices";
 import { useCallback, useRef, useState } from "react";
 import { DraftStore } from "./drafts";
-import { Folder, PanelRight, SquarePen } from "lucide-react";
+import { Folder, MessagesSquare, PanelRight, SquarePen } from "lucide-react";
 import { request, message } from "./api";
+import { SideChat, sideDraftKey } from "./SideChat";
 import { Conversation } from "./Conversation";
 import { Workspace } from "./Workspace";
 import { Sidebar } from "./Sidebar";
@@ -24,6 +25,8 @@ import { latestTurnChanges } from "./transcript";
 import {
   openWorkspaceResource,
   openTaskInfo,
+  openSideChatTab,
+  sideChatId,
   openTurnChanges,
   openSubagents,
   CONVERSATION_MIN_WIDTH,
@@ -190,9 +193,72 @@ export default function App() {
     statusCenter
   );
   const conversationHidden = merged && !workbench.workspace.conversationActive;
+  const supportsSide =
+    !!session &&
+    ["codex", "traex"].includes(session.agent) &&
+    workbench.supportsSideChat;
+  const canOpenSide =
+    supportsSide && !!session.native_id && !session.archived && connected;
+  const showSide = async (text?: string, quote = false) => {
+    if (!canOpenSide) return false;
+    const owner = workbench.workspaceId;
+    const tabs = workbench.workspace.tabs;
+    const tab =
+      tabs.find(
+        (tab) =>
+          tab.kind === "sideChat" && tab.id === workbench.workspace.current,
+      ) ?? tabs.filter((tab) => tab.kind === "sideChat").at(-1);
+    let sideId = tab ? sideChatId(tab.id) : undefined;
+    try {
+      if (!sideId) {
+        const response = await request(hostId, {
+          method: "open_side_chat",
+          session_id: session.id,
+          side_id: null,
+        });
+        if (
+          response.kind !== "session" ||
+          response.session.id === session.id ||
+          response.session.project_id !== session.project_id
+        )
+          throw new Error("Server 未返回独立的侧边聊天");
+        sideId = response.session.id;
+      }
+      if (text) {
+        const key = sideDraftKey(hostId, session.id, sideId);
+        const draft = drafts.get(key);
+        drafts.update(
+          key,
+          quote
+            ? { quotes: [...(draft.quotes ?? []), text] }
+            : { text: [draft.text, text].filter(Boolean).join("\n\n") },
+        );
+      }
+      openSideChatTab(owner, sideId);
+      return true;
+    } catch (cause) {
+      setError(message(cause));
+      return false;
+    }
+  };
   const conversationActions =
     !workbench.modal && !workbench.passwordPrompt ? (
-      <SessionMenuButton state={workbench} />
+      <>
+        {supportsSide && (
+          <button
+            className="panel-toggle icon-button"
+            aria-label="打开侧边聊天"
+            title={
+              session.native_id ? "打开侧边聊天" : "主会话开始后可打开侧边聊天"
+            }
+            disabled={!canOpenSide}
+            onClick={() => void showSide()}
+          >
+            <MessagesSquare size={16} />
+          </button>
+        )}
+        <SessionMenuButton state={workbench} />
+      </>
     ) : null;
   const overview = (
     <TaskOverview
@@ -204,6 +270,16 @@ export default function App() {
       openChanges={() => openWorkspaceResource(workbench.workspaceId, "diff")}
       openSubagents={showSubagents}
       openInfo={() => openTaskInfo(workbench.workspaceId)}
+      sideChatHistory={
+        canOpenSide
+          ? {
+              hostId,
+              parentId: session.id,
+              currentId: sideChatId(workbench.workspace.current),
+              onOpen: (id) => openSideChatTab(workbench.workspaceId, id),
+            }
+          : undefined
+      }
     />
   );
   return (
@@ -298,6 +374,10 @@ export default function App() {
           </header>
           <Conversation
             openSubagents={showSubagents}
+            openSideChat={canOpenSide ? showSide : undefined}
+            quoteInSideChat={
+              canOpenSide ? (text) => void showSide(text, true) : undefined
+            }
             openTurnChanges={(changes, path) => {
               if (session)
                 openTurnChanges(
@@ -415,6 +495,25 @@ export default function App() {
         />
         <Workspace
           sessionId={session?.id}
+          canOpenSideChat={canOpenSide}
+          renderSideChat={
+            session
+              ? (tab, active) => (
+                  <SideChat
+                    key={JSON.stringify([hostId, session.id, tab])}
+                    parent={session}
+                    sideId={sideChatId(tab)}
+                    hostId={hostId}
+                    drafts={drafts}
+                    active={
+                      active && !workbench.modal && !workbench.passwordPrompt
+                    }
+                    connected={connected}
+                    supported={supportsSide}
+                  />
+                )
+              : undefined
+          }
           lastTurnVersion={lastTurnVersion}
           overview={overview}
           taskInfo={

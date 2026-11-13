@@ -436,6 +436,8 @@ export type Request =
   | { method: "mark_session_unread"; session_id: string; unread: boolean }
   | { method: "archive_session"; session_id: string; archived: boolean }
   | { method: "create_session"; project_id: string; agent: string }
+  | { method: "open_side_chat"; session_id: string; side_id: string | null }
+  | { method: "side_chats"; session_id: string }
   | {
       method: "open_agent_session";
       session_id: string;
@@ -749,6 +751,8 @@ export type Response =
       skill_management: boolean;
       skill_file_import: boolean;
       change_preview: boolean;
+      side_chat: boolean;
+      side_chat_controls: boolean;
     }
   | { kind: "projects"; projects: Array<Project> }
   | { kind: "project"; project: Project }

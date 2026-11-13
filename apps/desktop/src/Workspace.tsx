@@ -7,6 +7,8 @@ import {
   openSubagent,
   openArtifact,
   openBrowser,
+  openSideChatTab,
+  sideChatId,
   useWorkspaceState,
   type WorkspaceTab as Tab,
 } from "./workspaceState";
@@ -34,6 +36,7 @@ import type { SubagentsState } from "./useSubagents";
 import { TerminalPane } from "./TerminalPane";
 import { SidebarToggle } from "./SidebarToggle";
 import { useStatusIssues } from "./statusNotices";
+import { SideChatHistoryButton } from "./SideChatHistory";
 import type { SidebarPreview } from "./useSidebarPreview";
 
 function ConversationTab({
@@ -70,6 +73,7 @@ type Kind = "terminal" | "files" | "diff" | "subagents" | "browser";
 
 const labels = {
   taskInfo: "任务摘要",
+  sideChat: "侧边聊天",
   artifact: "文件产物",
   browser: "浏览器",
   terminal: "终端",
@@ -81,6 +85,7 @@ const labels = {
 };
 const icons = {
   taskInfo: Info,
+  sideChat: MessageCircle,
   artifact: FileText,
   browser: Globe2,
   subagents: Bot,
@@ -96,6 +101,8 @@ export function Workspace({
   subagents,
   overview,
   taskInfo,
+  renderSideChat,
+  canOpenSideChat,
   conversationActions,
   statusCenter,
   sessionId,
@@ -115,6 +122,8 @@ export function Workspace({
   subagents?: SubagentsState;
   overview?: React.ReactNode;
   taskInfo?: React.ReactNode;
+  renderSideChat?: (tab: string, active: boolean) => React.ReactNode;
+  canOpenSideChat?: boolean;
   conversationActions?: React.ReactNode;
   statusCenter?: React.ReactNode;
   sessionId?: string;
@@ -170,6 +179,8 @@ export function Workspace({
             subagents={selected ? subagents : undefined}
             overview={selected ? overview : undefined}
             taskInfo={selected ? taskInfo : undefined}
+            renderSideChat={selected ? renderSideChat : undefined}
+            canOpenSideChat={selected && canOpenSideChat}
             conversationActions={selected ? conversationActions : undefined}
             statusCenter={selected ? statusCenter : undefined}
             sessionId={selected ? sessionId : page.sessionId}
@@ -199,6 +210,8 @@ function WorkspacePage({
   subagents,
   overview,
   taskInfo,
+  renderSideChat,
+  canOpenSideChat,
   conversationActions,
   statusCenter,
   sessionId,
@@ -223,6 +236,8 @@ function WorkspacePage({
   subagents?: SubagentsState;
   overview?: React.ReactNode;
   taskInfo?: React.ReactNode;
+  renderSideChat?: (tab: string, active: boolean) => React.ReactNode;
+  canOpenSideChat?: boolean;
   conversationActions?: React.ReactNode;
   statusCenter?: React.ReactNode;
   sessionId?: string;
@@ -445,17 +460,20 @@ function WorkspacePage({
       setBusy(false);
     }
   }
+  const sideTabs = tabs.filter((tab) => tab.kind === "sideChat");
   const title = (tab: Tab) =>
-    tab.kind === "artifact"
-      ? tab.name
-      : tab.kind === "terminal"
-        ? `${tab.terminal.title} · ${tab.hostName ?? hostName}`
-        : tab.kind === "subagent"
-          ? (subagents?.tasks.find((task) => task.id === tab.taskId)?.title ??
-            tab.title)
-          : tab.kind === "turnChanges" || tab.kind === "browser"
-            ? tab.title
-            : labels[tab.kind];
+    tab.kind === "sideChat" && sideTabs.length > 1
+      ? `侧边聊天 ${sideTabs.indexOf(tab) + 1}`
+      : tab.kind === "artifact"
+        ? tab.name
+        : tab.kind === "terminal"
+          ? `${tab.terminal.title} · ${tab.hostName ?? hostName}`
+          : tab.kind === "subagent"
+            ? (subagents?.tasks.find((task) => task.id === tab.taskId)?.title ??
+              tab.title)
+            : tab.kind === "turnChanges" || tab.kind === "browser"
+              ? tab.title
+              : labels[tab.kind];
   return (
     <div
       className={`workspace-page${tabs.length ? "" : " empty"}`}
@@ -540,6 +558,18 @@ function WorkspacePage({
           </button>
         )}
         <div className="workspace-header-space" data-tauri-drag-region />
+        {canOpenSideChat &&
+          sessionId &&
+          !conversationActive &&
+          tabs.some((tab) => tab.kind === "sideChat" && tab.id === current) && (
+            <SideChatHistoryButton
+              key={sessionId}
+              hostId={hostId}
+              parentId={sessionId}
+              currentId={sideChatId(current)}
+              onOpen={(id) => openSideChatTab(workspaceId, id)}
+            />
+          )}
         {expanded && conversationActions}
         {expanded && overview}
         {expanded && <span className="titlebar-divider" aria-hidden="true" />}
@@ -566,6 +596,14 @@ function WorkspacePage({
         <AddMenu
           trigger={trigger.current}
           connected={connected && !!project}
+          newSideChat={
+            canOpenSideChat
+              ? () => {
+                  setMenu(false);
+                  openSideChatTab(workspaceId, crypto.randomUUID());
+                }
+              : undefined
+          }
           close={() => {
             setMenu(false);
             trigger.current?.focus();
@@ -585,6 +623,11 @@ function WorkspacePage({
           {["files", "diff", "turnChanges"].includes(tab.kind) &&
           !(tab.project ?? project) ? (
             <div className="workspace-empty">选择项目后打开此标签。</div>
+          ) : tab.kind === "sideChat" ? (
+            renderSideChat?.(
+              tab.id,
+              active && !conversationActive && current === tab.id,
+            )
           ) : tab.kind === "taskInfo" ? (
             taskInfo
           ) : tab.kind === "artifact" ? (
@@ -728,11 +771,13 @@ function WorkspacePage({
 function AddMenu({
   trigger,
   connected,
+  newSideChat,
   close,
   choose,
 }: {
   trigger: HTMLButtonElement;
   connected: boolean;
+  newSideChat?: () => void;
   close: () => void;
   choose: (kind: Kind) => void;
 }) {
@@ -794,9 +839,16 @@ function AddMenu({
       aria-label="添加工作区标签"
       style={{
         left: Math.max(8, Math.min(rect.left, window.innerWidth - 232)),
-        top: Math.min(rect.bottom + 6, window.innerHeight - 132),
+        top: rect.bottom + 6,
+        maxHeight: Math.max(92, window.innerHeight - rect.bottom - 14),
       }}
     >
+      {newSideChat && (
+        <button role="menuitem" onClick={newSideChat}>
+          <MessageCircle size={18} />
+          <span>{labels.sideChat}</span>
+        </button>
+      )}
       {(["diff", "terminal", "files", "subagents", "browser"] as const).map(
         (kind) => {
           const Icon = icons[kind];

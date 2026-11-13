@@ -503,7 +503,14 @@ fn control_for(
     session: Session,
     path: String,
 ) -> Result<mpsc::Sender<Control>> {
-    if db(&database, |s| Ok(s.session(&session.id)?.archived))? {
+    if db(&database, |s| {
+        if let Some((parent, _)) = s.side_parent(&session.id)?
+            && s.session(&parent)?.archived
+        {
+            bail!("请先取消主会话归档，再继续侧边聊天");
+        }
+        Ok(s.session(&session.id)?.archived)
+    })? {
         bail!("请先取消归档再打开 Agent 会话或发送消息");
     }
     let mut map = runs.lock().map_err(|_| anyhow::anyhow!("执行状态锁异常"))?;
@@ -566,6 +573,15 @@ pub async fn archive(
     if archived {
         if db(database, |s| Ok(s.session(id)?.status.active()))? {
             bail!("请先停止任务，再归档会话");
+        }
+        let children = db(database, |s| s.side_chat_ids(id))?;
+        for child in &children {
+            if db(database, |s| Ok(s.session(child)?.status.active()))? {
+                bail!("侧边聊天仍在执行，请等待完成或停止后再归档");
+            }
+        }
+        for child in children {
+            close(database, runs, &child, true).await?;
         }
         close(database, runs, id, false).await?;
     }
@@ -989,6 +1005,7 @@ impl Process {
             && self.adapter.can_start_turn()
     }
     fn spawn(
+        database: &Database,
         binary: &str,
         session: &Session,
         path: &str,
@@ -1000,6 +1017,19 @@ impl Process {
             session.custom_title.then(|| session.title.clone()),
             session.native_id.is_some(),
         );
+        if let Some((parent, native)) = db(database, |s| s.side_parent(&session.id))? {
+            let fingerprint = config.fingerprint()?;
+            let (owner, source) = session
+                .native_id
+                .as_ref()
+                .map_or((&parent, &native), |id| (&session.id, id));
+            if !db(database, |s| {
+                s.native_rename_context_matches(owner, source, fingerprint.as_deref())
+            })? {
+                bail!("侧边聊天的 Provider 或环境已变化，请恢复原配置后重试");
+            }
+            adapter.set_side_parent(native)?;
+        }
         let prepared = adapter.command(binary, path, session.native_id.as_deref(), &config)?;
         let mut command = prepared.command;
         command
@@ -1333,28 +1363,33 @@ async fn accept_turn(
     // After durable admission, all failures become explicit terminal events. The
     // accepted request ID still reconciles a lost transport response without replay.
     let result = async {
-        let baseline = crate::task_changes::Snapshot::capture_stored(
-            std::path::Path::new(path),
-            &db(database, |s| Ok(s.snapshot_dir.clone()))?,
-        )
-        .await
-        .unwrap_or_else(|e| crate::task_changes::Snapshot::unavailable(e.to_string()));
-        db(database, |s| {
-            s.save_turn_baseline(&session.id, &turn.request_id, &baseline)
-        })?;
-        if db(database, |s| s.baseline(&session.id))?.is_none() {
-            let task_baseline = if db(database, |s| s.first_request(&session.id))? {
-                baseline
-            } else {
-                crate::task_changes::Snapshot::unavailable(
-                    "此历史任务没有记录文件基线，请查看工作区改动".into(),
-                )
-            };
-            db(database, |s| s.save_baseline(&session.id, &task_baseline))?;
+        // Side chats share the main working directory. An independent snapshot
+        // could attribute concurrent main writes to the child and undo them.
+        if db(database, |s| Ok(s.side_parent(&session.id)?.is_none()))? {
+            let baseline = crate::task_changes::Snapshot::capture_stored(
+                std::path::Path::new(path),
+                &db(database, |s| Ok(s.snapshot_dir.clone()))?,
+            )
+            .await
+            .unwrap_or_else(|e| crate::task_changes::Snapshot::unavailable(e.to_string()));
+            db(database, |s| {
+                s.save_turn_baseline(&session.id, &turn.request_id, &baseline)
+            })?;
+            if db(database, |s| s.baseline(&session.id))?.is_none() {
+                let task_baseline = if db(database, |s| s.first_request(&session.id))? {
+                    baseline
+                } else {
+                    crate::task_changes::Snapshot::unavailable(
+                        "此历史任务没有记录文件基线，请查看工作区改动".into(),
+                    )
+                };
+                db(database, |s| s.save_baseline(&session.id, &task_baseline))?;
+            }
         }
         if process.is_none() {
             let current = db(database, |s| s.session(&session.id))?;
             *process = Some(Process::spawn(
+                database,
                 binary,
                 &current,
                 path,
@@ -1538,7 +1573,7 @@ async fn actor(
                     let result = async {
                         if process.is_none() {
                             let current = db(&database, |s| s.session(&session.id))?;
-                            let mut p = Process::spawn(&binary, &current, &path, config, session_open.clone())?;
+                            let mut p = Process::spawn(&database, &binary, &current, &path, config, session_open.clone())?;
                             let actions = p.adapter.advance(Input::Open)?;
                             p.apply(actions, &database, &session.id).await?;
                             process = Some(p);
@@ -1911,8 +1946,14 @@ async fn actor(
             if let Some(config) = recovery {
                 let restore = async {
                     let current = db(&database, |s| s.session(&session.id))?;
-                    let mut p =
-                        Process::spawn(&binary, &current, &path, config, session_open.clone())?;
+                    let mut p = Process::spawn(
+                        &database,
+                        &binary,
+                        &current,
+                        &path,
+                        config,
+                        session_open.clone(),
+                    )?;
                     let actions = p.adapter.advance(Input::Open)?;
                     p.apply(actions, &database, &session.id).await?;
                     Ok::<_, anyhow::Error>(p)

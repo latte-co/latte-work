@@ -14,6 +14,7 @@ export function PermissionPicker({
   value,
   onChange,
   disabled,
+  sideChat = false,
 }: {
   hostId: string;
   agent: string;
@@ -22,6 +23,7 @@ export function PermissionPicker({
   value: string | null;
   onChange: (value: string | null) => void;
   disabled: boolean;
+  sideChat?: boolean;
 }) {
   const scope = JSON.stringify([hostId, agent]);
   const [loaded, setLoaded] = useState<{
@@ -58,8 +60,10 @@ export function PermissionPicker({
         if (!disposed) setLoaded({ scope, modes: result.modes });
       })
       .catch((e) => {
-        if (!disposed && !(e instanceof HostConnectionError))
+        if (!disposed && !(e instanceof HostConnectionError)) {
           setFailure({ scope, message: message(e) });
+          if (sideChat) setLoaded({ scope, modes: [] });
+        }
       })
       .finally(() => {
         if (!disposed) setLoading(false);
@@ -67,19 +71,24 @@ export function PermissionPicker({
     return () => {
       disposed = true;
     };
-  }, [hostId, agent, connected, hidden, retry]);
+  }, [hostId, agent, connected, hidden, retry, sideChat]);
   const current = modes?.find((mode) => mode.id === value);
   const Icon = current?.elevated ? ShieldAlert : Shield;
   const options: SelectOption[] = [
     {
       value: "",
-      label: "跟随 Agent",
-      description: "沿用 Agent 自己的权限配置。",
+      label: sideChat ? "只读" : "跟随 Agent",
+      description: sideChat
+        ? "可以读取文件。禁止写入或请求提权。"
+        : "沿用 Agent 自己的权限配置。",
     },
     ...(modes ?? []).map((mode) => ({
       value: mode.id,
       label: mode.label,
-      description: mode.description,
+      description:
+        sideChat && mode.elevated
+          ? `${mode.description} 侧边聊天与主聊使用同一个工作目录。`
+          : mode.description,
       tone: mode.elevated ? ("warning" as const) : undefined,
     })),
   ];
@@ -87,7 +96,9 @@ export function PermissionPicker({
     options.push({
       value,
       label: modes ? "权限模式不可用" : value,
-      description: "此选择尚未验证；可切换为跟随 Agent。",
+      description: sideChat
+        ? "此选择尚未验证，可切换为只读。"
+        : "此选择尚未验证；可切换为跟随 Agent。",
     });
   return (
     <div
@@ -95,7 +106,7 @@ export function PermissionPicker({
     >
       <Icon size={15} aria-hidden="true" />
       <Select
-        label="Agent 权限"
+        label={sideChat ? "侧边聊天权限" : "Agent 权限"}
         value={value ?? ""}
         options={options}
         onChange={(id) => onChange(id || null)}

@@ -4,6 +4,7 @@ import type { ComposerReference } from "./pasteAttachments";
 export interface Draft {
   text: string;
   skillCreator?: boolean;
+  quotes?: string[];
   references: { scope: string; entries: ComposerReference[] };
 }
 const empty: Draft = { text: "", references: { scope: "", entries: [] } };
@@ -33,6 +34,7 @@ export class DraftStore {
     const sameContent =
       previous.text === next.text &&
       previous.skillCreator === next.skillCreator &&
+      previous.quotes === next.quotes &&
       sameReferences;
     this.versions.set(
       next,

@@ -51,6 +51,10 @@ interface Props {
   skillCreator?: boolean;
   onRemoveSkillCreator?: () => void;
   focusRequest?: number;
+  inputLabel?: string;
+  sideChat?: boolean;
+  context?: ReactNode;
+  hasContext?: boolean;
   referenceState?: { scope: string; entries: ComposerReference[] };
   onReferencesChange?: (value: {
     scope: string;
@@ -69,7 +73,8 @@ interface Props {
   value: string;
   onChange: (text: string) => void;
   placeholder: string;
-  onSubmit: (prompt: string, uiAction?: "subagents") => Promise<boolean>;
+  onSubmit: (prompt: string) => Promise<boolean>;
+  onOpenSideChat?: (draft?: string) => boolean | Promise<boolean>;
   onOpenSubagents?: () => void;
   onOpenModelSettings?: (target: "model" | "effort") => string | null;
   toolbar: (
@@ -369,10 +374,11 @@ export function Composer(props: Props) {
     ...subagentPanelAliases,
     ...commands.filter(isNativeSubagentCommand).map((command) => command.name),
   ];
-  const localNavigation = appCommandAction(value, commands);
+  const sideAgent = !props.sideChat && (agent === "codex" || agent === "traex");
+  const localNavigation = appCommandAction(value, commands, sideAgent);
   const options: Option[] =
     mode === "commands"
-      ? unifiedComposerCommands(commands)
+      ? unifiedComposerCommands(commands, !!props.onOpenSideChat)
           .filter((item) =>
             `${item.name} ${commandTitle(item, agent)} ${item.description} ${item.ui_action === "subagents" ? panelAliases.join(" ") : ""}`
               .toLowerCase()
@@ -637,14 +643,14 @@ export function Composer(props: Props) {
     )
       return;
     if (localNavigation) {
-      openAppCommand(localNavigation);
+      await openAppCommand(localNavigation);
       return;
     }
     if (value.trimStart().startsWith("/") && attached.length) {
       setNotice("Agent 命令使用原生参数，请先移除项目引用，避免改变命令含义。");
       return;
     }
-    if (!value.trim() && !attached.length) return;
+    if (!value.trim() && !attached.length && !props.hasContext) return;
     const owner = scope;
     const commandContext = currentContext.current;
     submitting.current = true;
@@ -670,9 +676,9 @@ export function Composer(props: Props) {
         )
           return;
       }
-      const uiAction = appCommandAction(value, catalog);
+      const uiAction = appCommandAction(value, catalog, sideAgent);
       if (uiAction) {
-        openAppCommand(uiAction);
+        await openAppCommand(uiAction);
         return;
       }
       const prompt = referencePrompt(
@@ -690,8 +696,31 @@ export function Composer(props: Props) {
       submitting.current = false;
     }
   }
-  function openAppCommand(action: AppCommandAction) {
+  async function openAppCommand(action: AppCommandAction) {
     close();
+    if (action === "side") {
+      if (!props.onOpenSideChat) {
+        setNotice(
+          "侧边聊天需要已开始的 Codex 或 Traex 主会话和支持此功能的 Server。",
+        );
+        return;
+      }
+      const owner = currentContext.current;
+      submitting.current = true;
+      try {
+        if (
+          (await props.onOpenSideChat(value.trim().replace(/^\/\S+\s*/, ""))) &&
+          currentContext.current === owner &&
+          latestValue.current === value
+        ) {
+          onChange("");
+          setNotice("");
+        }
+      } finally {
+        submitting.current = false;
+      }
+      return;
+    }
     if (action === "subagents") {
       if (!props.onOpenSubagents) {
         setNotice("无法打开子智能体面板");
@@ -1170,6 +1199,7 @@ export function Composer(props: Props) {
           </div>
         </ImageGallery>
       )}
+      {!concealSubmitted && props.context}
       <textarea
         ref={input}
         /* Remount across conceal transitions: a fresh node carries no IME
@@ -1177,7 +1207,7 @@ export function Composer(props: Props) {
            into the cleared field after re-enabling it. */
         key={concealSubmitted ? "concealed" : "editing"}
         rows={1}
-        aria-label="任务输入"
+        aria-label={props.inputLabel ?? "任务输入"}
         aria-autocomplete="list"
         aria-controls={menu && !addMenu ? listId : undefined}
         aria-expanded={menu && !addMenu}
@@ -1280,7 +1310,7 @@ export function Composer(props: Props) {
           () => void submit(),
           !pasting &&
             !retryFiles.length &&
-            (!!value.trim() || !!attached.length),
+            (!!value.trim() || !!attached.length || !!props.hasContext),
           localNavigation,
         )}
       </div>

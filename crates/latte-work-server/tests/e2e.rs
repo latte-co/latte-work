@@ -3,6 +3,8 @@
 mod codex_e2e;
 #[path = "support/environment.rs"]
 mod environment_e2e;
+#[path = "support/side_chat.rs"]
+mod side_chat_e2e;
 #[path = "support/ssh.rs"]
 mod ssh_e2e;
 #[path = "support/titles.rs"]

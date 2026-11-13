@@ -58,6 +58,20 @@ for line in sys.stdin:
     elif method == 'config/read':
         config_file = pathlib.Path('codex-native-config.json')
         reply(value, {'config': json.loads(config_file.read_text()) if config_file.exists() else {'model_provider': None, 'model': None, 'developer_instructions': 'NATIVE_CODEX_INSTRUCTIONS'}})
+    elif method == 'thread/fork' or (method == 'thread/resume' and params['threadId'].startswith('side-thread-')):
+        sandbox, approval = {
+            'read-only': ('readOnly', 'never'),
+            'workspace-write': ('workspaceWrite', 'on-request'),
+            'danger-full-access': ('dangerFullAccess', 'never'),
+        }[params['sandbox']]
+        assert params['approvalPolicy'] == approval
+        assert 'inherited messages' in params['developerInstructions']
+        if method == 'thread/fork':
+            assert params['threadId'] == thread and params['excludeTurns']
+        parent_thread = thread
+        thread = f'side-thread-{os.getpid()}' if method == 'thread/fork' else params['threadId']
+        reply(value, {'thread': {'id': thread, 'forkedFromId': parent_thread},
+                      'sandbox': {'type': sandbox}, 'approvalPolicy': approval})
     elif method in ('thread/start', 'thread/resume'):
         if params.get('ephemeral'):
             expected_env = pathlib.Path('title-environment.json')

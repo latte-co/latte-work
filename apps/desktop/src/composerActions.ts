@@ -55,7 +55,7 @@ export function isNativeSubagentCommand(command: AgentSlashCommand) {
   );
 }
 
-export type AppCommandAction = "subagents" | "model" | "effort";
+export type AppCommandAction = "subagents" | "model" | "effort" | "side";
 export type ComposerCommand = Omit<AgentSlashCommand, "ui_action"> & {
   ui_action?: AppCommandAction;
 };
@@ -64,9 +64,11 @@ export type ComposerCommand = Omit<AgentSlashCommand, "ui_action"> & {
 export function appCommandAction(
   text: string,
   commands: AgentSlashCommand[] = [],
+  sideChat = false,
 ): AppCommandAction | null {
   const name = /^\/([^\s]+)(?:\s|$)/.exec(text.trim())?.[1];
   if (!name) return null;
+  if (sideChat && (name === "side" || name === "btw")) return "side";
   if (name === "model" || name === "effort") return name;
   if (subagentPanelAliases.includes(name)) return "subagents";
   return commands.find((command) => command.name === name)?.ui_action ?? null;
@@ -74,6 +76,7 @@ export function appCommandAction(
 
 export function unifiedComposerCommands(
   commands: AgentSlashCommand[],
+  sideChat = false,
 ): ComposerCommand[] {
   return [
     {
@@ -97,9 +100,21 @@ export function unifiedComposerCommands(
       argument_hint: "",
       ui_action: "effort",
     },
+    ...(sideChat
+      ? [
+          {
+            name: "side",
+            display_name: "侧边聊天",
+            description: "在右侧引用主聊上下文继续提问",
+            argument_hint: "[问题]",
+            ui_action: "side" as const,
+          },
+        ]
+      : []),
     ...commands.filter(
       (command) =>
         !isNativeSubagentCommand(command) &&
+        (!sideChat || (command.name !== "side" && command.name !== "btw")) &&
         command.name !== "model" &&
         command.name !== "effort",
     ),

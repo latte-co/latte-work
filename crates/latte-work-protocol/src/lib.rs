@@ -600,6 +600,15 @@ pub enum Request {
         project_id: String,
         agent: String,
     },
+    /// Open the latest side chat, or idempotently create one with an explicit ID.
+    OpenSideChat {
+        session_id: String,
+        #[serde(default)]
+        side_id: Option<String>,
+    },
+    SideChats {
+        session_id: String,
+    },
     /// Open/resume the native Agent without sending a prompt. Idempotent.
     OpenAgentSession {
         session_id: String,
@@ -1210,6 +1219,10 @@ pub enum Response {
         skill_file_import: bool,
         #[serde(default)]
         change_preview: bool,
+        #[serde(default)]
+        side_chat: bool,
+        #[serde(default)]
+        side_chat_controls: bool,
     },
     Projects {
         projects: Vec<Project>,

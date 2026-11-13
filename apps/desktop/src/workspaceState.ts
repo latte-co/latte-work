@@ -9,7 +9,7 @@ export type WorkspaceTab = {
 } & (
   | {
       id: string;
-      kind: "files" | "diff" | "subagents" | "taskInfo";
+      kind: "files" | "diff" | "subagents" | "taskInfo" | "sideChat";
       requestId?: string;
       snapshotSessionId?: string;
       snapshotAt?: number | null;
@@ -110,6 +110,7 @@ export function readWorkspace(key: string): WorkspaceState {
           tab.kind === "files" ||
           tab.kind === "diff" ||
           tab.kind === "subagents" ||
+          tab.kind === "sideChat" ||
           tab.kind === "taskInfo"
             ? (tab.path === undefined || typeof tab.path === "string") &&
               (tab.file === undefined || typeof tab.file === "string") &&
@@ -262,6 +263,24 @@ export function openSubagents(workspaceId: string) {
   }));
 }
 
+const sideTabPrefix = "sideChat:";
+export function sideChatId(tab: string) {
+  return tab.startsWith(sideTabPrefix)
+    ? tab.slice(sideTabPrefix.length)
+    : undefined;
+}
+
+export function openSideChatTab(workspaceId: string, sideId: string) {
+  const id = sideTabPrefix + sideId;
+  updateWorkspace(workspaceId, (state) => ({
+    tabs: state.tabs.some((tab) => tab.id === id)
+      ? state.tabs
+      : [...state.tabs, { id, kind: "sideChat" }],
+    current: id,
+    visible: true,
+    conversationActive: false,
+  }));
+}
 export function openSubagent(workspaceId: string, task: Subagent) {
   const id = `subagent:${task.id}`;
   updateWorkspace(workspaceId, (state) => ({

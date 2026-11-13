@@ -702,3 +702,54 @@ it("focuses task information after pinning and closes its tab without host mutat
   expect(screen.queryByRole("tab", { name: "任务摘要" })).toBeNull();
   expect(mocks.request).not.toHaveBeenCalled();
 });
+
+it("creates side chats from the plus menu and reopens them from the history button", async () => {
+  updateWorkspace(props.workspaceId, { expanded: true });
+  const past = crypto.randomUUID();
+  mocks.request.mockImplementation(async (_host: string, r: Request) => {
+    if (r.method === "side_chats")
+      return {
+        kind: "sessions",
+        sessions: [
+          {
+            id: past,
+            title: "先前的侧边聊天",
+            created_at: 1,
+            status: "running",
+          },
+        ],
+      };
+    return { kind: "ok" };
+  });
+  render(
+    <Workspace
+      {...props}
+      sessionId="parent"
+      canOpenSideChat
+      renderSideChat={(tab, active) =>
+        active ? <div>当前侧边聊天 {tab}</div> : null
+      }
+    />,
+  );
+  const add = screen.getByRole("button", { name: "添加工作区标签" });
+  fireEvent.click(add);
+  expect(mocks.request).not.toHaveBeenCalled();
+  expect(screen.queryByText("历史")).toBeNull();
+  fireEvent.click(screen.getByRole("menuitem", { name: "侧边聊天" }));
+  const history = screen.getByRole("button", { name: "历史" });
+  fireEvent.click(history);
+  const entry = await screen.findByRole("button", { name: /先前的侧边聊天/ });
+  expect(entry.getAttribute("title")).toBe("先前的侧边聊天");
+  fireEvent.click(entry);
+  expect(screen.getByText(`当前侧边聊天 sideChat:${past}`)).toBeTruthy();
+  expect(screen.queryByRole("dialog", { name: "历史" })).toBeNull();
+  const sideTabs = readWorkspace(props.workspaceId).tabs.filter(
+    (tab) => tab.kind === "sideChat",
+  );
+  expect(sideTabs).toHaveLength(2);
+  expect(sideTabs[1].id).not.toBe(sideTabs[0].id);
+  expect(mocks.request).toHaveBeenCalledWith("local", {
+    method: "side_chats",
+    session_id: "parent",
+  });
+});
