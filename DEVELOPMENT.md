@@ -1718,7 +1718,9 @@ is consumed only after a matching native inbox delivery event. A background
 Shell is displayed as running until its native exit. Native execution
 completion fences project slash commands and autonomous follow-up activity.
 Compaction uses its ACP completion. OpenCode 2.0 implements `/compact` even
-though its ACP catalog omits the command.
+though its ACP catalog omits the command. Skill shortcuts advertised by
+older catalogs are activated through ACP. A custom title set before the
+first prompt is applied to the new native session before it can run.
 
 Permission modes use a process-local OpenCode permission hook. Explicit
 native denials and managed policies continue to apply. The adapter uses ACP

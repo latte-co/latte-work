@@ -170,7 +170,7 @@ def run(binary, cli, llm, root):
     }))
     skill = project / ".opencode/skills/smoke-latte-skill"
     skill.mkdir(parents=True)
-    (skill / "SKILL.md").write_text("---\nname: Smoke Latte Skill\ndescription: Smoke test instructions\n---\nSKILL_BODY_OK\n")
+    (skill / "SKILL.md").write_text("---\nname: smoke-latte-skill\ndescription: Smoke test instructions\n---\nSKILL_BODY_OK\n")
     env = {key: value for key, value in os.environ.items() if key in {"PATH", "USER", "LANG", "TMPDIR"}}
     env.update({
         "HOME": str(root),
@@ -276,6 +276,29 @@ def run(binary, cli, llm, root):
                 assert "Second smoke turn after resume." in submitted
                 print(version + ": streamed turns and native close/resume", flush=True)
 
+                named = rpc("create_session", project_id=pid, agent="opencode")["session"]["id"]
+                rpc("rename_session", session_id=named, title="Initial OpenCode title", provider=provider)
+                before = len(Model.calls)
+                rpc("open_agent_session", session_id=named, provider=provider)
+                assert len(Model.calls) == before
+                rpc("send_queued", session_id=named, request_id="named-first", text="First named turn.",
+                    model="test/test-model", effort="high", provider=provider)
+                deadline = time.monotonic() + 8
+                while True:
+                    named_session = rpc("session", session_id=named)["session"]
+                    if named_session["status"] == "completed":
+                        break
+                    if time.monotonic() >= deadline:
+                        raise AssertionError(named_session)
+                    time.sleep(.05)
+                assert len(Model.calls) == before + 1
+                assert named_session["title"] == "Initial OpenCode title"
+                rpc("close_agent_session", session_id=named, only_if_idle=True)
+                exported = subprocess.run([cli, "session", "export", "--standalone", named_session["native_id"]],
+                    cwd=project, env=env, capture_output=True, check=True, timeout=6)
+                assert json.loads(exported.stdout)["info"]["title"] == "Initial OpenCode title"
+                print(version + ": initial user title persisted natively without a naming prompt", flush=True)
+
                 send("permission", "permission sentinel")
                 pending = wait("waiting")
                 approval = next(e["event"] for e in reversed(pending["events"]) if e["event"]["kind"] == "approval")
@@ -353,8 +376,15 @@ def run(binary, cli, llm, root):
                 assert any(e["event"].get("name") == "Skill"
                            and e["event"]["input"]["skill"] == "smoke-latte-skill" for e in result["events"])
                 assert "SKILL_BODY_OK" in json.dumps(Model.calls[-1]["messages"][-1])
-                assert rpc("skill_info", session_id=sid, name="smoke-latte-skill")["skill"]["name"] == "Smoke Latte Skill"
+                assert rpc("skill_info", session_id=sid, name="smoke-latte-skill")["skill"]["name"] == "smoke-latte-skill"
                 print(version + ": project Skill execution and metadata", flush=True)
+                if any(command["name"] == "smoke-latte-skill" for command in commands):
+                    before = len(Model.calls)
+                    send("slash-skill", "/smoke-latte-skill", "bypass_permissions")
+                    wait("completed")
+                    assert Model.calls[before:]
+                    assert "SKILL_BODY_OK" in json.dumps(Model.calls[before:])
+                    print(version + ": native Skill slash shortcut", flush=True)
                 send("subagent", "launch subagent sentinel", "bypass_permissions")
                 deadline = time.monotonic() + 10
                 while time.monotonic() < deadline:

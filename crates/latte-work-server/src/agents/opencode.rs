@@ -42,6 +42,8 @@ pub struct OpenCode {
     fallback_model_on_open: bool,
     managed_provider: bool,
     legacy_instructions: Option<String>,
+    initial_title: Option<String>,
+    initial_title_pending: bool,
     sideband_ready: bool,
     rename: Option<(String, String)>,
     steering: Option<(String, String)>,
@@ -49,6 +51,7 @@ pub struct OpenCode {
     native_questions: HashSet<String>,
     followup: bool,
     native_command: Option<String>,
+    slash_prompt: Option<String>,
     command_outcome: Option<bool>,
     command_waiting_for_end: bool,
     command_acknowledged: bool,
@@ -253,6 +256,17 @@ impl OpenCode {
         }
         if kind == "reply" {
             let id = string(&message, "id")?;
+            if id == "initial-title" && self.initial_title_pending {
+                self.initial_title_pending = false;
+                let mut actions = Vec::new();
+                if message["error"] == true {
+                    actions.push(Action::Event(EventKind::Notice {
+                        text: "OpenCode 未确认初始标题，Latte 保留手动设置的名称。".into(),
+                    }));
+                }
+                actions.extend(self.ready()?);
+                return Ok(actions);
+            }
             if self
                 .rename
                 .as_ref()
@@ -269,6 +283,14 @@ impl OpenCode {
                 return Ok(self.generated_title(&message["title"]));
             }
             if self.native_command.as_deref() == Some(id) {
+                if message["viaACP"] == true {
+                    if self.cancelling {
+                        return Ok(self.finish_command(true));
+                    }
+                    let prompt = self.slash_prompt.take().context("OpenCode 命令已失效")?;
+                    self.native_command = None;
+                    return self.start_prompt(&prompt);
+                }
                 if message["error"] == true || !self.command_waiting_for_end {
                     return Ok(self.finish_command(message["error"] == true));
                 }
@@ -534,6 +556,7 @@ impl OpenCode {
 
     fn finish_command(&mut self, error: bool) -> Vec<Action> {
         self.native_command = None;
+        self.slash_prompt = None;
         self.command_waiting_for_end = false;
         self.command_acknowledged = false;
         let failed = error || self.command_outcome.take() == Some(false);
@@ -573,8 +596,15 @@ impl OpenCode {
             || self.commands.is_none()
             || self.request.is_some()
             || !self.sideband_ready
+            || self.initial_title_pending
         {
             return Ok(vec![]);
+        }
+        if let Some(title) = self.initial_title.take() {
+            let rename =
+                self.sideband_request("rename", "initial-title", json!({"title":title}))?;
+            self.initial_title_pending = true;
+            return Ok(vec![rename]);
         }
         self.ready = true;
         let mut actions = vec![Action::Ready];
@@ -612,6 +642,7 @@ impl OpenCode {
             let id = uuid::Uuid::new_v4().to_string();
             let action = self.sideband_request("command", &id, json!({"name":name,"text":args}))?;
             self.native_command = Some(id);
+            self.slash_prompt = Some(text.trim_start().into());
             self.command_outcome = None;
             self.command_waiting_for_end = false;
             self.command_acknowledged = false;
@@ -619,9 +650,16 @@ impl OpenCode {
             self.tools.clear();
             return Ok(vec![Action::NativeSession(session), action]);
         }
-        let mut blocks = vec![
-            json!({"type":"text", "text":if command.is_some() {text.trim_start()} else {text}}),
-        ];
+        self.start_prompt(if command.is_some() {
+            text.trim_start()
+        } else {
+            text
+        })
+    }
+
+    fn start_prompt(&mut self, text: &str) -> Result<Vec<Action>> {
+        let session = self.session_id()?.to_owned();
+        let mut blocks = vec![json!({"type":"text", "text":text})];
         if let Some(instructions) = self.legacy_instructions.take() {
             blocks.insert(
                 0,
@@ -1251,11 +1289,15 @@ impl AgentAdapter for OpenCode {
     }
 
     fn knows_subagent(&self, _native_id: &str) -> bool {
-        // Only live ACP updates are available; Runtime must not read Claude history.
+        // The request handler uses OpenCode export for known, completed children.
         false
     }
 
-    fn set_session_title(&mut self, _title: Option<String>, _resuming: bool) {}
+    fn set_session_title(&mut self, title: Option<String>, resuming: bool) {
+        if !resuming {
+            self.initial_title = title;
+        }
+    }
 
     fn command(
         &mut self,

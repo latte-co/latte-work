@@ -16,7 +16,7 @@ export default {
     const socket = createConnection(ctx.options.socket);
     const abort = new AbortController();
     const questions = new Map();
-    const legacyQuestions = Number(ctx.app.version.split(".")[1]) < 3;
+    const legacy = Number(ctx.app.version.split(".")[1]) < 3;
     const bridgeQuestions = new Set();
     const cleanup = () => {
       abort.abort();
@@ -133,6 +133,24 @@ export default {
             resume: false,
           });
         } else if (action === "command") {
+          if (legacy) {
+            // 2.0 mixes command and Skill shortcuts in its ACP catalog. Only
+            // the ACP entry point can activate a Skill directly in this version.
+            const location = (await ctx.session.get({ sessionID })).location;
+            const { data: commands } = await ctx.command.list({ location });
+            if (!commands.some((command) => command.name === request.name)) {
+              const { data: skills } = await ctx.skill.list({ location });
+              if (
+                !skills.some(
+                  (skill) => skill.name === request.name && skill.slash !== false,
+                )
+              ) {
+                throw new Error("Unknown native command");
+              }
+              send({ type: "reply", id, viaACP: true });
+              return;
+            }
+          }
           bridgeQuestions.add(sessionID);
           try {
             await ctx.session.command({
@@ -190,7 +208,7 @@ export default {
         const native = tool.execute;
         tool.execute = async ({ questions: prompts }, context) => {
           const { sessionID, agent, messageID, id: toolCallId } = context;
-          if (!legacyQuestions && !bridgeQuestions.has(sessionID))
+          if (!legacy && !bridgeQuestions.has(sessionID))
             return native({ questions: prompts }, context);
           if (questions.size >= 32 || socket.destroyed)
             throw new Error("Latte Work cannot show questions");
