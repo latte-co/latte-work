@@ -1,0 +1,167 @@
+//! Bounded, prompt-free recovery of a known child's native transcript.
+use crate::{
+    agents::{ChildHistoryCursor, ChildHistoryPage},
+    providers::LaunchConfig,
+    runtime::Group,
+};
+use anyhow::{Context, Result, ensure};
+use latte_work_protocol::{Event, EventKind};
+use serde_json::{Value, json};
+use std::{path::Path, process::Stdio, time::Duration};
+use tokio::io::{AsyncRead, AsyncReadExt};
+
+const LIMIT: u64 = 4 * 1024 * 1024;
+
+pub(in crate::agents) async fn read(
+    binary: &str,
+    cwd: &Path,
+    parent: &str,
+    child: &str,
+    session_id: &str,
+    config: &LaunchConfig,
+) -> Result<Option<ChildHistoryPage>> {
+    if ![parent, child].iter().all(|id| {
+        id.starts_with("ses_")
+            && id.len() <= 128
+            && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
+    }) || parent == child
+    {
+        return Ok(None);
+    }
+    let process = crate::agent_environment::command(binary)
+        .envs(&config.environment.0)
+        .current_dir(cwd)
+        .args(["session", "export", "--standalone", child])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .kill_on_drop(true)
+        .process_group(0)
+        .spawn()?;
+    let pid = process.id().context("OpenCode export PID missing")? as i32;
+    let mut group = Group {
+        child: process,
+        pid,
+    };
+    let result = tokio::time::timeout(Duration::from_secs(6), async {
+        let stdout = group
+            .child
+            .stdout
+            .take()
+            .context("OpenCode export stdout missing")?;
+        let bytes = bounded(stdout).await?;
+        if !group.child.wait().await?.success() {
+            return Ok(None);
+        }
+        let document: Value = serde_json::from_slice(&bytes).context("无效的 OpenCode 导出")?;
+        let document = document.get("data").unwrap_or(&document);
+        let info = &document["info"];
+        let Some(directory) = info["location"]["directory"].as_str().map(Path::new) else {
+            return Ok(None);
+        };
+        if info["id"] != child || info["parentID"] != parent || directory != cwd {
+            return Ok(None);
+        }
+        let messages = document["messages"]
+            .as_array()
+            .context("OpenCode 导出缺少消息")?;
+        let mut events = Vec::new();
+        let redactor = config.redactor();
+        let mut bytes = 0;
+        for message in messages {
+            let at = message["time"]["created"].as_f64().unwrap_or_default();
+            for event in message_events(message) {
+                let event = redactor.event(event);
+                bytes += serde_json::to_vec(&event)?.len();
+                ensure!(
+                    bytes <= LIMIT as usize && events.len() < 4096,
+                    "OpenCode 子任务历史超出限制"
+                );
+                events.push(Event {
+                    seq: (events.len() + 1) as f64,
+                    session_id: session_id.into(),
+                    at,
+                    event,
+                    content_size: None,
+                });
+            }
+        }
+        if events.is_empty() {
+            return Ok(None);
+        }
+        let cursor = ChildHistoryCursor {
+            identity: child.into(),
+            offset: events.len() as u64,
+            ..Default::default()
+        };
+        Ok(Some(ChildHistoryPage {
+            events,
+            cursor,
+            has_more: false,
+        }))
+    })
+    .await;
+    result.context("读取 OpenCode 子任务历史超时")?
+}
+
+async fn bounded(stdout: impl AsyncRead + Unpin) -> Result<Vec<u8>> {
+    let mut bytes = Vec::new();
+    stdout.take(LIMIT + 1).read_to_end(&mut bytes).await?;
+    ensure!(bytes.len() as u64 <= LIMIT, "OpenCode 导出超出读取范围");
+    Ok(bytes)
+}
+
+fn message_events(message: &Value) -> Vec<EventKind> {
+    let mut events = Vec::new();
+    if message["type"] == "user" {
+        if let (Some(text), Some(id)) = (message["text"].as_str(), message["id"].as_str()) {
+            events.push(EventKind::User {
+                text: text.into(),
+                request_id: id.into(),
+            });
+        }
+    } else if message["type"] == "assistant" {
+        for part in message["content"].as_array().into_iter().flatten() {
+            if let Some(text) = part["text"].as_str().filter(|_| part["type"] == "text") {
+                events.push(EventKind::Text { text: text.into() });
+            } else if part["type"] == "tool"
+                && let (Some(id), Some(name)) = (part["id"].as_str(), part["name"].as_str())
+            {
+                let state = &part["state"];
+                let is_error = state["status"] == "error";
+                if !is_error && state["status"] != "completed" {
+                    continue;
+                }
+                let input = state["input"].clone();
+                let name = super::tool_label(&json!({"name":name,"rawInput":input}), None);
+                events.push(EventKind::Tool {
+                    id: id.into(),
+                    name,
+                    input,
+                });
+                let mut images = super::super::ToolImages::default();
+                let content: Vec<_> = state["content"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|part| {
+                        if part["type"] == "text" {
+                            return Some(json!({"type":"text","text":part["text"].as_str()?}));
+                        }
+                        let (mime, data) = part["uri"]
+                            .as_str()?
+                            .strip_prefix("data:")?
+                            .split_once(";base64,")?;
+                        Some(images.inline(mime, data))
+                    })
+                    .collect();
+                events.push(EventKind::ToolResult {
+                    id: id.into(),
+                    content: json!(content),
+                    is_error,
+                });
+            }
+        }
+    }
+    events
+}

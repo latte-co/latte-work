@@ -373,6 +373,17 @@ def run(binary, cli, llm, root):
                 assert "CHILD_SMOKE_OK" not in text(result)
                 print(version + ": child transcript and autonomous parent follow-up", flush=True)
                 rpc("close_agent_session", session_id=sid, only_if_idle=True)
+                before = len(Model.calls)
+                other_context = {"kind": "configured", "snapshot": {
+                    "provider": None, "environment": {"LATTE_SMOKE_OTHER_CONTEXT": "1"},
+                }}
+                other = rpc("subagent_history", session_id=sid, task_id=children[0]["id"], provider=other_context)
+                assert other["source"] == "stream", other["source"]
+                recovered = rpc("subagent_history", session_id=sid, task_id=children[0]["id"], provider=provider)
+                assert recovered["source"] == "native" and "CHILD_SMOKE_OK" in json.dumps(recovered), recovered
+                assert "subagent child sentinel" in recovered["prompt"]
+                assert len(Model.calls) == before
+                print(version + ": prompt-free native child history after close", flush=True)
                 assert set(next(a for a in hello["agents"] if a["id"] == "opencode")["provider_protocols"]) == {
                     "openai_chat", "openai_responses", "anthropic_messages",
                 }

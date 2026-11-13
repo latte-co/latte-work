@@ -41,6 +41,17 @@ impl ToolImages {
     }
 }
 pub(crate) use opencode::commands as opencode_commands;
+pub(crate) async fn opencode_child_history(
+    binary: &str,
+    cwd: &std::path::Path,
+    parent: &str,
+    child: &str,
+    session_id: &str,
+    config: &crate::providers::LaunchConfig,
+) -> Result<Option<ChildHistoryPage>> {
+    let _permit = child_read_permit()?;
+    opencode::child_history(binary, cwd, parent, child, session_id, config).await
+}
 pub type ChildTranscript = (Vec<latte_work_protocol::Event>, bool);
 pub fn normalize_history_event(
     agent: &str,

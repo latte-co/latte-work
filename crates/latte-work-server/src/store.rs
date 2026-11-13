@@ -827,7 +827,7 @@ impl Store {
     ) -> Result<latte_work_protocol::Response> {
         let task = self.subagent(session_id, task_id)?;
         // Read the original, already-redacted parent tool input independently of UI history pages.
-        let prompt: Option<String> = if let Some(tool) = task.tool_use_id {
+        let mut prompt: Option<String> = if let Some(tool) = task.tool_use_id {
             self.db.query_row(
                 "SELECT json_extract(data,'$.input.prompt') FROM events WHERE session_id=?1 AND json_extract(data,'$.kind')='tool' AND json_extract(data,'$.name') IN ('Agent','Task') AND json_extract(data,'$.id')=?2 AND json_type(data,'$.input.prompt')='text' ORDER BY seq DESC LIMIT 1",
                 params![session_id, tool], |row| row.get(0),
@@ -835,6 +835,19 @@ impl Store {
         } else {
             None
         };
+        if prompt.is_none() && self.session(session_id)?.agent == "opencode" {
+            prompt = self
+                .db
+                .query_row(
+                    "SELECT json_extract(data,'$.text') FROM subagent_history
+                 WHERE session_id=?1 AND task_id=?2 AND source='native'
+                 AND json_extract(data,'$.kind')='user'
+                 ORDER BY seq LIMIT 1",
+                    params![session_id, task_id],
+                    |row| row.get(0),
+                )
+                .optional()?;
+        }
         if prompt
             .as_ref()
             .is_some_and(|text| text.len() > latte_work_protocol::MAX_FRAME / 2)

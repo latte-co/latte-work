@@ -11,8 +11,10 @@ use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet};
 
 mod config;
+mod history;
 mod metadata;
 mod question;
+pub(super) use history::read as child_history;
 pub(crate) use metadata::commands;
 pub(super) use metadata::{discover, models, permission_modes, skill_info};
 

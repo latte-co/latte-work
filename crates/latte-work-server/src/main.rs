@@ -1100,6 +1100,51 @@ async fn dispatch(s: &Service, request: Request) -> Result<Response> {
                 d.child_history_cursor(&session_id, &task_id)
             })?;
             let session = db(&s.database, |d| d.session(&session_id))?;
+            if session.agent == "opencode"
+                && cursor.identity.is_empty()
+                && let Some(parent) = session.native_id.as_deref()
+                && let Ok(binary) = s.agent_binary("opencode")
+            {
+                let (child, cwd, accepted) = db(&s.database, |d| {
+                    Ok((
+                        d.subagent(&session_id, &task_id)?,
+                        d.project(&session.project_id)?.path,
+                        d.child_provider_fingerprint(&session_id, &task_id)?,
+                    ))
+                })?;
+                let fingerprint = providers::turn_fingerprint(provider.as_ref())?;
+                if !child.status.active() && accepted == Some(fingerprint.clone()) {
+                    let config = s
+                        .providers
+                        .lock()
+                        .map_err(|_| anyhow::anyhow!("Provider 配置锁异常"))?
+                        .turn_config("opencode", None, provider.clone())?;
+                    if (fingerprint.is_some() || config.provider.is_none())
+                        && let Ok(Some(page)) = agents::opencode_child_history(
+                            binary,
+                            std::path::Path::new(&cwd),
+                            parent,
+                            &child.native_id,
+                            &session_id,
+                            &config,
+                        )
+                        .await
+                    {
+                        db(&s.database, |d| {
+                            let current = d.session(&session_id)?;
+                            let same_context =
+                                d.child_provider_fingerprint(&session_id, &task_id)? == accepted;
+                            if current.native_id.as_deref() == Some(parent)
+                                && d.subagent(&session_id, &task_id)?.native_id == child.native_id
+                                && same_context
+                            {
+                                d.cache_child_history(&session_id, &task_id, &page)?;
+                            }
+                            Ok(())
+                        })?;
+                    }
+                }
+            }
             if session.agent == "claude"
                 && !source_has_more
                 && (cursor.identity.is_empty() || cursor.has_more)

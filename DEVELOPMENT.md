@@ -1731,7 +1731,10 @@ are unavailable. Tool images are limited to bounded inline raster data.
 Child text and tools are persisted separately from the parent. A child can
 outlive its foreground ACP turn. Reconfiguration and undo remain fenced
 while background work is active or a child-triggered continuation is
-unconfirmed. History keeps the child activity observed by Latte.
+unconfirmed. For a finished child, Latte can recover native history with a
+bounded, prompt-free export. Import requires the original launch context,
+matching parent and child IDs, and the same project directory. The stored
+stream remains available if the native export is unavailable.
 
 The implementation follows the [OpenCode ACP contract](https://opencode.ai/docs/cli/acp/).
 The final-binary tests use a deterministic ACP peer. For an installed CLI,
