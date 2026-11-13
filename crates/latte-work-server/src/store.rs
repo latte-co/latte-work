@@ -494,10 +494,10 @@ impl Store {
     }
     pub fn open_side_chat(&self, parent_id: &str, side_id: Option<&str>) -> Result<Session> {
         let parent = self.session(parent_id)?;
-        if !matches!(parent.agent.as_str(), "codex" | "traex")
+        if !matches!(parent.agent.as_str(), "claude" | "codex" | "traex")
             || self.side_parent(parent_id)?.is_some()
         {
-            bail!("仅 Codex 和 Traex 主会话支持侧边聊天");
+            bail!("仅 Claude Code、Codex 和 Traex 主会话支持侧边聊天");
         }
         let id = if let Some(id) = side_id {
             let id = Uuid::parse_str(id).context("侧边聊天 ID 无效")?;

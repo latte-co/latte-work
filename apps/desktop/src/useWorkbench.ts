@@ -1412,6 +1412,7 @@ export function useWorkbench() {
     setHostId,
     connected,
     supportsSideChat: cachedHello(host)?.side_chat_controls === true,
+    supportsClaudeSideChat: cachedHello(host)?.claude_side_chat === true,
     connectionLost: connectedHosts.current.has(hostId),
     agentSessionTransitions,
     agentSessionState: (target: HostedSession) =>

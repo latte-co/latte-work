@@ -11,7 +11,8 @@ import type { ComponentProps } from "react";
 import type { ModelPicker } from "./ModelPicker";
 import { modelSelectionScope } from "./modelSelectionScope";
 import { DraftStore } from "./drafts";
-import { SideChat, sideDraftKey } from "./SideChat";
+import { closeSideChat, SideChat, sideDraftKey } from "./SideChat";
+import { openSideChatTab, useWorkspaceState } from "./workspaceState";
 import type { Request, Session } from "./protocol";
 
 vi.mock("./ModelPicker", async () => {
@@ -66,9 +67,22 @@ const child = {
   status: "ready",
 } as Session;
 
+type SideChatProps = Omit<ComponentProps<typeof SideChat>, "isDraft">;
+function ChatTab(props: SideChatProps) {
+  const [workspace] = useWorkspaceState(props.workspaceId);
+  const tab = workspace.tabs.find(
+    (tab) => tab.id === `sideChat:${props.sideId}`,
+  );
+  return (
+    <SideChat {...props} isDraft={tab?.kind === "sideChat" && tab.draft} />
+  );
+}
+
 it("opens without sending, reconciles an ambiguous admission and keeps main input independent", async () => {
   const drafts = new DraftStore();
-  const key = sideDraftKey("local", parent.id);
+  const workspaceId = crypto.randomUUID();
+  openSideChatTab(workspaceId, child.id, true);
+  const key = sideDraftKey("local", parent.id, child.id);
   const mainKey = JSON.stringify(["local", parent.id]);
   drafts.update(mainKey, { text: "main draft" });
   drafts.update(key, {
@@ -76,6 +90,7 @@ it("opens without sending, reconciles an ambiguous admission and keeps main inpu
     quotes: ["selected detail", "remove me"],
   });
   let received = "";
+  let published = false;
   request.mockImplementation(async (_host: string, action: Request) => {
     if (action.method === "agent_permissions")
       return {
@@ -97,7 +112,7 @@ it("opens without sending, reconciles an ambiguous admission and keeps main inpu
         session: child,
         has_more: false,
         events:
-          received && !action.after
+          published && received && !action.after
             ? [
                 {
                   seq: 1,
@@ -120,18 +135,23 @@ it("opens without sending, reconciles an ambiguous admission and keeps main inpu
   });
   const props = {
     parent,
+    workspaceId,
+    sideId: child.id,
     hostId: "local",
     drafts,
     active: true,
     connected: true,
     supported: true,
   };
-  const view = render(<SideChat {...props} />);
+  const view = render(<ChatTab {...props} />);
   const send = screen.getByRole("button", {
     name: "发送侧边聊天消息",
   }) as HTMLButtonElement;
   await waitFor(() => expect(send.disabled).toBe(false));
   expect(received).toBe("");
+  expect(request.mock.calls.map(([, action]) => action.method)).toEqual([
+    "agent_permissions",
+  ]);
   expect(document.activeElement).toBe(
     screen.getByRole("textbox", { name: "侧边聊天输入" }),
   );
@@ -155,9 +175,10 @@ it("opens without sending, reconciles an ambiguous admission and keeps main inpu
     }),
   );
   expect(drafts.get(key).text).toBe("side question");
-  view.rerender(<SideChat {...props} connected={false} />);
+  view.rerender(<ChatTab {...props} connected={false} />);
   expect(send.disabled).toBe(true);
-  view.rerender(<SideChat {...props} />);
+  published = true;
+  view.rerender(<ChatTab {...props} />);
   await waitFor(() => expect(drafts.get(key).text).toBe(""));
   expect(
     request.mock.calls.filter(([, cmd]) => cmd.method === "send"),
@@ -181,6 +202,8 @@ it("stops only the side turn and never reads a hidden tab", async () => {
   });
   const props = {
     parent,
+    workspaceId: crypto.randomUUID(),
+    sideId: child.id,
     hostId: "ssh",
     drafts,
     active: false,
@@ -200,5 +223,77 @@ it("stops only the side turn and never reads a hidden tab", async () => {
   expect(request).not.toHaveBeenCalledWith("ssh", {
     method: "cancel",
     session_id: "main",
+  });
+});
+
+it("closes an unsent draft locally and waits for the first send before closing the child session", async () => {
+  const drafts = new DraftStore();
+  const workspaceId = crypto.randomUUID();
+  const tabId = `sideChat:${child.id}`;
+  const close = () =>
+    closeSideChat(drafts, "local", parent.id, workspaceId, tabId);
+  openSideChatTab(workspaceId, child.id, true);
+  await close();
+  expect(request).not.toHaveBeenCalled();
+
+  const props = {
+    parent,
+    workspaceId,
+    sideId: child.id,
+    hostId: "local",
+    drafts,
+    active: true,
+    connected: true,
+    supported: true,
+  };
+  let finishCreation!: (value: unknown) => void;
+  const creation = new Promise((resolve) => {
+    finishCreation = resolve;
+  });
+  request.mockImplementation(async (_host, action: Request) => {
+    if (action.method === "agent_permissions")
+      return { kind: "agent_permissions", modes: [] };
+    if (action.method === "open_side_chat") return creation;
+    if (action.method === "send") return { kind: "accepted" };
+    if (action.method === "poll")
+      return { kind: "events", session: child, events: [], has_more: false };
+    return { kind: "ok" };
+  });
+  drafts.update(sideDraftKey("local", parent.id, child.id), { text: "first" });
+  render(<ChatTab {...props} />);
+  const send = screen.getByRole("button", {
+    name: "发送侧边聊天消息",
+  }) as HTMLButtonElement;
+  await waitFor(() => expect(send.disabled).toBe(false));
+  fireEvent.click(send);
+  await waitFor(() =>
+    expect(request).toHaveBeenCalledWith("local", {
+      method: "open_side_chat",
+      session_id: parent.id,
+      side_id: child.id,
+    }),
+  );
+  const closing = close();
+  expect(
+    request.mock.calls.some(
+      ([, action]) => action.method === "close_agent_session",
+    ),
+  ).toBe(false);
+  finishCreation({ kind: "session", session: child });
+  await closing;
+  expect(
+    request.mock.calls
+      .map(([, action]) => action.method)
+      .filter((method) => method !== "poll"),
+  ).toEqual([
+    "agent_permissions",
+    "open_side_chat",
+    "send",
+    "close_agent_session",
+  ]);
+  expect(request).toHaveBeenCalledWith("local", {
+    method: "close_agent_session",
+    session_id: child.id,
+    only_if_idle: false,
   });
 });

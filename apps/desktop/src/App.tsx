@@ -6,9 +6,9 @@ import { StatusCenter } from "./StatusCenter";
 import { useStatusNotices, type StatusNotice } from "./statusNotices";
 import { useCallback, useRef, useState } from "react";
 import { DraftStore } from "./drafts";
-import { Folder, MessagesSquare, PanelRight, SquarePen } from "lucide-react";
+import { Folder, PanelRight, SquarePen } from "lucide-react";
 import { request, message } from "./api";
-import { SideChat, sideDraftKey } from "./SideChat";
+import { closeSideChat, SideChat, sideDraftKey } from "./SideChat";
 import { Conversation } from "./Conversation";
 import { Workspace } from "./Workspace";
 import { Sidebar } from "./Sidebar";
@@ -195,8 +195,10 @@ export default function App() {
   const conversationHidden = merged && !workbench.workspace.conversationActive;
   const supportsSide =
     !!session &&
-    ["codex", "traex"].includes(session.agent) &&
-    workbench.supportsSideChat;
+    workbench.supportsSideChat &&
+    (session.agent === "claude"
+      ? workbench.supportsClaudeSideChat
+      : ["codex", "traex"].includes(session.agent));
   const canOpenSide =
     supportsSide && !!session.native_id && !session.archived && connected;
   const showSide = async (text?: string, quote = false) => {
@@ -208,57 +210,23 @@ export default function App() {
         (tab) =>
           tab.kind === "sideChat" && tab.id === workbench.workspace.current,
       ) ?? tabs.filter((tab) => tab.kind === "sideChat").at(-1);
-    let sideId = tab ? sideChatId(tab.id) : undefined;
-    try {
-      if (!sideId) {
-        const response = await request(hostId, {
-          method: "open_side_chat",
-          session_id: session.id,
-          side_id: null,
-        });
-        if (
-          response.kind !== "session" ||
-          response.session.id === session.id ||
-          response.session.project_id !== session.project_id
-        )
-          throw new Error("Server 未返回独立的侧边聊天");
-        sideId = response.session.id;
-      }
-      if (text) {
-        const key = sideDraftKey(hostId, session.id, sideId);
-        const draft = drafts.get(key);
-        drafts.update(
-          key,
-          quote
-            ? { quotes: [...(draft.quotes ?? []), text] }
-            : { text: [draft.text, text].filter(Boolean).join("\n\n") },
-        );
-      }
-      openSideChatTab(owner, sideId);
-      return true;
-    } catch (cause) {
-      setError(message(cause));
-      return false;
+    const sideId = (tab && sideChatId(tab.id)) ?? crypto.randomUUID();
+    if (text) {
+      const key = sideDraftKey(hostId, session.id, sideId);
+      const draft = drafts.get(key);
+      drafts.update(
+        key,
+        quote
+          ? { quotes: [...(draft.quotes ?? []), text] }
+          : { text: [draft.text, text].filter(Boolean).join("\n\n") },
+      );
     }
+    openSideChatTab(owner, sideId, true);
+    return true;
   };
   const conversationActions =
     !workbench.modal && !workbench.passwordPrompt ? (
-      <>
-        {supportsSide && (
-          <button
-            className="panel-toggle icon-button"
-            aria-label="打开侧边聊天"
-            title={
-              session.native_id ? "打开侧边聊天" : "主会话开始后可打开侧边聊天"
-            }
-            disabled={!canOpenSide}
-            onClick={() => void showSide()}
-          >
-            <MessagesSquare size={16} />
-          </button>
-        )}
-        <SessionMenuButton state={workbench} />
-      </>
+      <SessionMenuButton state={workbench} />
     ) : null;
   const overview = (
     <TaskOverview
@@ -496,13 +464,27 @@ export default function App() {
         <Workspace
           sessionId={session?.id}
           canOpenSideChat={canOpenSide}
+          closeSideChat={
+            session
+              ? (tab) =>
+                  closeSideChat(
+                    drafts,
+                    hostId,
+                    session.id,
+                    workbench.workspaceId,
+                    tab,
+                  )
+              : undefined
+          }
           renderSideChat={
             session
               ? (tab, active) => (
                   <SideChat
-                    key={JSON.stringify([hostId, session.id, tab])}
+                    key={JSON.stringify([hostId, session.id, tab.id])}
                     parent={session}
-                    sideId={sideChatId(tab)}
+                    sideId={sideChatId(tab.id)!}
+                    workspaceId={workbench.workspaceId}
+                    isDraft={tab.draft}
                     hostId={hostId}
                     drafts={drafts}
                     active={

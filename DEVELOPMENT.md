@@ -1700,19 +1700,23 @@ localhost-upstream, actual model, native desktop and real SSH evidence are separ
 ### Side conversations
 
 A host advertising `hello.side_chat_controls` supports opening multiple side chats for a
-started Codex or Traex session. Opening a panel creates or reopens a child record and
-does not start a process. Clients can supply a UUID for retry-safe creation. The first
-explicit send starts a separate app-server actor that forks the current persisted
-context at the parent native ID, verifies the new thread identity and requested sandbox,
-and saves the child native ID before starting its turn. Later launches resume that ID.
+started Codex or Traex session. `hello.claude_side_chat` also enables Claude Code.
+Opening a new tab reserves a UUID locally. On the first explicit send, the desktop
+uses that UUID to create the child record and forks the persisted parent context in
+a separate process. Closing the tab closes the child runtime and preserves its history.
+Codex and Traex verify the new thread and sandbox
+before sending the turn. Claude Code uses `--resume --fork-session --session-id` and
+validates the requested child ID from the stream's init event. Later launches resume
+the saved child ID.
 The side chat shares the working directory, with an independent request ledger and
 transcript. Side chats do not take undo snapshots because main and side file activity can
 overlap. The host rejects main-turn undo when a write-capable side turn overlaps it.
 The desktop routes the same protocol through local and SSH transports.
 
-A null side-chat permission selection defaults to a read-only sandbox and blocks
-external tools and permission requests. Explicit workspace approval or full access uses
-the corresponding native policy and restores normal tool configuration. The app routes
+A null side-chat permission selection blocks external tools and permission requests.
+Codex and Traex use a read-only sandbox. Claude Code uses plan mode with only Read,
+Glob and Grep, disables hooks and integrations, and denies any permission request.
+Explicit permission choices use the corresponding native policy. The app routes
 permission decisions to the child that requested them.
 
 Codex's TUI uses an ephemeral native fork with an instruction boundary

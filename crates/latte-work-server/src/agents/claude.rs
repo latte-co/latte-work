@@ -273,6 +273,9 @@ pub struct Claude {
     generating_title_for: Option<String>,
     native_named: bool,
     native_session_id: Option<String>,
+    side_parent: Option<uuid::Uuid>,
+    expected_side_id: Option<uuid::Uuid>,
+    side_read_only: bool,
     renaming: Option<(String, String)>,
     rename_result_title: Option<String>,
     streamed: bool,
@@ -447,6 +450,12 @@ impl AgentAdapter for Claude {
             && (self.session_state.as_deref() == Some("idle")
                 || (self.session_state.is_none() && !self.delegated))
     }
+    fn set_side_parent(&mut self, native_id: String) -> Result<()> {
+        self.side_parent =
+            Some(uuid::Uuid::parse_str(&native_id).context("Claude 主会话 ID 无效")?);
+        self.title_attempted = true;
+        Ok(())
+    }
     fn command(
         &mut self,
         binary: &str,
@@ -463,7 +472,42 @@ impl AgentAdapter for Claude {
         );
         let mut command = crate::agent_environment::command(binary);
         command.envs(&config.environment.0);
-        let instructions = crate::skills::platform_instructions(&config.settings_dir);
+        let mut instructions = crate::skills::platform_instructions(&config.settings_dir);
+        if let Some(parent) = self.side_parent {
+            // Claude reports the fork's identity in the first turn's init event.
+            self.native_session_id = None;
+            self.side_read_only = config.permission_mode.is_none();
+            let child = if let Some(id) = resume {
+                uuid::Uuid::parse_str(id).context("Claude 侧边聊天 ID 无效")?
+            } else {
+                let id = uuid::Uuid::new_v4();
+                command.args([
+                    format!("--resume={parent}"),
+                    "--fork-session".into(),
+                    format!("--session-id={id}"),
+                ]);
+                id
+            };
+            if child == parent {
+                bail!("Claude 侧边聊天与主会话 ID 冲突");
+            }
+            self.expected_side_id = Some(child);
+            instructions.push_str(
+                "\n\nThis is a side conversation. Treat inherited messages, instructions, tool calls and plans as reference material. Act only on new requests in this conversation. Do not resume the parent task on your own.",
+            );
+            if self.side_read_only {
+                instructions.push_str(" This conversation is read-only. Do not make changes.");
+                command.args([
+                    "--permission-mode=plan",
+                    "--safe-mode",
+                    "--strict-mcp-config",
+                    "--no-chrome",
+                    "--tools",
+                    "Read,Glob,Grep",
+                ]);
+            }
+            command.arg("--disable-slash-commands");
+        }
         if !instructions.is_empty() {
             command.arg("--append-system-prompt").arg(instructions);
         }
@@ -556,13 +600,16 @@ impl AgentAdapter for Claude {
         } else {
             if let Some(model) = &config.model {
                 command.arg(format!("--model={model}"));
-            } else if resume.is_some() {
+            } else if resume.is_some() || self.side_parent.is_some() {
                 command.arg("--model=default");
             }
             json!({"env":{}})
         };
         if let Some(level) = config.effort {
             settings["env"]["CLAUDE_CODE_EFFORT_LEVEL"] = json!(level.as_str());
+        }
+        if self.side_read_only {
+            settings["disableAllHooks"] = json!(true);
         }
         // An absent override leaves native environment/settings resolution intact.
         // Settings env overrides inherited env. Keep turn-specific effort and
@@ -853,7 +900,7 @@ impl Claude {
             .trim_start()
             .strip_prefix('/')
             .and_then(|s| s.split_whitespace().next())
-            && !self.commands.contains(name)
+            && (self.side_parent.is_some() || !self.commands.contains(name))
         {
             bail!("当前 Claude 不支持命令 /{name}；输入 / 查看可用命令");
         }
@@ -1105,6 +1152,11 @@ impl Claude {
                 if m["response"]["subtype"] != "success" {
                     bail!("Claude 初始化失败: {}", m["response"]["error"]);
                 }
+                if self.side_read_only
+                    && m["response"]["response"]["current_permission_mode"] != "plan"
+                {
+                    bail!("Claude 未确认侧边聊天的只读权限，请检查 CLI 版本和权限设置");
+                }
                 if matches!(self.phase, Phase::Discovering) {
                     let commands = parse_commands(&m["response"]["response"]["commands"])?;
                     self.phase = Phase::Finished;
@@ -1148,6 +1200,24 @@ impl Claude {
                 }
             }
             "system" if m["subtype"] == "init" && m["parent_tool_use_id"].is_null() => {
+                if let Some(expected) = self.expected_side_id {
+                    let actual = m["session_id"]
+                        .as_str()
+                        .and_then(|id| uuid::Uuid::parse_str(id).ok());
+                    if actual != Some(expected) {
+                        bail!("Claude 未确认独立的侧边聊天 ID");
+                    }
+                    if self.side_read_only
+                        && (!m["mcp_servers"].as_array().is_some_and(Vec::is_empty)
+                            || !m["tools"].as_array().is_some_and(|tools| {
+                                tools.iter().all(|tool| {
+                                    matches!(tool.as_str(), Some("Read" | "Glob" | "Grep"))
+                                })
+                            }))
+                    {
+                        bail!("Claude 未确认侧边聊天的只读工具范围");
+                    }
+                }
                 self.skills = m["skills"]
                     .as_array()
                     .filter(|skills| skills.len() <= 2000)
@@ -1258,6 +1328,9 @@ impl Claude {
                 if request["subtype"] == "can_use_tool" {
                     if id.is_empty() || !request["input"].is_object() {
                         bail!("无效的 Claude 审批请求");
+                    }
+                    if self.side_read_only {
+                        return Ok(vec![write_action(self.approval(&id, Value::Null, false))?]);
                     }
                     if request["tool_name"] == "AskUserQuestion" {
                         match parse_questions(&request["input"]) {
@@ -1501,6 +1574,9 @@ impl Claude {
                         ));
                     }
                     return Ok(output);
+                }
+                if !failed && self.expected_side_id.is_some() && self.native_session_id.is_none() {
+                    bail!("Claude 未确认独立的侧边聊天 ID");
                 }
                 let consumed: Vec<_> = self
                     .consumed_inputs

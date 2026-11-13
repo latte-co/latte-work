@@ -18,8 +18,9 @@ import { WorkingStatus } from "./WorkingStatus";
 import { executionStatus } from "./executionStatus";
 import type { Effort, Event, Request, Session } from "./protocol";
 import { LIVE_POLL_MS } from "./usePollingSnapshot";
+import { readWorkspace, setSideChatDraft, sideChatId } from "./workspaceState";
 
-export const sideDraftKey = (host: string, parent: string, side?: string) =>
+export const sideDraftKey = (host: string, parent: string, side: string) =>
   JSON.stringify(["side", host, parent, side]);
 
 type Send = Extract<Request, { method: "send" }>;
@@ -30,10 +31,69 @@ const admissions = new WeakMap<
   DraftStore,
   Map<string, { draft: Draft; request: Send }>
 >();
+const operations = new WeakMap<DraftStore, Map<string, Promise<unknown>>>();
+
+function sideOperations(drafts: DraftStore) {
+  let pending = operations.get(drafts);
+  if (!pending) {
+    pending = new Map();
+    operations.set(drafts, pending);
+  }
+  return pending;
+}
+
+function missingSession(error: unknown) {
+  return (
+    error instanceof ServerRequestError &&
+    error.code === "request_failed" &&
+    error.message === "会话不存在"
+  );
+}
+
+export async function closeSideChat(
+  drafts: DraftStore,
+  hostId: string,
+  parentId: string,
+  workspaceId: string,
+  id: string,
+) {
+  const sideId = sideChatId(id);
+  if (!sideId || sideId === parentId) throw new Error("侧边聊天 ID 无效");
+  const key = sideDraftKey(hostId, parentId, sideId);
+  const pending = sideOperations(drafts);
+  const previous = pending.get(key);
+  const closing = (async () => {
+    await previous;
+    const tab = readWorkspace(workspaceId).tabs.find((tab) => tab.id === id);
+    if (tab?.kind !== "sideChat") return;
+    if (!tab.draft) {
+      try {
+        const result = await request(hostId, {
+          method: "close_agent_session",
+          session_id: sideId,
+          only_if_idle: false,
+        });
+        if (result.kind !== "ok") throw new Error("无法确认侧边聊天已关闭");
+      } catch (cause) {
+        if (!missingSession(cause)) throw cause;
+      }
+    }
+    drafts.clear(key, drafts.get(key));
+    admissions.get(drafts)?.delete(key);
+  })();
+  pending.set(key, closing);
+  try {
+    await closing;
+  } finally {
+    if (pending.get(key) === closing) pending.delete(key);
+  }
+}
 
 export function SideChat({
   parent,
   sideId,
+  workspaceId,
+  isDraft = false,
   hostId,
   drafts,
   active,
@@ -41,7 +101,9 @@ export function SideChat({
   supported,
 }: {
   parent: Session;
-  sideId?: string;
+  sideId: string;
+  workspaceId: string;
+  isDraft?: boolean;
   hostId: string;
   drafts: DraftStore;
   active: boolean;
@@ -57,7 +119,6 @@ export function SideChat({
   const [ready, setReady] = useState(false);
   const [busy, setBusy] = useState(false);
   const [revision, refresh] = useState(0);
-  const inFlight = useRef(false);
   const picker = useRef<ModelPickerHandle>(null);
   const [focus, setFocus] = useState(0);
   const [selection, setSelection] = useState<{
@@ -82,7 +143,6 @@ export function SideChat({
   const scroll = useRef<HTMLDivElement>(null);
   const follow = useRef(true);
   const after = useRef(0);
-  const childId = useRef<string | undefined>(undefined);
   const enabled = active && connected && supported;
   useEffect(() => {
     if (!enabled) return;
@@ -91,34 +151,25 @@ export function SideChat({
 
   useEffect(() => {
     setReady(false);
-    if (!enabled) return;
+    if (!enabled || busy || isDraft) return;
     let disposed = false;
     let timer: ReturnType<typeof setTimeout>;
     async function read() {
       try {
-        if (!childId.current) {
-          const opened = await request(hostId, {
-            method: "open_side_chat",
-            session_id: parent.id,
-            side_id: sideId ?? null,
-          });
-          if (disposed) return;
-          if (
-            opened.kind !== "session" ||
-            opened.session.id === parent.id ||
-            (sideId && opened.session.id !== sideId) ||
-            opened.session.project_id !== parent.project_id
-          )
-            throw new Error("Server 未返回独立的侧边聊天");
-          childId.current = opened.session.id;
-        }
+        await sideOperations(drafts).get(key);
+        if (disposed) return;
         const page = await request(hostId, {
           method: "poll",
-          session_id: childId.current,
+          session_id: sideId,
           after: after.current,
         });
         if (disposed) return;
-        if (page.kind !== "events" || page.session.id !== childId.current)
+        if (
+          page.kind !== "events" ||
+          page.session.id !== sideId ||
+          page.session.id === parent.id ||
+          page.session.project_id !== parent.project_id
+        )
           throw new Error("侧边聊天记录不匹配");
         if (page.has_more && !page.events.length)
           throw new Error("侧边聊天记录分页未前进");
@@ -126,7 +177,7 @@ export function SideChat({
           const next = page.events.at(-1)!.seq;
           if (
             next <= after.current ||
-            page.events.some((e) => e.session_id !== childId.current)
+            page.events.some((e) => e.session_id !== sideId)
           )
             throw new Error("侧边聊天记录游标无效");
           after.current = next;
@@ -151,6 +202,14 @@ export function SideChat({
         timer = setTimeout(read, page.has_more ? 0 : LIVE_POLL_MS);
       } catch (cause) {
         if (!disposed) {
+          if (missingSession(cause)) {
+            after.current = 0;
+            setSession(undefined);
+            setEvents([]);
+            setSideChatDraft(workspaceId, sideId, true);
+            setReadError("");
+            return;
+          }
           setReadError(message(cause));
           setReady(false);
         }
@@ -163,10 +222,13 @@ export function SideChat({
     };
   }, [
     enabled,
+    busy,
     hostId,
     parent.id,
     parent.project_id,
     sideId,
+    workspaceId,
+    isDraft,
     revision,
     drafts,
     key,
@@ -177,39 +239,60 @@ export function SideChat({
       scroll.current.scrollTop = scroll.current.scrollHeight;
   }, [active, events, session?.status]);
 
-  async function perform(action: Request, accepted?: () => void) {
-    if (!enabled || !ready || inFlight.current) return false;
-    inFlight.current = true;
+  const canInteract = enabled && (ready || isDraft);
+  function perform(action: Request, accepted?: () => void) {
+    const pending = sideOperations(drafts);
+    if (!canInteract || pending.has(key)) return Promise.resolve(false);
     setBusy(true);
     setError("");
-    try {
-      const response = await request(hostId, action);
-      if (
-        action.method === "send"
-          ? response.kind !== "accepted"
-          : response.kind !== "ok"
-      )
-        throw new Error("操作结果待确认，请核对侧边聊天的记录");
-      accepted?.();
-      setReady(false);
-      refresh((v) => v + 1);
-      return true;
-    } catch (cause) {
-      if (action.method === "send" && cause instanceof ServerRequestError) {
-        const pending = admissions.get(drafts)?.get(key);
-        if (pending?.request.request_id === action.request_id)
-          admissions.get(drafts)?.delete(key);
+    const operation = Promise.resolve().then(async () => {
+      try {
+        if (action.method === "send" && isDraft) {
+          // Persist that creation was attempted so reconnect can check the same ID.
+          setSideChatDraft(workspaceId, sideId, false);
+          const opened = await request(hostId, {
+            method: "open_side_chat",
+            session_id: parent.id,
+            side_id: sideId,
+          });
+          if (
+            opened.kind !== "session" ||
+            opened.session.id !== sideId ||
+            opened.session.id === parent.id ||
+            opened.session.project_id !== parent.project_id
+          )
+            throw new Error("Server 未返回独立的侧边聊天");
+        }
+        const response = await request(hostId, action);
+        if (
+          action.method === "send"
+            ? response.kind !== "accepted"
+            : response.kind !== "ok"
+        )
+          throw new Error("操作结果待确认，请核对侧边聊天的记录");
+        accepted?.();
+        setReady(false);
+        refresh((v) => v + 1);
+        return true;
+      } catch (cause) {
+        if (action.method === "send" && cause instanceof ServerRequestError) {
+          const pending = admissions.get(drafts)?.get(key);
+          if (pending?.request.request_id === action.request_id)
+            admissions.get(drafts)?.delete(key);
+        }
+        setError(message(cause));
+        return false;
+      } finally {
+        if (pending.get(key) === operation) pending.delete(key);
+        setBusy(false);
       }
-      setError(message(cause));
-      return false;
-    } finally {
-      inFlight.current = false;
-      setBusy(false);
-    }
+    });
+    pending.set(key, operation);
+    return operation;
   }
   const running =
     session?.status === "running" || session?.status === "waiting";
-  const disabled = !enabled || !ready || busy || parent.archived;
+  const disabled = !canInteract || busy || parent.archived;
   const modelReady =
     modelReadiness?.scope ===
       modelSelectionScope(
@@ -223,7 +306,7 @@ export function SideChat({
     if (
       (!prompt.trim() && !quotes.length) ||
       disabled ||
-      !session ||
+      sideOperations(drafts).has(key) ||
       running ||
       !modelReady
     )
@@ -255,7 +338,7 @@ export function SideChat({
         ? old.request
         : {
             method: "send",
-            session_id: session.id,
+            session_id: sideId,
             request_id: crypto.randomUUID(),
             text: [
               ...quotes.map((quote) =>

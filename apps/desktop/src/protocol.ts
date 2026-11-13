@@ -753,6 +753,7 @@ export type Response =
       change_preview: boolean;
       side_chat: boolean;
       side_chat_controls: boolean;
+      claude_side_chat: boolean;
     }
   | { kind: "projects"; projects: Array<Project> }
   | { kind: "project"; project: Project }

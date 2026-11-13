@@ -9,7 +9,7 @@ export type WorkspaceTab = {
 } & (
   | {
       id: string;
-      kind: "files" | "diff" | "subagents" | "taskInfo" | "sideChat";
+      kind: "files" | "diff" | "subagents" | "taskInfo";
       requestId?: string;
       snapshotSessionId?: string;
       snapshotAt?: number | null;
@@ -18,6 +18,7 @@ export type WorkspaceTab = {
       reference?: FileEntry;
       sessionId?: string;
     }
+  | { id: string; kind: "sideChat"; draft?: boolean }
   | {
       id: string;
       kind: "turnChanges";
@@ -110,7 +111,6 @@ export function readWorkspace(key: string): WorkspaceState {
           tab.kind === "files" ||
           tab.kind === "diff" ||
           tab.kind === "subagents" ||
-          tab.kind === "sideChat" ||
           tab.kind === "taskInfo"
             ? (tab.path === undefined || typeof tab.path === "string") &&
               (tab.file === undefined || typeof tab.file === "string") &&
@@ -126,34 +126,39 @@ export function readWorkspace(key: string): WorkspaceState {
                   tab.requestId.length <= 256 &&
                   typeof tab.snapshotSessionId === "string" &&
                   !!tab.snapshotSessionId))
-            : tab.kind === "artifact"
-              ? typeof tab.path === "string" &&
-                !!tab.path &&
-                typeof tab.name === "string" &&
-                typeof tab.directory === "boolean"
-              : tab.kind === "browser"
-                ? !!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(
-                    tab.id,
-                  ) &&
-                  typeof tab.title === "string" &&
-                  typeof tab.url === "string" &&
-                  (tab.url === "" || webLink(tab.url) !== null)
-                : tab.kind === "turnChanges"
-                  ? typeof tab.requestId === "string" &&
-                    !!tab.requestId &&
-                    tab.requestId.length <= 256 &&
-                    typeof tab.sessionId === "string" &&
-                    !!tab.sessionId &&
+            : tab.kind === "sideChat"
+              ? (tab.draft === undefined || typeof tab.draft === "boolean") &&
+                /^sideChat:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(
+                  tab.id,
+                )
+              : tab.kind === "artifact"
+                ? typeof tab.path === "string" &&
+                  !!tab.path &&
+                  typeof tab.name === "string" &&
+                  typeof tab.directory === "boolean"
+                : tab.kind === "browser"
+                  ? !!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(
+                      tab.id,
+                    ) &&
                     typeof tab.title === "string" &&
-                    (tab.file === undefined || typeof tab.file === "string")
-                  : tab.kind === "subagent"
-                    ? typeof tab.taskId === "string" &&
-                      !!tab.taskId &&
-                      typeof tab.title === "string"
-                    : tab.kind === "terminal" &&
-                      tab.terminal?.id === tab.id &&
-                      typeof tab.terminal.project_id === "string" &&
-                      typeof tab.terminal.title === "string";
+                    typeof tab.url === "string" &&
+                    (tab.url === "" || webLink(tab.url) !== null)
+                  : tab.kind === "turnChanges"
+                    ? typeof tab.requestId === "string" &&
+                      !!tab.requestId &&
+                      tab.requestId.length <= 256 &&
+                      typeof tab.sessionId === "string" &&
+                      !!tab.sessionId &&
+                      typeof tab.title === "string" &&
+                      (tab.file === undefined || typeof tab.file === "string")
+                    : tab.kind === "subagent"
+                      ? typeof tab.taskId === "string" &&
+                        !!tab.taskId &&
+                        typeof tab.title === "string"
+                      : tab.kind === "terminal" &&
+                        tab.terminal?.id === tab.id &&
+                        typeof tab.terminal.project_id === "string" &&
+                        typeof tab.terminal.title === "string";
         if (valid) ids.add(tab.id);
         return valid;
       });
@@ -222,7 +227,13 @@ export function updateWorkspace(
   };
   if (!next.tabs.some((tab) => tab.id === next.current))
     next.current = next.tabs.at(-1)?.id ?? "";
-  if (next.expanded && !next.tabs.length) next.conversationActive = true;
+  if (previous.tabs.length && !next.tabs.length) {
+    next.visible = false;
+    next.expanded = false;
+    next.conversationActive = false;
+  } else if (next.expanded && !next.tabs.length) {
+    next.conversationActive = true;
+  }
   cache.set(key, next);
   try {
     localStorage.setItem(prefix + key, JSON.stringify(next));
@@ -270,15 +281,31 @@ export function sideChatId(tab: string) {
     : undefined;
 }
 
-export function openSideChatTab(workspaceId: string, sideId: string) {
+export function openSideChatTab(
+  workspaceId: string,
+  sideId: string,
+  draft = false,
+) {
   const id = sideTabPrefix + sideId;
   updateWorkspace(workspaceId, (state) => ({
     tabs: state.tabs.some((tab) => tab.id === id)
       ? state.tabs
-      : [...state.tabs, { id, kind: "sideChat" }],
+      : [...state.tabs, { id, kind: "sideChat", draft }],
     current: id,
     visible: true,
     conversationActive: false,
+  }));
+}
+export function setSideChatDraft(
+  workspaceId: string,
+  sideId: string,
+  draft: boolean,
+) {
+  const id = sideTabPrefix + sideId;
+  updateWorkspace(workspaceId, (state) => ({
+    tabs: state.tabs.map((tab) =>
+      tab.kind === "sideChat" && tab.id === id ? { ...tab, draft } : tab,
+    ),
   }));
 }
 export function openSubagent(workspaceId: string, task: Subagent) {

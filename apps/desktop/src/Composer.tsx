@@ -701,7 +701,7 @@ export function Composer(props: Props) {
     if (action === "side") {
       if (!props.onOpenSideChat) {
         setNotice(
-          "侧边聊天需要已开始的 Codex 或 Traex 主会话和支持此功能的 Server。",
+          "侧边聊天需要已开始的 Claude Code、Codex 或 Traex 主会话，且执行主机的 Server 须支持此功能。",
         );
         return;
       }

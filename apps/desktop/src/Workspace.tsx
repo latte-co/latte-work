@@ -70,6 +70,7 @@ function ConversationTab({
 }
 
 type Kind = "terminal" | "files" | "diff" | "subagents" | "browser";
+type SideTab = Extract<Tab, { kind: "sideChat" }>;
 
 const labels = {
   taskInfo: "任务摘要",
@@ -103,6 +104,7 @@ export function Workspace({
   taskInfo,
   renderSideChat,
   canOpenSideChat,
+  closeSideChat,
   conversationActions,
   statusCenter,
   sessionId,
@@ -122,8 +124,9 @@ export function Workspace({
   subagents?: SubagentsState;
   overview?: React.ReactNode;
   taskInfo?: React.ReactNode;
-  renderSideChat?: (tab: string, active: boolean) => React.ReactNode;
+  renderSideChat?: (tab: SideTab, active: boolean) => React.ReactNode;
   canOpenSideChat?: boolean;
+  closeSideChat?: (id: string) => Promise<void>;
   conversationActions?: React.ReactNode;
   statusCenter?: React.ReactNode;
   sessionId?: string;
@@ -181,6 +184,7 @@ export function Workspace({
             taskInfo={selected ? taskInfo : undefined}
             renderSideChat={selected ? renderSideChat : undefined}
             canOpenSideChat={selected && canOpenSideChat}
+            closeSideChat={selected ? closeSideChat : undefined}
             conversationActions={selected ? conversationActions : undefined}
             statusCenter={selected ? statusCenter : undefined}
             sessionId={selected ? sessionId : page.sessionId}
@@ -212,6 +216,7 @@ function WorkspacePage({
   taskInfo,
   renderSideChat,
   canOpenSideChat,
+  closeSideChat,
   conversationActions,
   statusCenter,
   sessionId,
@@ -236,8 +241,9 @@ function WorkspacePage({
   subagents?: SubagentsState;
   overview?: React.ReactNode;
   taskInfo?: React.ReactNode;
-  renderSideChat?: (tab: string, active: boolean) => React.ReactNode;
+  renderSideChat?: (tab: SideTab, active: boolean) => React.ReactNode;
   canOpenSideChat?: boolean;
+  closeSideChat?: (id: string) => Promise<void>;
   conversationActions?: React.ReactNode;
   statusCenter?: React.ReactNode;
   sessionId?: string;
@@ -300,6 +306,7 @@ function WorkspacePage({
     },
   ]);
   const [menu, setMenu] = useState(false);
+  const removing = useRef(new Set<string>());
   const [revision, refresh] = useState(0);
   const trigger = useRef<HTMLButtonElement>(null);
   const tabPrefix = useId();
@@ -445,6 +452,8 @@ function WorkspacePage({
     }
   }
   async function remove(tab: Tab) {
+    if (removing.current.has(tab.id)) return;
+    removing.current.add(tab.id);
     setBusy(true);
     setError("");
     try {
@@ -453,11 +462,16 @@ function WorkspacePage({
           method: "close_terminal",
           terminal_id: tab.id,
         });
+      if (tab.kind === "sideChat") {
+        if (!closeSideChat) throw new Error("无法关闭侧边聊天");
+        await closeSideChat(tab.id);
+      }
       setTabs((tabs) => tabs.filter((t) => t.id !== tab.id));
     } catch (e) {
       setError(message(e));
     } finally {
-      setBusy(false);
+      removing.current.delete(tab.id);
+      setBusy(removing.current.size > 0);
     }
   }
   const sideTabs = tabs.filter((tab) => tab.kind === "sideChat");
@@ -543,7 +557,7 @@ function WorkspacePage({
             );
           })}
         </div>
-        {(expanded || tabs.length > 0) && (
+        {(expanded || tabs.length > 0 || canOpenSideChat) && (
           <button
             ref={trigger}
             className="icon-button workspace-add"
@@ -600,7 +614,7 @@ function WorkspacePage({
             canOpenSideChat
               ? () => {
                   setMenu(false);
-                  openSideChatTab(workspaceId, crypto.randomUUID());
+                  openSideChatTab(workspaceId, crypto.randomUUID(), true);
                 }
               : undefined
           }
@@ -625,8 +639,8 @@ function WorkspacePage({
             <div className="workspace-empty">选择项目后打开此标签。</div>
           ) : tab.kind === "sideChat" ? (
             renderSideChat?.(
-              tab.id,
-              active && !conversationActive && current === tab.id,
+              tab,
+              active && !conversationActive && current === tab.id && !busy,
             )
           ) : tab.kind === "taskInfo" ? (
             taskInfo

@@ -93,14 +93,19 @@ async fn side_chat_forks_while_parent_waits_and_resumes_independently() {
         assert!(matches!(
             ask(
                 &mut reconnect,
-                Request::Cancel {
-                    session_id: side.id.clone()
+                Request::CloseAgentSession {
+                    session_id: side.id.clone(),
+                    only_if_idle: Some(false),
                 }
             )
             .await,
             Response::Ok
         ));
         wait(&mut reconnect, &side.id, Status::Stopped).await;
+        assert!(matches!(
+            ask(&mut reconnect, Request::Session { session_id: side.id.clone() }).await,
+            Response::Session { session } if session.agent_session_open == Some(false)
+        ));
         let next_id = uuid::Uuid::new_v4().to_string();
         let new_chat = || Request::OpenSideChat {
             session_id: parent.id.clone(),
@@ -194,4 +199,113 @@ async fn side_chat_forks_while_parent_waits_and_resumes_independently() {
             matches!(ask(&mut client,Request::RecentSessions{before:None}).await,Response::RecentSessions{sessions,..} if sessions.len()==1 && sessions[0].session.id==parent.id)
         );
     }
+}
+
+#[tokio::test]
+async fn claude_side_chat_resumes_its_own_native_session_and_denies_readonly_approval() {
+    let host = Host::start().await;
+    let root = tempfile::tempdir().unwrap();
+    let mut client = host.client().await;
+    let project_id = terminal_project(&mut client, root.path()).await;
+    let Response::Session { session: parent } = ask(
+        &mut client,
+        Request::CreateSession {
+            project_id,
+            agent: "claude".into(),
+        },
+    )
+    .await
+    else {
+        panic!("Claude main session");
+    };
+    let open = Request::OpenSideChat {
+        session_id: parent.id.clone(),
+        side_id: None,
+    };
+    assert!(matches!(
+        send(&mut client, &parent.id, "main", "approve").await,
+        Response::Accepted { .. }
+    ));
+    let pending = permission(&wait(&mut client, &parent.id, Status::Waiting).await);
+    let Response::Session { session: side } = ask(&mut client, open).await else {
+        panic!("Claude side session");
+    };
+    let read_session = |id: &str| Request::Session {
+        session_id: id.into(),
+    };
+    let Response::Session {
+        session: running_parent,
+    } = ask(&mut client, read_session(&parent.id)).await
+    else {
+        panic!("running Claude main session");
+    };
+    assert!(matches!(
+        send(&mut client, &side.id, "side", "approve").await,
+        Response::Accepted { .. }
+    ));
+    let events = wait(&mut client, &side.id, Status::Completed).await;
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e.event, EventKind::Approval { .. }))
+    );
+    assert!(!root.path().join("approved.txt").exists());
+    let Response::Session {
+        session: completed_side,
+    } = ask(&mut client, read_session(&side.id)).await
+    else {
+        panic!("completed Claude side session");
+    };
+    assert!(completed_side.native_id.is_some());
+    assert_ne!(completed_side.native_id, running_parent.native_id);
+    assert!(matches!(
+        ask(
+            &mut client,
+            Request::CloseAgentSession {
+                session_id: side.id.clone(),
+                only_if_idle: Some(true)
+            }
+        )
+        .await,
+        Response::Ok
+    ));
+    let mut reconnect = host.client().await;
+    assert!(matches!(
+        ask(
+            &mut reconnect,
+            Request::Send {
+                session_id: side.id.clone(),
+                request_id: "side-write".into(),
+                text: "approve".into(),
+                model: None,
+                effort: None,
+                permission_mode: Some("default".into()),
+                provider: Some(TurnProvider::Cli),
+            }
+        )
+        .await,
+        Response::Accepted { .. }
+    ));
+    let side_pending = permission(&wait(&mut reconnect, &side.id, Status::Waiting).await);
+    assert!(matches!(
+        ask(
+            &mut reconnect,
+            Request::Approve {
+                session_id: side.id.clone(),
+                request_id: side_pending,
+                allow: true
+            }
+        )
+        .await,
+        Response::Ok
+    ));
+    wait(&mut reconnect, &side.id, Status::Completed).await;
+    assert!(root.path().join("approved.txt").exists());
+    assert!(
+        matches!(ask(&mut reconnect, read_session(&side.id)).await, Response::Session { session } if session.native_id == completed_side.native_id)
+    );
+    assert_eq!(
+        permission(&wait(&mut client, &parent.id, Status::Waiting).await),
+        pending
+    );
 }
