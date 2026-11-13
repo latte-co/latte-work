@@ -16,23 +16,91 @@ import time
 
 class Model(BaseHTTPRequestHandler):
     calls = []
+    auth = []
+    paths = []
+    steering_ready = threading.Event()
+    steering_release = threading.Event()
 
     def do_POST(self):
-        if self.path != "/v1/chat/completions":
+        path = self.path.split("?")[0]
+        if path not in ("/v1/chat/completions", "/v1/messages", "/v1/responses"):
             self.send_error(404)
             return
         request = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
         self.calls.append(request)
+        self.auth.append((self.headers.get("Authorization"), self.headers.get("x-api-key")))
+        self.paths.append(path)
+        if path == "/v1/messages":
+            marker = {"id": "msg_fixture", "type": "message", "role": "assistant", "model": request["model"],
+                      "content": [], "stop_reason": None, "stop_sequence": None,
+                      "usage": {"input_tokens": 20, "output_tokens": 0}}
+            return self.events([
+                {"type": "message_start", "message": marker},
+                {"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}},
+                {"type": "content_block_delta", "index": 0,
+                 "delta": {"type": "text_delta", "text": "OPEN_CODE_SMOKE_OK"}},
+                {"type": "content_block_stop", "index": 0},
+                {"type": "message_delta", "delta": {"stop_reason": "end_turn", "stop_sequence": None},
+                 "usage": {"output_tokens": 6}},
+                {"type": "message_stop"},
+            ])
+        if path == "/v1/responses":
+            item = {"id": "msg_fixture", "type": "message", "role": "assistant", "status": "completed",
+                    "content": [{"type": "output_text", "text": "OPEN_CODE_SMOKE_OK", "annotations": []}]}
+            return self.events([
+                {"type": "response.created", "response": {"id": "resp_fixture", "status": "in_progress", "output": []}},
+                {"type": "response.output_item.added", "output_index": 0, "item": {**item, "content": []}},
+                {"type": "response.output_text.delta", "item_id": item["id"], "output_index": 0,
+                 "content_index": 0, "delta": "OPEN_CODE_SMOKE_OK"},
+                {"type": "response.output_item.done", "output_index": 0, "item": item},
+                {"type": "response.completed", "response": {"id": "resp_fixture", "status": "completed",
+                 "output": [item], "usage": {"input_tokens": 20, "output_tokens": 6, "total_tokens": 26}}},
+            ])
         last = request["messages"][-1]
-        if last["role"] == "tool":
+        if "steer start sentinel" in str(last["content"]):
+            self.steering_ready.set()
+            if not self.steering_release.wait(8):
+                self.send_error(504)
+                return
+        if last["role"] == "user" and "subagent child sentinel" in str(last["content"]):
+            time.sleep(.35)
+            delta = {"role": "assistant", "content": "CHILD_SMOKE_OK"}
+            finish = "stop"
+        elif "<subagent" in str(last["content"]):
+            delta = {"role": "assistant", "content": "PARENT_FOLLOWUP_OK"}
+            finish = "stop"
+        elif last["role"] == "tool":
             delta = {"role": "assistant", "content": "TOOL_SMOKE_OK"}
             finish = "stop"
-        elif "permission sentinel" in str(last["content"]) or "cancel sentinel" in str(last["content"]):
+        elif "launch subagent sentinel" in str(last["content"]):
+            delta = {"role": "assistant", "tool_calls": [{
+                "index": 0, "id": "call_child", "type": "function",
+                "function": {"name": "subagent", "arguments": json.dumps({
+                    "agent": "general", "description": "Smoke child", "prompt": "subagent child sentinel",
+                    "background": True,
+                })},
+            }]}
+            finish = "tool_calls"
+        elif "question sentinel" in str(last["content"]):
+            delta = {"role": "assistant", "tool_calls": [{
+                "index": 0, "id": "call_question", "type": "function",
+                "function": {"name": "question", "arguments": json.dumps({"questions": [{
+                    "header": "Mode", "question": "Which mode?", "options": [
+                        {"label": "One", "description": "First choice"},
+                        {"label": "Two", "description": "Second choice"},
+                    ],
+                }]})},
+            }]}
+            finish = "tool_calls"
+        elif any(sentinel in str(last["content"]) for sentinel in ("permission sentinel", "cancel sentinel", "background sentinel")):
             marker = "smoke-cancelled.txt" if "cancel sentinel" in str(last["content"]) else "smoke-approved.txt"
+            background = "background sentinel" in str(last["content"])
             delta = {"role": "assistant", "tool_calls": [{
                 "index": 0, "id": "call_permission", "type": "function",
                 "function": {"name": "shell", "arguments": json.dumps({
-                    "command": f"printf OC_EXECUTED > {marker}", "description": "Write smoke marker",
+                    "command": f"printf OC_EXECUTED > {marker}" if not background else "sleep 2; exit 7",
+                    "description": "Write smoke marker" if not background else "Background smoke",
+                    **({"background": True} if background else {}),
                 })},
             }]}
             finish = "tool_calls"
@@ -48,11 +116,20 @@ class Model(BaseHTTPRequestHandler):
             "id": "fixture", "object": "chat.completion.chunk", "created": 0, "model": "test-model",
             **chunk,
         }) + "\n\n" for chunk in chunks) + "data: [DONE]\n\n"
+        self.write_sse(payload)
+
+    def events(self, events):
+        self.write_sse("".join("event: " + e["type"] + "\ndata: " + json.dumps(e) + "\n\n" for e in events))
+
+    def write_sse(self, payload):
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
         self.send_header("Content-Length", str(len(payload.encode())))
         self.end_headers()
-        self.wfile.write(payload.encode())
+        try:
+            self.wfile.write(payload.encode())
+        except (BrokenPipeError, ConnectionResetError):
+            pass
 
     def log_message(self, *_):
         pass
@@ -81,7 +158,10 @@ def run(binary, cli, llm, root):
                      "models": {"test-model": {**model, "name": "Smoke Model"}}},
         },
     }))
-    (project / "opencode.json").write_text(json.dumps({"permission": {"shell": "ask", "bash": "ask"}}))
+    (project / "opencode.json").write_text(json.dumps({
+        "permission": {"shell": "ask", "bash": "ask"},
+        "commands": {"check": {"template": "Native slash smoke $ARGUMENTS", "description": "Smoke native command"}},
+    }))
     env = {key: value for key, value in os.environ.items() if key in {"PATH", "USER", "LANG", "TMPDIR"}}
     env.update({
         "HOME": str(root),
@@ -127,7 +207,7 @@ def run(binary, cli, llm, root):
                 assert catalog["default_model"] == "test/test-model", catalog
                 assert catalog["effort_levels"] == ["low", "high"], catalog
                 commands = rpc("agent_commands", agent="opencode", project_id=pid)["commands"]
-                assert all(command["name"] == "compact" for command in commands)
+                assert any(command["name"] == "check" for command in commands)
                 sid = rpc("create_session", project_id=pid, agent="opencode")["session"]["id"]
                 provider = {"kind": "cli"}
                 rpc("open_agent_session", session_id=sid, provider=provider)
@@ -135,10 +215,11 @@ def run(binary, cli, llm, root):
                 assert not Model.calls
                 print(version + ": metadata and prompt-free open", flush=True)
 
-                def send(request_id, text):
+                def send(request_id, text, permission_mode=None, queued=False):
                     response = rpc("send_queued", session_id=sid, request_id=request_id, text=text,
-                                   model="test/test-model", effort="high", provider=provider)
-                    assert response["kind"] == "accepted" and not response["duplicate"], response
+                                   model="test/test-model", effort="high", provider=provider,
+                                   permission_mode=permission_mode)
+                    assert response["kind"] == ("message_queued" if queued else "accepted") and not response["duplicate"], response
 
                 def wait(expected):
                     deadline = time.monotonic() + 15
@@ -160,7 +241,16 @@ def run(binary, cli, llm, root):
                 assert "OPEN_CODE_SMOKE_OK" in text(first), first
                 native = first["session"]["native_id"]
                 assert native
+                deadline = time.monotonic() + 5
+                while rpc("session", session_id=sid)["session"]["title"] != "OPEN_CODE_SMOKE_OK":
+                    if time.monotonic() >= deadline:
+                        raise AssertionError("OpenCode native title did not arrive")
+                    time.sleep(.05)
+                assert rpc("rename_session", session_id=sid, title="Live OpenCode title",
+                           provider=provider)["session"]["title"] == "Live OpenCode title"
                 rpc("close_agent_session", session_id=sid, only_if_idle=True)
+                assert rpc("rename_session", session_id=sid, title="Closed OpenCode title",
+                           provider=provider)["session"]["title"] == "Closed OpenCode title"
                 rpc("open_agent_session", session_id=sid, provider=provider)
                 send("second", "Second smoke turn after resume.")
                 second = wait("completed")
@@ -192,11 +282,124 @@ def run(binary, cli, llm, root):
                 wait("stopped")
                 assert not (project / "smoke-cancelled.txt").exists()
                 print(version + ": cancellation rejects a pending native shell permission", flush=True)
-                if commands:
+                if any(command["name"] == "compact" for command in commands):
                     send("compact", "/compact")
                     wait("completed")
                     print(version + ": advertised native compaction", flush=True)
+                send("question", "question sentinel")
+                pending = wait("waiting")
+                question = next(e["event"] for e in reversed(pending["events"]) if e["event"]["kind"] == "question")
+                rpc("answer_question", session_id=sid, request_id=question["request_id"],
+                    answers=[{"question_id": question["questions"][0]["id"], "option_indices": [1]}])
+                wait("completed")
+                assert "Two" in json.dumps(Model.calls[-1]["messages"][-1])
+                print(version + ": native question and answer", flush=True)
+                marker.unlink()
+                send("bypass", "permission sentinel", "bypass_permissions")
+                wait("completed")
+                assert marker.read_text() == "OC_EXECUTED"
+                assert any("Latte Work platform skill" in json.dumps(req) for req in Model.calls)
+                send("steer-start", "steer start sentinel", "bypass_permissions")
+                assert Model.steering_ready.wait(5)
+                send("steered", "steer followup sentinel", "bypass_permissions", queued=True)
+                queue = rpc("message_queue", session_id=sid)
+                entry = next(item for item in queue["entries"] if item["request_id"] == "steered")
+                try:
+                    rpc("dispatch_queued_message", session_id=sid, request_id="steered",
+                        revision=entry["revision"], interrupt=False, provider=provider)
+                finally:
+                    Model.steering_release.set()
+                deadline = time.monotonic() + 8
+                while not any("steer followup sentinel" in str(call["messages"][-1]["content"])
+                              for call in Model.calls if "messages" in call):
+                    if time.monotonic() >= deadline:
+                        raise AssertionError("Steered input did not reach the model")
+                    time.sleep(.05)
+                wait("completed")
+                assert not rpc("message_queue", session_id=sid)["entries"]
+                print(version + ": confirmed mid-turn input delivery", flush=True)
+                send("background", "background sentinel", "bypass_permissions")
+                wait("completed")
+                deadline = time.monotonic() + 10
+                while True:
+                    events = rpc("poll", session_id=sid, after=0)["events"]
+                    if any("退出码 7" in json.dumps(e, ensure_ascii=False) for e in events):
+                        break
+                    if time.monotonic() >= deadline:
+                        raise AssertionError("Background Shell exit did not arrive")
+                    time.sleep(.05)
+                wait("completed")
+                print(version + ": confirmed background Shell exit", flush=True)
+                deadline = time.monotonic() + 8
+                while rpc("session", session_id=sid)["session"]["agent_session_busy"]:
+                    if time.monotonic() >= deadline:
+                        raise AssertionError("Native work did not settle after Shell exit")
+                    time.sleep(.05)
+                send("native-command", "/check example", "bypass_permissions")
+                wait("completed")
+                assert "Native slash smoke example" in json.dumps(Model.calls[-1]["messages"][-1])
+                print(version + ": project slash command finished", flush=True)
+                send("subagent", "launch subagent sentinel", "bypass_permissions")
+                deadline = time.monotonic() + 10
+                while time.monotonic() < deadline:
+                    result = rpc("poll", session_id=sid, after=0)
+                    children = rpc("subagents", session_id=sid)["tasks"]
+                    if ("PARENT_FOLLOWUP_OK" in text(result) and result["session"]["status"] == "completed"
+                            and children and children[0]["status"] == "completed"):
+                        break
+                    time.sleep(.05)
+                else:
+                    raise AssertionError(result["events"][-8:])
+                children = rpc("subagents", session_id=sid)["tasks"]
+                assert children and children[0]["status"] == "completed", children
+                history = rpc("subagent_history", session_id=sid, task_id=children[0]["id"])
+                assert "CHILD_SMOKE_OK" in json.dumps(history)
+                assert "CHILD_SMOKE_OK" not in text(result)
+                print(version + ": child transcript and autonomous parent follow-up", flush=True)
                 rpc("close_agent_session", session_id=sid, only_if_idle=True)
+                assert set(next(a for a in hello["agents"] if a["id"] == "opencode")["provider_protocols"]) == {
+                    "openai_chat", "openai_responses", "anthropic_messages",
+                }
+                for protocol, endpoint in [
+                    ("openai_chat", "/v1/chat/completions"), ("openai_responses", "/v1/responses"),
+                    ("anthropic_messages", "/v1/messages"),
+                ]:
+                    for auth, expected in [
+                        ("bearer", ("Bearer fixture-work-key", None)),
+                        ("api_key", (None, "fixture-work-key")),
+                        ("none", (None, None)),
+                    ]:
+                        metadata = {
+                            "id": "smoke-work", "name": "Latte Provider", "protocol": protocol,
+                            "base_url": base_url, "model": "gateway/work-model", "auth": auth,
+                            "has_credential": auth != "none",
+                        }
+                        snapshot = {"kind": "snapshot", "snapshot": {"provider": metadata,
+                                    "credential": "fixture-work-key" if auth != "none" else ""}}
+                        catalog = rpc("models_for_provider", agent="opencode", project_id=pid, provider=metadata)
+                        assert catalog["default_model"] == "gateway/work-model", catalog
+                        before = len(Model.calls)
+                        print(f"{version}: probing {protocol} {auth}", flush=True)
+                        rpc("open_agent_session", session_id=sid, provider=snapshot)
+                        assert len(Model.calls) == before
+                        rpc("send_queued", session_id=sid, request_id=f"app-{protocol}-{auth}",
+                            text="Latte Provider smoke " + auth, model=metadata["model"], provider=snapshot)
+                        result = wait("completed")
+                        assert result["session"]["native_id"] == native
+                        assert Model.calls[before:]
+                        assert all(req["model"] == "gateway/work-model" for req in Model.calls[before:])
+                        assert all(path == endpoint for path in Model.paths[before:])
+                        assert all(headers == expected for headers in Model.auth[before:]), (protocol, auth)
+                        rpc("close_agent_session", session_id=sid, only_if_idle=True)
+                before = len(Model.calls)
+                rpc("open_agent_session", session_id=sid, provider=provider)
+                rpc("send_queued", session_id=sid, request_id="return-to-cli",
+                    text="Return to CLI defaults", provider=provider)
+                assert wait("completed")["session"]["native_id"] == native
+                assert all(req["model"] == "test-model" for req in Model.calls[before:])
+                assert all(headers == ("Bearer fixture", None) for headers in Model.auth[before:])
+                rpc("close_agent_session", session_id=sid, only_if_idle=True)
+                print(version + ": App Provider auth and native resume across Provider switches", flush=True)
     finally:
         if child.poll() is None:
             child.send_signal(signal.SIGINT)

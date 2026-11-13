@@ -7,7 +7,7 @@ Provider 页面没有主机选择，也不会因为保存配置而自动关联 A
 
 Code Agent 是主机上的执行程序。在「设置 → 连接与 Agent」中选择运行主机，
 为 Agent 关联一个协议兼容的 Provider。当前 Claude Code Adapter 只接受
-Anthropic Messages；Traex 接受 Anthropic Messages、OpenAI Chat Completions 和
+Anthropic Messages；OpenCode 和 Traex 接受 Anthropic Messages、OpenAI Chat Completions 和
 OpenAI Responses，直接使用原生协议。
 不会自动把 OpenAI 转换成 Anthropic。前端过滤选项，server 与 Adapter 同时校验。
 未关联 Provider 时沿用 Agent CLI 自己的配置。
@@ -219,6 +219,14 @@ Bearer 使用原生 `env_key`，API Key 使用原生 `env_http_headers` 注入 `
 无认证模式不继承原生 OpenAI 登录。凭据不进入命令行、JSON-RPC 或原生配置文件。
 线程启动／恢复时明确指定当前 Provider；解除关联后重新读取 CLI 配置。Codex 的 turn
 请求不使用 Traex 的 `modelProvider` 扩展字段。远端需安装 Codex 和更新 Server。
+
+## OpenCode Provider
+
+OpenCode 的三种协议均支持 Bearer、`x-api-key` 和无需认证。每次启动从本轮快照生成
+进程级配置，并在发送提示词前确认原生会话选择了该 Provider 下的模型。凭据通过专用子进程
+环境变量传递，原生配置文件保持原样。Provider ID 随进程生成，避免旧配置的认证或请求头混入。
+恢复会话时继续使用原生会话 ID；解除关联后，如果旧模型已不可用，则恢复 CLI 当前默认模型。
+App 模型目录只展示已配置的模型；原生 CLI 模型的思考强度由 OpenCode 提供。
 
 `python3 scripts/smoke-codex-providers.py` 使用真实 CLI 与本地 Responses 模拟服务
 验证三种认证、模型和 Provider 切换、原生恢复、CLI 配置恢复、临时项目的原生工具执行

@@ -3,7 +3,9 @@
 import json
 import os
 from pathlib import Path
+import socket
 import sys
+import threading
 import uuid
 
 if sys.argv[1:] == ["--version"]:
@@ -17,6 +19,40 @@ effort = "default"
 prompt_id = None
 permission_id = None
 rounds = 0
+titles = {}
+
+
+def sideband():
+    config = json.loads(os.environ.get("OPENCODE_CONFIG_CONTENT", "{}"))
+    entry = next((p for p in config.get("plugins", []) if isinstance(p, dict) and "socket" in p.get("options", {})), None)
+    if not entry:
+        return
+    with socket.socket(socket.AF_UNIX) as conn:
+        conn.connect(entry["options"]["socket"])
+        with conn.makefile("rw") as wire:
+            wire.write('{"type":"ready"}\n')
+            wire.flush()
+            for line in wire:
+                request = json.loads(line)
+                native = request["sessionID"]
+                action = request["action"]
+                reply = {"type": "reply", "id": request["id"]}
+                if action == "rename":
+                    titles[native] = request["title"]
+                elif action == "get":
+                    reply["title"] = titles.get(native)
+                elif action == "command":
+                    assert request["name"] == "project:check"
+                    Path(native).write_text("prompted")
+                    event = {"type": "session.text.delta", "data": {"sessionID": native, "delta": "command reply"}}
+                    wire.write(json.dumps(event) + "\n")
+                else:
+                    raise AssertionError(request)
+                wire.write(json.dumps(reply) + "\n")
+                wire.flush()
+
+
+threading.Thread(target=sideband, daemon=True).start()
 
 
 def send(**message):

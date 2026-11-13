@@ -22,8 +22,8 @@ LATTE_WORK_CLAUDE=/absolute/path/to/claude \
   ~/.local/bin/latte-work-server serve
 ```
 
-For OpenCode, verify `opencode --version` reports 2.x and configure its model or
-run `opencode auth login` on the remote host. The server looks up `opencode` on
+For OpenCode, verify `opencode --version` reports 2.x. Bind an App Provider to
+this host or configure and sign in to OpenCode on the remote host. The server looks up `opencode` on
 the host PATH; `LATTE_WORK_OPENCODE` can override it with an absolute path.
 Install a server build that advertises OpenCode before creating a remote task.
 

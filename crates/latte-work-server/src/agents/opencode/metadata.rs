@@ -5,7 +5,9 @@ use super::{
 use crate::runtime::Group;
 use anyhow::{Context, Result, bail, ensure};
 use futures_util::StreamExt;
-use latte_work_protocol::{AgentEnvironment, AgentInfo, AgentSlashCommand, Effort, Response};
+use latte_work_protocol::{
+    AgentEnvironment, AgentInfo, AgentPermissionMode, AgentSlashCommand, Effort, Response,
+};
 use serde_json::{Value, json};
 use std::{collections::BTreeMap, process::Stdio, time::Duration};
 use tokio::{
@@ -44,9 +46,32 @@ pub(in crate::agents) async fn discover() -> (String, AgentInfo) {
             name: "OpenCode".into(),
             available,
             detail,
-            provider_protocols: vec![],
+            provider_protocols: super::super::provider_protocols("opencode")
+                .unwrap_or_default()
+                .to_vec(),
         },
     )
+}
+
+pub(in crate::agents) async fn permission_modes(binary: &str) -> Result<Vec<AgentPermissionMode>> {
+    ensure!(
+        version_2(&crate::agents::traex::output(binary, &["--version"]).await?),
+        "需要 OpenCode 2.x"
+    );
+    Ok(vec![
+        AgentPermissionMode {
+            id: "default".into(),
+            label: "请求批准".into(),
+            description: "通过 OpenCode 的工具权限规则请求批准。".into(),
+            elevated: false,
+        },
+        AgentPermissionMode {
+            id: "bypass_permissions".into(),
+            label: "完全访问权限".into(),
+            description: "使用 OpenCode 的工具放行规则；执行主机的托管策略继续生效。".into(),
+            elevated: true,
+        },
+    ])
 }
 
 struct Probe {
@@ -246,11 +271,8 @@ pub(crate) async fn commands(
         let (id, _) = probe.attach(cwd).await?;
         let result = tokio::time::timeout(Duration::from_secs(5), probe.command_catalog(&id)).await;
         let closed = probe.close(&id).await;
-        let mut commands = result.context("读取 OpenCode 命令列表超时")??;
+        let commands = result.context("读取 OpenCode 命令列表超时")??;
         closed?;
-        // Custom commands may return end_turn after enqueueing native work.
-        // Only expose the native compaction whose ACP result fences execution.
-        commands.retain(|command| command.name == "compact");
         Ok(commands)
     })
     .await

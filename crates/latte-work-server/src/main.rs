@@ -737,6 +737,9 @@ async fn dispatch(s: &Service, request: Request) -> Result<Response> {
                     None,
                     Some(provider.unwrap_or(latte_work_protocol::TurnProvider::Cli)),
                 )?;
+            let open_code_binary = (session.agent == "opencode" && session.native_id.is_some())
+                .then(|| s.agent_binary("opencode").map(str::to_owned))
+                .transpose()?;
             Response::Session {
                 session: runtime::rename_title(
                     &s.database,
@@ -745,6 +748,7 @@ async fn dispatch(s: &Service, request: Request) -> Result<Response> {
                     project.path,
                     title,
                     config,
+                    open_code_binary,
                 )
                 .await?,
             }

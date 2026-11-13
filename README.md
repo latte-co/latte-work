@@ -14,7 +14,7 @@ make dev
 
 Install and sign in to the selected CLI (`claude`, `traex`, `codex`, or
 `opencode`) on each execution host, or bind a compatible App Provider before
-sending a task. OpenCode uses its own host configuration and sign-in.
+sending a task. OpenCode supports the App Provider and native host configuration.
 Create a project, select this computer or an SSH host, and choose its folder
 (local system picker or remote directory browser). Then create a task and send
 a prompt. You can also enter an absolute path. File
@@ -56,9 +56,9 @@ Windows support, or guaranteed continuation after a host daemon crashes.
 
 模型服务在「设置 → Provider」统一管理，支持 Anthropic Messages、
 OpenAI Chat Completions、OpenAI Responses 配置。在「设置 → 连接与 Agent」中关联兼容的
-Provider；Claude Code 仅接受 Anthropic Messages，Codex 仅接受 OpenAI Responses。
+Provider。OpenCode 和 Traex 支持三种协议。Claude Code 接受 Anthropic Messages，Codex 接受 OpenAI Responses。
 `LATTE_WORK_CODEX` 和 `LATTE_WORK_OPENCODE` 分别可指定对应的 CLI 路径。
-OpenCode 使用执行主机的原生模型和权限配置，支持 [OpenCode 2.x ACP](https://opencode.ai/docs/cli/acp/)。
+OpenCode 通过 [OpenCode 2.x ACP](https://opencode.ai/docs/cli/acp/) 运行会话，并读取执行主机的原生配置。
 详见 [Provider 与 Agent 配置](docs/providers.md)。
 
 Provider 可配置默认模型和多个可选模型。在输入框底部选择本轮模型，下一次发送时生效；

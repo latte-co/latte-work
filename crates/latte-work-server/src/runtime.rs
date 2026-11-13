@@ -268,13 +268,9 @@ pub async fn rename_title(
     path: String,
     title: String,
     config: LaunchConfig,
+    open_code_binary: Option<String>,
 ) -> Result<Session> {
     Store::validate_session_title(&title)?;
-    // OpenCode ACP cannot rename the native session. Keep the manual name
-    // in Latte consistently, whether or not the OpenCode child is running.
-    if session.agent == "opencode" {
-        return db(database, |s| s.rename_session(&session.id, &title));
-    }
     let control = runs
         .lock()
         .map_err(|_| anyhow::anyhow!("执行状态锁异常"))?
@@ -297,6 +293,59 @@ pub async fn rename_title(
             s.native_rename_context_matches(&session.id, &id, fingerprint.as_deref())
         })? {
             bail!("无法确认原生会话的启动配置，标题未修改；请恢复原 Provider 和 ENV 配置后重试");
+        }
+        if let Some(binary) = open_code_binary {
+            let current = db(database, |s| s.session(&session.id))?;
+            if current.status.active()
+                || runs
+                    .lock()
+                    .map_err(|_| anyhow::anyhow!("执行状态锁异常"))?
+                    .contains_key(&session.id)
+            {
+                bail!("OpenCode 会话正在打开，请稍后修改标题");
+            }
+            let mut process = Process::spawn(
+                &binary,
+                &current,
+                &path,
+                config,
+                Arc::new(AtomicBool::new(false)),
+            )?;
+            let result = tokio::time::timeout(Duration::from_secs(8), async {
+                let initial = process.adapter.advance(Input::Open)?;
+                process.apply(initial, database, &session.id).await?;
+                let (reply, receive) = oneshot::channel();
+                let mut reply = Some(reply);
+                loop {
+                    let (line, sideband) = process.next_message().await?;
+                    let actions = process.adapter.advance(if sideband {
+                        Input::Sideband(&line)
+                    } else {
+                        Input::Message(&line)
+                    })?;
+                    process.apply(actions, database, &session.id).await?;
+                    if process.state.ready
+                        && process.adapter.metadata_ready()
+                        && let Some(reply) = reply.take()
+                    {
+                        let id = uuid::Uuid::new_v4().to_string();
+                        let actions = process.adapter.advance(Input::RenameTitle {
+                            id: &id,
+                            title: &title,
+                        })?;
+                        process.rename_reply = Some(reply);
+                        process.apply(actions, database, &session.id).await?;
+                    }
+                    if reply.is_none() && process.rename_reply.is_none() {
+                        return receive.await?.map_err(anyhow::Error::msg);
+                    }
+                }
+            })
+            .await
+            .context("OpenCode 原生标题修改结果待确认");
+            process.close().await;
+            result??;
+            return db(database, |s| s.session(&session.id));
         }
         let agent = session.agent.clone();
         let actual = tokio::task::spawn_blocking(move || {
@@ -727,6 +776,7 @@ impl TurnState {
                 }
                 Action::Commands(_) => bail!("执行中的 Agent 返回了意外的命令目录"),
                 Action::Write(bytes) => write(input, &bytes).await?,
+                Action::SidebandWrite(_) => bail!("未处理的 Agent 辅助通道请求"),
                 Action::MetadataWrite(bytes) => {
                     if let Err(error) = write(input, &bytes).await {
                         eprintln!(
@@ -958,6 +1008,7 @@ struct Process {
     group: Group,
     input: tokio::process::ChildStdin,
     output: Output,
+    sideband: Option<AgentSideband>,
     drain: tokio::task::JoinHandle<()>,
     _settings: Option<tempfile::NamedTempFile>,
     state: TurnState,
@@ -976,6 +1027,29 @@ struct Process {
     init_deadline: tokio::time::Instant,
     turn_deadline: tokio::time::Instant,
 }
+struct AgentSideband {
+    listener: agents::Sideband,
+    stream: Option<FramedRead<tokio::net::UnixStream, LinesCodec>>,
+}
+
+impl AgentSideband {
+    async fn read(&mut self) -> Result<String> {
+        if self.stream.is_none() {
+            let (stream, _) = self.listener.listener.accept().await?;
+            self.stream = Some(FramedRead::new(
+                stream,
+                LinesCodec::new_with_max_length(1024 * 1024),
+            ));
+        }
+        Ok(self
+            .stream
+            .as_mut()
+            .expect("accepted")
+            .next()
+            .await
+            .context("Agent 辅助通道意外退出；会话历史已保留，后台任务状态无法恢复")??)
+    }
+}
 impl Drop for Process {
     fn drop(&mut self) {
         self.session_open.store(false, Ordering::SeqCst);
@@ -986,6 +1060,19 @@ impl Drop for Process {
     }
 }
 impl Process {
+    async fn next_message(&mut self) -> Result<(String, bool)> {
+        tokio::select! {
+            line = self.output.next() => {
+                Ok((line.context("Agent 进程意外退出；会话历史已保留，后台任务状态无法恢复")??, false))
+            }
+            line = async {
+                match &mut self.sideband {
+                    Some(channel) => channel.read().await,
+                    None => std::future::pending().await,
+                }
+            } => Ok((line?, true))
+        }
+    }
     fn can_start_turn(&self) -> bool {
         self.state.ready
             && !self.turn_active
@@ -1045,6 +1132,10 @@ impl Process {
             group,
             input,
             output,
+            sideband: prepared.sideband.map(|listener| AgentSideband {
+                listener,
+                stream: None,
+            }),
             drain,
             _settings: prepared._settings,
             state: TurnState::default(),
@@ -1063,8 +1154,11 @@ impl Process {
     }
     async fn apply(&mut self, actions: Vec<Action>, database: &Database, id: &str) -> Result<()> {
         let mut remaining = Vec::new();
+        let mut sideband_writes = Vec::new();
         for action in actions {
-            if let Action::GenerateTitle {
+            if let Action::SidebandWrite(bytes) = action {
+                sideband_writes.push(bytes);
+            } else if let Action::GenerateTitle {
                 native_session_id,
                 description,
                 model,
@@ -1155,11 +1249,21 @@ impl Process {
             // A CLI may emit the interrupted result before its control acknowledgement.
             self.state.pending.clear();
         }
-        if let Some((status, message)) = self
+        let outcome = self
             .state
             .apply(actions, &mut self.input, database, id, &self.config)
-            .await?
-        {
+            .await?;
+        // Persist the native session identity before any command can run
+        // through the supplementary channel.
+        for bytes in sideband_writes {
+            let stream = self
+                .sideband
+                .as_mut()
+                .and_then(|channel| channel.stream.as_mut())
+                .context("Agent 辅助通道尚未连接")?;
+            write(stream.get_mut(), &bytes).await?;
+        }
+        if let Some((status, message)) = outcome {
             if !self.state.pending.is_empty() {
                 bail!("Agent 在审批完成前结束了本轮任务");
             }
@@ -1866,11 +1970,11 @@ async fn actor(
                 }
                 None => break,
             },
-            line = async { match process.as_mut() { Some(p) => p.output.next().await, None => std::future::pending().await } } => {
+            line = async { match process.as_mut() { Some(p) => p.next_message().await, None => std::future::pending().await } } => {
                 async {
                     let p = process.as_mut().context("Agent process missing")?;
-                    let line = line.context("Agent 进程意外退出；会话历史已保留，后台任务状态无法恢复")?.map_err(|error|anyhow::anyhow!("读取 {} 原生消息失败：{error}；会话历史已保留",session.agent))?;
-                    let actions = p.adapter.advance(Input::Message(&line))?;
+                    let (line, sideband) = line?;
+                    let actions = p.adapter.advance(if sideband { Input::Sideband(&line) } else { Input::Message(&line) })?;
                     let consumed: Vec<_> = actions.iter().filter_map(|action| match action {
                         Action::InputsConsumed(ids) => Some(ids.as_slice()), _ => None,
                     }).flatten().cloned().chain(actions.iter().filter_map(|action| match action {

@@ -10,6 +10,12 @@ pub struct AgentCommand {
     pub command: Command,
     /// Keep private launch files alive until the agent exits, including spawn errors.
     pub _settings: Option<tempfile::NamedTempFile>,
+    pub sideband: Option<Sideband>,
+}
+
+pub struct Sideband {
+    pub listener: tokio::net::UnixListener,
+    pub _directory: tempfile::TempDir,
 }
 
 pub enum Input<'a> {
@@ -34,6 +40,7 @@ pub enum Input<'a> {
     },
     /// One complete line without its delimiter. Only the adapter interprets its payload.
     Message(&'a str),
+    Sideband(&'a str),
     /// Delivered only after Runtime validates and consumes a pending public approval ID.
     Approval {
         id: &'a str,
@@ -73,6 +80,7 @@ pub enum Action {
     Write(Vec<u8>),
     /// Best-effort metadata control. Failure must not fail the completed task.
     MetadataWrite(Vec<u8>),
+    SidebandWrite(Vec<u8>),
     /// Stop the startup deadline; this does not implicitly send any message.
     Ready,
     /// Native evidence that the main agent started an autonomous follow-up turn.
@@ -138,6 +146,9 @@ pub trait AgentAdapter: Send {
     /// Optional native read bound for one stdio frame.
     fn frame_limit(&self) -> Option<usize> {
         None
+    }
+    fn metadata_ready(&self) -> bool {
+        true
     }
     /// Optional JSON-RPC detach request for an owned process. Shutdown stays bounded.
     fn close_request(&self) -> Result<Option<Vec<u8>>> {

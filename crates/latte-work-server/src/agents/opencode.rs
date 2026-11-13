@@ -10,9 +10,11 @@ use latte_work_protocol::{
 use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet};
 
+mod config;
 mod metadata;
+mod question;
 pub(crate) use metadata::commands;
-pub(super) use metadata::{discover, models};
+pub(super) use metadata::{discover, models, permission_modes};
 
 const FRAME_LIMIT: usize = 4 * 1024 * 1024;
 const CHILD_CAPABILITY: &str = "opencode/child-session-updates";
@@ -24,6 +26,8 @@ const MAX_TOOLS: usize = 2048;
 enum Request {
     Initialize,
     Attach,
+    DefaultModel,
+    DeleteProbe,
     Model,
     Effort,
     Prompt,
@@ -33,6 +37,19 @@ enum Request {
 pub struct OpenCode {
     cwd: String,
     resume: Option<String>,
+    fallback_model_on_open: bool,
+    managed_provider: bool,
+    legacy_instructions: Option<String>,
+    sideband_ready: bool,
+    rename: Option<(String, String)>,
+    steering: Option<(String, String)>,
+    native_permissions: HashSet<String>,
+    native_questions: HashSet<String>,
+    followup: bool,
+    native_command: Option<String>,
+    command_outcome: Option<bool>,
+    command_waiting_for_end: bool,
+    command_acknowledged: bool,
     session: Option<String>,
     model: Option<String>,
     effort: Option<Effort>,
@@ -46,14 +63,16 @@ pub struct OpenCode {
     commands: Option<Vec<AgentSlashCommand>>,
     early_commands: Option<(String, Vec<AgentSlashCommand>)>,
     approvals: HashMap<String, Permission>,
+    questions: HashMap<String, question::Form>,
     tools: HashMap<String, Tool>,
     children: HashMap<String, bool>,
-    // ACP reports child lifecycle, but 2.3 can start a parent follow-up
-    // without an ACP prompt or a terminal marker. Keep replacement/undo
-    // fenced until an explicit foreground prompt settles or the user closes.
+    child_roles: HashMap<String, String>,
+    native_children: HashSet<String>,
+    // A finished child can wake the parent before the next execution event.
     possible_followup: bool,
     // ACP does not publish a completion event for detached shell commands.
-    background_shell: bool,
+    background_shells: HashMap<String, (String, Option<String>)>,
+    shell_exits: HashMap<String, Value>,
     context: Option<ContextUsage>,
 }
 
@@ -78,6 +97,14 @@ pub(super) fn version_2(value: &str) -> bool {
     parts.len() == 3 && parts[0] == "2" && parts[1..].iter().all(|part| part.parse::<u64>().is_ok())
 }
 
+fn minor_version(version: &str) -> u64 {
+    version
+        .split('.')
+        .nth(1)
+        .and_then(|part| part.parse().ok())
+        .unwrap_or_default()
+}
+
 pub(super) fn frame(value: Value) -> Result<Vec<u8>> {
     let mut bytes = serde_json::to_vec(&value)?;
     bytes.push(b'\n');
@@ -96,7 +123,7 @@ pub(super) fn initialize() -> Value {
     json!({
         "protocolVersion": 1,
         "clientInfo": {"name": "Latte Work", "version": env!("CARGO_PKG_VERSION")},
-        "clientCapabilities": {"_meta": {(CHILD_CAPABILITY): true}}
+        "clientCapabilities": {"elicitation":{"form":{}}, "_meta": {(CHILD_CAPABILITY): true}}
     })
 }
 
@@ -152,7 +179,7 @@ pub(super) fn parse_commands(update: &Value) -> Result<Vec<AgentSlashCommand>> {
         .context("OpenCode ACP 未返回命令列表")?;
     ensure!(entries.len() <= 1000, "OpenCode 命令列表超出限制");
     let mut seen = HashSet::new();
-    Ok(entries
+    let mut commands: Vec<_> = entries
         .iter()
         .filter_map(|entry| {
             let name = string(entry, "name").ok()?;
@@ -180,10 +207,337 @@ pub(super) fn parse_commands(update: &Value) -> Result<Vec<AgentSlashCommand>> {
                 ui_action: None,
             })
         })
-        .collect())
+        .collect();
+    if !seen.contains("compact") {
+        commands.push(AgentSlashCommand {
+            name: "compact".into(),
+            display_name: None,
+            description: "压缩当前 OpenCode 会话的上下文".into(),
+            argument_hint: String::new(),
+            ui_action: None,
+        });
+    }
+    Ok(commands)
 }
 
 impl OpenCode {
+    fn cancel_questions(&mut self) -> Result<Vec<Action>> {
+        std::mem::take(&mut self.native_questions)
+            .into_iter()
+            .map(|id| self.sideband_request("answer", &id, json!({"questionID":id,"answers":null})))
+            .collect()
+    }
+
+    fn sideband_request(&self, action: &str, id: &str, body: Value) -> Result<Action> {
+        ensure!(self.sideband_ready, "OpenCode 原生事件通道尚未就绪");
+        let mut body = body;
+        body["action"] = json!(action);
+        body["id"] = json!(id);
+        body["sessionID"] = json!(self.session_id()?);
+        Ok(Action::SidebandWrite(frame(body)?))
+    }
+
+    fn sideband(&mut self, line: &str) -> Result<Vec<Action>> {
+        let message: Value = serde_json::from_str(line)?;
+        let kind = message["type"].as_str().unwrap_or_default();
+        let data = &message["data"];
+        if kind == "ready" {
+            self.sideband_ready = true;
+            let mut actions = self.ready()?;
+            if self.session.is_some() && self.saved {
+                actions.push(self.sideband_request("get", "title", json!({}))?);
+            }
+            return Ok(actions);
+        }
+        if kind == "reply" {
+            let id = string(&message, "id")?;
+            if self
+                .rename
+                .as_ref()
+                .is_some_and(|(pending, _)| pending == id)
+            {
+                let (_, title) = self.rename.take().expect("matched");
+                return Ok(vec![Action::TitleRenamed(if message["error"] == true {
+                    Err("OpenCode 未确认标题修改".into())
+                } else {
+                    Ok(title)
+                })]);
+            }
+            if id == "title" {
+                return Ok(self.generated_title(&message["title"]));
+            }
+            if self.native_command.as_deref() == Some(id) {
+                if message["error"] == true || !self.command_waiting_for_end {
+                    return Ok(self.finish_command(message["error"] == true));
+                }
+                self.command_acknowledged = true;
+                return Ok(vec![]);
+            }
+            // Even a failed submission RPC can race with durable admission.
+            // Keep a handed-off input pending until its native delivery event.
+            return Ok(vec![]);
+        }
+        if kind == "shell.exited" {
+            let id = string(data, "id")?;
+            if let Some((tool, child)) = self.background_shells.remove(id) {
+                return Ok(vec![shell_result(tool, child, data)]);
+            }
+            // The native event can arrive before the ACP tool result.
+            if self.shell_exits.len() < MAX_TOOLS {
+                self.shell_exits.insert(id.into(), data.clone());
+            }
+            return Ok(vec![]);
+        }
+        if kind == "session.created" && self.saved {
+            let Some(parent) = data["parentID"].as_str() else {
+                return Ok(vec![]);
+            };
+            if self.session.as_deref() != Some(parent) && !self.children.contains_key(parent) {
+                return Ok(vec![]);
+            }
+            let id = string(data, "sessionID")?;
+            if let Ok(role) = string(data, "agent")
+                && self.child_roles.len() < MAX_CHILDREN
+            {
+                self.child_roles.insert(id.into(), role.into());
+            }
+            if !self.children.contains_key(id) {
+                let actions = self.child_update(&json!({
+                    "rootSessionId":self.session, "parentSessionId":parent,
+                    "childSessionId":id,"type":"status","status":"created","title":data["title"],
+                }))?;
+                if self.children.contains_key(id) {
+                    self.native_children.insert(id.into());
+                }
+                return Ok(actions);
+            }
+            self.native_children.insert(id.into());
+            if let Some(role) = self.child_roles.get(id) {
+                return Ok(vec![Action::Event(EventKind::Subagent {
+                    update: SubagentUpdate {
+                        id: id.into(),
+                        tool_use_id: Some(format!("opencode-child:{id}")),
+                        agent_type: Some(role.clone()),
+                        title: None,
+                        status: None,
+                        summary: None,
+                        last_tool: None,
+                    },
+                })]);
+            }
+            return Ok(vec![]);
+        }
+        if let Some(child) = data["sessionID"]
+            .as_str()
+            .filter(|id| self.children.contains_key(*id))
+        {
+            if !self.native_children.contains(child) {
+                return Ok(vec![]);
+            }
+            let status = match kind {
+                "session.execution.started" => Some(SubagentStatus::Running),
+                "session.execution.succeeded" => Some(SubagentStatus::Completed),
+                "session.execution.interrupted" => Some(SubagentStatus::Stopped),
+                "session.execution.failed" => Some(SubagentStatus::Failed),
+                _ => None,
+            };
+            if let Some(status) = status {
+                self.children.insert(child.into(), status.active());
+                return Ok(vec![Action::Event(EventKind::Subagent {
+                    update: SubagentUpdate {
+                        id: child.into(),
+                        tool_use_id: Some(format!("opencode-child:{child}")),
+                        agent_type: self.child_roles.get(child).cloned(),
+                        title: None,
+                        status: Some(status),
+                        summary: None,
+                        last_tool: None,
+                    },
+                })]);
+            }
+            // Children announced on the native stream stay on that stream.
+            let channel = format!("opencode-child:{child}");
+            return self.native_output(kind, data, Some(&channel));
+        }
+        if !self.saved || data["sessionID"].as_str() != self.session.as_deref() {
+            return Ok(vec![]);
+        }
+        match kind {
+            "session.renamed" => Ok(self.generated_title(&data["title"])),
+            "question" if self.running() || self.followup => {
+                let id = string(data, "id")?;
+                let questions = question::native_questions(&data["prompts"]);
+                let Some(questions) = questions.filter(|_| !self.cancelling) else {
+                    return Ok(vec![self.sideband_request(
+                        "answer",
+                        id,
+                        json!({"questionID":id,"answers":null}),
+                    )?]);
+                };
+                ensure!(
+                    self.native_questions.len() < 32 && self.native_questions.insert(id.into()),
+                    "OpenCode 问题重复或数量超出限制"
+                );
+                Ok(vec![Action::Question {
+                    id: id.into(),
+                    tool_use_id: data["toolCallId"].as_str().map(str::to_owned),
+                    input: json!({}),
+                    questions,
+                }])
+            }
+            "session.inbox.delivered" => {
+                if self
+                    .steering
+                    .as_ref()
+                    .is_some_and(|(_, id)| data["inboxID"] == *id)
+                {
+                    let (request, _) = self.steering.take().expect("matched");
+                    return Ok(vec![Action::InputsConsumed(vec![request])]);
+                }
+                Ok(vec![])
+            }
+            "session.inbox.cancelled" => {
+                if self
+                    .steering
+                    .as_ref()
+                    .is_some_and(|(_, id)| data["inboxID"] == *id)
+                {
+                    let (request_id, _) = self.steering.take().expect("matched");
+                    return Ok(vec![Action::InputRejected {
+                        request_id,
+                        message: "OpenCode 已取消未消费的补充消息".into(),
+                    }]);
+                }
+                Ok(vec![])
+            }
+            "session.execution.started" if !self.running() && !self.followup => {
+                self.followup = true;
+                Ok(vec![Action::TurnStarted])
+            }
+            "session.execution.started" if self.native_command.is_some() => {
+                self.command_waiting_for_end = true;
+                self.command_outcome = None;
+                Ok(vec![])
+            }
+            "session.execution.succeeded"
+            | "session.execution.failed"
+            | "session.execution.interrupted"
+                if self.native_command.is_some() =>
+            {
+                self.command_outcome = Some(kind == "session.execution.succeeded");
+                self.command_waiting_for_end = false;
+                if self.command_acknowledged {
+                    return Ok(self.finish_command(false));
+                }
+                Ok(vec![])
+            }
+            "session.execution.succeeded"
+            | "session.execution.failed"
+            | "session.execution.interrupted"
+                if self.followup =>
+            {
+                self.followup = false;
+                self.possible_followup = self.children.values().any(|active| *active);
+                Ok(self.finish(
+                    kind != "session.execution.succeeded",
+                    (kind == "session.execution.failed").then(|| "OpenCode 后续执行失败".into()),
+                ))
+            }
+            "permission.asked" if self.followup || self.native_command.is_some() => {
+                let native = string(data, "id")?;
+                if self.cancelling {
+                    return Ok(vec![self.sideband_request(
+                        "permission",
+                        native,
+                        json!({"requestID":native,"allow":false}),
+                    )?]);
+                }
+                ensure!(
+                    self.native_permissions.len() < 32,
+                    "OpenCode 后续执行审批超出限制"
+                );
+                if !self.native_permissions.insert(native.into()) {
+                    return Ok(vec![]);
+                }
+                let tool = string(data, "action")?;
+                Ok(vec![Action::Approval {
+                    id: native.into(),
+                    tool_use_id: data["source"]["id"].as_str().map(str::to_owned),
+                    tool: if tool == "shell" {
+                        "Bash".into()
+                    } else {
+                        tool.into()
+                    },
+                    input: data["metadata"].clone(),
+                }])
+            }
+            _ if self.followup || self.native_command.is_some() => {
+                self.native_output(kind, data, None)
+            }
+            _ => Ok(vec![]),
+        }
+    }
+
+    fn native_output(
+        &mut self,
+        kind: &str,
+        data: &Value,
+        child: Option<&str>,
+    ) -> Result<Vec<Action>> {
+        let update = match kind {
+            "session.text.delta" => json!({
+                "sessionUpdate":"agent_message_chunk","content":{"type":"text","text":data["delta"]},
+            }),
+            "session.reasoning.delta" => json!({"sessionUpdate":"agent_thought_chunk"}),
+            "session.tool.called" | "session.tool.success" | "session.tool.failed" => {
+                let id = string(data, "id")?;
+                let id = child.map_or_else(|| id.into(), |child| format!("{child}:{id}"));
+                let status = match kind {
+                    "session.tool.called" => "in_progress",
+                    "session.tool.success" => "completed",
+                    _ => "failed",
+                };
+                let content: Vec<_> = data["content"].as_array().into_iter().flatten()
+                    .filter_map(|item| {
+                        if item["type"] == "text" {
+                            return Some(json!({"type":"content","content":item}));
+                        }
+                        let (mime, image) = item["uri"].as_str()?.strip_prefix("data:")?.split_once(";base64,")?;
+                        Some(json!({"type":"content","content":{"type":"image","mimeType":mime,"data":image}}))
+                    }).collect();
+                json!({
+                    "sessionUpdate": if status == "in_progress" {"tool_call"} else {"tool_call_update"},
+                    "toolCallId":id,"name":data["name"],"rawInput":data["input"],"status":status,
+                    "content":content,"rawOutput":{"metadata":data["metadata"],"error":data["error"]["message"]},
+                })
+            }
+            _ => return Ok(vec![]),
+        };
+        self.events(&update, child)
+    }
+
+    fn generated_title(&self, value: &Value) -> Vec<Action> {
+        match (self.session.as_ref(), value.as_str()) {
+            (Some(session), Some(title))
+                if !title.trim().is_empty() && title.chars().count() <= 200 =>
+            {
+                vec![Action::GeneratedTitle {
+                    native_session_id: session.clone(),
+                    title: title.into(),
+                }]
+            }
+            _ => vec![],
+        }
+    }
+
+    fn finish_command(&mut self, error: bool) -> Vec<Action> {
+        self.native_command = None;
+        self.command_waiting_for_end = false;
+        self.command_acknowledged = false;
+        let failed = error || self.command_outcome.take() == Some(false);
+        self.finish(failed, failed.then(|| "OpenCode 原生命令执行失败".into()))
+    }
+
     fn request(&mut self, kind: Request, method: &str, params: Value) -> Result<Action> {
         ensure!(self.request.is_none(), "OpenCode ACP 请求仍在执行");
         self.next += 1;
@@ -212,7 +566,11 @@ impl OpenCode {
     fn ready(&mut self) -> Result<Vec<Action>> {
         // 2.0.0 announces commands before the attach response; later 2.x
         // announces them after it. Wait for both before forwarding slash input.
-        if self.ready || self.session.is_none() || self.commands.is_none() || self.request.is_some()
+        if self.ready
+            || self.session.is_none()
+            || self.commands.is_none()
+            || self.request.is_some()
+            || !self.sideband_ready
         {
             return Ok(vec![]);
         }
@@ -230,11 +588,10 @@ impl OpenCode {
             .strip_prefix('/')
             .map(|tail| tail.split_whitespace().next().unwrap_or_default());
         if let Some(name) = command
-            && (name != "compact"
-                || !self
-                    .commands
-                    .as_ref()
-                    .is_some_and(|list| list.iter().any(|c| c.name == name)))
+            && !self
+                .commands
+                .as_ref()
+                .is_some_and(|list| list.iter().any(|c| c.name == name))
         {
             return Ok(vec![Action::Finished {
                 failed: true,
@@ -242,9 +599,40 @@ impl OpenCode {
             }]);
         }
         let session = self.session_id()?.to_owned();
-        let action = self.request(Request::Prompt, "session/prompt", json!({
-            "sessionId": session, "prompt": [{"type":"text", "text":if command.is_some() {text.trim_start()} else {text}}]
-        }))?;
+        if let Some(name) = command.filter(|name| *name != "compact") {
+            if !self.sideband_ready {
+                return Ok(vec![Action::Finished {
+                    failed: true,
+                    message: Some("OpenCode 原生命令通道尚未就绪".into()),
+                }]);
+            }
+            let args = text.trim_start()[name.len() + 1..].trim();
+            let id = uuid::Uuid::new_v4().to_string();
+            let action = self.sideband_request("command", &id, json!({"name":name,"text":args}))?;
+            self.native_command = Some(id);
+            self.command_outcome = None;
+            self.command_waiting_for_end = false;
+            self.command_acknowledged = false;
+            self.saved = true;
+            self.tools.clear();
+            return Ok(vec![Action::NativeSession(session), action]);
+        }
+        let mut blocks = vec![
+            json!({"type":"text", "text":if command.is_some() {text.trim_start()} else {text}}),
+        ];
+        if let Some(instructions) = self.legacy_instructions.take() {
+            blocks.insert(
+                0,
+                json!({"type":"text","text":instructions,"annotations":{"audience":["assistant"]}}),
+            );
+        }
+        let action = self.request(
+            Request::Prompt,
+            "session/prompt",
+            json!({
+                "sessionId": session, "prompt": blocks
+            }),
+        )?;
         self.tools.clear();
         self.context = None;
         self.saved = true;
@@ -268,6 +656,15 @@ impl OpenCode {
         self.ready()
     }
 
+    fn select_model(&mut self, catalog: &Value, model: String) -> Result<Vec<Action>> {
+        ensure!(
+            options(catalog).any(|(id, _)| id == model),
+            "模型不在当前 OpenCode 可选列表中，请刷新模型列表"
+        );
+        self.model = Some(model.clone());
+        Ok(vec![self.set_config(Request::Model, "model", &model)?])
+    }
+
     fn response(&mut self, message: &Value) -> Result<Vec<Action>> {
         let Some((id, kind)) = self.request else {
             return Ok(vec![]);
@@ -286,6 +683,10 @@ impl OpenCode {
         match kind {
             Request::Initialize => {
                 verify_initialize(result)?;
+                let version = string(&result["agentInfo"], "version")?;
+                if minor_version(version) >= 3 {
+                    self.legacy_instructions = None;
+                }
                 let mut params = json!({"cwd":self.cwd, "mcpServers":[]});
                 let method = if let Some(id) = &self.resume {
                     params["sessionId"] = json!(id);
@@ -314,19 +715,37 @@ impl OpenCode {
                     self.commands = Some(commands);
                 }
                 self.session = Some(session);
-                let catalog =
-                    config_option(result, "model").context("OpenCode ACP 未返回模型配置")?;
-                self.selected_model = catalog["currentValue"].as_str().map(str::to_owned);
-                if let Some(model) = self.model.clone() {
-                    ensure!(
-                        options(catalog).any(|(id, _)| id == model),
-                        "模型不在当前 OpenCode 可选列表中，请刷新模型列表"
-                    );
-                    if catalog["currentValue"] != model {
-                        return Ok(vec![self.set_config(Request::Model, "model", &model)?]);
-                    }
+                if self.saved && self.sideband_ready {
+                    let title = self.sideband_request("get", "title", json!({}))?;
+                    let mut actions = self.attach_model(result)?;
+                    actions.insert(0, title);
+                    return Ok(actions);
                 }
-                self.apply_effort(result)
+                self.attach_model(result)
+            }
+            Request::DefaultModel => {
+                let probe = string(result, "sessionId")?;
+                ensure!(
+                    Some(probe) != self.session.as_deref(),
+                    "OpenCode 模型探针返回了当前会话"
+                );
+                let catalog =
+                    config_option(result, "model").context("OpenCode ACP 未返回默认模型")?;
+                let model = string(catalog, "currentValue")?;
+                ensure!(
+                    options(catalog).any(|(id, _)| id == model),
+                    "当前 OpenCode 默认模型不可用"
+                );
+                self.model = Some(model.into());
+                Ok(vec![self.request(
+                    Request::DeleteProbe,
+                    "session/delete",
+                    json!({"sessionId":probe}),
+                )?])
+            }
+            Request::DeleteProbe => {
+                let model = self.model.clone().context("OpenCode 未解析默认模型")?;
+                Ok(vec![self.set_config(Request::Model, "model", &model)?])
             }
             Request::Model => {
                 let catalog = config_option(result, "model").context("OpenCode 未确认所选模型")?;
@@ -372,7 +791,10 @@ impl OpenCode {
                         }),
                     }));
                 }
-                if reason == "end_turn" && !self.children.values().any(|active| *active) {
+                if reason == "end_turn"
+                    && !self.children.values().any(|active| *active)
+                    && self.background_shells.is_empty()
+                {
                     self.possible_followup = false;
                 }
                 actions.extend(self.finish(message.is_some(), message));
@@ -381,12 +803,40 @@ impl OpenCode {
         }
     }
 
+    fn attach_model(&mut self, result: &Value) -> Result<Vec<Action>> {
+        let catalog = config_option(result, "model").context("OpenCode ACP 未返回模型配置")?;
+        self.selected_model = catalog["currentValue"].as_str().map(str::to_owned);
+        let available = |model: &str| options(catalog).any(|(id, _)| id == model);
+        if self.fallback_model_on_open
+            && !self.managed_provider
+            && self.model.as_deref().is_some_and(|model| !available(model))
+        {
+            self.model = None;
+            self.effort = None;
+        }
+        if let Some(model) = self.model.clone() {
+            if !available(&model) || catalog["currentValue"] != model {
+                return self.select_model(catalog, model);
+            }
+        } else if !self.selected_model.as_deref().is_some_and(available) {
+            return Ok(vec![self.request(
+                Request::DefaultModel,
+                "session/new",
+                json!({"cwd":self.cwd, "mcpServers":[]}),
+            )?]);
+        }
+        self.apply_effort(result)
+    }
+
     fn finish(&mut self, failed: bool, message: Option<String>) -> Vec<Action> {
         self.tools.clear();
         self.context = None;
         let mut actions = Vec::new();
         if std::mem::take(&mut self.cancelling) {
             self.approvals.clear();
+            self.questions.clear();
+            self.native_permissions.clear();
+            self.native_questions.clear();
             actions.push(Action::Interrupted);
         }
         actions.push(Action::Finished { failed, message });
@@ -394,8 +844,10 @@ impl OpenCode {
     }
 
     fn running(&self) -> bool {
-        self.request
-            .is_some_and(|(_, kind)| kind == Request::Prompt)
+        self.native_command.is_some()
+            || self
+                .request
+                .is_some_and(|(_, kind)| kind == Request::Prompt)
     }
 
     fn session_update(&mut self, params: &Value) -> Result<Vec<Action>> {
@@ -444,6 +896,9 @@ impl OpenCode {
         if Some(child) == self.session.as_deref() {
             return Ok(vec![]);
         }
+        if self.native_children.contains(child) {
+            return Ok(vec![]);
+        }
         let parent = string(params, "parentSessionId")?;
         if Some(parent) != self.session.as_deref() && !self.children.contains_key(parent) {
             return Ok(vec![]);
@@ -475,7 +930,7 @@ impl OpenCode {
                     title: params["title"]
                         .as_str()
                         .map(|s| s.chars().take(160).collect()),
-                    agent_type: None,
+                    agent_type: self.child_roles.get(child).cloned(),
                     status: Some(status),
                     summary: None,
                     last_tool: None,
@@ -530,14 +985,39 @@ impl OpenCode {
                 }
                 if terminal {
                     let metadata = &update["rawOutput"]["metadata"];
-                    if metadata["status"] == "running" && metadata["shellID"].is_string() {
-                        self.background_shell = true;
+                    if metadata["status"] == "running"
+                        && let Some(shell) = metadata["shellID"].as_str()
+                    {
+                        ensure!(
+                            self.background_shells.len() < MAX_TOOLS,
+                            "OpenCode 后台 Shell 数量超出限制"
+                        );
+                        if let Some(exit) = self.shell_exits.remove(shell) {
+                            actions.push(shell_result(id.into(), child.map(str::to_owned), &exit));
+                            self.tools.remove(id);
+                            return Ok(actions);
+                        }
+                        self.background_shells
+                            .insert(shell.into(), (id.into(), child.map(str::to_owned)));
+                        self.possible_followup = true;
+                        actions.push(event(EventKind::Notice {
+                            text: format!(
+                                "命令已转入后台，结果待确认（工具 ID：{id}，Shell ID：{shell}）"
+                            ),
+                        }));
+                        self.tools.remove(id);
+                        return Ok(actions);
                     }
+                    let mut images = super::ToolImages::default();
                     let content: Vec<_> = update["content"].as_array().into_iter().flatten()
                         .filter_map(|v| match v["type"].as_str() {
                             Some("content") if v["content"]["type"] == "text" => {
                                 Some(json!({"type":"text", "text":v["content"]["text"].as_str()?}))
                             }
+                            Some("content") if v["content"]["type"] == "image" => Some(images.inline(
+                                v["content"]["mimeType"].as_str().unwrap_or_default(),
+                                v["content"]["data"].as_str().unwrap_or_default(),
+                            )),
                             Some("diff") => {
                                 Some(json!({"type":"text","text":format!("已修改：{}", v["path"].as_str()?)}))
                             }
@@ -637,6 +1117,9 @@ impl OpenCode {
                     if method == "session/request_permission" {
                         return self.permission(id, &message["params"]);
                     }
+                    if method == "elicitation/create" {
+                        return self.question(id, &message["params"]);
+                    }
                     // No filesystem, terminal, or other client capabilities were granted.
                     return Ok(vec![write(
                         json!({"jsonrpc":"2.0","id":id,"error":{"code":-32601,"message":"Unsupported client method"}}),
@@ -650,6 +1133,33 @@ impl OpenCode {
             }
             None => self.response(&message),
         }
+    }
+
+    fn question(&mut self, id: &Value, params: &Value) -> Result<Vec<Action>> {
+        let belongs = self
+            .session
+            .as_deref()
+            .is_some_and(|session| params["sessionId"] == session);
+        if !belongs || self.cancelling || !(self.running() || self.possible_followup) {
+            return Ok(vec![question_result(id, None)?]);
+        }
+        let Some((form, questions)) = question::Form::parse(id, params) else {
+            return Ok(vec![question_result(id, None)?]);
+        };
+        let key = serde_json::to_string(id)?;
+        ensure!(
+            self.questions.len() < 32
+                && !self.questions.contains_key(&key)
+                && !self.approvals.contains_key(&key),
+            "OpenCode 表单请求重复或数量超出限制"
+        );
+        self.questions.insert(key.clone(), form);
+        Ok(vec![Action::Question {
+            id: key,
+            tool_use_id: string(params, "toolCallId").ok().map(str::to_owned),
+            input: json!({}),
+            questions,
+        }])
     }
 }
 
@@ -679,17 +1189,51 @@ fn permission_result(id: &Value, selected: Option<&str>) -> Result<Action> {
     write(json!({"jsonrpc":"2.0","id":id,"result":{"outcome":outcome}}))
 }
 
+fn question_result(id: &Value, content: Option<Value>) -> Result<Action> {
+    let result = content.map_or_else(
+        || json!({"action":"cancel"}),
+        |content| json!({"action":"accept","content":content}),
+    );
+    write(json!({"jsonrpc":"2.0","id":id,"result":result}))
+}
+
+fn shell_result(id: String, child: Option<String>, data: &Value) -> Action {
+    let status = data["status"].as_str().unwrap_or("unknown");
+    let code = data["exit"].as_i64();
+    let is_error = status != "exited" || code != Some(0);
+    let text = if let Some(code) = code {
+        format!("后台命令退出，退出码 {code}")
+    } else {
+        format!("后台命令已结束（{status}）")
+    };
+    let event = EventKind::ToolResult {
+        id,
+        content: json!([{"type":"text","text":text}]),
+        is_error,
+    };
+    match child {
+        Some(tool_use_id) => Action::SubagentEvent { tool_use_id, event },
+        None => Action::Event(event),
+    }
+}
+
 impl AgentAdapter for OpenCode {
     fn can_reconfigure(&self) -> bool {
         self.can_start_turn() && !self.has_background_work()
     }
 
     fn can_start_turn(&self) -> bool {
-        self.ready && self.request.is_none() && self.approvals.is_empty()
+        self.ready
+            && !self.followup
+            && self.native_command.is_none()
+            && self.request.is_none()
+            && self.approvals.is_empty()
+            && self.questions.is_empty()
+            && self.native_questions.is_empty()
     }
 
     fn has_background_work(&self) -> bool {
-        self.background_shell
+        !self.background_shells.is_empty()
             || self.possible_followup
             || self.children.values().any(|active| *active)
     }
@@ -708,27 +1252,41 @@ impl AgentAdapter for OpenCode {
         resume: Option<&str>,
         config: &LaunchConfig,
     ) -> Result<AgentCommand> {
-        ensure!(
-            config.provider.is_none(),
-            "OpenCode 使用执行主机上的原生 Provider 配置"
-        );
-        ensure!(
-            config.permission_mode.is_none(),
-            "OpenCode 使用执行主机上的原生权限策略"
-        );
         self.cwd = cwd.into();
         self.resume = resume.map(str::to_owned);
         self.saved = self.resume.is_some();
-        self.model.clone_from(&config.model);
         self.effort = config.effort;
+        self.managed_provider = config.provider.is_some();
+        let mut command = metadata::command(binary, Some(cwd), &config.environment);
+        let directory = tempfile::Builder::new()
+            .prefix("lw-oc-")
+            .tempdir_in("/tmp")?;
+        std::fs::write(
+            directory.path().join("index.mjs"),
+            include_str!("opencode/index.mjs"),
+        )?;
+        let listener = tokio::net::UnixListener::bind(directory.path().join("events"))?;
+        let sideband = super::Sideband {
+            listener,
+            _directory: directory,
+        };
+        let instructions = crate::skills::platform_instructions(&config.settings_dir);
+        let (model, settings) = config::configure(&mut command, config, &instructions, &sideband)?;
+        self.legacy_instructions = (!instructions.is_empty()).then_some(instructions);
+        self.model = model;
         Ok(AgentCommand {
-            command: metadata::command(binary, Some(cwd), &config.environment),
-            _settings: None,
+            command,
+            _settings: settings,
+            sideband: Some(sideband),
         })
     }
 
     fn frame_limit(&self) -> Option<usize> {
         Some(FRAME_LIMIT)
+    }
+
+    fn metadata_ready(&self) -> bool {
+        self.sideband_ready
     }
 
     fn close_request(&self) -> Result<Option<Vec<u8>>> {
@@ -755,7 +1313,10 @@ impl AgentAdapter for OpenCode {
 
     fn advance(&mut self, input: Input<'_>) -> Result<Vec<Action>> {
         match input {
-            Input::Open => self.begin(),
+            Input::Open => {
+                self.fallback_model_on_open = true;
+                self.begin()
+            }
             Input::Start { prompt } if self.ready => self.start(prompt),
             Input::Start { prompt } => {
                 ensure!(self.prompt.is_none(), "OpenCode 正在初始化");
@@ -767,6 +1328,13 @@ impl AgentAdapter for OpenCode {
                 }
             }
             Input::Message(line) => self.message(line),
+            Input::Sideband(line) => self.sideband(line),
+            Input::Interrupt if self.followup || self.native_command.is_some() => {
+                self.cancelling = true;
+                let mut actions = self.cancel_questions()?;
+                actions.push(self.sideband_request("interrupt", "interrupt", json!({}))?);
+                Ok(actions)
+            }
             Input::Interrupt if self.running() => {
                 self.cancelling = true;
                 let mut actions = vec![write(
@@ -778,6 +1346,10 @@ impl AgentAdapter for OpenCode {
                 for (_, request) in self.approvals.drain() {
                     actions.push(permission_result(&request.wire_id, None)?);
                 }
+                for (_, request) in self.questions.drain() {
+                    actions.push(question_result(&request.wire_id, None)?);
+                }
+                actions.extend(self.cancel_questions()?);
                 Ok(actions)
             }
             Input::Interrupt => {
@@ -791,6 +1363,13 @@ impl AgentAdapter for OpenCode {
                 Ok(actions)
             }
             Input::Approval { id, allow, .. } => {
+                if self.native_permissions.remove(id) {
+                    return Ok(vec![self.sideband_request(
+                        "permission",
+                        id,
+                        json!({"requestID":id,"allow":allow && !self.cancelling}),
+                    )?]);
+                }
                 let request = self
                     .approvals
                     .remove(id)
@@ -804,12 +1383,49 @@ impl AgentAdapter for OpenCode {
                 };
                 Ok(vec![permission_result(&request.wire_id, selected)?])
             }
-            Input::Queue { .. } => {
-                bail!("OpenCode 暂不支持在当前轮中立即交付队列消息，请等待本轮结束")
+            Input::Queue { request_id, prompt } => {
+                ensure!(
+                    (self.running() || self.followup)
+                        && !self.cancelling
+                        && self.steering.is_none(),
+                    "OpenCode 当前轮无法接收补充消息"
+                );
+                ensure!(
+                    !prompt.trim_start().starts_with('/'),
+                    "请在独立轮次运行 OpenCode 命令"
+                );
+                let id = format!("msg_{}", uuid::Uuid::new_v4().simple());
+                let action =
+                    self.sideband_request("steer", &id, json!({"messageID":id,"text":prompt}))?;
+                self.steering = Some((request_id.into(), id));
+                Ok(vec![action])
             }
             Input::DiscoverCommands => bail!("OpenCode 通过独立 ACP 探针发现命令"),
-            Input::RenameTitle { .. } => bail!("OpenCode ACP 暂不支持修改原生会话标题"),
-            Input::QuestionAnswer { .. } => bail!("OpenCode ACP 暂不支持表单问答"),
+            Input::RenameTitle { id, title } => {
+                ensure!(self.rename.is_none(), "OpenCode 标题修改结果待确认");
+                let action = self.sideband_request("rename", id, json!({"title":title}))?;
+                self.rename = Some((id.into(), title.into()));
+                Ok(vec![action])
+            }
+            Input::QuestionAnswer {
+                id,
+                questions,
+                answers,
+                ..
+            } => {
+                if self.native_questions.remove(id) {
+                    let answers =
+                        answers.map(|answers| question::native_answers(&questions, answers));
+                    return Ok(vec![self.sideband_request(
+                        "answer",
+                        id,
+                        json!({"questionID":id,"answers":answers}),
+                    )?]);
+                }
+                let form = self.questions.remove(id).context("OpenCode 问题已过期")?;
+                let content = answers.map(|answers| form.answer(answers));
+                Ok(vec![question_result(&form.wire_id, content)?])
+            }
         }
     }
 }

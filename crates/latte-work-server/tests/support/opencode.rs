@@ -134,7 +134,7 @@ async fn opencode_metadata_resume_and_reconciliation_use_native_identity() {
     );
     assert!(
         matches!(ask(&mut client, Request::AgentCommands { agent: "opencode".into(), project_id: project_id.clone() }).await,
-        Response::AgentCommands { commands } if commands.len() == 1 && commands[0].name == "compact")
+        Response::AgentCommands { commands } if commands.iter().any(|c| c.name == "compact") && commands.iter().any(|c| c.name == "project:check"))
     );
     assert_eq!(
         std::fs::read_dir(folder.path()).unwrap().count(),
@@ -155,7 +155,7 @@ async fn opencode_metadata_resume_and_reconciliation_use_native_identity() {
     assert!(matches!(
         ask(
             &mut client,
-            turn(&id, "unknown-slash", "/project:check xxx")
+            turn(&id, "unknown-slash", "/not-a-native-command xxx")
         )
         .await,
         Response::Accepted { .. }
@@ -304,6 +304,31 @@ async fn opencode_permissions_cancel_and_eof_do_not_infer_completion() {
     ));
     let events = wait(&mut client, &id, Status::Failed).await;
     assert!(events.iter().any(|e| matches!(&e.event, EventKind::State { status: Status::Failed, message: Some(text) } if text.contains("意外退出"))));
+}
+
+#[tokio::test]
+async fn opencode_project_command_waits_for_native_response_without_sending_a_prompt() {
+    let host = Host::start().await;
+    let folder = tempfile::tempdir().unwrap();
+    let mut client = host.client().await;
+    let project_id = project(&mut client, folder.path()).await;
+    let id = create(&mut client, &project_id).await;
+    assert!(matches!(
+        ask(
+            &mut client,
+            turn(&id, "native-command", "/project:check now")
+        )
+        .await,
+        Response::Accepted { duplicate: false }
+    ));
+    let events = wait(&mut client, &id, Status::Completed).await;
+    assert!(contains_text(&events, "command reply"));
+    assert!(current(&mut client, &id).await.native_id.is_some());
+    assert!(!folder.path().join("prompts").exists());
+    assert!(matches!(
+        ask(&mut client, close(&id, true)).await,
+        Response::Ok
+    ));
 }
 
 #[tokio::test]

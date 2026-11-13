@@ -10,8 +10,36 @@ pub(crate) mod codex_title;
 mod opencode;
 mod titles;
 pub(crate) mod traex;
+pub use adapter::Sideband;
 pub use adapter::{Action, AgentAdapter, AgentCommand, Input};
 use anyhow::{Result, bail};
+
+#[derive(Default)]
+struct ToolImages {
+    count: usize,
+    bytes: usize,
+}
+
+impl ToolImages {
+    fn inline(&mut self, mime: &str, data: &str) -> serde_json::Value {
+        if matches!(
+            mime,
+            "image/png" | "image/jpeg" | "image/gif" | "image/webp"
+        ) && !data.is_empty()
+            && self.bytes + data.len() <= 384 * 1024
+            && self.count < 4
+            && data
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"+/=".contains(&b))
+        {
+            self.count += 1;
+            self.bytes += data.len();
+            serde_json::json!({"type":"image", "mime_type":mime, "data_base64":data})
+        } else {
+            serde_json::json!({"type":"text", "text":"图片未展示：格式不支持或内容超过预览上限。"})
+        }
+    }
+}
 pub(crate) use opencode::commands as opencode_commands;
 pub type ChildTranscript = (Vec<latte_work_protocol::Event>, bool);
 pub fn normalize_history_event(
@@ -174,12 +202,11 @@ pub fn provider_protocols(agent: &str) -> Option<&'static [latte_work_protocol::
     match agent {
         "claude" => Some(&[latte_work_protocol::ProviderProtocol::AnthropicMessages]),
         "codex" => Some(&[latte_work_protocol::ProviderProtocol::OpenaiResponses]),
-        "traex" => Some(&[
+        "traex" | "opencode" => Some(&[
             latte_work_protocol::ProviderProtocol::AnthropicMessages,
             latte_work_protocol::ProviderProtocol::OpenaiChat,
             latte_work_protocol::ProviderProtocol::OpenaiResponses,
         ]),
-        "opencode" => Some(&[]),
         _ => None,
     }
 }
@@ -229,7 +256,7 @@ pub async fn permission_modes(
         "claude" => claude::permission_modes(binary).await,
         "traex" => traex::permission_modes(binary).await,
         "codex" => codex::permission_modes(binary).await,
-        "opencode" => Ok(vec![]),
+        "opencode" => opencode::permission_modes(binary).await,
         _ => bail!("此 Agent 尚未实现权限设置：{agent}"),
     }
 }
