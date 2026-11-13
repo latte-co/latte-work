@@ -718,6 +718,14 @@ impl Store {
         let data: String = self.db.query_row("SELECT data FROM subagents WHERE session_id=?1 AND (native_id=?2 OR id=?2) ORDER BY at DESC LIMIT 1", params![session_id,native_id], |row| row.get(0)).optional()?.context("子智能体原生记录不存在")?;
         Ok(serde_json::from_str(&data)?)
     }
+    pub fn child_native_ids(&self, session_id: &str) -> Result<std::collections::HashSet<String>> {
+        let mut query = self.db.prepare(
+            "SELECT native_id FROM subagents WHERE session_id=?1 ORDER BY at DESC LIMIT 512",
+        )?;
+        Ok(query
+            .query_map([session_id], |row| row.get(0))?
+            .collect::<rusqlite::Result<_>>()?)
+    }
     /// Bind historical native reads to the accepted request before this child
     /// started. Only its digest is stored; credential snapshots stay ephemeral.
     pub fn child_provider_fingerprint(

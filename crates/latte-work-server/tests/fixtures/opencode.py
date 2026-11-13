@@ -11,6 +11,9 @@ import uuid
 if sys.argv[1:] == ["--version"]:
     print(f"opencode v{os.environ.get('LATTE_TEST_OPENCODE_VERSION', '2.3.0')}")
     sys.exit(0)
+if sys.argv[1:4] == ["session", "export", "--standalone"]:
+    print(Path(sys.argv[4] + ".json").read_text())
+    sys.exit(0)
 assert sys.argv[1:] == ["acp"], sys.argv
 
 session = None
@@ -174,6 +177,24 @@ for line in sys.stdin:
             send(method="opencode/session/child_update", params={**child, "type": "update", "update": {
                 "sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "child only"}
             }})
+            complete("main only")
+        elif text == "nested":
+            for child, parent, depth in [
+                ("ses_child", session, 1), ("ses_nested", "ses_child", 2),
+                ("ses_unowned", "ses_child", 2), ("ses_other_project", "ses_child", 2),
+            ]:
+                update_data = {"rootSessionId": session, "childSessionId": child, "parentSessionId": parent, "depth": depth}
+                send(method="opencode/session/child_update", params={**update_data, "type": "status", "status": "created"})
+                send(method="opencode/session/child_update", params={**update_data, "type": "update", "update": {
+                    "sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "stream " + child}
+                }})
+                send(method="opencode/session/child_update", params={**update_data, "type": "status", "status": "completed"})
+                Path(child + ".json").write_text(json.dumps({
+                    "info": {"id": child, "parentID": "ses_foreign" if child == "ses_unowned" else parent,
+                             "location": {"directory": str(Path.cwd().parent if child == "ses_other_project" else Path.cwd())}},
+                    "messages": [{"type": "user", "id": "msg_child", "text": "native child instruction"},
+                                 {"type": "assistant", "content": [{"type": "text", "text": "native " + child}]}],
+                }))
             complete("main only")
         elif text != "await-cancel":
             complete("fixture |reply")

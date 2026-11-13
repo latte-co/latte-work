@@ -7,31 +7,69 @@ use crate::{
 use anyhow::{Context, Result, ensure};
 use latte_work_protocol::{Event, EventKind};
 use serde_json::{Value, json};
-use std::{path::Path, process::Stdio, time::Duration};
+use std::{collections::HashSet, path::Path, process::Stdio, time::Duration};
 use tokio::io::{AsyncRead, AsyncReadExt};
 
 const LIMIT: u64 = 4 * 1024 * 1024;
+const MAX_DEPTH: usize = 8;
 
 pub(in crate::agents) async fn read(
     binary: &str,
     cwd: &Path,
     parent: &str,
     child: &str,
+    known_children: &HashSet<String>,
     session_id: &str,
     config: &LaunchConfig,
 ) -> Result<Option<ChildHistoryPage>> {
-    if ![parent, child].iter().all(|id| {
-        id.starts_with("ses_")
-            && id.len() <= 128
-            && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
-    }) || parent == child
+    if parent == child {
+        return Ok(None);
+    }
+    tokio::time::timeout(Duration::from_secs(6), async {
+        let Some(document) = export(binary, cwd, child, config).await? else {
+            return Ok(None);
+        };
+        let mut current = &document;
+        let mut ancestor;
+        let mut seen = HashSet::from([child.to_owned()]);
+        for depth in 1..=MAX_DEPTH {
+            let Some(id) = current["info"]["parentID"].as_str() else {
+                break;
+            };
+            if id == parent {
+                return history(&document, child, session_id, config);
+            }
+            if depth == MAX_DEPTH || !known_children.contains(id) || !seen.insert(id.to_owned()) {
+                break;
+            }
+            let Some(next) = export(binary, cwd, id, config).await? else {
+                break;
+            };
+            ancestor = next;
+            current = &ancestor;
+        }
+        Ok(None)
+    })
+    .await
+    .context("读取 OpenCode 子任务历史超时")?
+}
+
+async fn export(
+    binary: &str,
+    cwd: &Path,
+    id: &str,
+    config: &LaunchConfig,
+) -> Result<Option<Value>> {
+    if !id.starts_with("ses_")
+        || id.len() > 128
+        || !id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
     {
         return Ok(None);
     }
     let process = crate::agent_environment::command(binary)
         .envs(&config.environment.0)
         .current_dir(cwd)
-        .args(["session", "export", "--standalone", child])
+        .args(["session", "export", "--standalone", id])
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -43,65 +81,67 @@ pub(in crate::agents) async fn read(
         child: process,
         pid,
     };
-    let result = tokio::time::timeout(Duration::from_secs(6), async {
-        let stdout = group
-            .child
-            .stdout
-            .take()
-            .context("OpenCode export stdout missing")?;
-        let bytes = bounded(stdout).await?;
-        if !group.child.wait().await?.success() {
-            return Ok(None);
+    let stdout = group
+        .child
+        .stdout
+        .take()
+        .context("OpenCode export stdout missing")?;
+    let bytes = bounded(stdout).await?;
+    if !group.child.wait().await?.success() {
+        return Ok(None);
+    }
+    let mut document: Value = serde_json::from_slice(&bytes).context("无效的 OpenCode 导出")?;
+    if let Some(data) = document.get_mut("data") {
+        document = data.take();
+    }
+    let info = &document["info"];
+    let directory = info["location"]["directory"].as_str().map(Path::new);
+    Ok((info["id"] == id && directory == Some(cwd)).then_some(document))
+}
+
+fn history(
+    document: &Value,
+    child: &str,
+    session_id: &str,
+    config: &LaunchConfig,
+) -> Result<Option<ChildHistoryPage>> {
+    let messages = document["messages"]
+        .as_array()
+        .context("OpenCode 导出缺少消息")?;
+    let mut events = Vec::new();
+    let redactor = config.redactor();
+    let mut bytes = 0;
+    for message in messages {
+        let at = message["time"]["created"].as_f64().unwrap_or_default();
+        for event in message_events(message) {
+            let event = redactor.event(event);
+            bytes += serde_json::to_vec(&event)?.len();
+            ensure!(
+                bytes <= LIMIT as usize && events.len() < 4096,
+                "OpenCode 子任务历史超出限制"
+            );
+            events.push(Event {
+                seq: (events.len() + 1) as f64,
+                session_id: session_id.into(),
+                at,
+                event,
+                content_size: None,
+            });
         }
-        let document: Value = serde_json::from_slice(&bytes).context("无效的 OpenCode 导出")?;
-        let document = document.get("data").unwrap_or(&document);
-        let info = &document["info"];
-        let Some(directory) = info["location"]["directory"].as_str().map(Path::new) else {
-            return Ok(None);
-        };
-        if info["id"] != child || info["parentID"] != parent || directory != cwd {
-            return Ok(None);
-        }
-        let messages = document["messages"]
-            .as_array()
-            .context("OpenCode 导出缺少消息")?;
-        let mut events = Vec::new();
-        let redactor = config.redactor();
-        let mut bytes = 0;
-        for message in messages {
-            let at = message["time"]["created"].as_f64().unwrap_or_default();
-            for event in message_events(message) {
-                let event = redactor.event(event);
-                bytes += serde_json::to_vec(&event)?.len();
-                ensure!(
-                    bytes <= LIMIT as usize && events.len() < 4096,
-                    "OpenCode 子任务历史超出限制"
-                );
-                events.push(Event {
-                    seq: (events.len() + 1) as f64,
-                    session_id: session_id.into(),
-                    at,
-                    event,
-                    content_size: None,
-                });
-            }
-        }
-        if events.is_empty() {
-            return Ok(None);
-        }
-        let cursor = ChildHistoryCursor {
-            identity: child.into(),
-            offset: events.len() as u64,
-            ..Default::default()
-        };
-        Ok(Some(ChildHistoryPage {
-            events,
-            cursor,
-            has_more: false,
-        }))
-    })
-    .await;
-    result.context("读取 OpenCode 子任务历史超时")?
+    }
+    if events.is_empty() {
+        return Ok(None);
+    }
+    let cursor = ChildHistoryCursor {
+        identity: child.into(),
+        offset: events.len() as u64,
+        ..Default::default()
+    };
+    Ok(Some(ChildHistoryPage {
+        events,
+        cursor,
+        has_more: false,
+    }))
 }
 
 async fn bounded(stdout: impl AsyncRead + Unpin) -> Result<Vec<u8>> {

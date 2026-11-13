@@ -1105,11 +1105,12 @@ async fn dispatch(s: &Service, request: Request) -> Result<Response> {
                 && let Some(parent) = session.native_id.as_deref()
                 && let Ok(binary) = s.agent_binary("opencode")
             {
-                let (child, cwd, accepted) = db(&s.database, |d| {
+                let (child, cwd, accepted, known_children) = db(&s.database, |d| {
                     Ok((
                         d.subagent(&session_id, &task_id)?,
                         d.project(&session.project_id)?.path,
                         d.child_provider_fingerprint(&session_id, &task_id)?,
+                        d.child_native_ids(&session_id)?,
                     ))
                 })?;
                 let fingerprint = providers::turn_fingerprint(provider.as_ref())?;
@@ -1125,6 +1126,7 @@ async fn dispatch(s: &Service, request: Request) -> Result<Response> {
                             std::path::Path::new(&cwd),
                             parent,
                             &child.native_id,
+                            &known_children,
                             &session_id,
                             &config,
                         )
@@ -1134,8 +1136,11 @@ async fn dispatch(s: &Service, request: Request) -> Result<Response> {
                             let current = d.session(&session_id)?;
                             let same_context =
                                 d.child_provider_fingerprint(&session_id, &task_id)? == accepted;
+                            let latest = d.subagent(&session_id, &task_id)?;
                             if current.native_id.as_deref() == Some(parent)
-                                && d.subagent(&session_id, &task_id)?.native_id == child.native_id
+                                && latest.native_id == child.native_id
+                                && latest.updated_at == child.updated_at
+                                && !latest.status.active()
                                 && same_context
                             {
                                 d.cache_child_history(&session_id, &task_id, &page)?;

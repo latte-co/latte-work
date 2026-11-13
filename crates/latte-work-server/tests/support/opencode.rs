@@ -410,3 +410,43 @@ async fn opencode_child_transcript_is_separate_and_prevents_idle_close() {
         Response::Ok
     ));
 }
+
+#[tokio::test]
+async fn opencode_recovers_nested_history_only_within_known_project_and_ancestry() {
+    let host = Host::start().await;
+    let folder = tempfile::tempdir().unwrap();
+    let mut client = host.client().await;
+    let project_id = project(&mut client, folder.path()).await;
+    let id = create(&mut client, &project_id).await;
+    assert!(matches!(
+        ask(&mut client, turn(&id, "nested", "nested")).await,
+        Response::Accepted { .. }
+    ));
+    wait(&mut client, &id, Status::Completed).await;
+    assert!(matches!(
+        ask(&mut client, close(&id, true)).await,
+        Response::Ok
+    ));
+    for (task_id, expected_source, expected_text) in [
+        ("ses_nested", "native", "native ses_nested"),
+        ("ses_unowned", "stream", "stream ses_unowned"),
+        ("ses_other_project", "stream", "stream ses_other_project"),
+    ] {
+        let response = ask(
+            &mut client,
+            Request::SubagentHistory {
+                session_id: id.clone(),
+                task_id: task_id.into(),
+                after: None,
+                source: None,
+                provider: Some(TurnProvider::Cli),
+            },
+        )
+        .await;
+        assert!(
+            matches!(&response, Response::SubagentHistory { source, events, .. }
+                if source == expected_source && contains_text(events, expected_text)),
+            "{response:?}"
+        );
+    }
+}
