@@ -14,7 +14,7 @@ mod config;
 mod metadata;
 mod question;
 pub(crate) use metadata::commands;
-pub(super) use metadata::{discover, models, permission_modes};
+pub(super) use metadata::{discover, models, permission_modes, skill_info};
 
 const FRAME_LIMIT: usize = 4 * 1024 * 1024;
 const CHILD_CAPABILITY: &str = "opencode/child-session-updates";
@@ -976,10 +976,17 @@ impl OpenCode {
                 let terminal = matches!(status, Some("completed" | "failed"));
                 if !tool.shown && (terminal || status == Some("in_progress")) {
                     let name = tool_label(update, tool.name.as_deref());
+                    let mut input = update.get("rawInput").cloned().unwrap_or_else(|| json!({}));
+                    if name == "Skill"
+                        && input["skill"].is_null()
+                        && let Some(id) = input["id"].as_str()
+                    {
+                        input["skill"] = json!(id);
+                    }
                     actions.push(event(EventKind::Tool {
                         id: id.into(),
                         name,
-                        input: update.get("rawInput").cloned().unwrap_or_else(|| json!({})),
+                        input,
                     }));
                     tool.shown = true;
                 }
@@ -1167,6 +1174,9 @@ fn tool_label(update: &Value, fallback: Option<&str>) -> String {
     // ACP "execute" covers shell as well as other tools. Only map a
     // structured command (or OpenCode's explicit shell name) to Bash.
     let name = update["name"].as_str();
+    if name == Some("skill") || update["title"] == "skill" || fallback == Some("Skill") {
+        return "Skill".into();
+    }
     if matches!(name, Some("shell" | "bash"))
         || (update["kind"] == "execute" && update["rawInput"]["command"].is_string())
     {

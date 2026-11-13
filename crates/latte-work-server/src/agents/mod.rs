@@ -292,7 +292,7 @@ pub async fn skill_info(
     project: std::path::PathBuf,
     name: String,
 ) -> Result<Option<latte_work_protocol::SkillInfo>> {
-    if agent != "claude" {
+    if !matches!(agent, "claude" | "opencode") {
         bail!("此 Agent 尚不支持 Skill 信息");
     }
     static READS: std::sync::OnceLock<std::sync::Arc<tokio::sync::Semaphore>> =
@@ -302,11 +302,16 @@ pub async fn skill_info(
         .clone()
         .try_acquire_owned()
         .map_err(|_| anyhow::anyhow!("Skill 信息正在读取，请稍后重试"))?;
+    let find = if agent == "opencode" {
+        opencode::skill_info
+    } else {
+        claude_skills::find
+    };
     tokio::time::timeout(
         std::time::Duration::from_secs(3),
         tokio::task::spawn_blocking(move || {
             let _permit = permit;
-            claude_skills::find(&project, &name)
+            find(&project, &name)
         }),
     )
     .await

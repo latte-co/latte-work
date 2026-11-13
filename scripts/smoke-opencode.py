@@ -81,6 +81,12 @@ class Model(BaseHTTPRequestHandler):
                 })},
             }]}
             finish = "tool_calls"
+        elif "skill sentinel" in str(last["content"]):
+            delta = {"role": "assistant", "tool_calls": [{
+                "index": 0, "id": "call_skill", "type": "function",
+                "function": {"name": "skill", "arguments": '{"id":"smoke-latte-skill"}'},
+            }]}
+            finish = "tool_calls"
         elif "question sentinel" in str(last["content"]):
             delta = {"role": "assistant", "tool_calls": [{
                 "index": 0, "id": "call_question", "type": "function",
@@ -162,6 +168,9 @@ def run(binary, cli, llm, root):
         "permission": {"shell": "ask", "bash": "ask"},
         "commands": {"check": {"template": "Native slash smoke $ARGUMENTS", "description": "Smoke native command"}},
     }))
+    skill = project / ".opencode/skills/smoke-latte-skill"
+    skill.mkdir(parents=True)
+    (skill / "SKILL.md").write_text("---\nname: Smoke Latte Skill\ndescription: Smoke test instructions\n---\nSKILL_BODY_OK\n")
     env = {key: value for key, value in os.environ.items() if key in {"PATH", "USER", "LANG", "TMPDIR"}}
     env.update({
         "HOME": str(root),
@@ -339,6 +348,13 @@ def run(binary, cli, llm, root):
                 wait("completed")
                 assert "Native slash smoke example" in json.dumps(Model.calls[-1]["messages"][-1])
                 print(version + ": project slash command finished", flush=True)
+                send("skill", "skill sentinel", "bypass_permissions")
+                result = wait("completed")
+                assert any(e["event"].get("name") == "Skill"
+                           and e["event"]["input"]["skill"] == "smoke-latte-skill" for e in result["events"])
+                assert "SKILL_BODY_OK" in json.dumps(Model.calls[-1]["messages"][-1])
+                assert rpc("skill_info", session_id=sid, name="smoke-latte-skill")["skill"]["name"] == "Smoke Latte Skill"
+                print(version + ": project Skill execution and metadata", flush=True)
                 send("subagent", "launch subagent sentinel", "bypass_permissions")
                 deadline = time.monotonic() + 10
                 while time.monotonic() < deadline:

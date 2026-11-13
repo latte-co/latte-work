@@ -332,6 +332,42 @@ async fn opencode_project_command_waits_for_native_response_without_sending_a_pr
 }
 
 #[tokio::test]
+async fn opencode_skill_metadata_reads_project_install_without_starting_agent() {
+    let host = Host::start().await;
+    let folder = tempfile::tempdir().unwrap();
+    let mut client = host.client().await;
+    let project_id = project(&mut client, folder.path()).await;
+    let id = create(&mut client, &project_id).await;
+    let skill = folder
+        .path()
+        .join(".opencode/skills/fixture-opencode-skill");
+    std::fs::create_dir_all(&skill).unwrap();
+    std::fs::write(
+        skill.join("SKILL.md"),
+        "---\nname: Fixture Skill\ndescription: Project skill\n---\nprivate body\n",
+    )
+    .unwrap();
+    let request = |name: &str| Request::SkillInfo {
+        session_id: id.clone(),
+        name: name.into(),
+    };
+    assert!(matches!(
+        ask(&mut client, request("fixture-opencode-skill")).await,
+        Response::SkillInfo { skill: Some(info) }
+            if info.name == "Fixture Skill" && info.description == "Project skill"
+                && std::path::Path::new(&info.directory) == skill.canonicalize().unwrap()
+    ));
+    assert!(matches!(
+        ask(&mut client, request("../fixture-opencode-skill")).await,
+        Response::Error { .. }
+    ));
+    assert_eq!(
+        current(&mut client, &id).await.agent_session_open,
+        Some(false)
+    );
+}
+
+#[tokio::test]
 async fn opencode_child_transcript_is_separate_and_prevents_idle_close() {
     let host = Host::start().await;
     let folder = tempfile::tempdir().unwrap();

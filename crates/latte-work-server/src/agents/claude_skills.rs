@@ -72,7 +72,7 @@ pub(crate) fn field(document: &str, key: &str) -> String {
         .trim()
         .to_owned()
 }
-fn inspect(directory: &Path, requested: &str) -> Result<Option<SkillInfo>> {
+pub(super) fn inspect(directory: &Path, requested: &str) -> Result<Option<SkillInfo>> {
     let directory = match directory.canonicalize() {
         Ok(path) => path,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),

@@ -74,6 +74,57 @@ pub(in crate::agents) async fn permission_modes(binary: &str) -> Result<Vec<Agen
     ])
 }
 
+pub(in crate::agents) fn skill_info(
+    project: &std::path::Path,
+    name: &str,
+) -> Result<Option<latte_work_protocol::SkillInfo>> {
+    use std::path::PathBuf;
+    ensure!(crate::skills::component(name), "Skill 名称无效");
+    let home = crate::agent_environment::variable("HOME").map(PathBuf::from);
+    let config = crate::agent_environment::variable("OPENCODE_CONFIG_DIR")
+        .map(PathBuf::from)
+        .or_else(|| {
+            crate::agent_environment::variable("XDG_CONFIG_HOME")
+                .map(PathBuf::from)
+                .map(|path| path.join("opencode"))
+        })
+        .or_else(|| home.as_ref().map(|home| home.join(".config/opencode")));
+    let mut roots = Vec::new();
+    for parent in project.ancestors().take(32) {
+        roots.extend(
+            [
+                ".opencode/skill",
+                ".opencode/skills",
+                ".agents/skills",
+                ".claude/skills",
+            ]
+            .map(|relative| parent.join(relative)),
+        );
+        if parent.join(".git").exists() {
+            break;
+        }
+    }
+    if let Some(config) = config {
+        roots.extend([config.join("skill"), config.join("skills")]);
+    }
+    if let Some(home) = home {
+        roots.extend([home.join(".agents/skills"), home.join(".claude/skills")]);
+    }
+    let mut match_info: Option<latte_work_protocol::SkillInfo> = None;
+    for root in roots {
+        if let Some(found) = crate::agents::claude_skills::inspect(&root.join(name), name)? {
+            if match_info
+                .as_ref()
+                .is_some_and(|existing| existing.directory != found.directory)
+            {
+                bail!("此 Skill 有多个安装位置，无法确认当前目录");
+            }
+            match_info = Some(found);
+        }
+    }
+    Ok(match_info)
+}
+
 struct Probe {
     input: ChildStdin,
     output: FramedRead<ChildStdout, LinesCodec>,
