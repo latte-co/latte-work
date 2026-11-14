@@ -1151,7 +1151,11 @@ collected. Generation runs once per session lifetime: the request is recorded in
 persisted session state, so restarts, crash recovery and reopens never re-request
 it. Sessions whose first requestable turn never completed (legacy rows written
 before the marker existed, or a crash before the first completion) self-heal by
-generating on their next completed turn.
+generating on their next completed turn. Upgrade backfill inspects rows written
+before the marker: a saved title that already differs from the stored
+first-prompt prefix was earned by an earlier AI title and is marked requested,
+while rows still showing the prefix keep their chance. An imported or generated
+AI title likewise consumes the marker at write time.
 
 Claude uses `generate_session_title` with `persist: true`; its bounded description
 contains up to 2,048 request characters and 4,096 characters of recent visible
@@ -1180,7 +1184,9 @@ request using the selected Agent's existing service; no separate Provider is nee
 
 None of these paths adds a turn to the visible conversation or blocks subsequent
 input on the title response. Rejected, failed or invalid title requests retain
-the prefix and report a notice, and are never retried within the same session.
+the prefix and report a notice, and are never retried within the same session:
+a request that never reaches the Agent (write failure or crash) also consumes
+the chance, silently.
 Persisted manual names suppress generation without implicitly renaming the native
 session; the once marker now survives respawn instead of being inferred from a
 resumed process.

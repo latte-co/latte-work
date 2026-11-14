@@ -543,7 +543,10 @@ async fn relaunch(host: &mut Host) {
         .spawn()
         .unwrap();
     let deadline = Instant::now() + Duration::from_secs(10);
-    while !host.directory.path().join("control.sock").exists() {
+    // The socket file survives the killed server, so existence proves nothing;
+    // probe an actual connection the way the client's connect_socket does.
+    let socket = host.directory.path().join("control.sock");
+    while std::os::unix::net::UnixStream::connect(&socket).is_err() {
         assert!(Instant::now() < deadline, "server readiness timeout");
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
@@ -602,7 +605,11 @@ async fn legacy_sessions_without_the_flag_self_heal_exactly_once() {
         std::fs::read_to_string(&requests).unwrap().lines().count(),
         1
     );
-    // Downgrade the row to its pre-marker shape: prefix title, no flag.
+    // Downgrade the row to its pre-marker shape: the field absent entirely,
+    // exactly as the old build serialized it, with the prefix title. The
+    // prefix cohort also never earned a native ai-title record, so strip it
+    // from the transcript — otherwise the refresh import would (correctly)
+    // consume the chance before the followup can prove the self-heal.
     stop(&mut host).await;
     let connection =
         rusqlite::Connection::open(host.directory.path().join("state.sqlite")).unwrap();
@@ -612,8 +619,29 @@ async fn legacy_sessions_without_the_flag_self_heal_exactly_once() {
         })
         .unwrap();
     let mut value: serde_json::Value = serde_json::from_str(&data).unwrap();
-    value["title_requested"] = serde_json::json!(false);
+    value.as_object_mut().unwrap().remove("title_requested");
     value["title"] = serde_json::json!("native-auto-title");
+    let native_store = host.directory.path().join("claude-config/projects");
+    let mut transcript = None;
+    for entry in std::fs::read_dir(&native_store).unwrap() {
+        let candidate = entry
+            .unwrap()
+            .path()
+            .join("11111111-1111-4111-8111-111111111111.jsonl");
+        if candidate.exists() {
+            transcript = Some(candidate);
+        }
+    }
+    let transcript = transcript.expect("native transcript");
+    let kept: String = std::fs::read_to_string(&transcript)
+        .unwrap()
+        .lines()
+        // The fixture writes python-style JSON with spaces after colons, so
+        // match the quoted value token rather than a whole `"type":…` pair.
+        .filter(|line| !line.contains("\"ai-title\""))
+        .map(|line| format!("{line}\n"))
+        .collect();
+    std::fs::write(&transcript, kept).unwrap();
     let updated = serde_json::to_string(&value).unwrap();
     connection
         .execute(
@@ -653,5 +681,53 @@ async fn legacy_sessions_without_the_flag_self_heal_exactly_once() {
         std::fs::read_to_string(&requests).unwrap().lines().count(),
         2,
         "after healing, later turns stay inert"
+    );
+}
+
+#[tokio::test]
+async fn legacy_sessions_with_existing_ai_titles_are_never_regenerated() {
+    let mut host = Host::start().await;
+    let root = tempfile::tempdir().unwrap();
+    let mut client = host.client().await;
+    let id = create(&mut client, root.path(), "claude").await;
+    send(&mut client, &id, "first", "native-auto-title").await;
+    wait(&mut client, &id, Status::Completed).await;
+    title(&mut client, &id, "Friendly generated title").await;
+    let requests = root.path().join("fixture-title-requests");
+    assert_eq!(
+        std::fs::read_to_string(&requests).unwrap().lines().count(),
+        1
+    );
+    // Downgrade to the upgrade shape of a session that already earned an AI
+    // title under an older build: the marker absent entirely, while the saved
+    // title (and the native ai-title record) is no longer the prompt prefix.
+    stop(&mut host).await;
+    let connection =
+        rusqlite::Connection::open(host.directory.path().join("state.sqlite")).unwrap();
+    let data: String = connection
+        .query_row("SELECT data FROM sessions WHERE id=?1", [&id], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    let mut value: serde_json::Value = serde_json::from_str(&data).unwrap();
+    value.as_object_mut().unwrap().remove("title_requested");
+    let updated = serde_json::to_string(&value).unwrap();
+    connection
+        .execute(
+            "UPDATE sessions SET data=?2 WHERE id=?1",
+            rusqlite::params![id, updated],
+        )
+        .unwrap();
+    drop(connection);
+    relaunch(&mut host).await;
+    let mut reconnect = host.client().await;
+    title(&mut reconnect, &id, "Friendly generated title").await;
+    send(&mut reconnect, &id, "followup", "native-auto-title").await;
+    wait(&mut reconnect, &id, Status::Completed).await;
+    title(&mut reconnect, &id, "Friendly generated title").await;
+    assert_eq!(
+        std::fs::read_to_string(&requests).unwrap().lines().count(),
+        1,
+        "an existing AI title consumes the generation chance; the request must not re-fire"
     );
 }

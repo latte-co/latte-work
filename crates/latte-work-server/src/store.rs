@@ -240,7 +240,51 @@ impl Store {
         if let Err(error) = store.collect_snapshot_garbage() {
             eprintln!("snapshot cleanup skipped: {error}");
         }
+        if let Err(error) = store.backfill_title_requested() {
+            eprintln!("title-request backfill skipped: {error}");
+        }
         Ok(store)
+    }
+    /// One-time upgrade for rows written before `title_requested` existed. A
+    /// saved title that already differs from the stored first-prompt prefix was
+    /// produced by an earlier AI title, so its generation chance is consumed;
+    /// rows still showing the prompt prefix keep the chance and self-heal on
+    /// their next completed turn. The field is written explicitly so this scan
+    /// touches each row at most once.
+    fn backfill_title_requested(&self) -> Result<()> {
+        let rows = self
+            .db
+            .prepare(
+                "SELECT id,data FROM sessions WHERE json_extract(data,'$.title_requested') IS NULL",
+            )?
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        let mut first_prompt = self
+            .db
+            .prepare("SELECT text FROM requests WHERE session_id=?1 ORDER BY rowid LIMIT 1")?;
+        for (id, data) in rows {
+            let Ok(mut session) = serde_json::from_str::<Session>(&data) else {
+                continue;
+            };
+            session.title_requested = if session.native_id.is_some() {
+                match first_prompt
+                    .query_row(params![id], |row| row.get::<_, String>(0))
+                    .optional()?
+                    .map(|text| text.chars().take(48).collect::<String>())
+                {
+                    // A native session without a locally admitted turn owns
+                    // history we cannot attribute; never regenerate over it.
+                    None => true,
+                    Some(prefix) => session.title != prefix,
+                }
+            } else {
+                false
+            };
+            self.save(&session)?;
+        }
+        Ok(())
     }
     pub fn projects(&self) -> Result<Vec<Project>> {
         let hidden = self
@@ -533,6 +577,11 @@ impl Store {
         if session.title != title || (custom && !session.custom_title) {
             session.title = title;
             session.custom_title |= custom;
+            // An imported or generated AI title consumes the session's one
+            // generation chance, so a later turn never regenerates over it.
+            if !custom {
+                session.title_requested = true;
+            }
             self.save(&session)?;
         }
         Ok(session)
@@ -578,6 +627,9 @@ impl Store {
     /// never re-requests it for this session's lifetime.
     pub fn mark_title_requested(&self, id: &str) -> Result<Session> {
         let mut session = self.session(id)?;
+        if session.title_requested {
+            return Ok(session);
+        }
         session.title_requested = true;
         self.save(&session)?;
         Ok(session)
@@ -2339,6 +2391,83 @@ mod tests {
         let restored = store.session("legacy").unwrap();
         assert_eq!(restored.title, "首条输入前缀");
         assert!(!restored.title_requested);
+    }
+    #[test]
+    fn sync_native_title_ai_writes_consume_the_generation_marker() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(&dir.path().join("sync-titles.db")).unwrap();
+        let project = store.add_project(dir.path()).unwrap();
+        let mut session = store.create_session(project.id, "claude".into()).unwrap();
+        session.native_id = Some("current".into());
+        store.save(&session).unwrap();
+        assert!(!store.session(&session.id).unwrap().title_requested);
+        // A generated or imported AI title consumes the one generation chance.
+        let imported = store
+            .sync_native_title(&session.id, "AI 标题", false)
+            .unwrap();
+        assert_eq!(imported.title, "AI 标题");
+        assert!(imported.title_requested);
+        // A manual native name never consumes it for a fresh session.
+        let other = store
+            .create_session(session.project_id, "claude".into())
+            .unwrap();
+        let manual = store.sync_native_title(&other.id, "Manual", true).unwrap();
+        assert!(manual.custom_title);
+        assert!(!manual.title_requested);
+    }
+    #[test]
+    fn upgrade_backfill_marks_consumed_titles_and_keeps_prefix_chances() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("backfill.db");
+        {
+            let store = Store::open(&path).unwrap();
+            let project = store.add_project(dir.path()).unwrap();
+            let project_id = project.id.clone();
+            let legacy = |store: &Store, id: &str, native: Option<&str>, title: &str| {
+                let value = serde_json::json!({
+                    "id": id, "project_id": project_id, "title": title,
+                    "agent": "claude", "native_id": native,
+                    "status": "ready", "created_at": 1.0
+                });
+                store
+                    .db
+                    .execute(
+                        "INSERT INTO sessions(id,project_id,data) VALUES (?1,?2,?3)",
+                        params![id, project_id, serde_json::to_string(&value).unwrap()],
+                    )
+                    .unwrap();
+            };
+            legacy(
+                &store,
+                "prefix-native",
+                Some("n1"),
+                "修复消息发送后的输入框",
+            );
+            legacy(&store, "ai-native", Some("n2"), "AI 生成的标题");
+            legacy(&store, "orphan-native", Some("n3"), "来源不明的标题");
+            legacy(&store, "non-native", None, "修复消息发送后的输入框");
+            for (request_id, session_id) in [("r1", "prefix-native"), ("r2", "ai-native")] {
+                store
+                    .db
+                    .execute(
+                        "INSERT INTO requests(id,session_id,text) VALUES (?1,?2,?3)",
+                        params![request_id, session_id, "修复消息发送后的输入框"],
+                    )
+                    .unwrap();
+            }
+        }
+        let store = Store::open(&path).unwrap();
+        let flag = |store: &Store, id: &str| store.session(id).unwrap().title_requested;
+        assert!(
+            !flag(&store, "prefix-native"),
+            "prefix titles keep the chance"
+        );
+        assert!(flag(&store, "ai-native"), "earned AI titles are consumed");
+        assert!(
+            flag(&store, "orphan-native"),
+            "native history without a local turn is never regenerated over"
+        );
+        assert!(!flag(&store, "non-native"));
     }
     #[test]
     fn redacted_native_titles_survive_reimport_and_restart_without_raw_credentials() {
