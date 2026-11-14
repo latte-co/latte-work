@@ -120,6 +120,7 @@ impl Store {
         CREATE TABLE IF NOT EXISTS projects(id TEXT PRIMARY KEY, name TEXT NOT NULL, path TEXT NOT NULL UNIQUE);
         CREATE TABLE IF NOT EXISTS hidden_projects(project_id TEXT PRIMARY KEY REFERENCES projects(id));
         CREATE TABLE IF NOT EXISTS sessions(id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id), data TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS unconfirmed_agent_closes(session_id TEXT PRIMARY KEY REFERENCES sessions(id), reason TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS side_chats(parent_id TEXT NOT NULL REFERENCES sessions(id), session_id TEXT PRIMARY KEY REFERENCES sessions(id), parent_native_id TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS native_title_secrets(session_id TEXT NOT NULL REFERENCES sessions(id), native_id TEXT NOT NULL, secret_hash BLOB NOT NULL, secret_bytes INTEGER NOT NULL, PRIMARY KEY(session_id,native_id,secret_hash));
         CREATE TABLE IF NOT EXISTS native_session_contexts(session_id TEXT NOT NULL REFERENCES sessions(id), native_id TEXT NOT NULL, fingerprint TEXT, PRIMARY KEY(session_id,native_id));
@@ -1403,6 +1404,34 @@ impl Store {
         )?;
         Ok(())
     }
+    pub fn check_agent_close(&self, id: &str) -> Result<()> {
+        let reason: Option<String> = self
+            .db
+            .query_row(
+                "SELECT reason FROM unconfirmed_agent_closes WHERE session_id=?1",
+                [id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if let Some(reason) = reason {
+            bail!(reason);
+        }
+        Ok(())
+    }
+    pub fn record_unconfirmed_agent_close(&self, id: &str, reason: &str) -> Result<()> {
+        self.db.execute(
+            "INSERT OR IGNORE INTO unconfirmed_agent_closes(session_id,reason) VALUES (?1,?2)",
+            params![id, reason],
+        )?;
+        Ok(())
+    }
+    pub fn clear_unconfirmed_agent_close(&self, id: &str) -> Result<()> {
+        self.db.execute(
+            "DELETE FROM unconfirmed_agent_closes WHERE session_id=?1",
+            [id],
+        )?;
+        Ok(())
+    }
     pub fn mark_side_write_not_started(&self, request_id: &str) -> Result<()> {
         self.db.execute(
             "UPDATE requests SET side_write_start=NULL,side_write_end=0
@@ -2267,6 +2296,30 @@ mod tests {
                 interrupted.then_some((side.id, true))
             );
         }
+    }
+
+    #[test]
+    fn unconfirmed_close_survives_reopening_the_store() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("state.sqlite");
+        let store = Store::open(&path).unwrap();
+        let project = store.add_project(directory.path()).unwrap();
+        let session = store.create_session(project.id, "codex".into()).unwrap();
+        assert!(store.check_agent_close(&session.id).is_ok());
+        store
+            .record_unconfirmed_agent_close(&session.id, "background state unknown")
+            .unwrap();
+        drop(store);
+        let store = Store::open(&path).unwrap();
+        assert_eq!(
+            store
+                .check_agent_close(&session.id)
+                .unwrap_err()
+                .to_string(),
+            "background state unknown"
+        );
+        store.clear_unconfirmed_agent_close(&session.id).unwrap();
+        assert!(store.check_agent_close(&session.id).is_ok());
     }
 
     #[test]

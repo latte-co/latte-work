@@ -32,6 +32,8 @@ use tokio_util::codec::{FramedRead, LinesCodec};
 pub type Database = Arc<Mutex<Store>>;
 pub type Runs = Arc<Mutex<HashMap<String, Run>>>;
 const TURN_LIMIT: Duration = Duration::from_secs(24 * 3600);
+const CLOSE_PENDING: &str = "原生会话的关闭状态待确认，请核对主机上的 Agent 和后台任务。";
+const SIDE_CLOSE_PENDING: &str = "无法确认侧边聊天的后台写入已结束。请核对主机上的后台任务和外部工具，并按工作区差异手动调整文件。";
 const RECONFIGURE_BLOCKED: &str = "当前会话仍有后台任务或待确认状态，无法更换模型、Provider、权限或思考强度；请沿用当前配置发送，消息未发送";
 
 #[derive(Default)]
@@ -509,6 +511,7 @@ fn control_for(
     path: String,
 ) -> Result<mpsc::Sender<Control>> {
     if db(&database, |s| {
+        s.check_agent_close(&session.id)?;
         if let Some((parent, _)) = s.side_parent(&session.id)?
             && s.session(&parent)?.archived
         {
@@ -594,7 +597,10 @@ pub async fn archive(
 }
 
 pub async fn close(database: &Database, runs: &Runs, id: &str, only_if_idle: bool) -> Result<()> {
-    db(database, |s| s.session(id))?;
+    db(database, |s| {
+        s.session(id)?;
+        s.check_agent_close(id)
+    })?;
     let control = runs
         .lock()
         .map_err(|_| anyhow::anyhow!("执行状态锁异常"))?
@@ -613,7 +619,9 @@ pub async fn close(database: &Database, runs: &Runs, id: &str, only_if_idle: boo
             .context("关闭 Agent 会话超时")??
             .map_err(anyhow::Error::msg)?;
     }
-    Ok(())
+    // A concurrent close may have recorded uncertainty and removed the actor
+    // after the first lookup. A missing actor cannot clear that evidence.
+    db(database, |s| s.check_agent_close(id))
 }
 async fn write(input: &mut (impl AsyncWrite + Unpin), bytes: &[u8]) -> Result<()> {
     if bytes.len() > latte_work_protocol::MAX_FRAME {
@@ -1288,16 +1296,7 @@ impl Process {
             if !reaped {
                 reaped = self.group.child.wait().await.is_ok();
             }
-            if !reaped || self.side_writes_since.is_none() {
-                return reaped;
-            }
-            loop {
-                match killpg(group, None) {
-                    Err(Errno::ESRCH) => return true,
-                    Err(_) => return false,
-                    Ok(()) => tokio::time::sleep(Duration::from_millis(20)).await,
-                }
-            }
+            reaped
         })
         .await
         .unwrap_or(false)
@@ -1839,12 +1838,25 @@ async fn actor(
                     let background_pending = process
                         .as_ref()
                         .is_some_and(|p| p.turn_active && p.background_at_start);
-                    let (side_writes_since, close_unconfirmed) = if let Some(p) = process.as_mut() {
-                        let confirmed = p.close().await;
-                        (p.side_writes_since.filter(|_| confirmed), !confirmed)
+                    let unconfirmed = if let Some(p) = process.as_ref()
+                        && p.side_writes_since.is_some()
+                    {
+                        // Record uncertainty before signalling. Reaping the CLI
+                        // cannot settle detached work or external tool calls.
+                        Some(SIDE_CLOSE_PENDING)
                     } else {
-                        (None, false)
+                        process.as_ref().map(|_| CLOSE_PENDING)
                     };
+                    if let Some(reason) = unconfirmed
+                        && let Err(error) = db(&database, |s| s.record_unconfirmed_agent_close(&session.id, reason))
+                    {
+                        if let Some(reply) = reply { let _ = reply.send(Err(error.to_string())); }
+                        continue;
+                    }
+                    let close_failure = if let Some(p) = process.as_mut() {
+                        let reaped = p.close().await;
+                        unconfirmed.filter(|_| !reaped || p.side_writes_since.is_some())
+                    } else { None };
                     process = None;
                     if let Err(error) =
                         finish_turn(&database, &session.id, &path, true, background_pending).await
@@ -1853,24 +1865,24 @@ async fn actor(
                     }
                     // Preserve completed history when merely closing an idle runtime.
                     let result = db(&database, |s| {
-                        let (status, subagent_status, message) = if close_unconfirmed {
+                        let (status, subagent_status, message) = if let Some(reason) = close_failure {
                             (Status::Unknown, latte_work_protocol::SubagentStatus::Unknown,
-                             "无法确认原生进程组已停止。请核对侧边聊天记录与工作区差异。")
+                             reason)
                         } else {
                             (Status::Stopped, latte_work_protocol::SubagentStatus::Stopped,
                              "已停止；已执行的文件改动不会撤销。")
                         };
-                        if let Some(since) = side_writes_since {
-                            s.finish_side_writes(&session.id, since)?;
-                        }
                         s.end_subagents(&session.id, subagent_status)?;
                         if s.session(&session.id)?.status.active() {
                             s.state(&session.id, status, Some(message.into()))?;
-                        } else if close_unconfirmed {
+                        } else if close_failure.is_some() {
                             s.event(&session.id, EventKind::Notice { text: message.into() })?;
                         }
-                        if close_unconfirmed {
+                        if close_failure.is_some() {
                             bail!(message);
+                        }
+                        if unconfirmed.is_some() {
+                            s.clear_unconfirmed_agent_close(&session.id)?;
                         }
                         Ok(())
                     });

@@ -3,7 +3,6 @@
 import json
 import os
 import pathlib
-import signal
 import subprocess
 import sys
 import threading
@@ -214,15 +213,23 @@ for line in sys.stdin:
                                                'processId': '91', 'aggregatedOutput': 'bg-done'}})
             text('BACKGROUND_RELEASED')
             complete()
-        elif prompt in ('approval', 'approval-then-main-write', 'side-write-until-closed', 'question'):
-            if prompt == 'side-write-until-closed':
-                worker = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'])
-                def stop_side_writer(*_):
-                    worker.wait(timeout=1)
-                    sys.exit(0)
-                signal.signal(signal.SIGTERM, stop_side_writer)
+        elif prompt in ('approval', 'approval-then-main-write', 'side-detached-writer', 'question'):
+            if prompt == 'side-detached-writer':
+                assert thread.startswith('side-thread-') and sandbox == 'dangerFullAccess'
+                worker = subprocess.Popen([sys.executable, '-c', """
+import pathlib
+import time
+
+release = pathlib.Path('release-detached-writer')
+deadline = time.monotonic() + 20
+while not release.exists() and time.monotonic() < deadline:
+    time.sleep(0.02)
+if release.exists():
+    pathlib.Path('shared.txt').write_text('side edit\\n')
+    pathlib.Path('detached-write-done').touch()
+"""], start_new_session=True, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL)
                 pathlib.Path('side-writer-pids').write_text(f'{os.getpid()} {worker.pid}')
-                pathlib.Path('shared.txt').write_text('side edit\n')
                 notify('item/started', {'item': {'id': 'side-worker', 'type': 'commandExecution',
                                                  'command': 'background worker', 'cwd': os.getcwd(),
                                                  'status': 'inProgress', 'processId': str(worker.pid)}})

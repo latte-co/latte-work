@@ -1727,12 +1727,13 @@ overlap. The host rejects main-turn undo when write-capable side work on the
 same host overlaps the main turn. Native permissions and approvals can allow
 writes outside the side project's root. The host records possible writes just
 before launching the native process or dispatching to a live process, and records
-when native background work finishes. Closing a side chat ends its write interval
-when the native process has been reaped and its process group is gone. Launch
-validation failures and Unix `ENOENT` launch errors leave no write interval.
-An unconfirmed launch or execution end can still block undo after restart. The
-undo error identifies the side chat, so users can check its history and use the
-main turn's saved diff to restore individual changes manually.
+when the Agent confirms completion and its tracked background work is idle.
+Forced close of a still-writable session attempts to stop the local process group.
+Detached processes and external tools can outlive it, so the write interval and
+close remain unconfirmed. Retrying close or reconnecting preserves that result.
+Launch validation failures and Unix `ENOENT` launch errors leave no write
+interval. The undo error identifies the side chat, so users can check its history
+and use the main turn's saved diff to restore individual changes manually.
 `SideChatHistory` pages through a parent's children newest first, with `next` as
 the cursor for the next request. The desktop routes the same protocol through
 local and SSH transports.

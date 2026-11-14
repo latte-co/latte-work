@@ -624,7 +624,7 @@ async fn undo_ignores_prelaunch_rejection_and_fences_unconfirmed_native_exit() {
 }
 
 #[tokio::test]
-async fn closing_a_writable_side_chat_preserves_its_edits_and_releases_future_undo() {
+async fn closing_a_side_chat_with_detached_writes_stays_unconfirmed_and_fences_undo() {
     let host = Host::start().await;
     let root = tempfile::tempdir().unwrap();
     let file = root.path().join("shared.txt");
@@ -632,33 +632,41 @@ async fn closing_a_writable_side_chat_preserves_its_edits_and_releases_future_un
     let mut client = host.client().await;
     let project = terminal_project(&mut client, root.path()).await;
     let main = create_session(&mut client, project, "codex").await;
-    send(&mut client, &main.id, "main-write", "approval").await;
-    let pending = permission(&wait(&mut client, &main.id, Status::Waiting).await);
+    send(&mut client, &main.id, "main-init", "hello").await;
+    wait(&mut client, &main.id, Status::Completed).await;
     let side = open_side(&mut client, &main).await;
     send_writable_side(
         &mut client,
         &side,
-        "side-write-until-closed",
-        "default",
+        "side-detached-writer",
+        "bypass_permissions",
         TurnProvider::Cli,
     )
     .await;
     wait(&mut client, &side.id, Status::Waiting).await;
     let pids = std::fs::read_to_string(root.path().join("side-writer-pids")).unwrap();
-    assert_eq!(std::fs::read_to_string(&file).unwrap(), "side edit\n");
-    let close = ask(
-        &mut client,
-        Request::CloseAgentSession {
-            session_id: side.id.clone(),
-            only_if_idle: Some(false),
-        },
-    )
-    .await;
-    assert!(matches!(close, Response::Ok), "{close:?}");
-    wait(&mut client, &side.id, Status::Stopped).await;
-    for pid in pids.split_whitespace() {
-        assert_gone(pid.parse().unwrap()).await;
+    let mut pids = pids.split_whitespace().map(|pid| pid.parse().unwrap());
+    let cli = pids.next().unwrap();
+    let worker = pids.next().unwrap();
+    let close = || Request::CloseAgentSession {
+        session_id: side.id.clone(),
+        only_if_idle: Some(false),
+    };
+    let first_close = ask(&mut client, close()).await;
+    assert_gone(cli).await;
+    assert!(kill(Pid::from_raw(worker), None).is_ok());
+    let mut reconnect = host.client().await;
+    let second_close = ask(&mut reconnect, close()).await;
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), "before\n");
+    send(&mut client, &main.id, "main-write", "approval").await;
+    let pending = permission(&wait(&mut client, &main.id, Status::Waiting).await);
+    std::fs::write(root.path().join("release-detached-writer"), "").unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !root.path().join("detached-write-done").exists() {
+        assert!(Instant::now() < deadline, "detached writer did not finish");
+        tokio::time::sleep(Duration::from_millis(20)).await;
     }
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), "side edit\n");
     assert!(matches!(
         ask(
             &mut client,
@@ -671,29 +679,32 @@ async fn closing_a_writable_side_chat_preserves_its_edits_and_releases_future_un
         .await,
         Response::Ok
     ));
-    wait(&mut client, &main.id, Status::Completed).await;
-    let undo = |request_id: &str| Request::UndoTurnChanges {
-        session_id: main.id.clone(),
-        request_id: request_id.into(),
-    };
-    let response = ask(&mut client, undo("main-write")).await;
+    let events = wait(&mut client, &main.id, Status::Completed).await;
+    assert!(events.iter().any(|event| matches!(&event.event,
+        EventKind::TurnChanges { changes } if changes.summary.entries.iter().any(|entry| entry.path == "shared.txt")
+    )));
+    let response = ask(
+        &mut client,
+        Request::UndoTurnChanges {
+            session_id: main.id,
+            request_id: "main-write".into(),
+        },
+    )
+    .await;
     assert!(
         matches!(&response, Response::Error { message, .. }
-        if message.contains(&side.id) && message.contains("与本轮同时执行")),
+        if message.contains(&side.id) && message.contains("写入结束时间待确认")),
         "{response:?}"
     );
     assert_eq!(std::fs::read_to_string(&file).unwrap(), "side edit\n");
-
-    send(&mut client, &main.id, "main-later", "main-foreground-write").await;
-    wait(&mut client, &main.id, Status::Completed).await;
-    assert_eq!(std::fs::read_to_string(&file).unwrap(), "main edit\n");
-    let response = ask(&mut client, undo("main-later")).await;
-    assert!(
-        matches!(&response, Response::TurnChanges { changes }
-        if changes.undo == TurnUndoStatus::Reverted),
-        "{response:?}"
-    );
-    assert_eq!(std::fs::read_to_string(&file).unwrap(), "side edit\n");
+    for response in [first_close, second_close] {
+        assert!(
+            matches!(&response, Response::Error { message, .. }
+            if message.contains("无法确认") && message.contains("后台")),
+            "{response:?}"
+        );
+    }
+    wait(&mut client, &side.id, Status::Unknown).await;
 }
 
 #[tokio::test]
