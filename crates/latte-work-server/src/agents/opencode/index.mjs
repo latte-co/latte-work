@@ -1,35 +1,30 @@
 import { createConnection } from "node:net";
-
-// OpenCode 2.0 exposes the configured rules, but not permission.assert.
-// Match the native wildcard syntax and last-match precedence for question:*.
-function matches(input, pattern) {
-  let expression = pattern
-    .replaceAll("\\", "/")
-    .replace(/[.+^${}()|[\]\\]/g, "\\$&")
-    .replace(/\*/g, ".*")
-    .replace(/\?/g, ".");
-  if (expression.endsWith(" .*"))
-    expression = expression.slice(0, -3) + "( .*)?";
-  return new RegExp("^" + expression + "$", "s").test(input);
-}
+import { readFile } from "node:fs/promises";
 
 // Loaded by the same private OpenCode server that owns the ACP session.
 // Only forward lifecycle evidence that ACP does not carry.
 export default {
   id: "latte-work.session",
   async setup(ctx) {
+    const legacy = Number(ctx.app.version.split(".")[1]) < 3;
+    if (legacy && ctx.options.instructions) {
+      const text = await readFile(ctx.options.instructions, "utf8");
+      await ctx.session.hook("context", (event) => {
+        event.system.push({ type: "text", text });
+      });
+    }
     if (ctx.options.permissionMode) {
       await ctx.permission.hook("evaluate", (event) => {
         // A preceding native or managed denial is authoritative.
-        if (event.effect !== "deny")
-          event.effect =
-            ctx.options.permissionMode === "default" ? "ask" : "allow";
+        if (event.effect === "deny" || (legacy && event.action === "question"))
+          return;
+        event.effect =
+          ctx.options.permissionMode === "default" ? "ask" : "allow";
       });
     }
     const socket = createConnection(ctx.options.socket);
     const abort = new AbortController();
     const questions = new Map();
-    const legacy = Number(ctx.app.version.split(".")[1]) < 3;
     const bridgeQuestions = new Set();
     const cleanup = () => {
       abort.abort();
@@ -53,6 +48,7 @@ export default {
       "session.tool.success",
       "session.tool.failed",
       "permission.asked",
+      "permission.replied",
       "shell.exited",
     ]);
     function send(message) {
@@ -70,27 +66,12 @@ export default {
     socket.once("connect", () => {
       const stream = ctx.event.subscribe({ signal: abort.signal });
       void (async () => {
-        const synthetic = new Set();
         send({ type: "ready" });
         for await (const { type, data } of stream) {
           if (type === "session.inbox.enqueued") {
             const { sessionID, inboxID, item } = data;
-            const source =
-              item.type === "synthetic" && item.payload.metadata?.source;
-            if (source === "shell" || source === "subagent")
-              send({ type, data: { sessionID, inboxID, background: true } });
-            else if (item.type === "synthetic") {
-              if (synthetic.size >= 2048)
-                throw new Error("Too many pending synthetic inputs");
-              synthetic.add(inboxID);
-            }
-          } else if (
-            (type === "session.inbox.delivered" ||
-              type === "session.inbox.cancelled") &&
-            synthetic.delete(data.inboxID)
-          ) {
-            // Synthetic platform context does not own an execution.
-            continue;
+            if (item.type === "synthetic")
+              send({ type, data: { sessionID, inboxID, synthetic: true } });
           } else if (type === "session.created") {
             const { sessionID, parentID, agent, title } = data;
             if (parentID)
@@ -186,15 +167,6 @@ export default {
           }
           bridgeQuestions.add(sessionID);
           try {
-            if (request.instructions) {
-              await ctx.session.synthetic({
-                sessionID,
-                text: request.instructions,
-                description: "Latte Work platform skill",
-                delivery: "steer",
-                resume: false,
-              });
-            }
             await ctx.session.command({
               sessionID,
               name: request.name,
@@ -267,17 +239,39 @@ export default {
               source: { type: "tool", messageID, id: toolCallId },
             });
           } else {
-            const selected = await ctx.agent.get({ agentID: agent });
-            const session = await ctx.session.get({ sessionID });
-            const rule = [
-              ...(selected.data?.permissions ?? []),
-              ...(session.permissions ?? []),
-            ].findLast(
-              (rule) =>
-                matches("question", rule.action) && matches("*", rule.resource),
-            );
-            if (rule?.effect === "deny") {
-              throw new Error("Permission denied: question");
+            // 2.0 has no public permission assertion API. Run the original
+            // tool through the native rules and hooks, stopping just before
+            // it would open a form that its ACP peer cannot answer.
+            let evaluated;
+            const registration = await ctx.permission.hook("evaluate", (event) => {
+              if (
+                event.action !== "question" ||
+                event.sessionID !== sessionID ||
+                event.source?.type !== "tool" ||
+                event.source.messageID !== messageID ||
+                event.source.id !== toolCallId
+              )
+                return;
+              evaluated = event.effect;
+              event.effect = "deny";
+            });
+            try {
+              try {
+                return await native({ questions: prompts }, context);
+              } catch (error) {
+                if (
+                  (evaluated !== "allow" && evaluated !== "ask") ||
+                  !String(error).includes("Permission denied: question") ||
+                  context.signal?.aborted
+                )
+                  throw error;
+              }
+              if (evaluated === "ask")
+                throw new Error(
+                  "OpenCode 2.0 cannot bridge a question that requires a separate approval",
+                );
+            } finally {
+              await registration.dispose();
             }
           }
           const id = crypto.randomUUID();

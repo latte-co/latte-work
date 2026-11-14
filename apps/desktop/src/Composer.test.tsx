@@ -643,6 +643,19 @@ it("sends an OpenCode prompt starting with an absolute path without command disc
   expect(mocks.request).not.toHaveBeenCalled();
 });
 
+it("submits a single-component OpenCode path with a project reference", async () => {
+  render(<Harness agent="opencode" />);
+  type("@READ");
+  fireEvent.click(await screen.findByRole("option", { name: /README.md/ }));
+  type("/tmp 请检查这里");
+  fireEvent.click(screen.getByText("发送"));
+  await waitFor(() =>
+    expect(mocks.send).toHaveBeenCalledWith(
+      expect.stringMatching(/^\/tmp 请检查这里[\s\S]*README\.md/),
+    ),
+  );
+});
+
 it("does not submit an adapter-specific navigation command discovered from pasted text", async () => {
   mocks.request.mockResolvedValue({
     kind: "agent_commands",

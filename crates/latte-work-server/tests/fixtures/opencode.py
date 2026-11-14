@@ -69,6 +69,7 @@ def sideband():
                     if request["text"] == "child permission":
                         command_id = request["id"]
                         root = native
+                        rejected = False
                         native_event("session.created", sessionID=root + "_child", parentID=root)
                         native_event("permission.asked", sessionID=root + "_child", id="native-ask",
                                      action="shell", source={"id": "shell-call"}, resources=["printf fixture"])
@@ -78,6 +79,12 @@ def sideband():
                 elif action == "permission":
                     assert native == root + "_child" and request["requestID"] == "native-ask"
                     assert request["allow"]
+                    if not rejected:
+                        rejected = True
+                        wire.write(json.dumps({**reply, "error": True}) + "\n")
+                        wire.flush()
+                        continue
+                    native_event("permission.replied", sessionID=native, requestID="native-ask", reply="once")
                     native_event("session.tool.input.started", sessionID=native, id="skill-call", name="skill")
                     native_event("session.tool.called", sessionID=native, id="skill-call", input={"id": "fixture-skill"})
                     native_event("session.tool.success", sessionID=native, id="skill-call", content=[])
@@ -89,7 +96,8 @@ def sideband():
                     assert parent_finished.is_set()
                     native_event("session.text.delta", sessionID=native + "_child", delta="child answered")
                     native_event("session.execution.succeeded", sessionID=native + "_child")
-                    native_event("session.inbox.enqueued", sessionID=native, inboxID="msg_answered", background=True)
+                    native_event("session.inbox.enqueued", sessionID=native, inboxID="msg_answered", synthetic=True)
+                    native_event("session.execution.started", sessionID=native)
                     native_event("session.inbox.delivered", sessionID=native, inboxID="msg_answered")
                     native_event("session.execution.succeeded", sessionID=native)
                     continue
@@ -229,7 +237,7 @@ for line in sys.stdin:
             native_event("session.inbox.delivered", sessionID=session, inboxID="msg_acp")
             native_event("session.text.delta", sessionID=session, delta="duplicate native reply")
             native_event("session.execution.succeeded", sessionID=session)
-            native_event("session.inbox.enqueued", sessionID=session, inboxID="msg_bg", background=True)
+            native_event("session.inbox.enqueued", sessionID=session, inboxID="msg_bg", synthetic=True)
             native_event("session.execution.started", sessionID=session)
             native_event("session.inbox.delivered", sessionID=session, inboxID="msg_bg")
             native_event("session.text.delta", sessionID=session, delta="real follow-up")

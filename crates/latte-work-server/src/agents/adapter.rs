@@ -41,7 +41,7 @@ pub enum Input<'a> {
     /// One complete line without its delimiter. Only the adapter interprets its payload.
     Message(&'a str),
     Sideband(&'a str),
-    /// Delivered only after Runtime validates and consumes a pending public approval ID.
+    /// Delivered only after Runtime validates a pending public approval ID.
     Approval {
         id: &'a str,
         input: Value,
@@ -107,6 +107,11 @@ pub enum Action {
         tool: String,
         input: Value,
     },
+    /// Authoritative native decision, or failure to submit a requested decision.
+    ApprovalReply {
+        id: String,
+        result: Result<bool, String>,
+    },
     Question {
         id: String,
         tool_use_id: Option<String>,
@@ -132,6 +137,9 @@ pub trait AgentAdapter: Send {
     fn has_background_work(&self) -> bool;
     /// A pending interaction can belong to a child that outlives the main turn.
     fn is_child_interaction(&self, _id: &str) -> bool {
+        false
+    }
+    fn awaits_approval_reply(&self, _id: &str) -> bool {
         false
     }
     /// Only children observed by this process share its credential redaction context.

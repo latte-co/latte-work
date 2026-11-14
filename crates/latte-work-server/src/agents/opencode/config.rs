@@ -34,26 +34,6 @@ pub(super) fn configure(
     let root = CstRootNode::parse(inherited, &ParseOptions::default())
         .map_err(|_| anyhow::anyhow!("无法合并 OpenCode 内联配置"))?;
     let overlay = root.object_value().context("OpenCode 内联配置必须是对象")?;
-    if let Some(sideband) = sideband {
-        ensure!(
-            matches!(
-                config.permission_mode.as_deref(),
-                None | Some("default" | "bypass_permissions")
-            ),
-            "无效的 OpenCode 权限模式"
-        );
-        let directory = sideband._directory.path();
-        overlay.array_value_or_create("plugins")
-            .context("OpenCode plugins 必须是数组")?
-            .append(jsonc_parser::json!({
-                "package": (directory.to_str().context("OpenCode 插件路径不是 UTF-8")?),
-                "options": {
-                    "socket": (directory.join("events").to_str().context("OpenCode Socket 路径不是 UTF-8")?),
-                    "permissionMode": (config.permission_mode.as_deref().unwrap_or_default())
-                }
-            }));
-    }
-
     let file = if instructions.is_empty() {
         None
     } else {
@@ -73,6 +53,30 @@ pub(super) fn configure(
             );
         Some(file)
     };
+    if let Some(sideband) = sideband {
+        ensure!(
+            matches!(
+                config.permission_mode.as_deref(),
+                None | Some("default" | "bypass_permissions")
+            ),
+            "无效的 OpenCode 权限模式"
+        );
+        let directory = sideband._directory.path();
+        let instructions = file
+            .as_ref()
+            .map(|file| file.path().to_str().context("OpenCode 指令路径不是 UTF-8"))
+            .transpose()?;
+        overlay.array_value_or_create("plugins")
+            .context("OpenCode plugins 必须是数组")?
+            .append(jsonc_parser::json!({
+                "package": (directory.to_str().context("OpenCode 插件路径不是 UTF-8")?),
+                "options": {
+                    "socket": (directory.join("events").to_str().context("OpenCode Socket 路径不是 UTF-8")?),
+                    "permissionMode": (config.permission_mode.as_deref().unwrap_or_default()),
+                    "instructions": (instructions.unwrap_or_default())
+                }
+            }));
+    }
 
     let mut model = config.model.clone();
     if let Some(provider) = &config.provider {

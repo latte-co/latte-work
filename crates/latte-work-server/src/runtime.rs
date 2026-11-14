@@ -770,6 +770,7 @@ impl TurnState {
                     })?;
                 }
                 Action::TitleRenamed(_) => bail!("未处理的原生标题确认"),
+                Action::ApprovalReply { .. } => bail!("未处理的原生审批确认"),
                 Action::GenerateTitle { .. } => bail!("未处理的标题生成请求"),
                 Action::SourceUsed { id, name } => {
                     db(database, |s| s.observe_tool(session_id, &id, &name))?
@@ -1005,6 +1006,7 @@ struct Process {
     binary: String,
     title_job: Option<tokio::task::JoinHandle<()>>,
     rename_reply: Option<oneshot::Sender<Result<String, String>>>,
+    approval_replies: HashMap<String, PendingApprovalReply>,
     group: Group,
     input: tokio::process::ChildStdin,
     output: Output,
@@ -1028,6 +1030,11 @@ struct Process {
     stop_reply: Option<oneshot::Sender<Result<(), String>>>,
     init_deadline: tokio::time::Instant,
     turn_deadline: tokio::time::Instant,
+}
+struct PendingApprovalReply {
+    reply: Option<oneshot::Sender<Result<(), String>>>,
+    deadline: tokio::time::Instant,
+    allow: bool,
 }
 struct AgentSideband {
     listener: agents::Sideband,
@@ -1131,6 +1138,7 @@ impl Process {
             binary: binary.into(),
             title_job: None,
             rename_reply: None,
+            approval_replies: HashMap::new(),
             group,
             input,
             output,
@@ -1249,6 +1257,35 @@ impl Process {
                 if let Some(reply) = self.rename_reply.take() {
                     let _ = reply.send(result);
                 }
+            } else if let Action::ApprovalReply { id: native, result } = action {
+                let pending_reply = self.approval_replies.remove(&native);
+                match result {
+                    Ok(allow) => {
+                        if let Some(request_id) = self.state.pending.iter().find_map(
+                            |(request_id, (pending, _, questions))| {
+                                (pending == &native && questions.is_none())
+                                    .then(|| request_id.clone())
+                            },
+                        ) {
+                            self.record_approval(database, id, request_id, allow)?;
+                        }
+                        if let Some(pending) = pending_reply
+                            && let Some(reply) = pending.reply
+                        {
+                            let result = if pending.allow == allow {
+                                Ok(())
+                            } else {
+                                Err("OpenCode 已按其他决定处理此审批".into())
+                            };
+                            let _ = reply.send(result);
+                        }
+                    }
+                    Err(error) => {
+                        if let Some(reply) = pending_reply.and_then(|p| p.reply) {
+                            let _ = reply.send(Err(error));
+                        }
+                    }
+                }
             } else {
                 if matches!(&action, Action::NativeName(_)) {
                     self.cancel_title().await;
@@ -1271,6 +1308,7 @@ impl Process {
             || (self.stopping && actions.iter().any(|a| matches!(a, Action::Finished { .. })))
         {
             // A CLI may emit the interrupted result before its control acknowledgement.
+            self.clear_approval_replies();
             self.state.pending.clear();
         }
         let outcome = self
@@ -1334,6 +1372,27 @@ impl Process {
         self.session_open.store(self.state.ready, Ordering::SeqCst);
         Ok(())
     }
+    fn record_approval(
+        &mut self,
+        database: &Database,
+        id: &str,
+        request_id: String,
+        allow: bool,
+    ) -> Result<()> {
+        self.state.pending.remove(&request_id);
+        db(database, |s| {
+            s.event(id, EventKind::ApprovalResolved { request_id, allow })?;
+            Ok(())
+        })?;
+        self.state_after_interaction(database, id)
+    }
+    fn clear_approval_replies(&mut self) {
+        for pending in self.approval_replies.drain().map(|(_, pending)| pending) {
+            if let Some(reply) = pending.reply {
+                let _ = reply.send(Err("原生执行已停止，审批结果未确认".into()));
+            }
+        }
+    }
     fn state_after_interaction(&mut self, database: &Database, id: &str) -> Result<()> {
         let (status, message) = if !self.state.pending.is_empty() {
             (Status::Waiting, None)
@@ -1354,6 +1413,7 @@ impl Process {
     }
     async fn close(&mut self) {
         self.cancel_title().await;
+        self.clear_approval_replies();
         if let Some(reply) = self.rename_reply.take() {
             let _ = reply.send(Err("原生会话已关闭，标题修改结果待确认".into()));
         }
@@ -1689,6 +1749,13 @@ async fn actor(
         // active turn's execution limit.
         let handoff_deadline = forwarded.deadline();
         let immediate_deadline = immediate.as_ref().map(|v| v.deadline);
+        let approval_deadline = process.as_ref().and_then(|p| {
+            p.approval_replies
+                .values()
+                .filter(|p| p.reply.is_some())
+                .map(|p| p.deadline)
+                .min()
+        });
         let previous_status = db(&database, |d| Ok(d.session(&session.id)?.status)).ok();
         let result: Result<()> = tokio::select! {
             control = controls.recv() => match control {
@@ -1980,42 +2047,42 @@ async fn actor(
                     }
                 }
                 Some(Control::Approval { id, allow, reply }) => {
-                    let valid = process
-                        .as_ref()
-                        .is_some_and(|p| !p.stopping && p.state.pending.get(&id).is_some_and(|(_, _, questions)| questions.is_none()));
-                    if !valid {
-                        let _ = reply.send(Err("审批已过期或不属于当前执行".into()));
-                        Ok(())
-                    } else {
-                        let result = async {
-                            let p = process.as_mut().context("此会话没有运行中的任务")?;
-                            let (native_id, original, _) = p
-                                .state
-                                .pending
-                                .remove(&id)
-                                .context("审批已过期或不属于当前执行")?;
-                            let actions = p.adapter.advance(Input::Approval {
-                                id: &native_id,
-                                input: original,
-                                allow,
-                            })?;
-                            p.apply(actions, &database, &session.id).await?;
-                            db(&database, |s| {
-                                s.event(
-                                    &session.id,
-                                    EventKind::ApprovalResolved {
-                                        request_id: id,
-                                        allow,
-                                    },
-                                )?;
-                                Ok(())
-                            })?;
-                            p.state_after_interaction(&database, &session.id)
+                    async {
+                        let Some(p) = process.as_mut().filter(|p| !p.stopping) else {
+                            let _ = reply.send(Err("审批已过期或不属于当前执行".into()));
+                            return Ok(());
+                        };
+                        let Some((native, original, None)) = p.state.pending.get(&id) else {
+                            let _ = reply.send(Err("审批已过期或不属于当前执行".into()));
+                            return Ok(());
+                        };
+                        if p.approval_replies.contains_key(native) {
+                            let _ = reply.send(Err("OpenCode 审批结果待确认".into()));
+                            return Ok(());
                         }
-                        .await;
-                        let _ = reply.send(result.as_ref().map(|_| ()).map_err(|e| e.to_string()));
-                        result
-                    }
+                        let deferred = p.adapter.awaits_approval_reply(native);
+                        let actions = p.adapter.advance(Input::Approval {
+                            id: native,
+                            input: original.clone(),
+                            allow,
+                        })?;
+                        if deferred {
+                            p.approval_replies.insert(native.clone(), PendingApprovalReply {
+                                reply: Some(reply),
+                                deadline: tokio::time::Instant::now() + Duration::from_secs(8),
+                                allow,
+                            });
+                            p.apply(actions, &database, &session.id).await
+                        } else {
+                            p.state.pending.remove(&id);
+                            let result = async {
+                                p.apply(actions, &database, &session.id).await?;
+                                p.record_approval(&database, &session.id, id, allow)
+                            }.await;
+                            let _ = reply.send(result.as_ref().map(|_| ()).map_err(|e| e.to_string()));
+                            result
+                        }
+                    }.await
                 }
                 None => break,
             },
@@ -2044,6 +2111,17 @@ async fn actor(
                 } else { Ok(()) }
             },
             _ = deadline(init_deadline) => Err(anyhow::anyhow!("Agent 初始化超时（18 秒）")),
+            _ = deadline(approval_deadline) => {
+                if let Some(p) = &mut process {
+                    let now = tokio::time::Instant::now();
+                    for pending in p.approval_replies.values_mut().filter(|p| p.deadline <= now) {
+                        if let Some(reply) = pending.reply.take() {
+                            let _ = reply.send(Err("OpenCode 审批确认超时，审批结果待确认".into()));
+                        }
+                    }
+                }
+                Ok(())
+            },
             _ = deadline(turn_deadline) => Err(anyhow::anyhow!("任务超过 24 小时上限")),
             _ = deadline(handoff_deadline) => Err(anyhow::anyhow!("Agent 未在 24 小时内确认已交付的消息，处理结果待确认；不会自动重发")),
         };

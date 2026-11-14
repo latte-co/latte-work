@@ -83,6 +83,9 @@ class Model(BaseHTTPRequestHandler):
         elif "<subagent" in str(last["content"]):
             delta = {"role": "assistant", "content": "PARENT_FOLLOWUP_OK"}
             finish = "stop"
+        elif "plugin watch report" in str(last["content"]):
+            delta = {"role": "assistant", "content": "PLUGIN_WATCH_OK"}
+            finish = "stop"
         elif last["role"] == "tool":
             delta = {"role": "assistant", "content": "TOOL_SMOKE_OK"}
             finish = "stop"
@@ -169,6 +172,42 @@ def run(binary, cli, llm, root):
         "variants": [{"id": "low"}, {"id": "high"}],
     }
     base_url = f"http://127.0.0.1:{llm.server_port}/v1"
+    plugin = root / "review-plugin"
+    plugin.mkdir()
+    (plugin / "package.json").write_text(json.dumps({
+        "name": "latte-review-smoke", "type": "module", "exports": "./index.mjs",
+    }))
+    (plugin / "index.mjs").write_text("""
+export default {
+  id: "latte-review-smoke",
+  async setup(ctx) {
+    await ctx.permission.hook("evaluate", (event) => {
+      if (event.action === "question" && event.agent === "smoke-restricted")
+        event.effect = "deny";
+    });
+    await ctx.command.transform((editor) => {
+      editor.add({
+        name: "fail-first",
+        description: "Fail before requesting a model",
+        execute: async () => { throw new Error("fixture command failure"); },
+      });
+      editor.add({
+        name: "schedule-watch",
+        description: "Wake the session with a plugin notification",
+        execute: async ({ sessionID }) => {
+          setTimeout(() => void ctx.session.synthetic({
+            sessionID,
+            text: "plugin watch report",
+            metadata: { source: "console.watch" },
+            resume: true,
+            delivery: "steer",
+          }), 800);
+        },
+      });
+    });
+  },
+};
+""")
     (config / "opencode.json").write_text(json.dumps({
         "update": "disable",
         "model": "test/test-model",
@@ -179,14 +218,18 @@ def run(binary, cli, llm, root):
         },
     }))
     (project / "opencode.json").write_text(json.dumps({
+        "plugins": [{"package": str(plugin)}],
         "permission": {"shell": "ask", "bash": "ask"},
-        "agents": {"smoke-child": {"mode": "subagent", "description": "Smoke child",
+        "agents": {"smoke-restricted": {"mode": "primary",
+            "permissions": [{"action": "question", "resource": "*", "effect": "allow"}]},
+            "smoke-child": {"mode": "subagent", "description": "Smoke child",
             "permissions": [{"action": "*", "resource": "*", "effect": "deny"},
                             {"action": "quest?on", "resource": "*", "effect": "allow"},
                             {"action": "question", "resource": "private", "effect": "deny"}]}},
         "commands": {
             "check": {"template": "Native slash smoke $ARGUMENTS", "description": "Smoke native command"},
             "child-check": {"template": "permission sentinel", "agent": "general", "subagent": True},
+            "restricted": {"template": "question sentinel", "agent": "smoke-restricted"},
         },
     }))
     skill = project / ".opencode/skills/smoke-latte-skill"
@@ -265,6 +308,28 @@ def run(binary, cli, llm, root):
 
                 def text(result):
                     return "".join(e["event"]["text"] for e in result["events"] if e["event"]["kind"] == "text")
+
+                if version.startswith("opencode v2.0."):
+                    normal_session = sid
+                    sid = rpc("create_session", project_id=pid, agent="opencode")["session"]["id"]
+                    before = len(Model.calls)
+                    send("failed-first-command", "/fail-first")
+                    wait("failed")
+                    assert len(Model.calls) == before
+                    failed_native = rpc("session", session_id=sid)["session"]["native_id"]
+                    send("after-first-failure", "Continue after the rejected native command.")
+                    continued = wait("completed")
+                    assert continued["session"]["native_id"] == failed_native
+                    assert "Latte Work platform skill" in json.dumps(Model.calls[before:])
+                    send("hook-denies-question", "/restricted")
+                    restricted = wait("completed")
+                    assert not any(e["event"]["kind"] == "question" for e in restricted["events"])
+                    assert any(e["event"]["kind"] == "tool_result" and e["event"].get("is_error")
+                               for e in restricted["events"]), restricted["events"][-8:]
+                    rpc("close_agent_session", session_id=sid, only_if_idle=True)
+                    sid = normal_session
+                    print(version + ": instructions survive the first command failure and question hook denies the form",
+                          flush=True)
 
                 send("first", "First smoke turn.")
                 first = wait("completed")
@@ -405,6 +470,17 @@ def run(binary, cli, llm, root):
                 wait("completed")
                 assert marker.read_text() == "OC_EXECUTED"
                 print(version + ": project slash command finished", flush=True)
+                send("watch", "/schedule-watch", "bypass_permissions")
+                wait("completed")
+                deadline = time.monotonic() + 6
+                while time.monotonic() < deadline:
+                    watched = rpc("poll", session_id=sid, after=0)
+                    if "PLUGIN_WATCH_OK" in text(watched) and watched["session"]["status"] == "completed":
+                        break
+                    time.sleep(.05)
+                else:
+                    raise AssertionError(watched["events"][-10:])
+                print(version + ": native plugin notification wakes the settled session", flush=True)
                 send("skill", "skill sentinel", "bypass_permissions")
                 result = wait("completed")
                 assert any(e["event"].get("name") == "Skill"

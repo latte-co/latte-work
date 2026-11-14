@@ -476,6 +476,7 @@ async fn opencode_ignores_late_foreground_events_and_runs_the_background_notific
     let id = create(&mut client, &project_id).await;
     for (request, text) in [
         ("path", "/tmp/project/src inspect this"),
+        ("single-component-path", "/tmp inspect this"),
         ("race", "late-native"),
     ] {
         assert!(matches!(
@@ -518,6 +519,24 @@ async fn opencode_routes_native_command_child_approval_and_preserves_tool_identi
     let events = wait(&mut client, &id, Status::Waiting).await;
     assert!(events.iter().any(|e| matches!(&e.event, EventKind::Approval { input, .. } if input["command"] == "printf fixture")));
     let request_id = permission(&events);
+    assert!(matches!(
+        ask(
+            &mut client,
+            Request::Approve {
+                session_id: id.clone(),
+                request_id: request_id.clone(),
+                allow: true
+            }
+        )
+        .await,
+        Response::Error { message, .. } if message.contains("仍待处理")
+    ));
+    let events = wait(&mut client, &id, Status::Waiting).await;
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(&e.event, EventKind::ApprovalResolved { .. }))
+    );
     assert!(matches!(
         ask(
             &mut client,
