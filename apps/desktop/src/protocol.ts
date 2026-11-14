@@ -59,6 +59,10 @@ export type Session = {
    * Active turn, pending approval or background work; live evidence only.
    */
   agent_session_busy?: boolean;
+  /**
+   * Latest side write request whose end has yet to be confirmed.
+   */
+  side_write_pending?: string;
 };
 export type RecentCursor = { updated_at: number; id: string };
 export type RecentSession = { session: Session; updated_at: number };
@@ -457,6 +461,14 @@ export type Request =
       only_if_idle?: boolean;
     }
   | {
+      method: "confirm_side_writes_ended";
+      session_id: string;
+      /**
+       * Latest write request observed during verification.
+       */
+      request_id: string;
+    }
+  | {
       method: "send_queued";
       provider?: TurnProvider;
       session_id: string;
@@ -657,6 +669,7 @@ export type Request =
       section: ChangeSection;
     };
 export type Response =
+  | { kind: "side_chat_closed" }
   | {
       kind: "recent_sessions";
       sessions: Array<RecentSession>;

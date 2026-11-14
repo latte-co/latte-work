@@ -213,8 +213,8 @@ for line in sys.stdin:
                                                'processId': '91', 'aggregatedOutput': 'bg-done'}})
             text('BACKGROUND_RELEASED')
             complete()
-        elif prompt in ('approval', 'approval-then-main-write', 'side-detached-writer', 'question'):
-            if prompt == 'side-detached-writer':
+        elif prompt in ('approval', 'approval-then-main-write', 'side-detached-writer', 'side-detached-writer-complete', 'question'):
+            if prompt.startswith('side-detached-writer'):
                 assert thread.startswith('side-thread-') and sandbox == 'dangerFullAccess'
                 worker = subprocess.Popen([sys.executable, '-c', """
 import pathlib
@@ -230,6 +230,12 @@ if release.exists():
 """], start_new_session=True, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL)
                 pathlib.Path('side-writer-pids').write_text(f'{os.getpid()} {worker.pid}')
+                if prompt == 'side-detached-writer-complete':
+                    notify('item/completed', {'item': {'id': 'side-launcher', 'type': 'commandExecution',
+                        'command': 'launch detached worker', 'cwd': os.getcwd(), 'status': 'completed',
+                        'exitCode': 0}})
+                    complete()
+                    continue
                 notify('item/started', {'item': {'id': 'side-worker', 'type': 'commandExecution',
                                                  'command': 'background worker', 'cwd': os.getcwd(),
                                                  'status': 'inProgress', 'processId': str(worker.pid)}})

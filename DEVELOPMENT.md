@@ -1726,11 +1726,17 @@ transcript. Side chats do not take undo snapshots because main and side file act
 overlap. The host rejects main-turn undo when write-capable side work on the
 same host overlaps the main turn. Native permissions and approvals can allow
 writes outside the side project's root. The host records possible writes just
-before launching the native process or dispatching to a live process, and records
-when the Agent confirms completion and its tracked background work is idle.
-Forced close of a still-writable session attempts to stop the local process group.
-Detached processes and external tools can outlive it, so the write interval and
-close remain unconfirmed. Retrying close or reconnecting preserves that result.
+before launching the native process or dispatching to a live process. Detached
+processes and external tools can keep writing after either normal completion
+or forced close. The host keeps the write interval open until the user verifies
+those tasks have stopped. A confirmed local close can return `SideChatClosed`
+with pending writes, so tabs can close and the parent can be archived. A side
+chat reopened from history displays the pending writes. Once the local runtime
+is closed, `ConfirmSideWritesEnded` verifies the latest pending request ID and
+records the current event sequence as the end boundary. Earlier overlapping
+turns remain protected. Legacy boundaries inferred from CLI completion become
+pending on upgrade. Side chats accept direct messages without native steering
+or a message queue.
 Launch validation failures and Unix `ENOENT` launch errors leave no write
 interval. The undo error identifies the side chat, so users can check its history
 and use the main turn's saved diff to restore individual changes manually.

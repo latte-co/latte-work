@@ -539,6 +539,7 @@ async fn host_request(
             | Request::ResumeMessageQueue { .. }
             | Request::OpenAgentSession { .. }
             | Request::CloseAgentSession { .. }
+            | Request::ConfirmSideWritesEnded { .. }
     ) {
         Some(state.agent_admission.lock().await)
     } else {
@@ -558,10 +559,12 @@ async fn host_request(
             .entry((host_id.clone(), session_id.clone()))
             .or_insert_with(|| "open".into());
     }
-    let closed_agent = if let Request::CloseAgentSession { session_id, .. } = &request {
-        Some((host_id.clone(), session_id.clone()))
-    } else {
-        None
+    let closed_agent = match &request {
+        Request::CloseAgentSession { session_id, .. }
+        | Request::ConfirmSideWritesEnded { session_id, .. } => {
+            Some((host_id.clone(), session_id.clone()))
+        }
+        _ => None,
     };
     if let Request::Send {
         session_id,
@@ -674,8 +677,10 @@ async fn host_request(
             latte_work_protocol::lifecycle::Resource::Terminal(key.1),
         ));
     }
-    if matches!(response, Response::Ok)
-        && let Some(key) = closed_agent
+    if matches!(
+        response,
+        Response::Ok | Response::SideChatClosed | Response::Session { .. }
+    ) && let Some(key) = closed_agent
     {
         state.turns.lock().await.remove(&key);
         state.owned_instances.lock().await.remove(&(

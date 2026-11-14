@@ -413,7 +413,7 @@ async fn check_side_write_undo(background: bool, main_in_subdir: Option<bool>) {
                     }
                 )
                 .await,
-                Response::Ok
+                Response::SideChatClosed
             ) {
                 break;
             }
@@ -454,6 +454,10 @@ async fn check_side_write_undo(background: bool, main_in_subdir: Option<bool>) {
     assert_eq!(std::fs::read_to_string(&file).unwrap(), "side edit\n");
 
     if background {
+        assert!(matches!(ask(&mut client, Request::ConfirmSideWritesEnded {
+            session_id: side.id.clone(),
+            request_id: "side-write".into(),
+        }).await, Response::Session { session } if session.side_write_pending.is_none()));
         send(&mut client, &main.id, "main-later", "main-foreground-write").await;
         wait(&mut client, &main.id, Status::Completed).await;
         assert_eq!(std::fs::read_to_string(&file).unwrap(), "main edit\n");
@@ -625,6 +629,15 @@ async fn undo_ignores_prelaunch_rejection_and_fences_unconfirmed_native_exit() {
 
 #[tokio::test]
 async fn closing_a_side_chat_with_detached_writes_stays_unconfirmed_and_fences_undo() {
+    check_detached_side_writes(false).await;
+}
+
+#[tokio::test]
+async fn completed_side_turn_can_leave_detached_writes() {
+    check_detached_side_writes(true).await;
+}
+
+async fn check_detached_side_writes(completed: bool) {
     let host = Host::start().await;
     let root = tempfile::tempdir().unwrap();
     let file = root.path().join("shared.txt");
@@ -638,12 +651,32 @@ async fn closing_a_side_chat_with_detached_writes_stays_unconfirmed_and_fences_u
     send_writable_side(
         &mut client,
         &side,
-        "side-detached-writer",
+        if completed {
+            "side-detached-writer-complete"
+        } else {
+            "side-detached-writer"
+        },
         "bypass_permissions",
         TurnProvider::Cli,
     )
     .await;
-    wait(&mut client, &side.id, Status::Waiting).await;
+    let status = if completed {
+        Status::Completed
+    } else {
+        Status::Waiting
+    };
+    wait(&mut client, &side.id, status.clone()).await;
+    assert!(matches!(
+        ask(
+            &mut client,
+            Request::ConfirmSideWritesEnded {
+                session_id: side.id.clone(),
+                request_id: "side-write".into(),
+            }
+        )
+        .await,
+        Response::Error { .. }
+    ));
     let pids = std::fs::read_to_string(root.path().join("side-writer-pids")).unwrap();
     let mut pids = pids.split_whitespace().map(|pid| pid.parse().unwrap());
     let cli = pids.next().unwrap();
@@ -652,11 +685,17 @@ async fn closing_a_side_chat_with_detached_writes_stays_unconfirmed_and_fences_u
         session_id: side.id.clone(),
         only_if_idle: Some(false),
     };
-    let first_close = ask(&mut client, close()).await;
+    assert!(matches!(
+        ask(&mut client, close()).await,
+        Response::SideChatClosed
+    ));
     assert_gone(cli).await;
     assert!(kill(Pid::from_raw(worker), None).is_ok());
     let mut reconnect = host.client().await;
-    let second_close = ask(&mut reconnect, close()).await;
+    assert!(matches!(
+        ask(&mut reconnect, close()).await,
+        Response::SideChatClosed
+    ));
     assert_eq!(std::fs::read_to_string(&file).unwrap(), "before\n");
     send(&mut client, &main.id, "main-write", "approval").await;
     let pending = permission(&wait(&mut client, &main.id, Status::Waiting).await);
@@ -686,7 +725,7 @@ async fn closing_a_side_chat_with_detached_writes_stays_unconfirmed_and_fences_u
     let response = ask(
         &mut client,
         Request::UndoTurnChanges {
-            session_id: main.id,
+            session_id: main.id.clone(),
             request_id: "main-write".into(),
         },
     )
@@ -697,14 +736,71 @@ async fn closing_a_side_chat_with_detached_writes_stays_unconfirmed_and_fences_u
         "{response:?}"
     );
     assert_eq!(std::fs::read_to_string(&file).unwrap(), "side edit\n");
-    for response in [first_close, second_close] {
-        assert!(
-            matches!(&response, Response::Error { message, .. }
-            if message.contains("无法确认") && message.contains("后台")),
-            "{response:?}"
-        );
+    assert!(
+        matches!(ask(&mut reconnect, Request::ConfirmSideWritesEnded {
+        session_id: side.id.clone(),
+        request_id: "side-write".into(),
+    }).await, Response::Session { session } if session.side_write_pending.is_none())
+    );
+    assert!(matches!(ask(&mut client, Request::UndoTurnChanges {
+        session_id: main.id, request_id: "main-write".into(),
+    }).await, Response::Error { message, .. } if message.contains("与本轮同时执行")));
+    wait(
+        &mut client,
+        &side.id,
+        if completed { status } else { Status::Unknown },
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn an_interrupted_writable_side_chat_can_reopen_and_archive_its_parent() {
+    let host = Host::start().await;
+    let root = tempfile::tempdir().unwrap();
+    let mut client = host.client().await;
+    let project = terminal_project(&mut client, root.path()).await;
+    let parent = create_session(&mut client, project, "codex").await;
+    send(&mut client, &parent.id, "main-init", "hello").await;
+    wait(&mut client, &parent.id, Status::Completed).await;
+    let side = open_side(&mut client, &parent).await;
+    send_writable_side(&mut client, &side, "wait", "default", TurnProvider::Cli).await;
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let path = root.path().join("codex-inputs");
+        if std::fs::read_to_string(path)
+            .is_ok_and(|contents| contents.contains("\"prompt\": \"wait\""))
+        {
+            break;
+        }
+        assert!(Instant::now() < deadline, "side chat did not reach the CLI");
+        tokio::time::sleep(Duration::from_millis(20)).await;
     }
-    wait(&mut client, &side.id, Status::Unknown).await;
+    assert!(matches!(
+        ask(
+            &mut client,
+            Request::CloseAgentSession {
+                session_id: side.id.clone(),
+                only_if_idle: Some(false),
+            }
+        )
+        .await,
+        Response::SideChatClosed
+    ));
+    assert!(matches!(ask(&mut client, Request::OpenSideChat {
+        session_id: parent.id.clone(), side_id: Some(side.id.clone()),
+    }).await, Response::Session { session } if session.id == side.id && session.status == Status::Unknown));
+    assert!(matches!(
+        send(&mut client, &side.id, "resumed-side", "hello").await,
+        Response::Accepted { .. }
+    ));
+    wait(&mut client, &side.id, Status::Completed).await;
+    assert!(matches!(ask(&mut client, Request::ArchiveSession {
+        session_id: parent.id.clone(), archived: true,
+    }).await, Response::Session { session } if session.archived));
+    assert!(matches!(ask(&mut client, Request::Poll {
+        session_id: side.id, after: 0.0,
+    }).await, Response::Events { session, .. } if session.agent_session_open == Some(false) &&
+        session.side_write_pending.as_deref() == Some("side-write")));
 }
 
 #[tokio::test]

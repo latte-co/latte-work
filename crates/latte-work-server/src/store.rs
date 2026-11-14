@@ -185,6 +185,24 @@ impl Store {
         if !columns.iter().any(|name| name == "side_write_end") {
             db.execute("ALTER TABLE requests ADD COLUMN side_write_end INTEGER", [])?;
         }
+        let write_migration = db.unchecked_transaction()?;
+        let has_confirmed_boundaries: bool = write_migration.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='index' AND name='pending_side_writes')",
+            [],
+            |row| row.get(0),
+        )?;
+        if !has_confirmed_boundaries {
+            // Older Servers considered CLI completion proof of background exit.
+            // Those boundaries must be verified under the new contract.
+            write_migration.execute_batch(
+                "UPDATE requests SET side_write_end=NULL
+                 WHERE side_write_end>0 AND permission_mode IS NOT NULL
+                 AND session_id IN (SELECT session_id FROM side_chats);
+                 CREATE INDEX pending_side_writes ON requests(session_id)
+                 WHERE permission_mode IS NOT NULL AND side_write_end IS NULL;",
+            )?;
+        }
+        write_migration.commit()?;
         db.execute_batch("CREATE INDEX IF NOT EXISTS requests_session_provider ON requests(session_id,provider_fingerprint);")?;
         crate::message_queue::initialize(&db)?;
         let snapshot_dir = crate::snapshot_storage::prepare(&path.with_extension("snapshots"))?;
@@ -515,6 +533,7 @@ impl Store {
             archived: false,
             agent_session_open: None,
             agent_session_busy: None,
+            side_write_pending: None,
         };
         self.db.execute(
             "INSERT INTO sessions VALUES (?1,?2,?3)",
@@ -1384,39 +1403,75 @@ impl Store {
     }
     /// Called before any native operation that may write. Zero is reserved for
     /// an admitted side request that has not reached this point.
-    pub fn start_side_write(&self, request_id: &str) -> Result<Option<i64>> {
+    pub fn start_side_write(&self, request_id: &str) -> Result<()> {
+        self.db.execute(
+            "UPDATE requests SET side_write_start=(SELECT MAX(seq) FROM events),
+                 side_write_end=NULL WHERE id=?1 AND side_write_end=0",
+            [request_id],
+        )?;
+        Ok(())
+    }
+    pub fn pending_side_write(&self, session_id: &str) -> Result<Option<String>> {
         Ok(self
             .db
             .query_row(
-                "UPDATE requests SET side_write_start=(SELECT MAX(seq) FROM events),
-                     side_write_end=NULL WHERE id=?1 AND side_write_end=0
-                 RETURNING side_write_start",
-                [request_id],
+                "SELECT id FROM requests WHERE session_id=?1 AND permission_mode IS NOT NULL
+                AND side_write_end IS NULL ORDER BY rowid DESC LIMIT 1",
+                [session_id],
                 |row| row.get(0),
             )
             .optional()?)
     }
-    pub fn finish_side_writes(&self, session_id: &str, since: i64) -> Result<()> {
-        self.db.execute(
+    pub fn confirm_side_writes_ended(&self, session_id: &str, request_id: &str) -> Result<Session> {
+        if self.side_parent(session_id)?.is_none() {
+            bail!("此操作仅适用于侧边聊天");
+        }
+        if self.session(session_id)?.status.active() {
+            bail!("请先停止侧边聊天，再确认后台写入已结束");
+        }
+        let pending = self.pending_side_write(session_id)?;
+        if pending.as_deref() != Some(request_id) {
+            if pending.is_none()
+                && self.db.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM requests WHERE id=?1 AND session_id=?2
+                        AND permission_mode IS NOT NULL AND side_write_end>0)",
+                    params![request_id, session_id],
+                    |row| row.get::<_, bool>(0),
+                )?
+            {
+                return self.with_side_write_state(self.session(session_id)?);
+            }
+            bail!("后台写入记录已变化，请重新核对后确认");
+        }
+        let tx = self.db.unchecked_transaction()?;
+        tx.execute(
             "UPDATE requests SET side_write_end=(SELECT MAX(seq) FROM events)
-             WHERE session_id=?1 AND side_write_start>=?2 AND side_write_end IS NULL",
-            params![session_id, since],
+             WHERE session_id=?1 AND permission_mode IS NOT NULL AND side_write_end IS NULL",
+            [session_id],
         )?;
-        Ok(())
+        // The same host-side verification resolves a previously unknown close.
+        tx.execute(
+            "DELETE FROM unconfirmed_agent_closes WHERE session_id=?1",
+            [session_id],
+        )?;
+        tx.commit()?;
+        self.with_side_write_state(self.session(session_id)?)
     }
-    pub fn check_agent_close(&self, id: &str) -> Result<()> {
-        let reason: Option<String> = self
+    pub fn with_side_write_state(&self, mut session: Session) -> Result<Session> {
+        if self.side_parent(&session.id)?.is_some() {
+            session.side_write_pending = self.pending_side_write(&session.id)?;
+        }
+        Ok(session)
+    }
+    pub fn unconfirmed_agent_close(&self, id: &str) -> Result<Option<String>> {
+        Ok(self
             .db
             .query_row(
                 "SELECT reason FROM unconfirmed_agent_closes WHERE session_id=?1",
                 [id],
                 |row| row.get(0),
             )
-            .optional()?;
-        if let Some(reason) = reason {
-            bail!(reason);
-        }
-        Ok(())
+            .optional()?)
     }
     pub fn record_unconfirmed_agent_close(&self, id: &str, reason: &str) -> Result<()> {
         self.db.execute(
@@ -2225,7 +2280,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn side_write_end_survives_restart_and_resuming_does_not_settle_old_requests() {
+    async fn side_write_confirmation_survives_restart_and_preserves_earlier_overlap() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("state.sqlite");
         for interrupted in [false, true] {
@@ -2251,14 +2306,20 @@ mod tests {
                     Some("default"),
                 )
                 .unwrap();
-            let start = store.start_side_write("original").unwrap().unwrap();
+            store.start_side_write("original").unwrap();
             if !interrupted {
-                store.finish_side_writes(&side.id, start).unwrap();
                 store.state(&side.id, Status::Completed, None).unwrap();
+                store
+                    .confirm_side_writes_ended(&side.id, "original")
+                    .unwrap();
             }
             drop(store);
 
             let mut store = Store::open(&db_path).unwrap();
+            assert_eq!(
+                store.pending_side_write(&side.id).unwrap().is_some(),
+                interrupted
+            );
             store
                 .begin(
                     &side.id,
@@ -2270,9 +2331,17 @@ mod tests {
                     Some("default"),
                 )
                 .unwrap();
-            let start = store.start_side_write("resumed").unwrap().unwrap();
-            store.finish_side_writes(&side.id, start).unwrap();
+            store.start_side_write("resumed").unwrap();
             store.state(&side.id, Status::Completed, None).unwrap();
+            assert_eq!(
+                store.pending_side_write(&side.id).unwrap().as_deref(),
+                Some("resumed")
+            );
+            assert!(
+                store
+                    .confirm_side_writes_ended(&side.id, "original")
+                    .is_err()
+            );
 
             store
                 .begin(&parent.id, "main", "edit", None, None, None, None)
@@ -2293,9 +2362,60 @@ mod tests {
             store.finish_turn(&parent.id, &turn).unwrap();
             assert_eq!(
                 store.overlapping_side_chat(&parent.id, "main").unwrap(),
-                interrupted.then_some((side.id, true))
+                Some((side.id.clone(), true))
+            );
+            store
+                .confirm_side_writes_ended(&side.id, "resumed")
+                .unwrap();
+            assert!(
+                store
+                    .confirm_side_writes_ended(&side.id, "resumed")
+                    .unwrap()
+                    .side_write_pending
+                    .is_none()
+            );
+            assert_eq!(
+                store.overlapping_side_chat(&parent.id, "main").unwrap(),
+                Some((side.id, false))
             );
         }
+    }
+
+    #[test]
+    fn older_side_write_boundaries_require_verification_after_upgrade() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("state.sqlite");
+        let mut store = Store::open(&path).unwrap();
+        let project = store.add_project(directory.path()).unwrap();
+        let mut parent = store.create_session(project.id, "codex".into()).unwrap();
+        parent.native_id = Some("native-main".into());
+        store.save(&parent).unwrap();
+        let side = store.open_side_chat(&parent.id, None).unwrap();
+        for id in ["finished", "never-started"] {
+            store
+                .begin(&side.id, id, "edit", None, None, None, Some("default"))
+                .unwrap();
+            store.state(&side.id, Status::Completed, None).unwrap();
+        }
+        store
+            .db
+            .execute_batch(
+                "DROP INDEX pending_side_writes;
+             UPDATE requests SET side_write_end=2 WHERE id='finished';",
+            )
+            .unwrap();
+        drop(store);
+        let store = Store::open(&path).unwrap();
+        assert_eq!(
+            store.pending_side_write(&side.id).unwrap().as_deref(),
+            Some("finished")
+        );
+        store
+            .confirm_side_writes_ended(&side.id, "finished")
+            .unwrap();
+        drop(store);
+        let store = Store::open(&path).unwrap();
+        assert!(store.pending_side_write(&side.id).unwrap().is_none());
     }
 
     #[test]
@@ -2305,7 +2425,12 @@ mod tests {
         let store = Store::open(&path).unwrap();
         let project = store.add_project(directory.path()).unwrap();
         let session = store.create_session(project.id, "codex".into()).unwrap();
-        assert!(store.check_agent_close(&session.id).is_ok());
+        assert!(
+            store
+                .unconfirmed_agent_close(&session.id)
+                .unwrap()
+                .is_none()
+        );
         store
             .record_unconfirmed_agent_close(&session.id, "background state unknown")
             .unwrap();
@@ -2313,13 +2438,18 @@ mod tests {
         let store = Store::open(&path).unwrap();
         assert_eq!(
             store
-                .check_agent_close(&session.id)
-                .unwrap_err()
-                .to_string(),
-            "background state unknown"
+                .unconfirmed_agent_close(&session.id)
+                .unwrap()
+                .as_deref(),
+            Some("background state unknown")
         );
         store.clear_unconfirmed_agent_close(&session.id).unwrap();
-        assert!(store.check_agent_close(&session.id).is_ok());
+        assert!(
+            store
+                .unconfirmed_agent_close(&session.id)
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]

@@ -78,7 +78,7 @@ async fn guarded_close(
 }
 fn close_response(response: Response) -> Result<(), String> {
     match response {
-        Response::Ok => Ok(()),
+        Response::Ok | Response::SideChatClosed => Ok(()),
         Response::Error { message, .. } => Err(message),
         other => Err(format!("关闭响应格式不匹配：{other:?}")),
     }

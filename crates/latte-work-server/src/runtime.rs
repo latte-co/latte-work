@@ -33,7 +33,7 @@ pub type Database = Arc<Mutex<Store>>;
 pub type Runs = Arc<Mutex<HashMap<String, Run>>>;
 const TURN_LIMIT: Duration = Duration::from_secs(24 * 3600);
 const CLOSE_PENDING: &str = "原生会话的关闭状态待确认，请核对主机上的 Agent 和后台任务。";
-const SIDE_CLOSE_PENDING: &str = "无法确认侧边聊天的后台写入已结束。请核对主机上的后台任务和外部工具，并按工作区差异手动调整文件。";
+const SIDE_CLOSE_PENDING: &str = "本地侧边聊天已关闭，后台写入待确认。";
 const RECONFIGURE_BLOCKED: &str = "当前会话仍有后台任务或待确认状态，无法更换模型、Provider、权限或思考强度；请沿用当前配置发送，消息未发送";
 
 #[derive(Default)]
@@ -511,7 +511,9 @@ fn control_for(
     path: String,
 ) -> Result<mpsc::Sender<Control>> {
     if db(&database, |s| {
-        s.check_agent_close(&session.id)?;
+        if let Some(reason) = s.unconfirmed_agent_close(&session.id)? {
+            bail!(reason);
+        }
         if let Some((parent, _)) = s.side_parent(&session.id)?
             && s.session(&parent)?.archived
         {
@@ -599,7 +601,10 @@ pub async fn archive(
 pub async fn close(database: &Database, runs: &Runs, id: &str, only_if_idle: bool) -> Result<()> {
     db(database, |s| {
         s.session(id)?;
-        s.check_agent_close(id)
+        if let Some(reason) = s.unconfirmed_agent_close(id)? {
+            bail!(reason);
+        }
+        Ok(())
     })?;
     let control = runs
         .lock()
@@ -621,7 +626,12 @@ pub async fn close(database: &Database, runs: &Runs, id: &str, only_if_idle: boo
     }
     // A concurrent close may have recorded uncertainty and removed the actor
     // after the first lookup. A missing actor cannot clear that evidence.
-    db(database, |s| s.check_agent_close(id))
+    db(database, |s| {
+        if let Some(reason) = s.unconfirmed_agent_close(id)? {
+            bail!(reason);
+        }
+        Ok(())
+    })
 }
 async fn write(input: &mut (impl AsyncWrite + Unpin), bytes: &[u8]) -> Result<()> {
     if bytes.len() > latte_work_protocol::MAX_FRAME {
@@ -995,9 +1005,6 @@ struct Process {
     /// land inside this turn's diff window even after it completes, so the
     /// undo fence must survive until the turn is frozen.
     background_at_start: bool,
-    // Only settle requests admitted by this process. A resumed process cannot
-    // confirm when the previous process or its background work stopped.
-    side_writes_since: Option<i64>,
     stopping: bool,
     interrupt_sent: bool,
     interrupt_ack_pending: bool,
@@ -1061,10 +1068,9 @@ impl Process {
             .process_group(0);
         // A launch may fail after starting the native process. Record the
         // possible write before calling spawn, after all launch validation.
-        let side_writes_since = match request_id {
-            Some(id) => db(database, |s| s.start_side_write(id))?,
-            None => None,
-        };
+        if let Some(id) = request_id {
+            db(database, |s| s.start_side_write(id))?;
+        }
         let child = command
             .spawn()
             .or_else(|error| -> Result<Child> {
@@ -1072,7 +1078,6 @@ impl Process {
                 // interpreter or cwd missing). Other errors can come from Tokio
                 // setting up child I/O or the reaper after a successful launch.
                 if error.raw_os_error() == Some(Errno::ENOENT as i32)
-                    && side_writes_since.is_some()
                     && let Some(id) = request_id
                 {
                     db(database, |s| s.mark_side_write_not_started(id))?;
@@ -1114,7 +1119,6 @@ impl Process {
             path: path.into(),
             turn_active: false,
             background_at_start: false,
-            side_writes_since,
             stopping: false,
             interrupt_sent: false,
             interrupt_ack_pending: false,
@@ -1256,15 +1260,6 @@ impl Process {
             self.state
                 .apply(actions, &mut self.input, database, id, &self.config)
                 .await?;
-        }
-        if let Some(since) = self.side_writes_since
-            && !self.turn_active
-            && !self.interrupt_ack_pending
-            && self.adapter.can_reconfigure()
-            && self.state.pending.is_empty()
-        {
-            db(database, |s| s.finish_side_writes(id, since))?;
-            self.side_writes_since = None;
         }
         self.session_open.store(self.state.ready, Ordering::SeqCst);
         Ok(())
@@ -1443,9 +1438,8 @@ async fn accept_turn(
                 db(database, |s| s.save_baseline(&session.id, &task_baseline))?;
             }
         }
-        if let Some(p) = process.as_mut() {
-            let start = db(database, |s| s.start_side_write(&turn.request_id))?;
-            p.side_writes_since = p.side_writes_since.or(start);
+        if process.is_some() {
+            db(database, |s| s.start_side_write(&turn.request_id))?;
         } else {
             let current = db(database, |s| s.session(&session.id))?;
             *process = Some(Process::spawn(
@@ -1838,25 +1832,16 @@ async fn actor(
                     let background_pending = process
                         .as_ref()
                         .is_some_and(|p| p.turn_active && p.background_at_start);
-                    let unconfirmed = if let Some(p) = process.as_ref()
-                        && p.side_writes_since.is_some()
-                    {
-                        // Record uncertainty before signalling. Reaping the CLI
-                        // cannot settle detached work or external tool calls.
-                        Some(SIDE_CLOSE_PENDING)
-                    } else {
-                        process.as_ref().map(|_| CLOSE_PENDING)
-                    };
-                    if let Some(reason) = unconfirmed
-                        && let Err(error) = db(&database, |s| s.record_unconfirmed_agent_close(&session.id, reason))
+                    let had_process = process.is_some();
+                    if had_process
+                        && let Err(error) = db(&database, |s| s.record_unconfirmed_agent_close(&session.id, CLOSE_PENDING))
                     {
                         if let Some(reply) = reply { let _ = reply.send(Err(error.to_string())); }
                         continue;
                     }
-                    let close_failure = if let Some(p) = process.as_mut() {
-                        let reaped = p.close().await;
-                        unconfirmed.filter(|_| !reaped || p.side_writes_since.is_some())
-                    } else { None };
+                    let close_unconfirmed = if let Some(p) = process.as_mut() {
+                        !p.close().await
+                    } else { false };
                     process = None;
                     if let Err(error) =
                         finish_turn(&database, &session.id, &path, true, background_pending).await
@@ -1865,9 +1850,12 @@ async fn actor(
                     }
                     // Preserve completed history when merely closing an idle runtime.
                     let result = db(&database, |s| {
-                        let (status, subagent_status, message) = if let Some(reason) = close_failure {
+                        let writes_pending = s.pending_side_write(&session.id)?.is_some();
+                        let (status, subagent_status, message) = if close_unconfirmed {
                             (Status::Unknown, latte_work_protocol::SubagentStatus::Unknown,
-                             reason)
+                             CLOSE_PENDING)
+                        } else if writes_pending {
+                            (Status::Unknown, latte_work_protocol::SubagentStatus::Unknown, SIDE_CLOSE_PENDING)
                         } else {
                             (Status::Stopped, latte_work_protocol::SubagentStatus::Stopped,
                              "已停止；已执行的文件改动不会撤销。")
@@ -1875,13 +1863,11 @@ async fn actor(
                         s.end_subagents(&session.id, subagent_status)?;
                         if s.session(&session.id)?.status.active() {
                             s.state(&session.id, status, Some(message.into()))?;
-                        } else if close_failure.is_some() {
-                            s.event(&session.id, EventKind::Notice { text: message.into() })?;
                         }
-                        if close_failure.is_some() {
+                        if close_unconfirmed {
                             bail!(message);
                         }
-                        if unconfirmed.is_some() {
+                        if had_process {
                             s.clear_unconfirmed_agent_close(&session.id)?;
                         }
                         Ok(())

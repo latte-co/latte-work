@@ -393,12 +393,13 @@ async fn dispatch(s: &Service, request: Request) -> Result<Response> {
         },
         other => other,
     };
-    // Undo and archive hold exclusive admission through their durable result.
+    // Undo, archive, and write confirmation hold exclusive admission through their durable result.
     // Archive must not race a new open/send between closing and saving metadata.
     // Ordinary turns retain concurrent admission; no request is replayed.
     let exclusive = matches!(
         &request,
         Request::UndoTurnChanges { .. }
+            | Request::ConfirmSideWritesEnded { .. }
             | Request::ArchiveSession { archived: true, .. }
             | Request::RenameSession { .. }
     );
@@ -411,6 +412,7 @@ async fn dispatch(s: &Service, request: Request) -> Result<Response> {
         &request,
         Request::Send { .. }
             | Request::OpenAgentSession { .. }
+            | Request::CloseAgentSession { .. }
             | Request::CreateTerminal { .. }
             | Request::WriteTerminal { .. }
             | Request::Approve { .. }
@@ -424,6 +426,7 @@ async fn dispatch(s: &Service, request: Request) -> Result<Response> {
     };
     let closed_resource = match &request {
         Request::CloseAgentSession { session_id, .. }
+        | Request::ConfirmSideWritesEnded { session_id, .. }
         | Request::ArchiveSession {
             session_id,
             archived: true,
@@ -820,6 +823,23 @@ async fn dispatch(s: &Service, request: Request) -> Result<Response> {
             .await?;
             Response::Ok
         }
+        Request::ConfirmSideWritesEnded {
+            session_id,
+            request_id,
+        } => {
+            if s.runs
+                .lock()
+                .map_err(|_| anyhow::anyhow!("执行状态锁异常"))?
+                .contains_key(&session_id)
+            {
+                bail!("请先关闭侧边聊天的原生会话，再确认后台写入已结束");
+            }
+            Response::Session {
+                session: db(&s.database, |d| {
+                    d.confirm_side_writes_ended(&session_id, &request_id)
+                })?,
+            }
+        }
         Request::CloseAgentSession {
             session_id,
             only_if_idle,
@@ -831,7 +851,11 @@ async fn dispatch(s: &Service, request: Request) -> Result<Response> {
                 only_if_idle.unwrap_or(false),
             )
             .await?;
-            Response::Ok
+            if db(&s.database, |d| d.pending_side_write(&session_id))?.is_some() {
+                Response::SideChatClosed
+            } else {
+                Response::Ok
+            }
         }
         Request::SendQueued { .. } => unreachable!(),
         Request::Send {
@@ -843,6 +867,9 @@ async fn dispatch(s: &Service, request: Request) -> Result<Response> {
             effort,
             permission_mode,
         } => {
+            if allow_queue && db(&s.database, |d| Ok(d.side_parent(&session_id)?.is_some()))? {
+                bail!("侧边聊天暂不支持消息排队");
+            }
             if allow_queue && provider.is_none() {
                 bail!("消息排队需要明确的执行配置，请更新客户端");
             }
@@ -1198,7 +1225,7 @@ async fn dispatch(s: &Service, request: Request) -> Result<Response> {
             Response::SubagentTranscript { events, truncated }
         }
         Request::Poll { session_id, after } => db(&s.database, |d| {
-            let session = d.session(&session_id)?;
+            let session = d.with_side_write_state(d.session(&session_id)?)?;
             let (events, has_more) = d.events(&session_id, after)?;
             Ok(Response::Events {
                 session,

@@ -66,6 +66,7 @@ export async function closeSideChat(
     await previous;
     const tab = readWorkspace(workspaceId).tabs.find((tab) => tab.id === id);
     if (tab?.kind !== "sideChat") return;
+    let notice: string | undefined;
     if (!tab.draft) {
       try {
         const result = await request(hostId, {
@@ -73,17 +74,22 @@ export async function closeSideChat(
           session_id: sideId,
           only_if_idle: false,
         });
-        if (result.kind !== "ok") throw new Error("无法确认侧边聊天已关闭");
+        if (result.kind === "side_chat_closed")
+          notice =
+            "本地侧边聊天已关闭，后台写入待确认。可从历史重新打开并确认。";
+        else if (result.kind !== "ok")
+          throw new Error("无法确认侧边聊天已关闭");
       } catch (cause) {
         if (!missingSession(cause)) throw cause;
       }
     }
     drafts.clear(key, drafts.get(key));
     admissions.get(drafts)?.delete(key);
+    return notice;
   })();
   pending.set(key, closing);
   try {
-    await closing;
+    return await closing;
   } finally {
     if (pending.get(key) === closing) pending.delete(key);
   }
@@ -116,6 +122,9 @@ export function SideChat({
   const [events, setEvents] = useState<Event[]>([]);
   const [readError, setReadError] = useState("");
   const [error, setError] = useState("");
+  const [confirmingWrites, setConfirmingWrites] = useState<string>();
+  const showingWriteConfirmation =
+    !!confirmingWrites && confirmingWrites === session?.side_write_pending;
   const [ready, setReady] = useState(false);
   const [busy, setBusy] = useState(false);
   const [revision, refresh] = useState(0);
@@ -240,6 +249,24 @@ export function SideChat({
   }, [active, events, session?.status]);
 
   const canInteract = enabled && (ready || isDraft);
+  async function confirmWrites() {
+    if (!confirmingWrites || confirmingWrites !== session?.side_write_pending)
+      return;
+    setConfirmingWrites(undefined);
+    if (session?.agent_session_open) {
+      const closed = await perform({
+        method: "close_agent_session",
+        session_id: sideId,
+        only_if_idle: true,
+      });
+      if (!closed) return;
+    }
+    await perform({
+      method: "confirm_side_writes_ended",
+      session_id: sideId,
+      request_id: confirmingWrites,
+    });
+  }
   function perform(action: Request, accepted?: () => void) {
     const pending = sideOperations(drafts);
     if (!canInteract || pending.has(key)) return Promise.resolve(false);
@@ -264,10 +291,18 @@ export function SideChat({
             throw new Error("Server 未返回独立的侧边聊天");
         }
         const response = await request(hostId, action);
-        if (
+        const expected =
           action.method === "send"
-            ? response.kind !== "accepted"
-            : response.kind !== "ok"
+            ? "accepted"
+            : action.method === "confirm_side_writes_ended"
+              ? "session"
+              : "ok";
+        if (
+          response.kind !== expected &&
+          !(
+            action.method === "close_agent_session" &&
+            response.kind === "side_chat_closed"
+          )
         )
           throw new Error("操作结果待确认，请核对侧边聊天的记录");
         accepted?.();
@@ -469,6 +504,34 @@ export function SideChat({
         </div>
       </div>
       <div className="side-chat-compose">
+        {session?.side_write_pending && !running && (
+          <div className="notice" role="status">
+            {showingWriteConfirmation
+              ? "请先核对主机上的后台进程和外部工具。确认后，写入重叠的历史轮次仍受保护。"
+              : "后台写入待确认。确认前，主对话的撤销保护会继续生效。"}
+            {showingWriteConfirmation && (
+              <button
+                className="secondary small"
+                onClick={() => setConfirmingWrites(undefined)}
+              >
+                取消
+              </button>
+            )}
+            <button
+              className="secondary small"
+              disabled={!connected || busy || session.agent_session_busy}
+              onClick={() =>
+                showingWriteConfirmation
+                  ? void confirmWrites()
+                  : setConfirmingWrites(session.side_write_pending)
+              }
+            >
+              {showingWriteConfirmation
+                ? "我已核对，确认结束"
+                : "确认后台写入已结束"}
+            </button>
+          </div>
+        )}
         {(!connected || !supported || readError || error) && (
           <div role="alert" className="notice">
             {!connected

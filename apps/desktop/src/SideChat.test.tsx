@@ -297,3 +297,67 @@ it("closes an unsent draft locally and waits for the first send before closing t
     only_if_idle: false,
   });
 });
+
+it("closes locally with a warning and requires explicit confirmation after reopening", async () => {
+  const drafts = new DraftStore();
+  const workspaceId = crypto.randomUUID();
+  openSideChatTab(workspaceId, child.id, false);
+  let pending: string | undefined = "write-1";
+  request.mockImplementation(async (_host: string, action: Request) => {
+    if (action.method === "close_agent_session")
+      return { kind: "side_chat_closed" };
+    if (action.method === "confirm_side_writes_ended") {
+      pending = undefined;
+      return {
+        kind: "session",
+        session: child,
+      };
+    }
+    if (action.method === "poll")
+      return {
+        kind: "events",
+        session: { ...child, side_write_pending: pending },
+        events: [],
+        has_more: false,
+      };
+    return { kind: "agent_permissions", modes: [] };
+  });
+  await expect(
+    closeSideChat(
+      drafts,
+      "local",
+      parent.id,
+      workspaceId,
+      `sideChat:${child.id}`,
+    ),
+  ).resolves.toContain("后台写入待确认");
+  render(
+    <SideChat
+      parent={parent}
+      workspaceId={workspaceId}
+      sideId={child.id}
+      hostId="local"
+      drafts={drafts}
+      active
+      connected
+      supported
+    />,
+  );
+  fireEvent.click(
+    await screen.findByRole("button", { name: "确认后台写入已结束" }),
+  );
+  expect(
+    request.mock.calls.some(
+      ([, action]) => action.method === "confirm_side_writes_ended",
+    ),
+  ).toBe(false);
+  fireEvent.click(screen.getByRole("button", { name: "我已核对，确认结束" }));
+  await waitFor(() =>
+    expect(request).toHaveBeenCalledWith("local", {
+      method: "confirm_side_writes_ended",
+      session_id: child.id,
+      request_id: "write-1",
+    }),
+  );
+  await waitFor(() => expect(screen.queryByText(/后台写入待确认/)).toBeNull());
+});

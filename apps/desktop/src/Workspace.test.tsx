@@ -691,14 +691,14 @@ it("returns from merged mode when all resources close and can reopen without a p
   expect(screen.getByRole("button", { name: "分离右侧栏" })).toBeTruthy();
 });
 
-it("keeps a side chat tab when closing fails and collapses after the close is confirmed", async () => {
+it("keeps a side chat tab when closing fails and collapses after local close with pending writes", async () => {
   const { openSideChatTab } = await import("./workspaceState");
   const sideId = crypto.randomUUID();
   openSideChatTab(props.workspaceId, sideId);
   const close = vi
     .fn()
     .mockRejectedValueOnce(new Error("offline"))
-    .mockResolvedValueOnce(undefined);
+    .mockResolvedValueOnce("后台写入待确认");
   function LinkedWorkspace() {
     const [workspace] = useWorkspaceState(props.workspaceId);
     return (
