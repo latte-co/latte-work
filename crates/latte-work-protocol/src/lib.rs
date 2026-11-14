@@ -63,6 +63,9 @@ pub struct Session {
     pub created_at: f64,
     #[serde(default)]
     pub custom_title: bool,
+    /// The native title-generation request was already sent for this session.
+    #[serde(default)]
+    pub title_requested: bool,
     #[serde(default)]
     pub pinned_at: Option<f64>,
     #[serde(default)]

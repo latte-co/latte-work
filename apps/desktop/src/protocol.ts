@@ -44,6 +44,10 @@ export type Session = {
   status: Status;
   created_at: number;
   custom_title: boolean;
+  /**
+   * The native title-generation request was already sent for this session.
+   */
+  title_requested: boolean;
   pinned_at: number | null;
   unread: boolean;
   archived: boolean;

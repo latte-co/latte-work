@@ -25,6 +25,7 @@ const session: Session = {
   status: "completed",
   created_at: 1,
   custom_title: false,
+  title_requested: false,
   pinned_at: null,
   unread: false,
   archived: false,

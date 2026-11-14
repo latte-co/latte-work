@@ -406,9 +406,9 @@ fn write_action(value: Value) -> Result<Action> {
 }
 
 impl AgentAdapter for Claude {
-    fn set_session_title(&mut self, title: Option<String>, resuming: bool) {
+    fn set_session_title(&mut self, title: Option<String>, resuming: bool, title_requested: bool) {
         self.native_named = title.is_some();
-        self.title_attempted = resuming;
+        self.title_attempted = title_requested;
         self.initial_title = if resuming { None } else { title };
     }
     fn has_background_work(&self) -> bool {
@@ -1578,6 +1578,7 @@ impl Claude {
                     )
                 {
                     self.title_attempted = true;
+                    output.push(Action::TitleRequested);
                     self.generating_title_for = Some(native_session_id);
                     if let Some(reply) = m["result"].as_str() {
                         context.reply(reply);
@@ -2218,6 +2219,10 @@ mod tests {
             .unwrap();
         let wire = encoded(&actions);
         assert_eq!(wire.len(), 1);
+        assert!(
+            matches!(actions.first(), Some(Action::TitleRequested)),
+            "the durable once marker accompanies the request"
+        );
         assert_eq!(
             wire[0]["request"],
             json!({"subtype":"generate_session_title","description":"修复消息发送后的输入框\n\nAssistant reply:\n已修复发送后的输入框状态","persist":true})
@@ -2321,7 +2326,7 @@ mod tests {
         };
         for resuming in [false, true] {
             let mut agent = Claude::default();
-            agent.set_session_title(Some("My name".into()), resuming);
+            agent.set_session_title(Some("My name".into()), resuming, false);
             let command = agent
                 .command("claude", "/tmp", resuming.then_some("native"), &config)
                 .unwrap();
@@ -2344,6 +2349,87 @@ mod tests {
                 .is_empty()
             );
         }
+    }
+
+    #[test]
+    fn resume_without_requested_title_generates_on_its_next_turn() {
+        use super::*;
+        let directory = tempfile::tempdir().unwrap();
+        let config = LaunchConfig {
+            environment: Default::default(),
+            traex_model: None,
+            provider: None,
+            model: None,
+            effort: None,
+            permission_mode: None,
+            settings_dir: directory.path().into(),
+        };
+        let mut agent = Claude::default();
+        agent.set_session_title(None, true, false);
+        agent
+            .command("claude", "/tmp", Some("native"), &config)
+            .unwrap();
+        agent.phase = Phase::Running;
+        agent.native_session_id = Some("native".into());
+        agent.remember_title_description("followup");
+        agent
+            .decode(json!({"type":"assistant","message":{"content":[{"type":"text","text":"已恢复并继续排查"}]}}))
+            .unwrap();
+        let actions = agent
+            .decode(json!({"type":"result","is_error":false}))
+            .unwrap();
+        let wire = encoded(&actions);
+        assert_eq!(wire.len(), 1);
+        assert_eq!(wire[0]["request"]["subtype"], "generate_session_title");
+        assert!(matches!(actions.first(), Some(Action::TitleRequested)));
+    }
+
+    #[test]
+    fn title_requested_spawn_contract_suppresses_generation() {
+        use super::*;
+        let directory = tempfile::tempdir().unwrap();
+        let config = LaunchConfig {
+            environment: Default::default(),
+            traex_model: None,
+            provider: None,
+            model: None,
+            effort: None,
+            permission_mode: None,
+            settings_dir: directory.path().into(),
+        };
+        let mut agent = Claude::default();
+        agent.set_session_title(None, true, true);
+        agent
+            .command("claude", "/tmp", Some("native"), &config)
+            .unwrap();
+        agent.phase = Phase::Running;
+        agent.native_session_id = Some("native".into());
+        agent.remember_title_description("followup");
+        assert!(
+            agent.title_description.is_none(),
+            "a recorded request suppresses context capture"
+        );
+        assert!(
+            encoded(
+                &agent
+                    .decode(json!({"type":"result","is_error":false}))
+                    .unwrap()
+            )
+            .is_empty()
+        );
+        agent.advance(Input::Start { prompt: "again" }).unwrap();
+        agent
+            .decode(json!({"type":"assistant","message":{"content":[{"type":"text","text":"again done"}]}}))
+            .unwrap();
+        assert!(
+            encoded(
+                &agent
+                    .decode(json!({"type":"result","is_error":false}))
+                    .unwrap()
+            )
+            .is_empty(),
+            "later turns stay inert once the request was recorded"
+        );
     }
 
     #[test]

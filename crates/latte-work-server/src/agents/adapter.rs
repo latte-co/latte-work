@@ -70,6 +70,8 @@ pub enum Action {
         model: Option<String>,
         native_provider: Option<super::codex_title::NativeProvider>,
     },
+    /// The native title-generation request was sent for this session's lifetime.
+    TitleRequested,
     TitleRenamed(Result<String, String>),
     SourceUsed {
         id: String,
@@ -145,8 +147,9 @@ pub trait AgentAdapter: Send {
     /// Only children observed by this process share its credential redaction context.
     fn knows_subagent(&self, native_id: &str) -> bool;
     /// Persisted manual name, including resumed sessions. Creation arguments
-    /// must not implicitly rename an existing native session.
-    fn set_session_title(&mut self, title: Option<String>, resuming: bool);
+    /// must not implicitly rename an existing native session. `title_requested`
+    /// records the durable once-per-session generation marker.
+    fn set_session_title(&mut self, title: Option<String>, resuming: bool, title_requested: bool);
     /// Prepare launch resources; may retain resume/config context for later protocol steps.
     fn command(
         &mut self,
