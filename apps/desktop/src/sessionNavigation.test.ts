@@ -45,6 +45,7 @@ const session = (id: string, pin: number | null = 1): Session => ({
   created_at: 1,
   pinned_at: pin,
   custom_title: false,
+  title_requested: false,
   archived: false,
   unread: false,
 });

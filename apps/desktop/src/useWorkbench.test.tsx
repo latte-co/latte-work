@@ -39,6 +39,7 @@ const session = (): Session => ({
   status,
   created_at: 1,
   custom_title: false,
+  title_requested: false,
   pinned_at: null,
   unread,
   archived: false,
