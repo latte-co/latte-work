@@ -715,6 +715,9 @@ impl TurnState {
                         Ok(())
                     })?;
                 }
+                Action::TitleRequested => {
+                    db(database, |s| s.mark_title_requested(session_id))?;
+                }
                 Action::TitleRenamed(_) => bail!("未处理的原生标题确认"),
                 Action::GenerateTitle { .. } => bail!("未处理的标题生成请求"),
                 Action::SourceUsed { id, name } => {
@@ -999,6 +1002,7 @@ impl Process {
         adapter.set_session_title(
             session.custom_title.then(|| session.title.clone()),
             session.native_id.is_some(),
+            session.title_requested,
         );
         let prepared = adapter.command(binary, path, session.native_id.as_deref(), &config)?;
         let mut command = prepared.command;
@@ -2419,6 +2423,47 @@ mod tests {
             db(&database, |s| s.session(&session.id)).unwrap().title,
             "Manual"
         );
+    }
+
+    #[tokio::test]
+    async fn title_requested_marks_the_session_without_finishing_the_turn() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(&dir.path().join("title-requests.sqlite")).unwrap();
+        let project = store.add_project(dir.path()).unwrap();
+        let session = store.create_session(project.id, "claude".into()).unwrap();
+        let database = Arc::new(Mutex::new(store));
+        let config = LaunchConfig {
+            environment: Default::default(),
+            traex_model: None,
+            provider: None,
+            model: None,
+            effort: None,
+            permission_mode: None,
+            settings_dir: dir.path().into(),
+        };
+        let mut state = TurnState::default();
+        let mut sink = tokio::io::sink();
+        for _ in 0..2 {
+            assert_eq!(
+                state
+                    .apply(
+                        vec![Action::TitleRequested],
+                        &mut sink,
+                        &database,
+                        &session.id,
+                        &config,
+                    )
+                    .await
+                    .unwrap(),
+                None,
+                "recording the marker never finishes a turn"
+            );
+            assert!(
+                db(&database, |s| s.session(&session.id))
+                    .unwrap()
+                    .title_requested
+            );
+        }
     }
 
     #[tokio::test]

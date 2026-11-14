@@ -28,6 +28,7 @@ const session = (id: string, busy = false): Session => ({
   status: "completed",
   created_at: 0,
   custom_title: false,
+  title_requested: false,
   pinned_at: id === "pinned" ? 1 : null,
   unread: true,
   archived: false,
