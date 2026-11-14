@@ -1709,3 +1709,50 @@ tool execution in the disposable project without a paid
 model API. `smoke-codex.py --live` optionally sends two small actual model turns;
 `--live-tools` also requests a file write in its disposable project. Fixture,
 localhost-upstream, actual model, native desktop and real SSH evidence are separate.
+
+### Side conversations
+
+A host advertising `hello.side_chat_controls` supports opening multiple side chats for a
+started Codex or Traex session. `hello.claude_side_chat` also enables Claude Code.
+Opening a new tab reserves a UUID locally. On the first explicit send, the desktop
+uses that UUID to create the child record and forks the persisted parent context in
+a separate process. Closing the tab closes the child runtime and preserves its history.
+Codex and Traex verify the new thread and sandbox
+before sending the turn. Claude Code uses `--resume --fork-session --session-id` and
+validates the requested child ID from the stream's init event. Later launches resume
+the saved child ID.
+The side chat shares the working directory, with an independent request ledger and
+transcript. Side chats do not take undo snapshots because main and side file activity can
+overlap. The host rejects main-turn undo when write-capable side work on the
+same host overlaps the main turn. Native permissions and approvals can allow
+writes outside the side project's root. The host records possible writes just
+before launching the native process or dispatching to a live process. Detached
+processes and external tools can keep writing after either normal completion
+or forced close. The host keeps the write interval open until the user verifies
+those tasks have stopped. A confirmed local close can return `SideChatClosed`
+with pending writes, so tabs can close and the parent can be archived. A side
+chat reopened from history displays the pending writes. Once the local runtime
+is closed, `ConfirmSideWritesEnded` verifies the latest pending request ID and
+records the current event sequence as the end boundary. Earlier overlapping
+turns remain protected. Legacy boundaries inferred from CLI completion become
+pending on upgrade. Side chats accept direct messages without native steering
+or a message queue.
+Launch validation failures and Unix `ENOENT` launch errors leave no write
+interval. The undo error identifies the side chat, so users can check its history
+and use the main turn's saved diff to restore individual changes manually.
+`SideChatHistory` pages through a parent's children newest first, with `next` as
+the cursor for the next request. The desktop routes the same protocol through
+local and SSH transports.
+
+A null side-chat permission selection blocks external tools and permission requests.
+Codex and Traex use a read-only sandbox. Claude Code uses plan mode with only Read,
+Glob and Grep, disables hooks and integrations, and denies any permission request.
+Explicit permission choices use the corresponding native policy. The app routes
+permission decisions to the child that requested them.
+
+Codex's TUI uses an ephemeral native fork with an instruction boundary
+([source](https://github.com/openai/codex/blob/10b4080/codex-rs/tui/src/app/side.rs)).
+TRAE documents a parent-linked side window with separate input and history
+([interaction](https://docs.trae.cn/ide_chat)). Both installed app-server schemas expose
+`thread/fork`; Traex also exposes the single-question `turn/btw` RPC. Latte uses a
+persistent fork for multi-turn follow-ups and reopening.

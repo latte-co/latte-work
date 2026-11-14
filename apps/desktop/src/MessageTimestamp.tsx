@@ -61,7 +61,7 @@ export function MessageTimestamp({
   label,
 }: {
   at?: number;
-  label: "发送时间" | "回复时间";
+  label: "发送时间" | "回复时间" | "创建时间";
 }) {
   useSyncExternalStore(subscribe, currentDay, currentDay);
   if (at === undefined) return null;

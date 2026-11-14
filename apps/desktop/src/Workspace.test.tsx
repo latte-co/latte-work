@@ -12,7 +12,11 @@ import { Workspace } from "./Workspace";
 import { useState } from "react";
 import { useSidebarPreview } from "./useSidebarPreview";
 import { StatusCenter } from "./StatusCenter";
-import { updateWorkspace, readWorkspace } from "./workspaceState";
+import {
+  updateWorkspace,
+  readWorkspace,
+  useWorkspaceState,
+} from "./workspaceState";
 import type { Request, Response, TerminalInfo } from "./protocol";
 const mocks = vi.hoisted(() => ({
   request: vi.fn(),
@@ -320,11 +324,11 @@ it("closes only the exited terminal on its original host and persists the remain
   await act(async () => {
     mocks.exits.get(local.id)!();
   });
-  expect(readWorkspace(props.workspaceId).tabs).toEqual([]);
-  expect(readWorkspace(props.workspaceId).conversationActive).toBe(true);
-  expect(
-    screen.getByRole("tab", { name: "对话" }).getAttribute("aria-selected"),
-  ).toBe("true");
+  expect(readWorkspace(props.workspaceId)).toMatchObject({
+    tabs: [],
+    visible: false,
+    expanded: false,
+  });
 });
 
 it("removes restored exited tabs without replacing the current file tab", async () => {
@@ -480,18 +484,22 @@ it("keeps a terminal tab when closing fails and scopes host project restoration"
   expect(mocks.disposed).not.toHaveBeenCalled();
 });
 
-it("starts empty, returns to the same launcher after last close, and persists the empty state", async () => {
+it("collapses the workspace after last close and persists the empty state", async () => {
   const view = render(<Workspace {...props} />);
   await act(async () => {});
   expect(screen.queryAllByRole("tab")).toHaveLength(0);
   expect(screen.queryByRole("button", { name: "添加工作区标签" })).toBeNull();
   expect(screen.getByLabelText("工作区入口")).toBeTruthy();
+  expect(screen.queryByRole("button", { name: "侧边聊天" })).toBeNull();
   fireEvent.click(screen.getByRole("button", { name: "文件" }));
   expect(screen.getByRole("tab", { name: "文件" })).toBeTruthy();
   await act(async () => {
     fireEvent.click(screen.getByRole("button", { name: "关闭文件" }));
   });
-  expect(screen.getByLabelText("工作区入口")).toBeTruthy();
+  expect(readWorkspace(props.workspaceId)).toMatchObject({
+    visible: false,
+    tabs: [],
+  });
   view.unmount();
   render(<Workspace {...props} />);
   await act(async () => {});
@@ -651,7 +659,7 @@ it("keeps conversation first in merged tabs, supports keyboard selection, and pr
   );
   expect(mocks.disposed).not.toHaveBeenCalled();
 });
-it("keeps a merged conversation tab when all resources close or no project is selected", async () => {
+it("returns from merged mode when all resources close and can reopen without a project", async () => {
   updateWorkspace(props.workspaceId, {
     tabs: [{ id: "files", kind: "files" }],
     current: "files",
@@ -662,11 +670,18 @@ it("keeps a merged conversation tab when all resources close or no project is se
   await act(async () =>
     fireEvent.click(screen.getByRole("button", { name: "关闭文件" })),
   );
-  expect(screen.getAllByRole("tab")).toHaveLength(1);
-  expect(
-    screen.getByRole("tab", { name: "保留对话" }).getAttribute("aria-selected"),
-  ).toBe("true");
-  expect(screen.getByRole("button", { name: "添加工作区标签" })).toBeTruthy();
+  expect(screen.queryAllByRole("tab")).toHaveLength(0);
+  expect(readWorkspace(props.workspaceId)).toMatchObject({
+    visible: false,
+    expanded: false,
+  });
+  act(() =>
+    updateWorkspace(props.workspaceId, {
+      visible: true,
+      expanded: true,
+      conversationActive: true,
+    }),
+  );
   view.rerender(
     <Workspace {...props} project={undefined} conversationTitle="新任务" />,
   );
@@ -674,6 +689,32 @@ it("keeps a merged conversation tab when all resources close or no project is se
     screen.getByRole("tab", { name: "新任务" }).getAttribute("aria-selected"),
   ).toBe("true");
   expect(screen.getByRole("button", { name: "分离右侧栏" })).toBeTruthy();
+});
+
+it("keeps a side chat tab when closing fails and collapses after local close with pending writes", async () => {
+  const { openSideChatTab } = await import("./workspaceState");
+  const sideId = crypto.randomUUID();
+  openSideChatTab(props.workspaceId, sideId);
+  const close = vi
+    .fn()
+    .mockRejectedValueOnce(new Error("offline"))
+    .mockResolvedValueOnce("后台写入待确认");
+  function LinkedWorkspace() {
+    const [workspace] = useWorkspaceState(props.workspaceId);
+    return (
+      <Workspace {...props} visible={workspace.visible} closeSideChat={close} />
+    );
+  }
+  render(<LinkedWorkspace />);
+  const closeButton = () =>
+    screen.getByRole("button", { name: "关闭侧边聊天" });
+  await act(async () => fireEvent.click(closeButton()));
+  expect(screen.getByRole("tab", { name: "侧边聊天" })).toBeTruthy();
+  expect(readWorkspace(props.workspaceId).visible).toBe(true);
+  await act(async () => fireEvent.click(closeButton()));
+  expect(close).toHaveBeenLastCalledWith(`sideChat:${sideId}`);
+  expect(screen.queryByRole("tab", { name: "侧边聊天" })).toBeNull();
+  expect(document.getElementById("project-workspace")?.hidden).toBe(true);
 });
 
 it("offers browser access without a project and defers saved project previews", async () => {
@@ -701,4 +742,70 @@ it("focuses task information after pinning and closes its tab without host mutat
   fireEvent.click(screen.getByRole("button", { name: "关闭任务摘要" }));
   expect(screen.queryByRole("tab", { name: "任务摘要" })).toBeNull();
   expect(mocks.request).not.toHaveBeenCalled();
+});
+
+it("opens a side chat draft from the empty workspace without creating a session", () => {
+  render(<Workspace {...props} sessionId="parent" canOpenSideChat />);
+  const launcher = within(screen.getByLabelText("工作区入口"));
+  expect(launcher.getAllByRole("button")[0].textContent).toBe("侧边聊天");
+  fireEvent.click(launcher.getByRole("button", { name: "侧边聊天" }));
+  expect(screen.getByRole("tab", { name: "侧边聊天" })).toBeTruthy();
+  expect(readWorkspace(props.workspaceId).tabs).toMatchObject([
+    { kind: "sideChat", draft: true },
+  ]);
+  expect(mocks.request).not.toHaveBeenCalled();
+});
+
+it("creates side chats from the plus menu and reopens them from the history button", async () => {
+  const past = crypto.randomUUID();
+  mocks.request.mockImplementation(async (_host: string, r: Request) => {
+    if (r.method === "side_chat_history")
+      return {
+        kind: "side_chat_history",
+        next: null,
+        sessions: [
+          {
+            id: past,
+            title: "先前的侧边聊天",
+            created_at: 1,
+            status: "running",
+          },
+        ],
+      };
+    return { kind: "ok" };
+  });
+  render(
+    <Workspace
+      {...props}
+      sessionId="parent"
+      canOpenSideChat
+      renderSideChat={(tab, active) =>
+        active ? <div>当前侧边聊天 {tab.id}</div> : null
+      }
+    />,
+  );
+  const add = screen.getByRole("button", { name: "添加工作区标签" });
+  fireEvent.click(add);
+  expect(mocks.request).not.toHaveBeenCalled();
+  expect(screen.queryByText("历史")).toBeNull();
+  fireEvent.click(screen.getByRole("menuitem", { name: "侧边聊天" }));
+  const history = screen.getByRole("button", { name: "历史" });
+  fireEvent.click(history);
+  const entry = await screen.findByRole("button", { name: /先前的侧边聊天/ });
+  expect(entry.getAttribute("title")).toBe("先前的侧边聊天");
+  fireEvent.click(entry);
+  expect(screen.getByText(`当前侧边聊天 sideChat:${past}`)).toBeTruthy();
+  expect(screen.queryByRole("dialog", { name: "历史" })).toBeNull();
+  const sideTabs = readWorkspace(props.workspaceId).tabs.filter(
+    (tab) => tab.kind === "sideChat",
+  );
+  expect(sideTabs).toHaveLength(2);
+  expect(sideTabs[0].draft).toBe(true);
+  expect(sideTabs[1].draft).toBe(false);
+  expect(sideTabs[1].id).not.toBe(sideTabs[0].id);
+  expect(mocks.request).toHaveBeenCalledWith("local", {
+    method: "side_chat_history",
+    session_id: "parent",
+    before: null,
+  });
 });

@@ -6,6 +6,7 @@ import type { Project } from "./protocol";
 import type { SubagentsState } from "./useSubagents";
 import { subagentCounts } from "./SubagentsPanel";
 import { useStatusIssues } from "./statusNotices";
+import { SideChatHistory, type SideChatHistoryProps } from "./SideChatHistory";
 
 export function TaskOverview({
   hostId,
@@ -15,6 +16,7 @@ export function TaskOverview({
   openChanges,
   openSubagents,
   openInfo,
+  sideChatHistory,
 }: {
   hostId: string;
   project?: Project;
@@ -23,6 +25,7 @@ export function TaskOverview({
   openChanges: () => void;
   openSubagents: () => void;
   openInfo: () => void;
+  sideChatHistory?: SideChatHistoryProps;
 }) {
   const [open, setOpen] = useState(false);
   const trigger = useRef<HTMLButtonElement>(null);
@@ -234,6 +237,15 @@ export function TaskOverview({
                 </span>
               </button>
             </section>
+            {sideChatHistory && (
+              <section>
+                <h2>侧边聊天</h2>
+                <SideChatHistory
+                  {...sideChatHistory}
+                  onOpen={(id) => choose(() => sideChatHistory.onOpen(id))}
+                />
+              </section>
+            )}
           </div>,
           document.body,
         )}

@@ -84,7 +84,7 @@ jobs:
   e2e-host:
     name: E2E final server (${{ matrix.label }})
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 30
+    timeout-minutes: 40
     strategy:
       fail-fast: false
       matrix:

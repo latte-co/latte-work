@@ -14,6 +14,7 @@ pub fn lane(request: &Request) -> Lane {
     match request {
         Request::OpenAgentSession { .. }
         | Request::CloseAgentSession { .. }
+        | Request::ConfirmSideWritesEnded { .. }
         | Request::Send { .. }
         | Request::SendQueued { .. }
         | Request::ResumeMessageQueue { .. }

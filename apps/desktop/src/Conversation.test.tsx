@@ -65,10 +65,14 @@ vi.mock("./TaskProjectPicker", () => ({ TaskProjectPicker: () => null }));
 beforeEach(() => {
   HTMLElement.prototype.scrollTo = vi.fn();
   HTMLElement.prototype.scrollIntoView = vi.fn();
-  mocks.request.mockResolvedValue({
-    kind: "files",
-    entries: [{ name: "note.md", path: "note.md", directory: false }],
-  });
+  mocks.request.mockImplementation(async (_, request) =>
+    request.method === "message_queue"
+      ? { kind: "message_queue", entries: [], paused: false, reason: null }
+      : {
+          kind: "files",
+          entries: [{ name: "note.md", path: "note.md", directory: false }],
+        },
+  );
 });
 afterEach(() => {
   cleanup();
@@ -1369,13 +1373,7 @@ it("keeps a pending send disabled when polling reports running, then sends the n
     fireEvent.click(screen.getByRole("button", { name: "发送任务" })),
   );
   expect(p.send).toHaveBeenCalledTimes(2);
-  expect(p.send).toHaveBeenLastCalledWith(
-    "second",
-    null,
-    null,
-    null,
-    undefined,
-  );
+  expect(p.send).toHaveBeenLastCalledWith("second", null, null, null);
   expect(input().value).toBe("");
 });
 it("renders a question directly, submits once for its session and preserves panel navigation without a child summary card", async () => {
@@ -1469,13 +1467,7 @@ it("can queue a follow-up while the current turn runs with a single composer act
   expect(screen.queryByRole("button", { name: "停止任务" })).toBeNull();
   fireEvent.click(await screen.findByRole("button", { name: "加入队列" }));
   await waitFor(() =>
-    expect(p.send).toHaveBeenCalledWith(
-      "Next task",
-      null,
-      null,
-      null,
-      undefined,
-    ),
+    expect(p.send).toHaveBeenCalledWith("Next task", null, null, null),
   );
   expect(p.cancel).not.toHaveBeenCalled();
   // Clearing the draft turns the single action back into stop.
@@ -1714,7 +1706,6 @@ it("takes a queued message into the composer, retains existing draft and referen
     null,
     null,
     null,
-    undefined,
   );
 });
 
@@ -2176,4 +2167,76 @@ it("continues filling history until upward scrolling can leave the follow thresh
   fireEvent.scroll(el);
   expect(load).toHaveBeenCalledTimes(3);
   expect(screen.getByRole("button", { name: "回到最新" })).toBeTruthy();
+});
+
+it.each([
+  ["codex", "side"],
+  ["claude", "side"],
+  ["claude", "btw"],
+])(
+  "moves a %s /%s question to a separate draft while the main turn runs",
+  async (agent, command) => {
+    const p = props();
+    const openSideChat = vi.fn().mockResolvedValue(true);
+    render(
+      <Conversation
+        {...p}
+        openSideChat={openSideChat}
+        session={{ ...session("main"), agent, status: "running" }}
+      />,
+    );
+    fireEvent.change(input(), {
+      target: { value: `/${command} 这里为什么需要锁？` },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "打开侧边聊天" }));
+    expect(openSideChat).toHaveBeenCalledWith("这里为什么需要锁？");
+    expect(p.send).not.toHaveBeenCalled();
+    expect(p.cancel).not.toHaveBeenCalled();
+    await waitFor(() => expect(input().value).toBe(""));
+  },
+);
+
+it("quotes selected reply text and falls back to the full reply for an unrelated selection", async () => {
+  const p = props();
+  const openSideChat = vi.fn();
+  const events: Event[] = [
+    {
+      seq: 1,
+      at: 1,
+      session_id: "main",
+      event: { kind: "user", text: "用户的问题", request_id: "r" },
+    },
+    {
+      seq: 2,
+      at: 2,
+      session_id: "main",
+      event: { kind: "text", text: "需要锁来防止并发写入。" },
+    },
+    {
+      seq: 3,
+      at: 3,
+      session_id: "main",
+      event: { kind: "state", status: "completed", message: null },
+    },
+  ];
+  render(
+    <Conversation
+      {...p}
+      quoteInSideChat={openSideChat}
+      session={{ ...session("main"), agent: "traex" }}
+      events={events}
+    />,
+  );
+  const ask = await screen.findByRole("button", { name: "在侧边聊天中追问" });
+  const selection = window.getSelection()!;
+  const reply = screen.getByText("需要锁来防止并发写入。").firstChild!;
+  selection.setBaseAndExtent(reply, 2, reply, 3);
+  fireEvent.click(ask);
+  expect(openSideChat).toHaveBeenLastCalledWith("锁");
+
+  const user = screen.getByText("用户的问题").firstChild!;
+  selection.setBaseAndExtent(user, 0, user, 2);
+  fireEvent.click(ask);
+  expect(openSideChat).toHaveBeenLastCalledWith("需要锁来防止并发写入。");
+  expect(p.send).not.toHaveBeenCalled();
 });

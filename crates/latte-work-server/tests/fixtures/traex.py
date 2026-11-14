@@ -60,6 +60,20 @@ for line in sys.stdin:
                 'standard_context_window': 475000, 'max_context_window': 800000,
                 'standard_supported_reasoning_levels': [{'effort': 'high'}],
                 'max_supported_reasoning_levels': [{'effort': 'low'}]}}}], 'nextCursor': None})
+    elif method == 'thread/fork' or (method == 'thread/resume' and params['threadId'].startswith('side-thread-')):
+        sandbox, approval = {
+            'read-only': ('readOnly', 'never'),
+            'workspace-write': ('workspaceWrite', 'on-request'),
+            'danger-full-access': ('dangerFullAccess', 'never'),
+        }[params['sandbox']]
+        assert params['approvalPolicy'] == approval
+        assert 'inherited messages' in params['developerInstructions']
+        if method == 'thread/fork':
+            assert params['threadId'] == thread and params['excludeTurns']
+        parent_thread = thread
+        thread = f'side-thread-{os.getpid()}' if method == 'thread/fork' else params['threadId']
+        reply(value, {'thread': {'id': thread, 'forkedFromId': parent_thread},
+                      'sandbox': {'type': sandbox}, 'approvalPolicy': approval})
     elif method in ('thread/start', 'thread/resume'):
         if 'developerInstructions' in params:
             assert params['developerInstructions'].startswith('FIXTURE_NATIVE_DEVELOPER_INSTRUCTIONS\n\nLatte Work'), params['developerInstructions']

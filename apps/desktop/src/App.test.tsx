@@ -16,6 +16,7 @@ import type { SidebarPreview } from "./useSidebarPreview";
 const mocks = vi.hoisted(() => ({
   state: {} as Workbench,
   drafts: undefined as DraftStore | undefined,
+  workspaceSideChat: vi.fn(),
 }));
 vi.mock("./useWorkbench", () => ({ useWorkbench: () => mocks.state }));
 vi.mock("./appLifecycle", () => ({ useAppLifecycle: () => {} }));
@@ -52,16 +53,20 @@ vi.mock("./Workspace", () => ({
   Workspace: ({
     statusCenter,
     conversationActions,
+    canOpenSideChat,
   }: {
     statusCenter: ReactNode;
     conversationActions: ReactNode;
-  }) =>
-    mocks.state.panel && mocks.state.workspace.expanded ? (
+    canOpenSideChat?: boolean;
+  }) => {
+    mocks.workspaceSideChat(canOpenSideChat);
+    return mocks.state.panel && mocks.state.workspace.expanded ? (
       <header data-testid="merged-header">
         {statusCenter}
         {conversationActions}
       </header>
-    ) : null,
+    ) : null;
+  },
 }));
 vi.mock("./SkillsPage", () => ({
   SkillsPage: ({
@@ -105,7 +110,12 @@ beforeEach(() => {
     sessionId: "",
     workspaceId: "test",
     historyScope: "test",
-    workspace: { expanded: false, conversationActive: true },
+    workspace: {
+      expanded: false,
+      conversationActive: true,
+      current: "files",
+      tabs: [],
+    },
     error: "",
     setError: vi.fn(),
     refreshHost: vi.fn(),
@@ -123,6 +133,27 @@ beforeEach(() => {
 afterEach(() => {
   cleanup();
   vi.useRealTimers();
+});
+it("offers Claude side chat through the workspace without adding a title bar button", () => {
+  mocks.state = {
+    ...mocks.state,
+    session: {
+      id: "main",
+      agent: "claude",
+      native_id: "native",
+      archived: false,
+    } as Workbench["session"],
+    supportsSideChat: true,
+    supportsClaudeSideChat: false,
+    agentSessionState: vi.fn(),
+    agentSessionTransitions: {},
+  };
+  const view = render(<App />);
+  expect(mocks.workspaceSideChat).toHaveBeenLastCalledWith(false);
+  mocks.state = { ...mocks.state, supportsClaudeSideChat: true };
+  view.rerender(<App />);
+  expect(mocks.workspaceSideChat).toHaveBeenLastCalledWith(true);
+  expect(screen.queryByRole("button", { name: "打开侧边聊天" })).toBeNull();
 });
 it("keeps one status entry accessible with the sidebar collapsed and when the workspace is merged", () => {
   const view = render(<App />);

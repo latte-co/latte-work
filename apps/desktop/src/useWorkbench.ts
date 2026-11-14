@@ -14,6 +14,7 @@ import { useEffect, useRef, useState } from "react";
 import {
   isSubagentPanelCommand,
   appCommandAction,
+  supportsSideChatAgent,
   hasCommandArguments,
   subagentPanelArgumentNotice,
 } from "./composerActions";
@@ -1104,9 +1105,8 @@ export function useWorkbench() {
     model: string | null,
     effort: Effort | null,
     permission_mode: string | null,
-    uiAction?: "subagents",
   ): Promise<boolean> {
-    if (project && (uiAction === "subagents" || isSubagentPanelCommand(text))) {
+    if (project && isSubagentPanelCommand(text)) {
       openSubagents(workspaceId);
       if (hasCommandArguments(text)) {
         setError(subagentPanelArgumentNotice);
@@ -1115,7 +1115,15 @@ export function useWorkbench() {
       setError("");
       return true;
     }
-    const appAction = appCommandAction(text);
+    const appAction = appCommandAction(
+      text,
+      [],
+      supportsSideChatAgent(session?.agent ?? agent?.id ?? ""),
+    );
+    if (appAction === "side") {
+      setError("请从当前主会话打开侧边聊天。");
+      return false;
+    }
     if (appAction === "model" || appAction === "effort") {
       setError("请通过输入区的模型菜单选择模型或思考强度。");
       return false;
@@ -1403,6 +1411,8 @@ export function useWorkbench() {
     hostId,
     setHostId,
     connected,
+    supportsSideChat: cachedHello(host)?.side_chat_controls === true,
+    supportsClaudeSideChat: cachedHello(host)?.claude_side_chat === true,
     connectionLost: connectedHosts.current.has(hostId),
     agentSessionTransitions,
     agentSessionState: (target: HostedSession) =>

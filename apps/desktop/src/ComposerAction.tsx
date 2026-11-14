@@ -16,10 +16,10 @@ export function ComposerAction({
     <button
       className={`send${active ? " stop" : ""}`}
       aria-label={
-        sending ? "正在发送任务" : active ? "停止任务" : (label ?? "发送任务")
+        sending ? "正在发送任务" : (label ?? (active ? "停止任务" : "发送任务"))
       }
       title={
-        sending ? "正在发送任务" : active ? "停止任务" : (label ?? "发送任务")
+        sending ? "正在发送任务" : (label ?? (active ? "停止任务" : "发送任务"))
       }
       disabled={disabled || sending}
       onClick={onClick}

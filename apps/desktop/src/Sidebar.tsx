@@ -42,6 +42,25 @@ import type { Session } from "./protocol";
 import type { Workbench } from "./useWorkbench";
 import type { SidebarPreview } from "./useSidebarPreview";
 const PROJECT_SESSION_LIMIT = 5;
+const PROJECT_EXPANSION_KEY = "latte-work.project-expansion.v1";
+
+function readProjectExpansion(): Record<string, boolean> {
+  try {
+    const saved: unknown = JSON.parse(
+      localStorage.getItem(PROJECT_EXPANSION_KEY) ?? "null",
+    );
+    return saved && typeof saved === "object" && !Array.isArray(saved)
+      ? Object.fromEntries(
+          Object.entries(saved).filter(
+            ([, value]) => typeof value === "boolean",
+          ),
+        )
+      : {};
+  } catch {
+    return {};
+  }
+}
+
 export function Sidebar({
   state,
   historyPending = state.historyLoading,
@@ -77,9 +96,18 @@ export function Sidebar({
       setContext(null);
     }
   }, [visible]);
-  const [expandedProjects, setExpandedProjects] = useState<
-    Record<string, boolean>
-  >({});
+  const [expandedProjects, setExpandedProjects] =
+    useState(readProjectExpansion);
+  useEffect(() => {
+    try {
+      localStorage.setItem(
+        PROJECT_EXPANSION_KEY,
+        JSON.stringify(expandedProjects),
+      );
+    } catch {
+      /* Nonessential presentation preference. */
+    }
+  }, [expandedProjects]);
   const [showAllProjects, setShowAllProjects] = useState<
     Record<string, boolean>
   >({});
@@ -189,12 +217,12 @@ export function Sidebar({
       s.hostId === hostId && s.project_id === projectId && s.id === sessionId,
   );
   useEffect(() => {
-    if (!projectId || sections.recent || selectedIsPinned) return;
-    const key = `${hostId}:${projectId}`;
+    if (!projectId || !sessionId || sections.recent || selectedIsPinned) return;
+    const key = projectOrderKey({ hostId, id: projectId });
     setExpandedProjects((old) =>
       old[key] === undefined ? { ...old, [key]: true } : old,
     );
-  }, [hostId, projectId, sections.recent, selectedIsPinned]);
+  }, [hostId, projectId, sessionId, sections.recent, selectedIsPinned]);
   const recent = useRecentSessions(
     hosts
       .filter((host) => connectionStatus(host.id) === "connected")
@@ -408,7 +436,7 @@ export function Sidebar({
             if (list === "project")
               setExpandedProjects((old) => ({
                 ...old,
-                [`${s.hostId}:${s.project_id}`]: true,
+                [projectOrderKey({ hostId: s.hostId, id: s.project_id })]: true,
               }));
             state.openSession(s);
           }}
@@ -667,8 +695,9 @@ export function Sidebar({
         >
           {projects.map((p) => {
             const key = `${p.hostId}:${p.id}`;
+            const projectKey = projectOrderKey(p);
             const selected = p.id === projectId && p.hostId === hostId;
-            const expanded = expandedProjects[key] ?? false;
+            const expanded = expandedProjects[projectKey] ?? false;
             const projectSessions = selected
               ? sessions
               : (sessionCache[key] ?? []);
@@ -731,7 +760,10 @@ export function Sidebar({
               (s) => s.status === "completed" && s.unread,
             );
             const toggle = () => {
-              setExpandedProjects((old) => ({ ...old, [key]: !expanded }));
+              setExpandedProjects((old) => ({
+                ...old,
+                [projectKey]: !expanded,
+              }));
               if (!expanded && !selected) void loadProjectSessions(p);
             };
             const showProjectMenu = (point: { x: number; y: number }) => {
@@ -742,7 +774,7 @@ export function Sidebar({
               <div
                 className="project-group"
                 key={key}
-                data-project-key={projectOrderKey(p)}
+                data-project-key={projectKey}
                 data-dragging={
                   reorder.drag?.project.hostId === p.hostId &&
                   reorder.drag.project.id === p.id
@@ -873,7 +905,10 @@ export function Sidebar({
                       aria-label={`在 ${p.name} 中新建任务`}
                       title={`在 ${p.name} 中新建任务`}
                       onClick={() => {
-                        setExpandedProjects((old) => ({ ...old, [key]: true }));
+                        setExpandedProjects((old) => ({
+                          ...old,
+                          [projectKey]: true,
+                        }));
                         void createSession(p).catch((e) =>
                           setError(message(e)),
                         );

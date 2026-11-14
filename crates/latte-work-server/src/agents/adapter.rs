@@ -130,6 +130,10 @@ pub trait AgentAdapter: Send {
     /// must not implicitly rename an existing native session. `title_requested`
     /// records the durable once-per-session generation marker.
     fn set_session_title(&mut self, title: Option<String>, resuming: bool, title_requested: bool);
+    /// Keep inherited history private to a distinct native side thread.
+    fn set_side_parent(&mut self, _native_id: String) -> Result<()> {
+        anyhow::bail!("此 Agent 不支持侧边聊天")
+    }
     /// Prepare launch resources; may retain resume/config context for later protocol steps.
     fn command(
         &mut self,

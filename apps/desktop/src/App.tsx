@@ -8,7 +8,9 @@ import { useCallback, useRef, useState } from "react";
 import { DraftStore } from "./drafts";
 import { Folder, PanelRight, SquarePen } from "lucide-react";
 import { request, message } from "./api";
+import { closeSideChat, SideChat, sideDraftKey } from "./SideChat";
 import { Conversation } from "./Conversation";
+import { supportsSideChatAgent } from "./composerActions";
 import { Workspace } from "./Workspace";
 import { Sidebar } from "./Sidebar";
 import { SidebarToggle } from "./SidebarToggle";
@@ -24,6 +26,8 @@ import { latestTurnChanges } from "./transcript";
 import {
   openWorkspaceResource,
   openTaskInfo,
+  openSideChatTab,
+  sideChatId,
   openTurnChanges,
   openSubagents,
   CONVERSATION_MIN_WIDTH,
@@ -190,6 +194,36 @@ export default function App() {
     statusCenter
   );
   const conversationHidden = merged && !workbench.workspace.conversationActive;
+  const supportsSide =
+    !!session &&
+    workbench.supportsSideChat &&
+    supportsSideChatAgent(session.agent) &&
+    (session.agent !== "claude" || workbench.supportsClaudeSideChat);
+  const canOpenSide =
+    supportsSide && !!session.native_id && !session.archived && connected;
+  const showSide = async (text?: string, quote = false) => {
+    if (!canOpenSide) return false;
+    const owner = workbench.workspaceId;
+    const tabs = workbench.workspace.tabs;
+    const tab =
+      tabs.find(
+        (tab) =>
+          tab.kind === "sideChat" && tab.id === workbench.workspace.current,
+      ) ?? tabs.filter((tab) => tab.kind === "sideChat").at(-1);
+    const sideId = (tab && sideChatId(tab.id)) ?? crypto.randomUUID();
+    if (text) {
+      const key = sideDraftKey(hostId, session.id, sideId);
+      const draft = drafts.get(key);
+      drafts.update(
+        key,
+        quote
+          ? { quotes: [...(draft.quotes ?? []), text] }
+          : { text: [draft.text, text].filter(Boolean).join("\n\n") },
+      );
+    }
+    openSideChatTab(owner, sideId, true);
+    return true;
+  };
   const conversationActions =
     !workbench.modal && !workbench.passwordPrompt ? (
       <SessionMenuButton state={workbench} />
@@ -204,6 +238,16 @@ export default function App() {
       openChanges={() => openWorkspaceResource(workbench.workspaceId, "diff")}
       openSubagents={showSubagents}
       openInfo={() => openTaskInfo(workbench.workspaceId)}
+      sideChatHistory={
+        canOpenSide
+          ? {
+              hostId,
+              parentId: session.id,
+              currentId: sideChatId(workbench.workspace.current),
+              onOpen: (id) => openSideChatTab(workbench.workspaceId, id),
+            }
+          : undefined
+      }
     />
   );
   return (
@@ -298,6 +342,10 @@ export default function App() {
           </header>
           <Conversation
             openSubagents={showSubagents}
+            openSideChat={canOpenSide ? showSide : undefined}
+            quoteInSideChat={
+              canOpenSide ? (text) => void showSide(text, true) : undefined
+            }
             openTurnChanges={(changes, path) => {
               if (session)
                 openTurnChanges(
@@ -415,6 +463,39 @@ export default function App() {
         />
         <Workspace
           sessionId={session?.id}
+          canOpenSideChat={canOpenSide}
+          closeSideChat={
+            session
+              ? (tab) =>
+                  closeSideChat(
+                    drafts,
+                    hostId,
+                    session.id,
+                    workbench.workspaceId,
+                    tab,
+                  )
+              : undefined
+          }
+          renderSideChat={
+            session
+              ? (tab, active) => (
+                  <SideChat
+                    key={JSON.stringify([hostId, session.id, tab.id])}
+                    parent={session}
+                    sideId={sideChatId(tab.id)!}
+                    workspaceId={workbench.workspaceId}
+                    isDraft={tab.draft}
+                    hostId={hostId}
+                    drafts={drafts}
+                    active={
+                      active && !workbench.modal && !workbench.passwordPrompt
+                    }
+                    connected={connected}
+                    supported={supportsSide}
+                  />
+                )
+              : undefined
+          }
           lastTurnVersion={lastTurnVersion}
           overview={overview}
           taskInfo={

@@ -8,6 +8,7 @@ use anyhow::{Context, Result, bail};
 use futures_util::StreamExt;
 use latte_work_protocol::{EventKind, Response, Session, Status};
 use nix::{
+    errno::Errno,
     sys::signal::{Signal, killpg},
     unistd::Pid,
 };
@@ -31,6 +32,8 @@ use tokio_util::codec::{FramedRead, LinesCodec};
 pub type Database = Arc<Mutex<Store>>;
 pub type Runs = Arc<Mutex<HashMap<String, Run>>>;
 const TURN_LIMIT: Duration = Duration::from_secs(24 * 3600);
+const CLOSE_PENDING: &str = "原生会话的关闭状态待确认，请核对主机上的 Agent 和后台任务。";
+const SIDE_CLOSE_PENDING: &str = "本地侧边聊天已关闭，后台写入待确认。";
 const RECONFIGURE_BLOCKED: &str = "当前会话仍有后台任务或待确认状态，无法更换模型、Provider、权限或思考强度；请沿用当前配置发送，消息未发送";
 
 #[derive(Default)]
@@ -209,7 +212,9 @@ pub fn project_session_state(runs: &Runs, response: &mut Response) -> Result<()>
         Response::Session { session }
         | Response::Events { session, .. }
         | Response::History { session, .. } => project(session),
-        Response::Sessions { sessions } => sessions.iter_mut().for_each(project),
+        Response::Sessions { sessions } | Response::SideChatHistory { sessions, .. } => {
+            sessions.iter_mut().for_each(project)
+        }
         Response::RecentSessions { sessions, .. } => sessions
             .iter_mut()
             .for_each(|entry| project(&mut entry.session)),
@@ -372,7 +377,9 @@ pub async fn refresh_titles(
         Response::Session { session }
         | Response::Events { session, .. }
         | Response::History { session, .. } => vec![session.clone()],
-        Response::Sessions { sessions } => sessions.clone(),
+        Response::Sessions { sessions } | Response::SideChatHistory { sessions, .. } => {
+            sessions.clone()
+        }
         Response::RecentSessions { sessions, .. } => {
             sessions.iter().map(|entry| entry.session.clone()).collect()
         }
@@ -481,7 +488,7 @@ pub async fn refresh_titles(
         Response::Session { session }
         | Response::Events { session, .. }
         | Response::History { session, .. } => update(session),
-        Response::Sessions { sessions } => {
+        Response::Sessions { sessions } | Response::SideChatHistory { sessions, .. } => {
             for session in sessions {
                 update(session);
             }
@@ -503,7 +510,17 @@ fn control_for(
     session: Session,
     path: String,
 ) -> Result<mpsc::Sender<Control>> {
-    if db(&database, |s| Ok(s.session(&session.id)?.archived))? {
+    if db(&database, |s| {
+        if let Some(reason) = s.unconfirmed_agent_close(&session.id)? {
+            bail!(reason);
+        }
+        if let Some((parent, _)) = s.side_parent(&session.id)?
+            && s.session(&parent)?.archived
+        {
+            bail!("请先取消主会话归档，再继续侧边聊天");
+        }
+        Ok(s.session(&session.id)?.archived)
+    })? {
         bail!("请先取消归档再打开 Agent 会话或发送消息");
     }
     let mut map = runs.lock().map_err(|_| anyhow::anyhow!("执行状态锁异常"))?;
@@ -567,13 +584,28 @@ pub async fn archive(
         if db(database, |s| Ok(s.session(id)?.status.active()))? {
             bail!("请先停止任务，再归档会话");
         }
+        let children = db(database, |s| s.side_chat_ids(id))?;
+        for child in &children {
+            if db(database, |s| Ok(s.session(child)?.status.active()))? {
+                bail!("侧边聊天仍在执行，请等待完成或停止后再归档");
+            }
+        }
+        for child in children {
+            close(database, runs, &child, true).await?;
+        }
         close(database, runs, id, false).await?;
     }
     db(database, |s| s.archive_session(id, archived))
 }
 
 pub async fn close(database: &Database, runs: &Runs, id: &str, only_if_idle: bool) -> Result<()> {
-    db(database, |s| s.session(id))?;
+    db(database, |s| {
+        s.session(id)?;
+        if let Some(reason) = s.unconfirmed_agent_close(id)? {
+            bail!(reason);
+        }
+        Ok(())
+    })?;
     let control = runs
         .lock()
         .map_err(|_| anyhow::anyhow!("执行状态锁异常"))?
@@ -592,7 +624,14 @@ pub async fn close(database: &Database, runs: &Runs, id: &str, only_if_idle: boo
             .context("关闭 Agent 会话超时")??
             .map_err(anyhow::Error::msg)?;
     }
-    Ok(())
+    // A concurrent close may have recorded uncertainty and removed the actor
+    // after the first lookup. A missing actor cannot clear that evidence.
+    db(database, |s| {
+        if let Some(reason) = s.unconfirmed_agent_close(id)? {
+            bail!(reason);
+        }
+        Ok(())
+    })
 }
 async fn write(input: &mut (impl AsyncWrite + Unpin), bytes: &[u8]) -> Result<()> {
     if bytes.len() > latte_work_protocol::MAX_FRAME {
@@ -992,11 +1031,13 @@ impl Process {
             && self.adapter.can_start_turn()
     }
     fn spawn(
+        database: &Database,
         binary: &str,
         session: &Session,
         path: &str,
         config: LaunchConfig,
         session_open: Arc<AtomicBool>,
+        request_id: Option<&str>,
     ) -> Result<Self> {
         let mut adapter = agents::create(&session.agent)?;
         adapter.set_session_title(
@@ -1004,6 +1045,19 @@ impl Process {
             session.native_id.is_some(),
             session.title_requested,
         );
+        if let Some((parent, native)) = db(database, |s| s.side_parent(&session.id))? {
+            let fingerprint = config.fingerprint()?;
+            let (owner, source) = session
+                .native_id
+                .as_ref()
+                .map_or((&parent, &native), |id| (&session.id, id));
+            if !db(database, |s| {
+                s.native_rename_context_matches(owner, source, fingerprint.as_deref())
+            })? {
+                bail!("侧边聊天的 Provider 或环境已变化，请恢复原配置后重试");
+            }
+            adapter.set_side_parent(native)?;
+        }
         let prepared = adapter.command(binary, path, session.native_id.as_deref(), &config)?;
         let mut command = prepared.command;
         command
@@ -1012,12 +1066,30 @@ impl Process {
             .stderr(Stdio::piped())
             .kill_on_drop(true)
             .process_group(0);
-        let child = command.spawn().with_context(|| {
-            format!(
-                "无法启动 Agent {}，请检查此 Host 的 CLI 安装和登录状态",
-                session.agent
-            )
-        })?;
+        // A launch may fail after starting the native process. Record the
+        // possible write before calling spawn, after all launch validation.
+        if let Some(id) = request_id {
+            db(database, |s| s.start_side_write(id))?;
+        }
+        let child = command
+            .spawn()
+            .or_else(|error| -> Result<Child> {
+                // On Unix, ENOENT from spawn is a launch failure (executable,
+                // interpreter or cwd missing). Other errors can come from Tokio
+                // setting up child I/O or the reaper after a successful launch.
+                if error.raw_os_error() == Some(Errno::ENOENT as i32)
+                    && let Some(id) = request_id
+                {
+                    db(database, |s| s.mark_side_write_not_started(id))?;
+                }
+                Err(error.into())
+            })
+            .with_context(|| {
+                format!(
+                    "无法启动 Agent {}，请检查此 Host 的 CLI 安装和登录状态",
+                    session.agent
+                )
+            })?;
         let pid = child.id().context("Agent PID missing")? as i32;
         let mut group = Group { child, pid };
         let input = group.child.stdin.take().context("Agent stdin missing")?;
@@ -1198,25 +1270,31 @@ impl Process {
             let _ = job.await;
         }
     }
-    async fn close(&mut self) {
+    async fn close(&mut self) -> bool {
         self.cancel_title().await;
         if let Some(reply) = self.rename_reply.take() {
             let _ = reply.send(Err("原生会话已关闭，标题修改结果待确认".into()));
         }
         self.session_open.store(false, Ordering::SeqCst);
         // Closing stdin alone lets some CLI versions wait indefinitely for background work.
-        // Explicit stop/shutdown terminates and reaps the entire owned process group.
-        let _ = killpg(Pid::from_raw(self.group.pid), Signal::SIGTERM);
-        if tokio::time::timeout(Duration::from_secs(2), self.group.child.wait())
-            .await
-            .is_err()
-        {
-            let _ = killpg(Pid::from_raw(self.group.pid), Signal::SIGKILL);
-            let _ = self.group.child.wait().await;
-        }
-        // Reap descendants even if the parent exited before them.
-        let _ = killpg(Pid::from_raw(self.group.pid), Signal::SIGKILL);
+        let group = Pid::from_raw(self.group.pid);
+        let _ = killpg(group, Signal::SIGTERM);
+        let mut reaped = matches!(
+            tokio::time::timeout(Duration::from_secs(2), self.group.child.wait()).await,
+            Ok(Ok(_))
+        );
+        // The parent may have exited before its descendants. A signal alone
+        // does not prove that they have stopped writing.
+        let _ = killpg(group, Signal::SIGKILL);
         self.drain.abort();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            if !reaped {
+                reaped = self.group.child.wait().await.is_ok();
+            }
+            reaped
+        })
+        .await
+        .unwrap_or(false)
     }
 }
 async fn finish_turn(
@@ -1337,33 +1415,41 @@ async fn accept_turn(
     // After durable admission, all failures become explicit terminal events. The
     // accepted request ID still reconciles a lost transport response without replay.
     let result = async {
-        let baseline = crate::task_changes::Snapshot::capture_stored(
-            std::path::Path::new(path),
-            &db(database, |s| Ok(s.snapshot_dir.clone()))?,
-        )
-        .await
-        .unwrap_or_else(|e| crate::task_changes::Snapshot::unavailable(e.to_string()));
-        db(database, |s| {
-            s.save_turn_baseline(&session.id, &turn.request_id, &baseline)
-        })?;
-        if db(database, |s| s.baseline(&session.id))?.is_none() {
-            let task_baseline = if db(database, |s| s.first_request(&session.id))? {
-                baseline
-            } else {
-                crate::task_changes::Snapshot::unavailable(
-                    "此历史任务没有记录文件基线，请查看工作区改动".into(),
-                )
-            };
-            db(database, |s| s.save_baseline(&session.id, &task_baseline))?;
+        // Side chats share the main working directory. An independent snapshot
+        // could attribute concurrent main writes to the child and undo them.
+        if db(database, |s| Ok(s.side_parent(&session.id)?.is_none()))? {
+            let baseline = crate::task_changes::Snapshot::capture_stored(
+                std::path::Path::new(path),
+                &db(database, |s| Ok(s.snapshot_dir.clone()))?,
+            )
+            .await
+            .unwrap_or_else(|e| crate::task_changes::Snapshot::unavailable(e.to_string()));
+            db(database, |s| {
+                s.save_turn_baseline(&session.id, &turn.request_id, &baseline)
+            })?;
+            if db(database, |s| s.baseline(&session.id))?.is_none() {
+                let task_baseline = if db(database, |s| s.first_request(&session.id))? {
+                    baseline
+                } else {
+                    crate::task_changes::Snapshot::unavailable(
+                        "此历史任务没有记录文件基线，请查看工作区改动".into(),
+                    )
+                };
+                db(database, |s| s.save_baseline(&session.id, &task_baseline))?;
+            }
         }
-        if process.is_none() {
+        if process.is_some() {
+            db(database, |s| s.start_side_write(&turn.request_id))?;
+        } else {
             let current = db(database, |s| s.session(&session.id))?;
             *process = Some(Process::spawn(
+                database,
                 binary,
                 &current,
                 path,
                 turn.config,
                 session_open.clone(),
+                Some(&turn.request_id),
             )?);
         }
         let p = process.as_mut().context("Agent process missing")?;
@@ -1542,7 +1628,7 @@ async fn actor(
                     let result = async {
                         if process.is_none() {
                             let current = db(&database, |s| s.session(&session.id))?;
-                            let mut p = Process::spawn(&binary, &current, &path, config, session_open.clone())?;
+                            let mut p = Process::spawn(&database, &binary, &current, &path, config, session_open.clone(), None)?;
                             let actions = p.adapter.advance(Input::Open)?;
                             p.apply(actions, &database, &session.id).await?;
                             process = Some(p);
@@ -1746,9 +1832,16 @@ async fn actor(
                     let background_pending = process
                         .as_ref()
                         .is_some_and(|p| p.turn_active && p.background_at_start);
-                    if let Some(p) = process.as_mut() {
-                        p.close().await;
+                    let had_process = process.is_some();
+                    if had_process
+                        && let Err(error) = db(&database, |s| s.record_unconfirmed_agent_close(&session.id, CLOSE_PENDING))
+                    {
+                        if let Some(reply) = reply { let _ = reply.send(Err(error.to_string())); }
+                        continue;
                     }
+                    let close_unconfirmed = if let Some(p) = process.as_mut() {
+                        !p.close().await
+                    } else { false };
                     process = None;
                     if let Err(error) =
                         finish_turn(&database, &session.id, &path, true, background_pending).await
@@ -1757,13 +1850,25 @@ async fn actor(
                     }
                     // Preserve completed history when merely closing an idle runtime.
                     let result = db(&database, |s| {
-                        s.end_subagents(&session.id, latte_work_protocol::SubagentStatus::Stopped)?;
+                        let writes_pending = s.pending_side_write(&session.id)?.is_some();
+                        let (status, subagent_status, message) = if close_unconfirmed {
+                            (Status::Unknown, latte_work_protocol::SubagentStatus::Unknown,
+                             CLOSE_PENDING)
+                        } else if writes_pending {
+                            (Status::Unknown, latte_work_protocol::SubagentStatus::Unknown, SIDE_CLOSE_PENDING)
+                        } else {
+                            (Status::Stopped, latte_work_protocol::SubagentStatus::Stopped,
+                             "已停止；已执行的文件改动不会撤销。")
+                        };
+                        s.end_subagents(&session.id, subagent_status)?;
                         if s.session(&session.id)?.status.active() {
-                            s.state(
-                                &session.id,
-                                Status::Stopped,
-                                Some("已停止；已执行的文件改动不会撤销。".into()),
-                            )?;
+                            s.state(&session.id, status, Some(message.into()))?;
+                        }
+                        if close_unconfirmed {
+                            bail!(message);
+                        }
+                        if had_process {
+                            s.clear_unconfirmed_agent_close(&session.id)?;
                         }
                         Ok(())
                     });
@@ -1915,8 +2020,15 @@ async fn actor(
             if let Some(config) = recovery {
                 let restore = async {
                     let current = db(&database, |s| s.session(&session.id))?;
-                    let mut p =
-                        Process::spawn(&binary, &current, &path, config, session_open.clone())?;
+                    let mut p = Process::spawn(
+                        &database,
+                        &binary,
+                        &current,
+                        &path,
+                        config,
+                        session_open.clone(),
+                        None,
+                    )?;
                     let actions = p.adapter.advance(Input::Open)?;
                     p.apply(actions, &database, &session.id).await?;
                     Ok::<_, anyhow::Error>(p)

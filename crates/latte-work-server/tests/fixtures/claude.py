@@ -17,7 +17,23 @@ output_lock=threading.Lock()
 def emit(value):
     with output_lock: print(json.dumps(value),flush=True)
 native_id='11111111-1111-4111-8111-111111111111'
-store=pathlib.Path(os.environ['CLAUDE_CONFIG_DIR'])/'projects'/re.sub(r'[^a-zA-Z0-9]','-',os.path.realpath(os.getcwd()))/(native_id+'.jsonl')
+resume_id=next((arg.split('=',1)[1] for arg in sys.argv if arg.startswith('--resume=')),None)
+if '--fork-session' in sys.argv:
+    assert resume_id and resume_id==native_id
+    native_id=next(arg.split('=',1)[1] for arg in sys.argv if arg.startswith('--session-id='))
+    assert native_id!=resume_id
+elif resume_id:
+    native_id=resume_id
+project_store=pathlib.Path(os.environ['CLAUDE_CONFIG_DIR'])/'projects'/re.sub(r'[^a-zA-Z0-9]','-',os.path.realpath(os.getcwd()))
+store=project_store/(native_id+'.jsonl')
+if '--fork-session' in sys.argv or (resume_id and '--disable-slash-commands' in sys.argv):
+    assert (project_store/(resume_id+'.jsonl')).is_file()
+readonly='--safe-mode' in sys.argv
+if readonly:
+    assert '--strict-mcp-config' in sys.argv and '--disable-slash-commands' in sys.argv and '--no-chrome' in sys.argv
+    assert sys.argv[sys.argv.index('--tools')+1]=='Read,Glob,Grep'
+    assert '--permission-mode=plan' in sys.argv
+    assert json.loads(pathlib.Path(sys.argv[sys.argv.index('--settings')+1]).read_text())['disableAllHooks']
 name=next((arg.split('=',1)[1] for arg in sys.argv if arg.startswith('--name=')),None)
 def metadata(value):
     store.parent.mkdir(parents=True,exist_ok=True)
@@ -87,16 +103,16 @@ for line in sys.stdin:
             if not result_first: emit({'type':'result','subtype':'success','is_error':False})
             emit({'type':'control_response','response':{'subtype':'success','request_id':value['request_id']}})
             continue
-        if '--no-session-persistence' not in sys.argv:
+        if '--no-session-persistence' not in sys.argv and '--disable-slash-commands' not in sys.argv:
             with open('fixture-agent-pid','w') as f:f.write(str(os.getpid()))
-        emit({'type':'control_response','response':{'subtype':'success','request_id':value['request_id'],'response':{'commands':[{'name':'compact','description':'Compact history','argumentHint':'[instructions]'},{'name':'project:check','description':os.path.basename(os.getcwd()),'argumentHint':'<target>'},{'name':'agents','description':'Native child agents','argumentHint':''}]}}})
+        emit({'type':'control_response','response':{'subtype':'success','request_id':value['request_id'],'response':{'current_permission_mode':'plan' if readonly else 'default','commands':[{'name':'compact','description':'Compact history','argumentHint':'[instructions]'},{'name':'project:check','description':os.path.basename(os.getcwd()),'argumentHint':'<target>'},{'name':'agents','description':'Native child agents','argumentHint':''}]}}})
     elif value['type']=='user':
         text=value['message']['content']
         resumed=resumed or turns>0
         turns+=1
         metadata({'type':'user','message':{'content':text},'sessionId':native_id})
         if name: metadata({'type':'custom-title','customTitle':name,'sessionId':native_id})
-        emit({'type':'system','subtype':'init','session_id':native_id})
+        emit({'type':'system','subtype':'init','session_id':native_id,'tools':['Read','Glob','Grep'] if readonly else [],'mcp_servers':[]})
         if text.startswith('/project:check skill-load'):
             catalog_only=text.endswith('native-catalog')
             if catalog_only: emit({'type':'system','subtype':'init','session_id':native_id,'skills':['project:check']})

@@ -59,6 +59,10 @@ export type Session = {
    * Active turn, pending approval or background work; live evidence only.
    */
   agent_session_busy?: boolean;
+  /**
+   * Latest side write request whose end has yet to be confirmed.
+   */
+  side_write_pending?: string;
 };
 export type RecentCursor = { updated_at: number; id: string };
 export type RecentSession = { session: Session; updated_at: number };
@@ -440,6 +444,9 @@ export type Request =
   | { method: "mark_session_unread"; session_id: string; unread: boolean }
   | { method: "archive_session"; session_id: string; archived: boolean }
   | { method: "create_session"; project_id: string; agent: string }
+  | { method: "open_side_chat"; session_id: string; side_id: string | null }
+  | { method: "side_chats"; session_id: string }
+  | { method: "side_chat_history"; session_id: string; before: string | null }
   | {
       method: "open_agent_session";
       session_id: string;
@@ -452,6 +459,14 @@ export type Request =
        * Idle bulk close must recheck atomically in the session actor.
        */
       only_if_idle?: boolean;
+    }
+  | {
+      method: "confirm_side_writes_ended";
+      session_id: string;
+      /**
+       * Latest write request observed during verification.
+       */
+      request_id: string;
     }
   | {
       method: "send_queued";
@@ -654,11 +669,13 @@ export type Request =
       section: ChangeSection;
     };
 export type Response =
+  | { kind: "side_chat_closed" }
   | {
       kind: "recent_sessions";
       sessions: Array<RecentSession>;
       next: RecentCursor | null;
     }
+  | { kind: "side_chat_history"; sessions: Array<Session>; next: string | null }
   | { kind: "last_turn_changes"; changes: TurnChanges | null }
   | { kind: "turn_changes"; changes: TurnChanges }
   | { kind: "change_summary"; summary: ChangeSummary }
@@ -753,6 +770,8 @@ export type Response =
       skill_management: boolean;
       skill_file_import: boolean;
       change_preview: boolean;
+      side_chat_controls: boolean;
+      claude_side_chat: boolean;
     }
   | { kind: "projects"; projects: Array<Project> }
   | { kind: "project"; project: Project }

@@ -80,6 +80,10 @@ pub struct Session {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub agent_session_busy: Option<bool>,
+    /// Latest side write request whose end has yet to be confirmed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub side_write_pending: Option<String>,
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "snake_case")]
@@ -603,6 +607,19 @@ pub enum Request {
         project_id: String,
         agent: String,
     },
+    /// Open the latest side chat, or idempotently create one with an explicit ID.
+    OpenSideChat {
+        session_id: String,
+        #[serde(default)]
+        side_id: Option<String>,
+    },
+    SideChats {
+        session_id: String,
+    },
+    SideChatHistory {
+        session_id: String,
+        before: Option<String>,
+    },
     /// Open/resume the native Agent without sending a prompt. Idempotent.
     OpenAgentSession {
         session_id: String,
@@ -610,13 +627,19 @@ pub enum Request {
         #[ts(optional)]
         provider: Option<TurnProvider>,
     },
-    /// Explicitly release this session's native process and all its background work.
+    /// Release the session's local native process and its managed process group.
     CloseAgentSession {
         session_id: String,
         /// Idle bulk close must recheck atomically in the session actor.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         #[ts(optional)]
         only_if_idle: Option<bool>,
+    },
+    /// The user has verified that the side chat's background writes have stopped.
+    ConfirmSideWritesEnded {
+        session_id: String,
+        /// Latest write request observed during verification.
+        request_id: String,
     },
     SendQueued {
         #[serde(default)]
@@ -1076,9 +1099,15 @@ pub struct TaskSource {
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Response {
+    /// The local side chat closed with writes still awaiting confirmation.
+    SideChatClosed,
     RecentSessions {
         sessions: Vec<RecentSession>,
         next: Option<RecentCursor>,
+    },
+    SideChatHistory {
+        sessions: Vec<Session>,
+        next: Option<String>,
     },
     LastTurnChanges {
         changes: Option<TurnChanges>,
@@ -1213,6 +1242,10 @@ pub enum Response {
         skill_file_import: bool,
         #[serde(default)]
         change_preview: bool,
+        #[serde(default)]
+        side_chat_controls: bool,
+        #[serde(default)]
+        claude_side_chat: bool,
     },
     Projects {
         projects: Vec<Project>,

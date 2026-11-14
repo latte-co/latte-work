@@ -239,6 +239,54 @@ it("keeps earlier projects expanded when selection moves or the recent section o
   ).toBe("true");
   expect(props.openSession).not.toHaveBeenCalled();
 });
+it("restores project folders by host after restart without opening the default project", async () => {
+  const base = state([]);
+  const props = {
+    ...base,
+    sessionId: "",
+    hosts: [
+      ...base.hosts,
+      { id: "remote", name: "Remote", ssh: "remote", server_path: null },
+    ],
+    isHostConnected: () => true,
+    projects: [
+      ...base.projects,
+      { id: "p", hostId: "remote", name: "Remote project", path: "/remote" },
+    ],
+  };
+  mocks.request.mockResolvedValue({
+    kind: "sessions",
+    sessions: historySessions(1, "Remote"),
+  });
+  const project = (name: string) => screen.getByRole("button", { name });
+  const first = render(<Sidebar state={props} />);
+  expect(project("Project").getAttribute("aria-expanded")).toBe("false");
+  fireEvent.click(project("Project"));
+  fireEvent.click(project("Project"));
+  fireEvent.click(project("Remote project"));
+  await screen.findByRole("button", { name: "Remote 1" });
+  first.unmount();
+
+  const restarted = render(<Sidebar state={{ ...props, projects: [] }} />);
+  restarted.rerender(
+    <Sidebar state={{ ...props, projects: [...props.projects].reverse() }} />,
+  );
+  expect(project("Project").getAttribute("aria-expanded")).toBe("false");
+  expect(project("Remote project").getAttribute("aria-expanded")).toBe("true");
+  await screen.findByRole("button", { name: "Remote 1" });
+  restarted.rerender(
+    <Sidebar
+      state={{ ...props, sessionId: "s", sessions: [session("completed")] }}
+    />,
+  );
+  expect(project("Project").getAttribute("aria-expanded")).toBe("false");
+  fireEvent.click(project("Remote project"));
+  restarted.unmount();
+
+  render(<Sidebar state={props} />);
+  expect(project("Project").getAttribute("aria-expanded")).toBe("false");
+  expect(project("Remote project").getAttribute("aria-expanded")).toBe("false");
+});
 it("keeps reveal and manual collapse choices separate for projects with the same ID on different hosts", async () => {
   const local = historySessions(7, "Local");
   const remote = historySessions(6, "Remote");
@@ -743,7 +791,6 @@ it.each([
     const base = state([{ ...pinned, pinned_at: null }]);
     render(<Sidebar state={{ ...base, sessionId: "", pinned: [pinned] }} />);
     const project = screen.getByRole("button", { name: "Project" });
-    fireEvent.click(project);
     expect(project.getAttribute("aria-expanded")).toBe("false");
     expect(within(project).queryByRole("img", { name: /项目中有/ })).toBeNull();
     expect(
@@ -761,7 +808,6 @@ it("updates collapsed project activity when conversations are pinned and unpinne
   const base = { ...state([running, waiting, completed]), sessionId: "" };
   const view = render(<Sidebar state={base} />);
   const project = screen.getByRole("button", { name: "Project" });
-  fireEvent.click(project);
   expect(
     within(project).getByRole("img", { name: "项目中有对话执行中" }),
   ).toBeTruthy();

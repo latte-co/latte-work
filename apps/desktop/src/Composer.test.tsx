@@ -39,10 +39,12 @@ function Harness({
   hostId = "remote",
   projectId = "p",
   agent = "claude",
+  sideChat = false,
 }: {
   hostId?: string;
   projectId?: string;
   agent?: string;
+  sideChat?: boolean;
 }) {
   const [text, setText] = useState("");
   return (
@@ -53,6 +55,7 @@ function Harness({
       connected
       disabled={false}
       sending={false}
+      sideChat={sideChat}
       hidden={false}
       value={text}
       onChange={setText}
@@ -132,6 +135,21 @@ it("detects only standalone mention and slash triggers", () => {
     kind: "files",
     start: 3,
   });
+});
+
+it("offers local settings and does not discover or submit native commands in side chat", () => {
+  render(<Harness sideChat />);
+  type("/");
+  expect(screen.getAllByRole("option")).toHaveLength(2);
+  fireEvent.click(screen.getByRole("option", { name: /选择模型/ }));
+  fireEvent.click(screen.getByText("发送"));
+  expect(mocks.openModelSettings).toHaveBeenCalledWith("model");
+
+  type("/compact ");
+  fireEvent.click(screen.getByText("发送"));
+  expect(screen.getByText(/侧边聊天暂不支持 Agent 原生命令/)).toBeTruthy();
+  expect(mocks.request).not.toHaveBeenCalled();
+  expect(mocks.send).not.toHaveBeenCalled();
 });
 it.each([
   ["local", "请检查 /comp", "Enter"],

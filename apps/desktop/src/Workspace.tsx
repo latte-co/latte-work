@@ -7,6 +7,8 @@ import {
   openSubagent,
   openArtifact,
   openBrowser,
+  openSideChatTab,
+  sideChatId,
   useWorkspaceState,
   type WorkspaceTab as Tab,
 } from "./workspaceState";
@@ -34,6 +36,7 @@ import type { SubagentsState } from "./useSubagents";
 import { TerminalPane } from "./TerminalPane";
 import { SidebarToggle } from "./SidebarToggle";
 import { useStatusIssues } from "./statusNotices";
+import { SideChatHistoryButton } from "./SideChatHistory";
 import type { SidebarPreview } from "./useSidebarPreview";
 
 function ConversationTab({
@@ -66,10 +69,21 @@ function ConversationTab({
   );
 }
 
-type Kind = "terminal" | "files" | "diff" | "subagents" | "browser";
+const workspaceKinds = [
+  "sideChat",
+  "diff",
+  "terminal",
+  "files",
+  "subagents",
+  "browser",
+] as const;
+type Kind = (typeof workspaceKinds)[number];
+type WorkspaceOption = { kind: Kind; disabled: boolean };
+type SideTab = Extract<Tab, { kind: "sideChat" }>;
 
 const labels = {
   taskInfo: "任务摘要",
+  sideChat: "侧边聊天",
   artifact: "文件产物",
   browser: "浏览器",
   terminal: "终端",
@@ -81,6 +95,7 @@ const labels = {
 };
 const icons = {
   taskInfo: Info,
+  sideChat: MessageCircle,
   artifact: FileText,
   browser: Globe2,
   subagents: Bot,
@@ -96,6 +111,9 @@ export function Workspace({
   subagents,
   overview,
   taskInfo,
+  renderSideChat,
+  canOpenSideChat,
+  closeSideChat,
   conversationActions,
   statusCenter,
   sessionId,
@@ -115,6 +133,9 @@ export function Workspace({
   subagents?: SubagentsState;
   overview?: React.ReactNode;
   taskInfo?: React.ReactNode;
+  renderSideChat?: (tab: SideTab, active: boolean) => React.ReactNode;
+  canOpenSideChat?: boolean;
+  closeSideChat?: (id: string) => Promise<void | string>;
   conversationActions?: React.ReactNode;
   statusCenter?: React.ReactNode;
   sessionId?: string;
@@ -170,6 +191,9 @@ export function Workspace({
             subagents={selected ? subagents : undefined}
             overview={selected ? overview : undefined}
             taskInfo={selected ? taskInfo : undefined}
+            renderSideChat={selected ? renderSideChat : undefined}
+            canOpenSideChat={selected && canOpenSideChat}
+            closeSideChat={selected ? closeSideChat : undefined}
             conversationActions={selected ? conversationActions : undefined}
             statusCenter={selected ? statusCenter : undefined}
             sessionId={selected ? sessionId : page.sessionId}
@@ -199,6 +223,9 @@ function WorkspacePage({
   subagents,
   overview,
   taskInfo,
+  renderSideChat,
+  canOpenSideChat,
+  closeSideChat,
   conversationActions,
   statusCenter,
   sessionId,
@@ -223,6 +250,9 @@ function WorkspacePage({
   subagents?: SubagentsState;
   overview?: React.ReactNode;
   taskInfo?: React.ReactNode;
+  renderSideChat?: (tab: SideTab, active: boolean) => React.ReactNode;
+  canOpenSideChat?: boolean;
+  closeSideChat?: (id: string) => Promise<void | string>;
   conversationActions?: React.ReactNode;
   statusCenter?: React.ReactNode;
   sessionId?: string;
@@ -272,7 +302,15 @@ function WorkspacePage({
   };
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const [closeNotice, setCloseNotice] = useState("");
   useStatusIssues([
+    {
+      id: `side-chat-close:${workspaceId}`,
+      title: "侧边聊天后台写入待确认",
+      level: "warning",
+      error: selected ? closeNotice : "",
+      action: { label: "知道了", run: () => setCloseNotice("") },
+    },
     {
       id: `workspace:${workspaceId}`,
       title: "工作区操作未完成",
@@ -285,6 +323,7 @@ function WorkspacePage({
     },
   ]);
   const [menu, setMenu] = useState(false);
+  const removing = useRef(new Set<string>());
   const [revision, refresh] = useState(0);
   const trigger = useRef<HTMLButtonElement>(null);
   const tabPrefix = useId();
@@ -364,6 +403,10 @@ function WorkspacePage({
   async function add(kind: Kind) {
     setMenu(false);
     setError("");
+    if (kind === "sideChat") {
+      openSideChatTab(workspaceId, crypto.randomUUID(), true);
+      return;
+    }
     if (kind === "browser") {
       try {
         openBrowser(workspaceId);
@@ -430,6 +473,8 @@ function WorkspacePage({
     }
   }
   async function remove(tab: Tab) {
+    if (removing.current.has(tab.id)) return;
+    removing.current.add(tab.id);
     setBusy(true);
     setError("");
     try {
@@ -438,24 +483,41 @@ function WorkspacePage({
           method: "close_terminal",
           terminal_id: tab.id,
         });
+      if (tab.kind === "sideChat") {
+        if (!closeSideChat) throw new Error("无法关闭侧边聊天");
+        const notice = await closeSideChat(tab.id);
+        if (notice) setCloseNotice(notice);
+      }
       setTabs((tabs) => tabs.filter((t) => t.id !== tab.id));
     } catch (e) {
       setError(message(e));
     } finally {
-      setBusy(false);
+      removing.current.delete(tab.id);
+      setBusy(removing.current.size > 0);
     }
   }
+  const sideTabs = tabs.filter((tab) => tab.kind === "sideChat");
+  const options: WorkspaceOption[] = workspaceKinds
+    .filter((kind) => kind !== "sideChat" || canOpenSideChat)
+    .map((kind) => ({
+      kind,
+      disabled:
+        busy ||
+        (kind !== "browser" && kind !== "sideChat" && (!connected || !project)),
+    }));
   const title = (tab: Tab) =>
-    tab.kind === "artifact"
-      ? tab.name
-      : tab.kind === "terminal"
-        ? `${tab.terminal.title} · ${tab.hostName ?? hostName}`
-        : tab.kind === "subagent"
-          ? (subagents?.tasks.find((task) => task.id === tab.taskId)?.title ??
-            tab.title)
-          : tab.kind === "turnChanges" || tab.kind === "browser"
-            ? tab.title
-            : labels[tab.kind];
+    tab.kind === "sideChat" && sideTabs.length > 1
+      ? `侧边聊天 ${sideTabs.indexOf(tab) + 1}`
+      : tab.kind === "artifact"
+        ? tab.name
+        : tab.kind === "terminal"
+          ? `${tab.terminal.title} · ${tab.hostName ?? hostName}`
+          : tab.kind === "subagent"
+            ? (subagents?.tasks.find((task) => task.id === tab.taskId)?.title ??
+              tab.title)
+            : tab.kind === "turnChanges" || tab.kind === "browser"
+              ? tab.title
+              : labels[tab.kind];
   return (
     <div
       className={`workspace-page${tabs.length ? "" : " empty"}`}
@@ -525,7 +587,7 @@ function WorkspacePage({
             );
           })}
         </div>
-        {(expanded || tabs.length > 0) && (
+        {(expanded || tabs.length > 0 || canOpenSideChat) && (
           <button
             ref={trigger}
             className="icon-button workspace-add"
@@ -540,6 +602,18 @@ function WorkspacePage({
           </button>
         )}
         <div className="workspace-header-space" data-tauri-drag-region />
+        {canOpenSideChat &&
+          sessionId &&
+          !conversationActive &&
+          tabs.some((tab) => tab.kind === "sideChat" && tab.id === current) && (
+            <SideChatHistoryButton
+              key={sessionId}
+              hostId={hostId}
+              parentId={sessionId}
+              currentId={sideChatId(current)}
+              onOpen={(id) => openSideChatTab(workspaceId, id)}
+            />
+          )}
         {expanded && conversationActions}
         {expanded && overview}
         {expanded && <span className="titlebar-divider" aria-hidden="true" />}
@@ -565,7 +639,7 @@ function WorkspacePage({
       {menu && trigger.current && (
         <AddMenu
           trigger={trigger.current}
-          connected={connected && !!project}
+          options={options}
           close={() => {
             setMenu(false);
             trigger.current?.focus();
@@ -585,6 +659,11 @@ function WorkspacePage({
           {["files", "diff", "turnChanges"].includes(tab.kind) &&
           !(tab.project ?? project) ? (
             <div className="workspace-empty">选择项目后打开此标签。</div>
+          ) : tab.kind === "sideChat" ? (
+            renderSideChat?.(
+              tab,
+              active && !conversationActive && current === tab.id && !busy,
+            )
           ) : tab.kind === "taskInfo" ? (
             taskInfo
           ) : tab.kind === "artifact" ? (
@@ -701,16 +780,12 @@ function WorkspacePage({
       {!tabs.length && !conversationActive && (
         <div className="workspace-empty" aria-label="工作区入口">
           <div className="workspace-launchers">
-            {(
-              ["diff", "terminal", "files", "subagents", "browser"] as const
-            ).map((kind) => {
+            {options.map(({ kind, disabled }) => {
               const Icon = icons[kind];
               return (
                 <button
                   key={kind}
-                  disabled={
-                    busy || (kind !== "browser" && (!connected || !project))
-                  }
+                  disabled={disabled}
                   onClick={() => void add(kind)}
                 >
                   <Icon size={18} />
@@ -727,12 +802,12 @@ function WorkspacePage({
 
 function AddMenu({
   trigger,
-  connected,
+  options,
   close,
   choose,
 }: {
   trigger: HTMLButtonElement;
-  connected: boolean;
+  options: WorkspaceOption[];
   close: () => void;
   choose: (kind: Kind) => void;
 }) {
@@ -794,25 +869,24 @@ function AddMenu({
       aria-label="添加工作区标签"
       style={{
         left: Math.max(8, Math.min(rect.left, window.innerWidth - 232)),
-        top: Math.min(rect.bottom + 6, window.innerHeight - 132),
+        top: rect.bottom + 6,
+        maxHeight: Math.max(92, window.innerHeight - rect.bottom - 14),
       }}
     >
-      {(["diff", "terminal", "files", "subagents", "browser"] as const).map(
-        (kind) => {
-          const Icon = icons[kind];
-          return (
-            <button
-              key={kind}
-              role="menuitem"
-              disabled={kind !== "browser" && !connected}
-              onClick={() => choose(kind)}
-            >
-              <Icon size={18} />
-              <span>{labels[kind]}</span>
-            </button>
-          );
-        },
-      )}
+      {options.map(({ kind, disabled }) => {
+        const Icon = icons[kind];
+        return (
+          <button
+            key={kind}
+            role="menuitem"
+            disabled={disabled}
+            onClick={() => choose(kind)}
+          >
+            <Icon size={18} />
+            <span>{labels[kind]}</span>
+          </button>
+        );
+      })}
     </div>,
     document.body,
   );

@@ -3,7 +3,9 @@
 import json
 import os
 import pathlib
+import subprocess
 import sys
+import threading
 import time
 
 if '--version' in sys.argv:
@@ -58,6 +60,20 @@ for line in sys.stdin:
     elif method == 'config/read':
         config_file = pathlib.Path('codex-native-config.json')
         reply(value, {'config': json.loads(config_file.read_text()) if config_file.exists() else {'model_provider': None, 'model': None, 'developer_instructions': 'NATIVE_CODEX_INSTRUCTIONS'}})
+    elif method == 'thread/fork' or (method == 'thread/resume' and params['threadId'].startswith('side-thread-')):
+        sandbox, approval = {
+            'read-only': ('readOnly', 'never'),
+            'workspace-write': ('workspaceWrite', 'on-request'),
+            'danger-full-access': ('dangerFullAccess', 'never'),
+        }[params['sandbox']]
+        assert params['approvalPolicy'] == approval
+        assert 'inherited messages' in params['developerInstructions']
+        if method == 'thread/fork':
+            assert params['threadId'] == thread and params['excludeTurns']
+        parent_thread = thread
+        thread = f'side-thread-{os.getpid()}' if method == 'thread/fork' else params['threadId']
+        reply(value, {'thread': {'id': thread, 'forkedFromId': parent_thread},
+                      'sandbox': {'type': sandbox}, 'approvalPolicy': approval})
     elif method in ('thread/start', 'thread/resume'):
         if params.get('ephemeral'):
             expected_env = pathlib.Path('title-environment.json')
@@ -162,6 +178,32 @@ for line in sys.stdin:
                                              'cwd': os.getcwd(), 'status': 'inProgress', 'processId': '91'}})
             text('LONG_COMMAND_RUNNING')
             complete()
+        elif prompt == 'side-background-write':
+            notify('item/started', {'item': {'id': 'side-writer', 'type': 'commandExecution',
+                                             'command': 'write after signal', 'cwd': os.getcwd(),
+                                             'status': 'inProgress', 'processId': '92'}})
+            origin_turn = turn
+            complete()
+            def write_after_signal():
+                deadline = time.monotonic() + 15
+                while not pathlib.Path('release-side-writer').exists():
+                    if time.monotonic() >= deadline:
+                        return
+                    time.sleep(.02)
+                pathlib.Path('shared.txt').write_text('side edit\n')
+                notify('item/completed', {'turnId': origin_turn, 'item': {
+                    'id': 'side-writer', 'type': 'commandExecution', 'command': 'write after signal',
+                    'cwd': os.getcwd(), 'status': 'completed', 'exitCode': 0, 'processId': '92'}})
+            threading.Thread(target=write_after_signal, daemon=True).start()
+        elif prompt in ('side-foreground-write', 'side-foreground-write-nested', 'main-foreground-write'):
+            path = 'sub/shared.txt' if prompt == 'side-foreground-write-nested' else 'shared.txt'
+            content = 'main edit\n' if prompt == 'main-foreground-write' else 'side edit\n'
+            pathlib.Path(path).write_text(content)
+            complete()
+        elif prompt == 'side-cross-project-write':
+            assert thread.startswith('side-thread-') and sandbox == 'dangerFullAccess'
+            pathlib.Path('../main-project/shared.txt').write_text('side edit\n')
+            complete()
         elif prompt == 'release-background-command':
             # The unsolicited exit is tied to the ORIGINAL turn id; params
             # override the notify() turn so the guarded idle channel accepts it.
@@ -171,8 +213,33 @@ for line in sys.stdin:
                                                'processId': '91', 'aggregatedOutput': 'bg-done'}})
             text('BACKGROUND_RELEASED')
             complete()
-        elif prompt in ('approval', 'question'):
-            waiting = prompt
+        elif prompt in ('approval', 'approval-then-main-write', 'side-detached-writer', 'side-detached-writer-complete', 'question'):
+            if prompt.startswith('side-detached-writer'):
+                assert thread.startswith('side-thread-') and sandbox == 'dangerFullAccess'
+                worker = subprocess.Popen([sys.executable, '-c', """
+import pathlib
+import time
+
+release = pathlib.Path('release-detached-writer')
+deadline = time.monotonic() + 20
+while not release.exists() and time.monotonic() < deadline:
+    time.sleep(0.02)
+if release.exists():
+    pathlib.Path('shared.txt').write_text('side edit\\n')
+    pathlib.Path('detached-write-done').touch()
+"""], start_new_session=True, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL)
+                pathlib.Path('side-writer-pids').write_text(f'{os.getpid()} {worker.pid}')
+                if prompt == 'side-detached-writer-complete':
+                    notify('item/completed', {'item': {'id': 'side-launcher', 'type': 'commandExecution',
+                        'command': 'launch detached worker', 'cwd': os.getcwd(), 'status': 'completed',
+                        'exitCode': 0}})
+                    complete()
+                    continue
+                notify('item/started', {'item': {'id': 'side-worker', 'type': 'commandExecution',
+                                                 'command': 'background worker', 'cwd': os.getcwd(),
+                                                 'status': 'inProgress', 'processId': str(worker.pid)}})
+            waiting = 'question' if prompt == 'question' else 'approval'
             if waiting == 'approval':
                 emit({'id': 73, 'method': 'item/commandExecution/requestApproval', 'params': {'threadId': thread, 'turnId': turn, 'itemId': 'bash', 'command': 'echo approved', 'cwd': os.getcwd()}})
             else:
@@ -205,6 +272,8 @@ for line in sys.stdin:
     elif method is None and waiting:
         if waiting == 'approval':
             assert value['id'] == 73 and value['result']['decision'] in ('accept', 'decline')
+            if turn_prompt == 'approval-then-main-write' and value['result']['decision'] == 'accept':
+                pathlib.Path('shared.txt').write_text('main edit\n')
             text('APPROVED' if value['result']['decision'] == 'accept' else 'DENIED')
         else:
             assert value['id'] == 'ask'

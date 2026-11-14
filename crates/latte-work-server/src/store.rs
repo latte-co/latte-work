@@ -120,6 +120,8 @@ impl Store {
         CREATE TABLE IF NOT EXISTS projects(id TEXT PRIMARY KEY, name TEXT NOT NULL, path TEXT NOT NULL UNIQUE);
         CREATE TABLE IF NOT EXISTS hidden_projects(project_id TEXT PRIMARY KEY REFERENCES projects(id));
         CREATE TABLE IF NOT EXISTS sessions(id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id), data TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS unconfirmed_agent_closes(session_id TEXT PRIMARY KEY REFERENCES sessions(id), reason TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS side_chats(parent_id TEXT NOT NULL REFERENCES sessions(id), session_id TEXT PRIMARY KEY REFERENCES sessions(id), parent_native_id TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS native_title_secrets(session_id TEXT NOT NULL REFERENCES sessions(id), native_id TEXT NOT NULL, secret_hash BLOB NOT NULL, secret_bytes INTEGER NOT NULL, PRIMARY KEY(session_id,native_id,secret_hash));
         CREATE TABLE IF NOT EXISTS native_session_contexts(session_id TEXT NOT NULL REFERENCES sessions(id), native_id TEXT NOT NULL, fingerprint TEXT, PRIMARY KEY(session_id,native_id));
         CREATE TABLE IF NOT EXISTS events(seq INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT NOT NULL REFERENCES sessions(id), at REAL NOT NULL, data TEXT NOT NULL);
@@ -140,7 +142,19 @@ impl Store {
         CREATE TABLE IF NOT EXISTS reference_access(project_id TEXT NOT NULL REFERENCES projects(id), path TEXT NOT NULL, directory INTEGER NOT NULL, PRIMARY KEY(project_id,path));
         CREATE TABLE IF NOT EXISTS requests(id TEXT PRIMARY KEY,session_id TEXT NOT NULL,text TEXT NOT NULL);")?;
         let migration = db.unchecked_transaction()?;
-        migration.execute_batch("CREATE INDEX IF NOT EXISTS events_recent_activity_v2 ON events(session_id,seq DESC) WHERE json_extract(data,'$.kind') IN ('user','queued_message_sent','text','tool','tool_result','approval','approval_resolved','subagent');
+        let legacy_side_chat = migration.query_row(
+            "SELECT pk FROM pragma_table_info('side_chats') WHERE name='parent_id'",
+            [],
+            |row| row.get::<_, u32>(0),
+        )? != 0;
+        if legacy_side_chat {
+            migration.execute_batch("ALTER TABLE side_chats RENAME TO side_chats_legacy;
+                CREATE TABLE side_chats(parent_id TEXT NOT NULL REFERENCES sessions(id), session_id TEXT PRIMARY KEY REFERENCES sessions(id), parent_native_id TEXT NOT NULL);
+                INSERT INTO side_chats SELECT parent_id,session_id,parent_native_id FROM side_chats_legacy;
+                DROP TABLE side_chats_legacy;")?;
+        }
+        migration.execute_batch("CREATE INDEX IF NOT EXISTS side_chats_parent ON side_chats(parent_id);
+        CREATE INDEX IF NOT EXISTS events_recent_activity_v2 ON events(session_id,seq DESC) WHERE json_extract(data,'$.kind') IN ('user','queued_message_sent','text','tool','tool_result','approval','approval_resolved','subagent');
         DROP INDEX IF EXISTS events_recent_activity;")?;
         migration.commit()?;
         let columns = db
@@ -162,6 +176,33 @@ impl Store {
         if !columns.iter().any(|name| name == "permission_mode") {
             db.execute("ALTER TABLE requests ADD COLUMN permission_mode TEXT", [])?;
         }
+        if !columns.iter().any(|name| name == "side_write_start") {
+            db.execute(
+                "ALTER TABLE requests ADD COLUMN side_write_start INTEGER",
+                [],
+            )?;
+        }
+        if !columns.iter().any(|name| name == "side_write_end") {
+            db.execute("ALTER TABLE requests ADD COLUMN side_write_end INTEGER", [])?;
+        }
+        let write_migration = db.unchecked_transaction()?;
+        let has_confirmed_boundaries: bool = write_migration.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='index' AND name='pending_side_writes')",
+            [],
+            |row| row.get(0),
+        )?;
+        if !has_confirmed_boundaries {
+            // Older Servers considered CLI completion proof of background exit.
+            // Those boundaries must be verified under the new contract.
+            write_migration.execute_batch(
+                "UPDATE requests SET side_write_end=NULL
+                 WHERE side_write_end>0 AND permission_mode IS NOT NULL
+                 AND session_id IN (SELECT session_id FROM side_chats);
+                 CREATE INDEX pending_side_writes ON requests(session_id)
+                 WHERE permission_mode IS NOT NULL AND side_write_end IS NULL;",
+            )?;
+        }
+        write_migration.commit()?;
         db.execute_batch("CREATE INDEX IF NOT EXISTS requests_session_provider ON requests(session_id,provider_fingerprint);")?;
         crate::message_queue::initialize(&db)?;
         let snapshot_dir = crate::snapshot_storage::prepare(&path.with_extension("snapshots"))?;
@@ -406,12 +447,11 @@ impl Store {
     }
     pub fn sessions(&self, project: &str) -> Result<Vec<Session>> {
         self.project(project)?;
-        Ok(self
-            .all_sessions()?
-            .into_iter()
-            .filter(|s| s.project_id == project)
-            .take(500)
-            .collect())
+        let mut query = self.db.prepare("SELECT data FROM sessions WHERE project_id=?1 AND id NOT IN (SELECT session_id FROM side_chats) ORDER BY rowid DESC LIMIT 500")?;
+        query
+            .query_map([project], |row| row.get::<_, String>(0))?
+            .map(|row| Ok(serde_json::from_str(&row?)?))
+            .collect()
     }
     pub fn recent_sessions(
         &self,
@@ -431,7 +471,7 @@ impl Store {
             SELECT s.id,s.data,COALESCE((SELECT e.at FROM events e WHERE e.session_id=s.id
                 AND json_extract(e.data,'$.kind') IN ('user','queued_message_sent','text','tool','tool_result','approval','approval_resolved','subagent')
                 ORDER BY e.seq DESC LIMIT 1),json_extract(s.data,'$.created_at')) AS updated_at
-            FROM sessions s WHERE COALESCE(json_extract(s.data,'$.archived'),0)=0
+            FROM sessions s WHERE COALESCE(json_extract(s.data,'$.archived'),0)=0 AND s.id NOT IN (SELECT session_id FROM side_chats)
                 AND s.project_id NOT IN (SELECT project_id FROM hidden_projects))
             SELECT data,updated_at FROM recent
             WHERE ?1 IS NULL OR updated_at<?1 OR (updated_at=?1 AND id<?2)
@@ -466,9 +506,17 @@ impl Store {
         Ok(serde_json::from_str(&data)?)
     }
     pub fn create_session(&self, project_id: String, agent: String) -> Result<Session> {
+        self.create_session_with_id(project_id, agent, Uuid::new_v4())
+    }
+    fn create_session_with_id(
+        &self,
+        project_id: String,
+        agent: String,
+        id: Uuid,
+    ) -> Result<Session> {
         self.project(&project_id)?;
         let session = Session {
-            id: Uuid::new_v4().to_string(),
+            id: id.to_string(),
             project_id,
             title: "新任务".into(),
             agent,
@@ -485,6 +533,7 @@ impl Store {
             archived: false,
             agent_session_open: None,
             agent_session_busy: None,
+            side_write_pending: None,
         };
         self.db.execute(
             "INSERT INTO sessions VALUES (?1,?2,?3)",
@@ -496,8 +545,101 @@ impl Store {
         )?;
         Ok(session)
     }
+    pub fn side_parent(&self, child: &str) -> Result<Option<(String, String)>> {
+        Ok(self
+            .db
+            .query_row(
+                "SELECT parent_id,parent_native_id FROM side_chats WHERE session_id=?1",
+                [child],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?)
+    }
+    pub fn side_chat_history(
+        &self,
+        parent_id: &str,
+        before: Option<&str>,
+    ) -> Result<(Vec<Session>, Option<String>)> {
+        let before = before
+            .map(|id| {
+                self.db
+                    .query_row(
+                        "SELECT rowid FROM side_chats WHERE parent_id=?1 AND session_id=?2",
+                        params![parent_id, id],
+                        |row| row.get::<_, i64>(0),
+                    )
+                    .context("侧边聊天历史游标无效")
+            })
+            .transpose()?;
+        let mut query = self.db.prepare(
+            "SELECT s.data FROM side_chats c JOIN sessions s ON s.id=c.session_id
+             WHERE c.parent_id=?1 AND c.rowid<?2 ORDER BY c.rowid DESC LIMIT 101",
+        )?;
+        let mut sessions = query
+            .query_map(params![parent_id, before.unwrap_or(i64::MAX)], |row| {
+                row.get::<_, String>(0)
+            })?
+            .map(|row| Ok(serde_json::from_str(&row?)?))
+            .collect::<Result<Vec<Session>>>()?;
+        let has_more = sessions.len() > 100;
+        sessions.truncate(100);
+        let next = has_more.then(|| sessions[99].id.clone());
+        Ok((sessions, next))
+    }
+    pub fn side_chat_ids(&self, parent_id: &str) -> Result<Vec<String>> {
+        let mut query = self
+            .db
+            .prepare("SELECT session_id FROM side_chats WHERE parent_id=?1")?;
+        Ok(query
+            .query_map([parent_id], |row| row.get(0))?
+            .collect::<rusqlite::Result<_>>()?)
+    }
+    pub fn open_side_chat(&self, parent_id: &str, side_id: Option<&str>) -> Result<Session> {
+        let parent = self.session(parent_id)?;
+        if !matches!(parent.agent.as_str(), "claude" | "codex" | "traex")
+            || self.side_parent(parent_id)?.is_some()
+        {
+            bail!("仅 Claude Code、Codex 和 Traex 主会话支持侧边聊天");
+        }
+        let id = if let Some(id) = side_id {
+            let id = Uuid::parse_str(id).context("侧边聊天 ID 无效")?;
+            if let Some((owner, _)) = self.side_parent(&id.to_string())? {
+                if owner != parent_id {
+                    bail!("侧边聊天不属于此主会话");
+                }
+                return self.session(&id.to_string());
+            }
+            id
+        } else {
+            if let Some(id) = self.db.query_row(
+                "SELECT session_id FROM side_chats WHERE parent_id=?1 ORDER BY rowid DESC LIMIT 1",
+                [parent_id], |row| row.get::<_, String>(0),
+            ).optional()? {
+                return self.session(&id);
+            }
+            Uuid::new_v4()
+        };
+        if parent.archived {
+            bail!("请先取消主会话归档");
+        }
+        let native = parent
+            .native_id
+            .context("主会话尚未开始，请先发送一条消息")?;
+        let tx = self.db.unchecked_transaction()?;
+        let mut side = self.create_session_with_id(parent.project_id, parent.agent, id)?;
+        side.title = "侧边聊天".into();
+        side.model = parent.model;
+        side.effort = parent.effort;
+        self.save(&side)?;
+        tx.execute(
+            "INSERT INTO side_chats(parent_id,session_id,parent_native_id) VALUES (?1,?2,?3)",
+            params![parent_id, side.id, native],
+        )?;
+        tx.commit()?;
+        Ok(side)
+    }
     pub fn pinned_sessions(&self) -> Result<Vec<Session>> {
-        let rows = self.db.prepare("SELECT data FROM sessions WHERE json_extract(data, '$.pinned_at') IS NOT NULL AND COALESCE(json_extract(data, '$.archived'),0)=0 AND project_id NOT IN (SELECT project_id FROM hidden_projects) ORDER BY json_extract(data, '$.pinned_at') DESC LIMIT 100")?
+        let rows = self.db.prepare("SELECT data FROM sessions WHERE id NOT IN (SELECT session_id FROM side_chats) AND json_extract(data, '$.pinned_at') IS NOT NULL AND COALESCE(json_extract(data, '$.archived'),0)=0 AND project_id NOT IN (SELECT project_id FROM hidden_projects) ORDER BY json_extract(data, '$.pinned_at') DESC LIMIT 100")?
             .query_map([], |r| r.get::<_, String>(0))?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         rows.into_iter()
@@ -1259,6 +1401,127 @@ impl Store {
             .map(|request_id| self.turn_changes(id, &request_id))
             .transpose()
     }
+    /// Called before any native operation that may write. Zero is reserved for
+    /// an admitted side request that has not reached this point.
+    pub fn start_side_write(&self, request_id: &str) -> Result<()> {
+        self.db.execute(
+            "UPDATE requests SET side_write_start=(SELECT MAX(seq) FROM events),
+                 side_write_end=NULL WHERE id=?1 AND side_write_end=0",
+            [request_id],
+        )?;
+        Ok(())
+    }
+    pub fn pending_side_write(&self, session_id: &str) -> Result<Option<String>> {
+        Ok(self
+            .db
+            .query_row(
+                "SELECT id FROM requests WHERE session_id=?1 AND permission_mode IS NOT NULL
+                AND side_write_end IS NULL ORDER BY rowid DESC LIMIT 1",
+                [session_id],
+                |row| row.get(0),
+            )
+            .optional()?)
+    }
+    pub fn confirm_side_writes_ended(&self, session_id: &str, request_id: &str) -> Result<Session> {
+        if self.side_parent(session_id)?.is_none() {
+            bail!("此操作仅适用于侧边聊天");
+        }
+        if self.session(session_id)?.status.active() {
+            bail!("请先停止侧边聊天，再确认后台写入已结束");
+        }
+        let pending = self.pending_side_write(session_id)?;
+        if pending.as_deref() != Some(request_id) {
+            if pending.is_none()
+                && self.db.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM requests WHERE id=?1 AND session_id=?2
+                        AND permission_mode IS NOT NULL AND side_write_end>0)",
+                    params![request_id, session_id],
+                    |row| row.get::<_, bool>(0),
+                )?
+            {
+                return self.with_side_write_state(self.session(session_id)?);
+            }
+            bail!("后台写入记录已变化，请重新核对后确认");
+        }
+        let tx = self.db.unchecked_transaction()?;
+        tx.execute(
+            "UPDATE requests SET side_write_end=(SELECT MAX(seq) FROM events)
+             WHERE session_id=?1 AND permission_mode IS NOT NULL AND side_write_end IS NULL",
+            [session_id],
+        )?;
+        // The same host-side verification resolves a previously unknown close.
+        tx.execute(
+            "DELETE FROM unconfirmed_agent_closes WHERE session_id=?1",
+            [session_id],
+        )?;
+        tx.commit()?;
+        self.with_side_write_state(self.session(session_id)?)
+    }
+    pub fn with_side_write_state(&self, mut session: Session) -> Result<Session> {
+        if self.side_parent(&session.id)?.is_some() {
+            session.side_write_pending = self.pending_side_write(&session.id)?;
+        }
+        Ok(session)
+    }
+    pub fn unconfirmed_agent_close(&self, id: &str) -> Result<Option<String>> {
+        Ok(self
+            .db
+            .query_row(
+                "SELECT reason FROM unconfirmed_agent_closes WHERE session_id=?1",
+                [id],
+                |row| row.get(0),
+            )
+            .optional()?)
+    }
+    pub fn record_unconfirmed_agent_close(&self, id: &str, reason: &str) -> Result<()> {
+        self.db.execute(
+            "INSERT OR IGNORE INTO unconfirmed_agent_closes(session_id,reason) VALUES (?1,?2)",
+            params![id, reason],
+        )?;
+        Ok(())
+    }
+    pub fn clear_unconfirmed_agent_close(&self, id: &str) -> Result<()> {
+        self.db.execute(
+            "DELETE FROM unconfirmed_agent_closes WHERE session_id=?1",
+            [id],
+        )?;
+        Ok(())
+    }
+    pub fn mark_side_write_not_started(&self, request_id: &str) -> Result<()> {
+        self.db.execute(
+            "UPDATE requests SET side_write_start=NULL,side_write_end=0
+             WHERE id=?1 AND side_write_start IS NOT NULL AND side_write_end IS NULL",
+            [request_id],
+        )?;
+        Ok(())
+    }
+    /// Native permissions can allow writes outside the project's canonical root.
+    /// Without a verified write scope, compare execution intervals host-wide.
+    pub fn overlapping_side_chat(
+        &self,
+        session_id: &str,
+        request_id: &str,
+    ) -> Result<Option<(String, bool)>> {
+        Ok(self.db.query_row(
+            "WITH main_turn AS (
+                SELECT
+                    (SELECT MIN(seq) FROM events WHERE session_id=?1 AND json_extract(data,'$.kind')='user'
+                        AND json_extract(data,'$.request_id')=?2) AS start_seq,
+                    (SELECT MIN(seq) FROM events WHERE session_id=?1 AND json_extract(data,'$.kind')='turn_changes'
+                        AND json_extract(data,'$.changes.request_id')=?2) AS end_seq
+            )
+            SELECT side.session_id, r.side_write_end IS NULL FROM side_chats side
+                JOIN events admitted ON admitted.session_id=side.session_id AND json_extract(admitted.data,'$.kind')='user'
+                JOIN requests r ON r.session_id=side.session_id AND r.id=json_extract(admitted.data,'$.request_id')
+                CROSS JOIN main_turn
+                WHERE side.session_id!=?1 AND r.permission_mode IS NOT NULL
+                AND COALESCE(r.side_write_start, admitted.seq) < main_turn.end_seq
+                AND (r.side_write_end IS NULL OR r.side_write_end >= main_turn.start_seq)
+                LIMIT 1",
+            params![session_id, request_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        ).optional()?)
+    }
     pub fn latest_request(&self, id: &str) -> Result<String> {
         self.db
             .query_row(
@@ -1508,8 +1771,22 @@ impl Store {
         session.model = model.map(str::to_owned);
         session.effort = effort;
         session.permission_mode = permission_mode.map(str::to_owned);
+        let is_side_chat = self.side_parent(id)?.is_some();
         if !session.custom_title && session.title == "新任务" {
             session.title = text.chars().take(48).collect();
+        } else if !session.custom_title
+            && session.title == "侧边聊天"
+            && session.native_id.is_none()
+            && is_side_chat
+        {
+            session.title = text
+                .lines()
+                .map(str::trim)
+                .find(|line| !line.is_empty() && !line.starts_with('>'))
+                .unwrap_or(text.trim())
+                .chars()
+                .take(48)
+                .collect();
         }
         let tx = self.db.transaction()?;
         tx.execute(
@@ -1535,6 +1812,14 @@ impl Store {
                 params![id, now(), serde_json::to_string(&event)?],
             )?;
             index_event(&tx, id, &event)?;
+        }
+        if is_side_chat && permission_mode.is_some() {
+            // Keep the durable admission separate from possible native writes.
+            // Legacy rows have NULL here, so they retain the conservative fence.
+            tx.execute(
+                "UPDATE requests SET side_write_end=0 WHERE id=?1",
+                [request_id],
+            )?;
         }
         tx.execute("UPDATE message_queue SET status='dispatched' WHERE request_id=?1 AND session_id=?2 AND status IN ('pending','forwarded')", params![request_id,id])?;
         tx.commit()?;
@@ -1955,6 +2240,218 @@ fn index_source(
 }
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn side_chat_relationship_survives_restart_and_an_interrupted_turn_stays_unknown() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("state.sqlite");
+        let mut store = super::Store::open(&path).unwrap();
+        let project = store.add_project(directory.path()).unwrap();
+        let mut parent = store
+            .create_session(project.id.clone(), "codex".into())
+            .unwrap();
+        parent.native_id = Some("native-main".into());
+        store.save(&parent).unwrap();
+        let side = store.open_side_chat(&parent.id, None).unwrap();
+        store
+            .begin(&side.id, "lost", "side question", None, None, None, None)
+            .unwrap();
+        store.db.execute_batch("ALTER TABLE side_chats RENAME TO side_chats_current;
+            CREATE TABLE side_chats(parent_id TEXT PRIMARY KEY REFERENCES sessions(id), session_id TEXT NOT NULL UNIQUE REFERENCES sessions(id), parent_native_id TEXT NOT NULL);
+            INSERT INTO side_chats SELECT parent_id,session_id,parent_native_id FROM side_chats_current;
+            DROP TABLE side_chats_current;").unwrap();
+        drop(store);
+        let store = super::Store::open(&path).unwrap();
+        let restored = store.open_side_chat(&parent.id, None).unwrap();
+        assert_eq!(restored.id, side.id);
+        assert_eq!(restored.status, super::Status::Unknown);
+        assert_eq!(
+            store.session(&parent.id).unwrap().status,
+            super::Status::Ready
+        );
+        let second_id = uuid::Uuid::new_v4().to_string();
+        let second = store.open_side_chat(&parent.id, Some(&second_id)).unwrap();
+        assert_ne!(restored.id, second.id);
+        assert_eq!(
+            store.side_chat_history(&parent.id, None).unwrap().0.len(),
+            2
+        );
+        assert_eq!(store.sessions(&project.id).unwrap().len(), 1);
+        assert!(store.events(&parent.id, 0.0).unwrap().0.is_empty());
+    }
+
+    #[tokio::test]
+    async fn side_write_confirmation_survives_restart_and_preserves_earlier_overlap() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("state.sqlite");
+        for interrupted in [false, true] {
+            let db_path = path.with_extension(if interrupted {
+                "interrupted"
+            } else {
+                "finished"
+            });
+            let mut store = Store::open(&db_path).unwrap();
+            let project = store.add_project(directory.path()).unwrap();
+            let mut parent = store.create_session(project.id, "codex".into()).unwrap();
+            parent.native_id = Some("native-main".into());
+            store.save(&parent).unwrap();
+            let side = store.open_side_chat(&parent.id, None).unwrap();
+            store
+                .begin(
+                    &side.id,
+                    "original",
+                    "edit",
+                    None,
+                    None,
+                    None,
+                    Some("default"),
+                )
+                .unwrap();
+            store.start_side_write("original").unwrap();
+            if !interrupted {
+                store.state(&side.id, Status::Completed, None).unwrap();
+                store
+                    .confirm_side_writes_ended(&side.id, "original")
+                    .unwrap();
+            }
+            drop(store);
+
+            let mut store = Store::open(&db_path).unwrap();
+            assert_eq!(
+                store.pending_side_write(&side.id).unwrap().is_some(),
+                interrupted
+            );
+            store
+                .begin(
+                    &side.id,
+                    "resumed",
+                    "edit again",
+                    None,
+                    None,
+                    None,
+                    Some("default"),
+                )
+                .unwrap();
+            store.start_side_write("resumed").unwrap();
+            store.state(&side.id, Status::Completed, None).unwrap();
+            assert_eq!(
+                store.pending_side_write(&side.id).unwrap().as_deref(),
+                Some("resumed")
+            );
+            assert!(
+                store
+                    .confirm_side_writes_ended(&side.id, "original")
+                    .is_err()
+            );
+
+            store
+                .begin(&parent.id, "main", "edit", None, None, None, None)
+                .unwrap();
+            let before = crate::task_changes::Snapshot::unavailable("fixture".into());
+            store
+                .save_turn_baseline(&parent.id, "main", &before)
+                .unwrap();
+            let turn = crate::task_changes::FrozenTurn::freeze(
+                "main".into(),
+                before,
+                crate::task_changes::Snapshot::unavailable("fixture".into()),
+                false,
+                false,
+            )
+            .await
+            .unwrap();
+            store.finish_turn(&parent.id, &turn).unwrap();
+            assert_eq!(
+                store.overlapping_side_chat(&parent.id, "main").unwrap(),
+                Some((side.id.clone(), true))
+            );
+            store
+                .confirm_side_writes_ended(&side.id, "resumed")
+                .unwrap();
+            assert!(
+                store
+                    .confirm_side_writes_ended(&side.id, "resumed")
+                    .unwrap()
+                    .side_write_pending
+                    .is_none()
+            );
+            assert_eq!(
+                store.overlapping_side_chat(&parent.id, "main").unwrap(),
+                Some((side.id, false))
+            );
+        }
+    }
+
+    #[test]
+    fn older_side_write_boundaries_require_verification_after_upgrade() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("state.sqlite");
+        let mut store = Store::open(&path).unwrap();
+        let project = store.add_project(directory.path()).unwrap();
+        let mut parent = store.create_session(project.id, "codex".into()).unwrap();
+        parent.native_id = Some("native-main".into());
+        store.save(&parent).unwrap();
+        let side = store.open_side_chat(&parent.id, None).unwrap();
+        for id in ["finished", "never-started"] {
+            store
+                .begin(&side.id, id, "edit", None, None, None, Some("default"))
+                .unwrap();
+            store.state(&side.id, Status::Completed, None).unwrap();
+        }
+        store
+            .db
+            .execute_batch(
+                "DROP INDEX pending_side_writes;
+             UPDATE requests SET side_write_end=2 WHERE id='finished';",
+            )
+            .unwrap();
+        drop(store);
+        let store = Store::open(&path).unwrap();
+        assert_eq!(
+            store.pending_side_write(&side.id).unwrap().as_deref(),
+            Some("finished")
+        );
+        store
+            .confirm_side_writes_ended(&side.id, "finished")
+            .unwrap();
+        drop(store);
+        let store = Store::open(&path).unwrap();
+        assert!(store.pending_side_write(&side.id).unwrap().is_none());
+    }
+
+    #[test]
+    fn unconfirmed_close_survives_reopening_the_store() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("state.sqlite");
+        let store = Store::open(&path).unwrap();
+        let project = store.add_project(directory.path()).unwrap();
+        let session = store.create_session(project.id, "codex".into()).unwrap();
+        assert!(
+            store
+                .unconfirmed_agent_close(&session.id)
+                .unwrap()
+                .is_none()
+        );
+        store
+            .record_unconfirmed_agent_close(&session.id, "background state unknown")
+            .unwrap();
+        drop(store);
+        let store = Store::open(&path).unwrap();
+        assert_eq!(
+            store
+                .unconfirmed_agent_close(&session.id)
+                .unwrap()
+                .as_deref(),
+            Some("background state unknown")
+        );
+        store.clear_unconfirmed_agent_close(&session.id).unwrap();
+        assert!(
+            store
+                .unconfirmed_agent_close(&session.id)
+                .unwrap()
+                .is_none()
+        );
+    }
+
     #[test]
     fn native_rename_context_survives_restart_and_rejects_unknown_or_changed_launches() {
         let directory = tempfile::tempdir().unwrap();

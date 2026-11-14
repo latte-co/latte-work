@@ -167,7 +167,7 @@ it("keeps a new task focused on conversation while restoring explicit panel pref
   expect(reloaded.readWorkspace(fresh).visible).toBe(true);
 });
 
-it("selects conversation when the last resource closes in merged mode", () => {
+it("restores the main conversation layout when the last resource closes in merged mode", () => {
   const key = crypto.randomUUID();
   updateWorkspace(key, {
     expanded: true,
@@ -177,8 +177,9 @@ it("selects conversation when the last resource closes in merged mode", () => {
   });
   updateWorkspace(key, { tabs: [] });
   expect(readWorkspace(key)).toMatchObject({
-    expanded: true,
-    conversationActive: true,
+    visible: false,
+    expanded: false,
+    conversationActive: false,
     current: "",
   });
 });

@@ -103,10 +103,12 @@ export type TranscriptTurn = ReturnType<typeof turnTranscript>[number];
 export function TurnTranscript({
   events,
   turns: suppliedTurns,
+  askInSideChat,
   children,
 }: {
   events: Event[];
   turns?: TranscriptTurn[];
+  askInSideChat?: (quote: string) => void;
   children: (item: ActivityItem) => ReactNode;
 }) {
   const processMemory = useRef(new Map<string, boolean>());
@@ -157,7 +159,11 @@ export function TurnTranscript({
               <ImageGalleryItem key={item.key} id={item.key}>
                 {children(item)}
                 {item.key === turn.finalKey && item.type === "assistant" && (
-                  <ReplyActions text={turn.finalText!} at={turn.finalAt} />
+                  <ReplyActions
+                    text={turn.finalText!}
+                    at={turn.finalAt}
+                    askInSideChat={askInSideChat}
+                  />
                 )}
               </ImageGalleryItem>
             ))}

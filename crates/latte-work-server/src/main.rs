@@ -327,6 +327,8 @@ async fn connection(stream: UnixStream, service: Service) -> Result<()> {
                             skill_management: true,
                             skill_file_import: true,
                             change_preview: true,
+                            side_chat_controls: true,
+                            claude_side_chat: true,
                         }
                     } else {
                         Response::Error {
@@ -391,12 +393,13 @@ async fn dispatch(s: &Service, request: Request) -> Result<Response> {
         },
         other => other,
     };
-    // Undo and archive hold exclusive admission through their durable result.
+    // Undo, archive, and write confirmation hold exclusive admission through their durable result.
     // Archive must not race a new open/send between closing and saving metadata.
     // Ordinary turns retain concurrent admission; no request is replayed.
     let exclusive = matches!(
         &request,
         Request::UndoTurnChanges { .. }
+            | Request::ConfirmSideWritesEnded { .. }
             | Request::ArchiveSession { archived: true, .. }
             | Request::RenameSession { .. }
     );
@@ -409,6 +412,7 @@ async fn dispatch(s: &Service, request: Request) -> Result<Response> {
         &request,
         Request::Send { .. }
             | Request::OpenAgentSession { .. }
+            | Request::CloseAgentSession { .. }
             | Request::CreateTerminal { .. }
             | Request::WriteTerminal { .. }
             | Request::Approve { .. }
@@ -422,6 +426,7 @@ async fn dispatch(s: &Service, request: Request) -> Result<Response> {
     };
     let closed_resource = match &request {
         Request::CloseAgentSession { session_id, .. }
+        | Request::ConfirmSideWritesEnded { session_id, .. }
         | Request::ArchiveSession {
             session_id,
             archived: true,
@@ -756,6 +761,25 @@ async fn dispatch(s: &Service, request: Request) -> Result<Response> {
         } => Response::Session {
             session: runtime::archive(&s.database, &s.runs, &session_id, archived).await?,
         },
+        Request::OpenSideChat {
+            session_id,
+            side_id,
+        } => Response::Session {
+            session: db(&s.database, |d| {
+                d.open_side_chat(&session_id, side_id.as_deref())
+            })?,
+        },
+        Request::SideChats { session_id } => Response::Sessions {
+            sessions: db(&s.database, |d| {
+                Ok(d.side_chat_history(&session_id, None)?.0)
+            })?,
+        },
+        Request::SideChatHistory { session_id, before } => {
+            let (sessions, next) = db(&s.database, |d| {
+                d.side_chat_history(&session_id, before.as_deref())
+            })?;
+            Response::SideChatHistory { sessions, next }
+        }
         Request::CreateSession { project_id, agent } => {
             s.agent_binary(&agent)?;
             Response::Session {
@@ -799,6 +823,23 @@ async fn dispatch(s: &Service, request: Request) -> Result<Response> {
             .await?;
             Response::Ok
         }
+        Request::ConfirmSideWritesEnded {
+            session_id,
+            request_id,
+        } => {
+            if s.runs
+                .lock()
+                .map_err(|_| anyhow::anyhow!("执行状态锁异常"))?
+                .contains_key(&session_id)
+            {
+                bail!("请先关闭侧边聊天的原生会话，再确认后台写入已结束");
+            }
+            Response::Session {
+                session: db(&s.database, |d| {
+                    d.confirm_side_writes_ended(&session_id, &request_id)
+                })?,
+            }
+        }
         Request::CloseAgentSession {
             session_id,
             only_if_idle,
@@ -810,7 +851,11 @@ async fn dispatch(s: &Service, request: Request) -> Result<Response> {
                 only_if_idle.unwrap_or(false),
             )
             .await?;
-            Response::Ok
+            if db(&s.database, |d| d.pending_side_write(&session_id))?.is_some() {
+                Response::SideChatClosed
+            } else {
+                Response::Ok
+            }
         }
         Request::SendQueued { .. } => unreachable!(),
         Request::Send {
@@ -822,6 +867,9 @@ async fn dispatch(s: &Service, request: Request) -> Result<Response> {
             effort,
             permission_mode,
         } => {
+            if allow_queue && db(&s.database, |d| Ok(d.side_parent(&session_id)?.is_some()))? {
+                bail!("侧边聊天暂不支持消息排队");
+            }
             if allow_queue && provider.is_none() {
                 bail!("消息排队需要明确的执行配置，请更新客户端");
             }
@@ -1177,7 +1225,7 @@ async fn dispatch(s: &Service, request: Request) -> Result<Response> {
             Response::SubagentTranscript { events, truncated }
         }
         Request::Poll { session_id, after } => db(&s.database, |d| {
-            let session = d.session(&session_id)?;
+            let session = d.with_side_write_state(d.session(&session_id)?)?;
             let (events, has_more) = d.events(&session_id, after)?;
             Ok(Response::Events {
                 session,
@@ -1457,6 +1505,18 @@ async fn dispatch(s: &Service, request: Request) -> Result<Response> {
                     .is_empty()
             {
                 bail!("此主机仍有运行任务、后台 Agent 或终端；请结束后再撤销");
+            }
+            if let Some((side_id, unknown)) = db(&s.database, |d| {
+                d.overlapping_side_chat(&session_id, &request_id)
+            })? {
+                let reason = if unknown {
+                    "的写入结束时间待确认"
+                } else {
+                    "与本轮同时执行"
+                };
+                bail!(
+                    "具备写权限的侧边聊天（{side_id}）{reason}，无法安全撤销。请核对侧边聊天记录，并按本轮差异手动调整文件。"
+                );
             }
             let session = db(&s.database, |d| d.session(&session_id))?;
             let project = db(&s.database, |d| d.project(&session.project_id))?;
