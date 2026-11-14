@@ -13,6 +13,17 @@ export default {
         event.system.push({ type: "text", text });
       });
     }
+    // ACP assigns its own native inbox ID. Carry a process-local tag through
+    // ACP, remove it before admission, and correlate the resulting inbox ID.
+    const promptTag = ctx.options.promptTag + "\n";
+    await ctx.session.hook("prompt", (event) => {
+      if (!event.prompt.text.startsWith(promptTag)) return;
+      event.prompt.text = event.prompt.text.slice(promptTag.length);
+      event.metadata = {
+        ...event.metadata,
+        latteWorkPrompt: ctx.options.promptTag,
+      };
+    });
     if (ctx.options.permissionMode) {
       await ctx.permission.hook("evaluate", (event) => {
         // A preceding native or managed denial is authoritative.
@@ -25,7 +36,6 @@ export default {
     const socket = createConnection(ctx.options.socket);
     const abort = new AbortController();
     const questions = new Map();
-    const bridgeQuestions = new Set();
     const cleanup = () => {
       abort.abort();
       for (const resolve of questions.values()) resolve(null);
@@ -70,8 +80,22 @@ export default {
         for await (const { type, data } of stream) {
           if (type === "session.inbox.enqueued") {
             const { sessionID, inboxID, item } = data;
-            if (item.type === "synthetic")
-              send({ type, data: { sessionID, inboxID, synthetic: true } });
+            if (
+              item.type === "synthetic" ||
+              item.type === "user" ||
+              item.type === "compaction"
+            )
+              send({
+                type,
+                data: {
+                  sessionID,
+                  inboxID,
+                  itemType: item.type,
+                  foreground:
+                    item.payload.metadata?.latteWorkPrompt ===
+                    ctx.options.promptTag,
+                },
+              });
           } else if (type === "session.created") {
             const { sessionID, parentID, agent, title } = data;
             if (parentID)
@@ -156,7 +180,8 @@ export default {
               const { data: skills } = await ctx.skill.list({ location });
               if (
                 !skills.some(
-                  (skill) => skill.name === request.name && skill.slash !== false,
+                  (skill) =>
+                    skill.name === request.name && skill.slash !== false,
                 )
               ) {
                 throw new Error("Unknown native command");
@@ -165,19 +190,14 @@ export default {
               return;
             }
           }
-          bridgeQuestions.add(sessionID);
-          try {
-            await ctx.session.command({
-              sessionID,
-              name: request.name,
-              command: request.name,
-              text: request.text,
-              delivery: "steer",
-            });
-            await ctx.session.wait({ sessionID });
-          } finally {
-            bridgeQuestions.delete(sessionID);
-          }
+          await ctx.session.command({
+            sessionID,
+            name: request.name,
+            command: request.name,
+            text: request.text,
+            delivery: "steer",
+          });
+          await ctx.session.wait({ sessionID });
         } else if (action === "permission" && ctx.permission.reply) {
           const decision = request.allow ? "once" : "reject";
           await ctx.permission.reply({
@@ -224,10 +244,7 @@ export default {
         const native = tool.execute;
         tool.execute = async ({ questions: prompts }, context) => {
           const { sessionID, agent, messageID, id: toolCallId } = context;
-          if (!legacy && !bridgeQuestions.has(sessionID)) {
-            const session = await ctx.session.get({ sessionID });
-            if (!session.parentID) return native({ questions: prompts }, context);
-          }
+          // A native continuation can start with no foreground ACP subscriber.
           if (questions.size >= 32 || socket.destroyed)
             throw new Error("Latte Work cannot show questions");
           if (ctx.permission.assert) {
@@ -243,18 +260,21 @@ export default {
             // tool through the native rules and hooks, stopping just before
             // it would open a form that its ACP peer cannot answer.
             let evaluated;
-            const registration = await ctx.permission.hook("evaluate", (event) => {
-              if (
-                event.action !== "question" ||
-                event.sessionID !== sessionID ||
-                event.source?.type !== "tool" ||
-                event.source.messageID !== messageID ||
-                event.source.id !== toolCallId
-              )
-                return;
-              evaluated = event.effect;
-              event.effect = "deny";
-            });
+            const registration = await ctx.permission.hook(
+              "evaluate",
+              (event) => {
+                if (
+                  event.action !== "question" ||
+                  event.sessionID !== sessionID ||
+                  event.source?.type !== "tool" ||
+                  event.source.messageID !== messageID ||
+                  event.source.id !== toolCallId
+                )
+                  return;
+                evaluated = event.effect;
+                event.effect = "deny";
+              },
+            );
             try {
               try {
                 return await native({ questions: prompts }, context);

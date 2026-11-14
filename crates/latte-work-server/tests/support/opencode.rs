@@ -152,20 +152,6 @@ async fn opencode_metadata_resume_and_reconciliation_use_native_identity() {
         Response::Ok
     ));
 
-    assert!(matches!(
-        ask(
-            &mut client,
-            turn(&id, "unknown-slash", "/not-a-native-command xxx")
-        )
-        .await,
-        Response::Accepted { .. }
-    ));
-    wait(&mut client, &id, Status::Failed).await;
-    assert!(
-        !folder.path().join("prompts").exists(),
-        "unsupported command must not reach the model"
-    );
-
     let first = || turn(&id, "command", "/compact");
     assert!(matches!(
         ask(&mut client, first()).await,
@@ -477,6 +463,10 @@ async fn opencode_ignores_late_foreground_events_and_runs_the_background_notific
     for (request, text) in [
         ("path", "/tmp/project/src inspect this"),
         ("single-component-path", "/tmp inspect this"),
+        (
+            "missing-path",
+            "/missing-project explain why this path does not exist",
+        ),
         ("race", "late-native"),
     ] {
         assert!(matches!(
@@ -499,6 +489,8 @@ async fn opencode_ignores_late_foreground_events_and_runs_the_background_notific
     .unwrap();
     assert!(contains_text(&events, "ACP reply"));
     assert!(!contains_text(&events, "duplicate native reply"));
+    let log = std::fs::read_to_string(folder.path().join("prompts")).unwrap();
+    assert!(log.contains(":/missing-project explain why this path does not exist\n"));
 }
 
 #[tokio::test]

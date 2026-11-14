@@ -96,7 +96,7 @@ def sideband():
                     assert parent_finished.is_set()
                     native_event("session.text.delta", sessionID=native + "_child", delta="child answered")
                     native_event("session.execution.succeeded", sessionID=native + "_child")
-                    native_event("session.inbox.enqueued", sessionID=native, inboxID="msg_answered", synthetic=True)
+                    native_event("session.inbox.enqueued", sessionID=native, inboxID="msg_answered", itemType="synthetic")
                     native_event("session.execution.started", sessionID=native)
                     native_event("session.inbox.delivered", sessionID=native, inboxID="msg_answered")
                     native_event("session.execution.succeeded", sessionID=native)
@@ -205,6 +205,12 @@ for line in sys.stdin:
         assert params["sessionId"] == session
         prompt_id = id
         text = params["prompt"][0]["text"]
+        if not text.startswith("/compact"):
+            config = json.loads(os.environ["OPENCODE_CONFIG_CONTENT"])
+            plugin = next(p for p in config["plugins"] if "socket" in p.get("options", {}))
+            tag = plugin["options"]["promptTag"] + "\n"
+            assert text.startswith(tag), text
+            text = text[len(tag):]
         Path(session).write_text("prompted")
         with Path("prompts").open("a") as log:
             log.write(f"{session}:{model}:{effort}:{text}\n")
@@ -233,11 +239,12 @@ for line in sys.stdin:
         elif text == "late-native":
             complete("ACP reply")
             await_test_signal("release-native")
+            native_event("session.inbox.enqueued", sessionID=session, inboxID="msg_acp", itemType="user", foreground=True)
             native_event("session.execution.started", sessionID=session)
             native_event("session.inbox.delivered", sessionID=session, inboxID="msg_acp")
             native_event("session.text.delta", sessionID=session, delta="duplicate native reply")
             native_event("session.execution.succeeded", sessionID=session)
-            native_event("session.inbox.enqueued", sessionID=session, inboxID="msg_bg", synthetic=True)
+            native_event("session.inbox.enqueued", sessionID=session, inboxID="msg_bg", itemType="user")
             native_event("session.execution.started", sessionID=session)
             native_event("session.inbox.delivered", sessionID=session, inboxID="msg_bg")
             native_event("session.text.delta", sessionID=session, delta="real follow-up")

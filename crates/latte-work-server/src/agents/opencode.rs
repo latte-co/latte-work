@@ -35,6 +35,13 @@ enum Request {
     Prompt,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum AcpInput {
+    Prompt,
+    Compact,
+    Skill,
+}
+
 #[derive(Default)]
 pub struct OpenCode {
     cwd: String,
@@ -49,9 +56,11 @@ pub struct OpenCode {
     native_permissions: HashMap<String, String>,
     child_interactions: HashSet<String>,
     command_children: HashSet<String>,
-    background_inputs: HashSet<String>,
+    inbox_inputs: HashMap<String, bool>,
+    prompt_tag: String,
+    acp_input: Option<AcpInput>,
     native_execution_open: bool,
-    synthetic_delivered: bool,
+    autonomous_inbox_delivered: bool,
     foreground_inbox_delivered: bool,
     deferred_followup: Vec<String>,
     deferred_followup_bytes: usize,
@@ -238,8 +247,6 @@ impl OpenCode {
             self.commands
                 .as_ref()
                 .is_some_and(|commands| commands.iter().any(|c| c.name == *name))
-                || (!name.contains(['/', '.'])
-                    && !std::path::Path::new(&text.trim_start()[..name.len() + 1]).exists())
         })
     }
     fn cancel_questions(&mut self) -> Result<Vec<Action>> {
@@ -316,7 +323,7 @@ impl OpenCode {
                     }
                     let prompt = self.slash_prompt.take().context("OpenCode 命令已失效")?;
                     self.native_command = None;
-                    return self.start_prompt(&prompt);
+                    return self.start_prompt(&prompt, AcpInput::Skill);
                 }
                 if message["error"] == true || !self.command_waiting_for_end {
                     return Ok(self.finish_command(message["error"] == true));
@@ -410,45 +417,13 @@ impl OpenCode {
                 result: Ok(allow),
             }]);
         }
-        if kind == "question"
-            && self.saved
-            && (session == self.session.as_deref() && (self.running() || self.followup)
-                || session.is_some_and(|id| self.children.get(id) == Some(&true)))
-        {
-            let id = string(data, "id")?;
-            let questions = question::native_questions(&data["prompts"]);
-            let Some(questions) = questions.filter(|_| !self.cancelling) else {
-                return Ok(vec![self.sideband_request(
-                    "answer",
-                    id,
-                    json!({"questionID":id,"answers":null}),
-                )?]);
-            };
-            ensure!(
-                self.native_questions.len() < 32 && self.native_questions.insert(id.into()),
-                "OpenCode 问题重复或数量超出限制"
-            );
-            if session != self.session.as_deref() {
-                self.child_interactions.insert(id.into());
-            }
-            return Ok(vec![Action::Question {
-                id: id.into(),
-                tool_use_id: data["toolCallId"].as_str().map(|tool| {
-                    session
-                        .filter(|session| Some(*session) != self.session.as_deref())
-                        .map_or_else(
-                            || tool.to_owned(),
-                            |child| format!("opencode-child:{child}:{tool}"),
-                        )
-                }),
-                input: json!({}),
-                questions,
-            }]);
-        }
         if let Some(child) = data["sessionID"]
             .as_str()
             .filter(|id| self.children.contains_key(*id))
         {
+            if kind == "question" && self.children.get(child) == Some(&true) {
+                return self.native_question(data, Some(child));
+            }
             if kind == "permission.asked"
                 && self.children.get(child) == Some(&true)
                 && self.command_children.contains(child)
@@ -490,7 +465,7 @@ impl OpenCode {
             .request
             .is_some_and(|(_, kind)| kind == Request::Prompt);
         let followup_start = self.native_execution_open
-            && self.synthetic_delivered
+            && self.autonomous_inbox_delivered
             && !self.foreground_inbox_delivered
             && self.native_command.is_none()
             && !self.followup
@@ -506,6 +481,7 @@ impl OpenCode {
                     | "session.execution.succeeded"
                     | "session.execution.failed"
                     | "session.execution.interrupted"
+                    | "question"
             );
         if acp_prompt
             && (!self.deferred_followup.is_empty() || followup_start)
@@ -528,17 +504,21 @@ impl OpenCode {
         }
         let updates = match kind {
             "session.renamed" => Ok(self.generated_title(&data["title"])),
-            "session.inbox.enqueued" if data["synthetic"] == true => {
+            "session.inbox.enqueued" => {
                 ensure!(
-                    self.background_inputs.len() < MAX_TOOLS,
-                    "OpenCode 后台输入超出限制"
+                    self.inbox_inputs.len() < MAX_TOOLS,
+                    "OpenCode 原生输入超出限制"
                 );
-                self.background_inputs
-                    .insert(string(data, "inboxID")?.into());
+                let foreground = data["foreground"] == true
+                    || (data["itemType"] == "compaction"
+                        && self.acp_input == Some(AcpInput::Compact));
+                self.inbox_inputs
+                    .insert(string(data, "inboxID")?.into(), foreground);
                 Ok(vec![])
             }
             "session.inbox.delivered" => {
                 let inbox = string(data, "inboxID")?;
+                let foreground = self.inbox_inputs.remove(inbox);
                 if self
                     .steering
                     .as_ref()
@@ -547,18 +527,16 @@ impl OpenCode {
                     let (request, _) = self.steering.take().expect("matched");
                     return Ok(vec![Action::InputsConsumed(vec![request])]);
                 }
-                if self.background_inputs.remove(inbox) {
-                    // OpenCode can promote synthetic context alongside an ACP
-                    // prompt. Let the whole delivery batch identify the owner.
-                    self.synthetic_delivered = true;
-                } else {
-                    self.foreground_inbox_delivered = true;
+                match foreground {
+                    Some(true) => self.foreground_inbox_delivered = true,
+                    Some(false) => self.autonomous_inbox_delivered = true,
+                    None => {}
                 }
                 Ok(vec![])
             }
             "session.inbox.cancelled" => {
                 if let Some(id) = data["inboxID"].as_str() {
-                    self.background_inputs.remove(id);
+                    self.inbox_inputs.remove(id);
                 }
                 if self
                     .steering
@@ -574,19 +552,21 @@ impl OpenCode {
                 Ok(vec![])
             }
             "session.skill.activated" => {
-                self.foreground_inbox_delivered = true;
+                if self.acp_input == Some(AcpInput::Skill) {
+                    self.foreground_inbox_delivered = true;
+                }
                 Ok(vec![])
             }
             "session.execution.started" if self.native_command.is_some() => {
                 self.native_execution_open = true;
-                self.synthetic_delivered = false;
+                self.autonomous_inbox_delivered = false;
                 self.command_waiting_for_end = true;
                 self.command_outcome = None;
                 Ok(vec![])
             }
             "session.execution.started" => {
                 self.native_execution_open = true;
-                self.synthetic_delivered = false;
+                self.autonomous_inbox_delivered = false;
                 Ok(vec![])
             }
             "session.execution.succeeded"
@@ -597,7 +577,7 @@ impl OpenCode {
                 self.command_outcome = Some(kind == "session.execution.succeeded");
                 self.command_waiting_for_end = false;
                 self.native_execution_open = false;
-                self.synthetic_delivered = false;
+                self.autonomous_inbox_delivered = false;
                 self.foreground_inbox_delivered = false;
                 if self.command_acknowledged {
                     return Ok(self.finish_command(false));
@@ -611,7 +591,7 @@ impl OpenCode {
             {
                 self.followup = false;
                 self.native_execution_open = false;
-                self.synthetic_delivered = false;
+                self.autonomous_inbox_delivered = false;
                 self.possible_followup = self.children.values().any(|active| *active)
                     || !self.background_shells.is_empty();
                 Ok(self.finish(
@@ -623,13 +603,17 @@ impl OpenCode {
             | "session.execution.failed"
             | "session.execution.interrupted" => {
                 self.native_execution_open = false;
-                self.synthetic_delivered = false;
+                self.autonomous_inbox_delivered = false;
+                if self.foreground_inbox_delivered {
+                    self.acp_input = None;
+                }
                 self.foreground_inbox_delivered = false;
                 Ok(vec![])
             }
             "permission.asked" if self.followup || self.native_command.is_some() => {
                 self.native_permission(data, string(data, "sessionID")?)
             }
+            "question" if self.running() || self.followup => self.native_question(data, None),
             _ if self.followup || self.native_command.is_some() => {
                 self.native_output(kind, data, None)
             }
@@ -637,6 +621,36 @@ impl OpenCode {
         }?;
         actions.extend(updates);
         Ok(actions)
+    }
+
+    fn native_question(&mut self, data: &Value, child: Option<&str>) -> Result<Vec<Action>> {
+        let id = string(data, "id")?;
+        let questions = question::native_questions(&data["prompts"]);
+        let Some(questions) = questions.filter(|_| !self.cancelling) else {
+            return Ok(vec![self.sideband_request(
+                "answer",
+                id,
+                json!({"questionID":id,"answers":null}),
+            )?]);
+        };
+        ensure!(
+            self.native_questions.len() < 32 && self.native_questions.insert(id.into()),
+            "OpenCode 问题重复或数量超出限制"
+        );
+        if child.is_some() {
+            self.child_interactions.insert(id.into());
+        }
+        Ok(vec![Action::Question {
+            id: id.into(),
+            tool_use_id: data["toolCallId"].as_str().map(|tool| {
+                child.map_or_else(
+                    || tool.to_owned(),
+                    |child| format!("opencode-child:{child}:{tool}"),
+                )
+            }),
+            input: json!({}),
+            questions,
+        }])
     }
 
     fn native_permission(&mut self, data: &Value, session: &str) -> Result<Vec<Action>> {
@@ -822,15 +836,10 @@ impl OpenCode {
 
     fn start(&mut self, text: &str) -> Result<Vec<Action>> {
         let command = self.slash_command(text);
-        if let Some(name) = command
-            && !self
-                .commands
-                .as_ref()
-                .is_some_and(|list| list.iter().any(|c| c.name == name))
-        {
+        if command.is_some() && !crate::sources::references(text).is_empty() {
             return Ok(vec![Action::Finished {
                 failed: true,
-                message: Some("此 OpenCode 命令尚不支持；消息未发送给模型".into()),
+                message: Some("OpenCode 命令使用原生参数，请先移除项目引用".into()),
             }]);
         }
         let session = self.session_id()?.to_owned();
@@ -853,15 +862,20 @@ impl OpenCode {
             self.tools.retain(|_, tool| tool.child);
             return Ok(vec![Action::NativeSession(session), action]);
         }
-        self.start_prompt(if command.is_some() {
-            text.trim_start()
+        if command.is_some() {
+            self.start_prompt(text.trim_start(), AcpInput::Compact)
         } else {
-            text
-        })
+            self.start_prompt(text, AcpInput::Prompt)
+        }
     }
 
-    fn start_prompt(&mut self, text: &str) -> Result<Vec<Action>> {
+    fn start_prompt(&mut self, text: &str, input: AcpInput) -> Result<Vec<Action>> {
         let session = self.session_id()?.to_owned();
+        let text = if input == AcpInput::Prompt {
+            format!("{}\n{text}", self.prompt_tag)
+        } else {
+            text.into()
+        };
         let action = self.request(
             Request::Prompt,
             "session/prompt",
@@ -869,6 +883,7 @@ impl OpenCode {
                 "sessionId": session, "prompt": [{"type":"text","text":text}]
             }),
         )?;
+        self.acp_input = Some(input);
         self.tools.retain(|_, tool| tool.child);
         self.context = None;
         self.saved = true;
@@ -1071,10 +1086,11 @@ impl OpenCode {
             self.native_permissions.clear();
             self.native_questions.clear();
             self.child_interactions.clear();
-            self.background_inputs.clear();
+            self.inbox_inputs.clear();
             self.native_execution_open = false;
-            self.synthetic_delivered = false;
+            self.autonomous_inbox_delivered = false;
             self.foreground_inbox_delivered = false;
+            self.acp_input = None;
             actions.push(Action::Interrupted);
         }
         actions.push(Action::Finished { failed, message });
@@ -1512,7 +1528,7 @@ impl AgentAdapter for OpenCode {
 
     fn has_background_work(&self) -> bool {
         !self.background_shells.is_empty()
-            || (self.native_execution_open && self.synthetic_delivered)
+            || (self.native_execution_open && self.autonomous_inbox_delivered)
             || self.possible_followup
             || self.children.values().any(|active| *active)
     }
@@ -1530,7 +1546,8 @@ impl AgentAdapter for OpenCode {
         false
     }
 
-    fn set_session_title(&mut self, title: Option<String>, resuming: bool) {
+    // OpenCode manages its own title generation and persists its result natively.
+    fn set_session_title(&mut self, title: Option<String>, resuming: bool, _title_requested: bool) {
         if !resuming {
             self.initial_title = title;
         }
@@ -1562,8 +1579,13 @@ impl AgentAdapter for OpenCode {
             _directory: directory,
         };
         let instructions = crate::skills::platform_instructions(&config.settings_dir);
-        let (model, settings) =
-            config::configure(&mut command, config, &instructions, Some(&sideband))?;
+        self.prompt_tag = format!("[latte-work:{}]", uuid::Uuid::new_v4());
+        let (model, settings) = config::configure(
+            &mut command,
+            config,
+            &instructions,
+            Some((&sideband, &self.prompt_tag)),
+        )?;
         self.model = model;
         Ok(AgentCommand {
             command,

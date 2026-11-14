@@ -204,6 +204,18 @@ export default {
           }), 800);
         },
       });
+      editor.add({
+        name: "schedule-user",
+        description: "Wake the session with an ordinary plugin prompt",
+        execute: async ({ sessionID, prompt }) => {
+          setTimeout(() => void ctx.session.prompt({
+            sessionID,
+            text: prompt.text,
+            resume: true,
+            delivery: "steer",
+          }), 800);
+        },
+      });
     });
   },
 };
@@ -360,6 +372,7 @@ export default {
                 # title. Verify both submissions and that Latte replayed no text.
                 assert "First smoke turn." in submitted
                 assert "Second smoke turn after resume." in submitted
+                assert not any("[latte-work:" in json.dumps(call) for call in Model.calls)
                 print(version + ": streamed turns and native close/resume", flush=True)
 
                 named = rpc("create_session", project_id=pid, agent="opencode")["session"]["id"]
@@ -481,6 +494,29 @@ export default {
                 else:
                     raise AssertionError(watched["events"][-10:])
                 print(version + ": native plugin notification wakes the settled session", flush=True)
+                marker.unlink(missing_ok=True)
+                send("plugin-user", "/schedule-user plugin permission sentinel", "default")
+                pending = wait("waiting")
+                approval = next(e["event"] for e in reversed(pending["events"])
+                                if e["event"]["kind"] == "approval")
+                assert "smoke-approved.txt" in approval["input"]["command"]
+                assert not marker.exists()
+                rpc("approve", session_id=sid, request_id=approval["request_id"], allow=True)
+                completed = wait("completed")
+                assert marker.read_text() == "OC_EXECUTED"
+                new_text = "".join(e["event"]["text"] for e in completed["events"]
+                                   if e["seq"] > pending["events"][-1]["seq"] and e["event"]["kind"] == "text")
+                assert "TOOL_SMOKE_OK" in new_text
+                print(version + ": native plugin user prompt streams an approval and executes after consent", flush=True)
+                send("plugin-question", "/schedule-user plugin question sentinel")
+                pending = wait("waiting")
+                question = next(e["event"] for e in reversed(pending["events"])
+                                if e["event"]["kind"] == "question")
+                rpc("answer_question", session_id=sid, request_id=question["request_id"],
+                    answers=[{"question_id": question["questions"][0]["id"], "option_indices": [1]}])
+                wait("completed")
+                assert "Two" in json.dumps(Model.calls[-1]["messages"][-1])
+                print(version + ": native plugin question works without a foreground ACP request", flush=True)
                 send("skill", "skill sentinel", "bypass_permissions")
                 result = wait("completed")
                 assert any(e["event"].get("name") == "Skill"

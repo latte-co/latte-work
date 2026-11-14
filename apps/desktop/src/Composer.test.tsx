@@ -633,15 +633,18 @@ it("keeps local navigation available when native command discovery fails", async
   expect(mocks.send).not.toHaveBeenCalled();
 });
 
-it("sends an OpenCode prompt starting with an absolute path without command discovery", async () => {
-  mocks.request.mockRejectedValue(new Error("catalog unavailable"));
-  render(<Harness agent="opencode" />);
-  const prompt = "/tmp/project/src 请检查这里";
-  type(prompt);
-  fireEvent.click(screen.getByText("发送"));
-  await waitFor(() => expect(mocks.send).toHaveBeenCalledWith(prompt));
-  expect(mocks.request).not.toHaveBeenCalled();
-});
+it.each(["/tmp/project/src", "/tmp", "/missing-project"])(
+  "sends an OpenCode prompt starting with %s when command discovery is unavailable",
+  async (path) => {
+    mocks.request.mockRejectedValue(new Error("catalog unavailable"));
+    render(<Harness agent="opencode" />);
+    const prompt = `${path} 请检查这里`;
+    type(prompt);
+    fireEvent.click(screen.getByText("发送"));
+    await waitFor(() => expect(mocks.send).toHaveBeenCalledWith(prompt));
+    expect(mocks.request).not.toHaveBeenCalled();
+  },
+);
 
 it("submits a single-component OpenCode path with a project reference", async () => {
   render(<Harness agent="opencode" />);

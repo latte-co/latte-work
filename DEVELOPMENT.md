@@ -1730,19 +1730,20 @@ them and preserves the original native session ID on resume. A queued input
 is consumed only after a matching native inbox delivery event. A background
 Shell is displayed as running until its native exit. Native execution
 completion fences project slash commands and autonomous follow-up activity.
-Latte identifies autonomous continuations from native execution and synthetic
-inbox delivery, including notifications from OpenCode plugins. The foreground result and
-late copies of its native output can arrive on either transport first.
+Latte correlates native execution and inbox delivery IDs to distinguish ACP
+foreground prompts from autonomous user or synthetic inputs submitted by a
+plugin. The foreground result and late copies of its native output can arrive
+on either transport first. Only a slash name in the execution session's catalog
+is treated as a command. Other slash-prefixed text is sent as an ordinary prompt.
 Compaction uses its ACP completion. OpenCode 2.0 implements `/compact` even
 though its ACP catalog omits the command. Skill shortcuts advertised by
 older catalogs are activated through ACP. A custom title set before the
 first prompt is applied to the new native session before it can run.
 
 Permission modes use a process-local OpenCode permission hook. Explicit
-native denials and managed policies continue to apply. The adapter uses ACP
-form elicitation on 2.3 for ACP foreground questions. Child questions and
-OpenCode 2.0 questions use the question tool's plugin interface and native
-permission evaluation. A 2.0 question that needs a separate native approval
+native denials and managed policies continue to apply. The question tool uses
+its plugin interface and native permission evaluation for foreground and
+autonomous executions. A 2.0 question that needs a separate native approval
 is reported as unsupported. Sideband approvals settle on a native permission
 decision event. A child's
 pending approval or question can outlive the foreground turn.
