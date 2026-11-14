@@ -1479,10 +1479,17 @@ async fn dispatch(s: &Service, request: Request) -> Result<Response> {
             {
                 bail!("此主机仍有运行任务、后台 Agent 或终端；请结束后再撤销");
             }
-            if db(&s.database, |d| {
-                d.overlaps_writable_side_chat(&session_id, &request_id)
+            if let Some((side_id, unknown)) = db(&s.database, |d| {
+                d.overlapping_side_chat(&session_id, &request_id)
             })? {
-                bail!("本轮与具备写权限的侧边聊天同时执行，无法安全撤销，请核对工作区改动");
+                let reason = if unknown {
+                    "的写入结束时间待确认"
+                } else {
+                    "与本轮同时执行"
+                };
+                bail!(
+                    "具备写权限的侧边聊天（{side_id}）{reason}，无法安全撤销。请核对侧边聊天记录，并按本轮差异手动调整文件。"
+                );
             }
             let session = db(&s.database, |d| d.session(&session_id))?;
             let project = db(&s.database, |d| d.project(&session.project_id))?;

@@ -1335,9 +1335,21 @@ impl Store {
         )?;
         Ok(())
     }
+    pub fn mark_side_write_not_started(&self, request_id: &str) -> Result<()> {
+        self.db.execute(
+            "UPDATE requests SET side_write_start=NULL,side_write_end=0
+             WHERE id=?1 AND side_write_start IS NOT NULL AND side_write_end IS NULL",
+            [request_id],
+        )?;
+        Ok(())
+    }
     /// Native permissions can allow writes outside the project's canonical root.
     /// Without a verified write scope, compare execution intervals host-wide.
-    pub fn overlaps_writable_side_chat(&self, session_id: &str, request_id: &str) -> Result<bool> {
+    pub fn overlapping_side_chat(
+        &self,
+        session_id: &str,
+        request_id: &str,
+    ) -> Result<Option<(String, bool)>> {
         Ok(self.db.query_row(
             "WITH main_turn AS (
                 SELECT
@@ -1346,18 +1358,17 @@ impl Store {
                     (SELECT MIN(seq) FROM events WHERE session_id=?1 AND json_extract(data,'$.kind')='turn_changes'
                         AND json_extract(data,'$.changes.request_id')=?2) AS end_seq
             )
-            SELECT EXISTS(
-                SELECT 1 FROM side_chats side
+            SELECT side.session_id, r.side_write_end IS NULL FROM side_chats side
                 JOIN events admitted ON admitted.session_id=side.session_id AND json_extract(admitted.data,'$.kind')='user'
                 JOIN requests r ON r.session_id=side.session_id AND r.id=json_extract(admitted.data,'$.request_id')
                 CROSS JOIN main_turn
                 WHERE side.session_id!=?1 AND r.permission_mode IS NOT NULL
                 AND COALESCE(r.side_write_start, admitted.seq) < main_turn.end_seq
                 AND (r.side_write_end IS NULL OR r.side_write_end >= main_turn.start_seq)
-            )",
+                LIMIT 1",
             params![session_id, request_id],
-            |row| row.get(0),
-        )?)
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        ).optional()?)
     }
     pub fn latest_request(&self, id: &str) -> Result<String> {
         self.db
@@ -2184,10 +2195,8 @@ mod tests {
             .unwrap();
             store.finish_turn(&parent.id, &turn).unwrap();
             assert_eq!(
-                store
-                    .overlaps_writable_side_chat(&parent.id, "main")
-                    .unwrap(),
-                interrupted
+                store.overlapping_side_chat(&parent.id, "main").unwrap(),
+                interrupted.then_some((side.id, true))
             );
         }
     }

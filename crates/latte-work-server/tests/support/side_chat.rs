@@ -624,6 +624,157 @@ async fn undo_ignores_prelaunch_rejection_and_fences_unconfirmed_native_exit() {
 }
 
 #[tokio::test]
+async fn closing_a_writable_side_chat_preserves_its_edits_and_releases_future_undo() {
+    let host = Host::start().await;
+    let root = tempfile::tempdir().unwrap();
+    let file = root.path().join("shared.txt");
+    std::fs::write(&file, "before\n").unwrap();
+    let mut client = host.client().await;
+    let project = terminal_project(&mut client, root.path()).await;
+    let main = create_session(&mut client, project, "codex").await;
+    send(&mut client, &main.id, "main-write", "approval").await;
+    let pending = permission(&wait(&mut client, &main.id, Status::Waiting).await);
+    let side = open_side(&mut client, &main).await;
+    send_writable_side(
+        &mut client,
+        &side,
+        "side-write-until-closed",
+        "default",
+        TurnProvider::Cli,
+    )
+    .await;
+    wait(&mut client, &side.id, Status::Waiting).await;
+    let pids = std::fs::read_to_string(root.path().join("side-writer-pids")).unwrap();
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), "side edit\n");
+    let close = ask(
+        &mut client,
+        Request::CloseAgentSession {
+            session_id: side.id.clone(),
+            only_if_idle: Some(false),
+        },
+    )
+    .await;
+    assert!(matches!(close, Response::Ok), "{close:?}");
+    wait(&mut client, &side.id, Status::Stopped).await;
+    for pid in pids.split_whitespace() {
+        assert_gone(pid.parse().unwrap()).await;
+    }
+    assert!(matches!(
+        ask(
+            &mut client,
+            Request::Approve {
+                session_id: main.id.clone(),
+                request_id: pending,
+                allow: true,
+            }
+        )
+        .await,
+        Response::Ok
+    ));
+    wait(&mut client, &main.id, Status::Completed).await;
+    let undo = |request_id: &str| Request::UndoTurnChanges {
+        session_id: main.id.clone(),
+        request_id: request_id.into(),
+    };
+    let response = ask(&mut client, undo("main-write")).await;
+    assert!(
+        matches!(&response, Response::Error { message, .. }
+        if message.contains(&side.id) && message.contains("与本轮同时执行")),
+        "{response:?}"
+    );
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), "side edit\n");
+
+    send(&mut client, &main.id, "main-later", "main-foreground-write").await;
+    wait(&mut client, &main.id, Status::Completed).await;
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), "main edit\n");
+    let response = ask(&mut client, undo("main-later")).await;
+    assert!(
+        matches!(&response, Response::TurnChanges { changes }
+        if changes.undo == TurnUndoStatus::Reverted),
+        "{response:?}"
+    );
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), "side edit\n");
+}
+
+#[tokio::test]
+async fn a_missing_side_cli_does_not_block_undo() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let cli_dir = tempfile::tempdir().unwrap();
+    let cli = cli_dir.path().join("claude");
+    std::fs::write(
+        &cli,
+        r#"#!/bin/sh
+if [ "$1" = "--help" ]; then
+    rm -- "$0"
+fi
+exec "$LATTE_FIXTURE_CLAUDE" "$@"
+"#,
+    )
+    .unwrap();
+    std::fs::set_permissions(&cli, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/claude.py");
+    let host = Host::start_with_environment(&[
+        ("LATTE_WORK_CLAUDE", cli.as_os_str()),
+        ("LATTE_FIXTURE_CLAUDE", fixture.as_os_str()),
+    ])
+    .await;
+    let root = tempfile::tempdir().unwrap();
+    let file = root.path().join("shared.txt");
+    std::fs::write(&file, "before\n").unwrap();
+    let mut client = host.client().await;
+    let project = terminal_project(&mut client, root.path()).await;
+    let parent = create_session(&mut client, project.clone(), "claude").await;
+    send(&mut client, &parent.id, "parent-init", "hello").await;
+    wait(&mut client, &parent.id, Status::Completed).await;
+    let side = open_side(&mut client, &parent).await;
+
+    let main = create_session(&mut client, project, "codex").await;
+    send(
+        &mut client,
+        &main.id,
+        "main-write",
+        "approval-then-main-write",
+    )
+    .await;
+    let pending = permission(&wait(&mut client, &main.id, Status::Waiting).await);
+    send_writable_side(&mut client, &side, "hello", "default", TurnProvider::Cli).await;
+    assert!(!cli.exists());
+    let events = wait(&mut client, &side.id, Status::Failed).await;
+    assert!(events.iter().any(|event| matches!(&event.event,
+        EventKind::State { message: Some(message), .. } if message.contains("无法启动 Agent claude")
+    )));
+    assert!(matches!(
+        ask(
+            &mut client,
+            Request::Approve {
+                session_id: main.id.clone(),
+                request_id: pending,
+                allow: true,
+            }
+        )
+        .await,
+        Response::Ok
+    ));
+    wait(&mut client, &main.id, Status::Completed).await;
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), "main edit\n");
+    let response = ask(
+        &mut client,
+        Request::UndoTurnChanges {
+            session_id: main.id,
+            request_id: "main-write".into(),
+        },
+    )
+    .await;
+    assert!(
+        matches!(&response, Response::TurnChanges { changes }
+        if changes.undo == TurnUndoStatus::Reverted),
+        "{response:?}"
+    );
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), "before\n");
+}
+
+#[tokio::test]
 async fn history_pages_past_one_hundred_and_can_reopen_the_oldest_chat() {
     let host = Host::start().await;
     let root = tempfile::tempdir().unwrap();

@@ -65,10 +65,14 @@ vi.mock("./TaskProjectPicker", () => ({ TaskProjectPicker: () => null }));
 beforeEach(() => {
   HTMLElement.prototype.scrollTo = vi.fn();
   HTMLElement.prototype.scrollIntoView = vi.fn();
-  mocks.request.mockResolvedValue({
-    kind: "files",
-    entries: [{ name: "note.md", path: "note.md", directory: false }],
-  });
+  mocks.request.mockImplementation(async (_, request) =>
+    request.method === "message_queue"
+      ? { kind: "message_queue", entries: [], paused: false, reason: null }
+      : {
+          kind: "files",
+          entries: [{ name: "note.md", path: "note.md", directory: false }],
+        },
+  );
 });
 afterEach(() => {
   cleanup();

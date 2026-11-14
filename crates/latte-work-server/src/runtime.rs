@@ -8,6 +8,7 @@ use anyhow::{Context, Result, bail};
 use futures_util::StreamExt;
 use latte_work_protocol::{EventKind, Response, Session, Status};
 use nix::{
+    errno::Errno,
     sys::signal::{Signal, killpg},
     unistd::Pid,
 };
@@ -1052,12 +1053,26 @@ impl Process {
             Some(id) => db(database, |s| s.start_side_write(id))?,
             None => None,
         };
-        let child = command.spawn().with_context(|| {
-            format!(
-                "无法启动 Agent {}，请检查此 Host 的 CLI 安装和登录状态",
-                session.agent
-            )
-        })?;
+        let child = command
+            .spawn()
+            .or_else(|error| -> Result<Child> {
+                // On Unix, ENOENT from spawn is a launch failure (executable,
+                // interpreter or cwd missing). Other errors can come from Tokio
+                // setting up child I/O or the reaper after a successful launch.
+                if error.raw_os_error() == Some(Errno::ENOENT as i32)
+                    && side_writes_since.is_some()
+                    && let Some(id) = request_id
+                {
+                    db(database, |s| s.mark_side_write_not_started(id))?;
+                }
+                Err(error.into())
+            })
+            .with_context(|| {
+                format!(
+                    "无法启动 Agent {}，请检查此 Host 的 CLI 安装和登录状态",
+                    session.agent
+                )
+            })?;
         let pid = child.id().context("Agent PID missing")? as i32;
         let mut group = Group { child, pid };
         let input = group.child.stdin.take().context("Agent stdin missing")?;
@@ -1248,25 +1263,40 @@ impl Process {
             let _ = job.await;
         }
     }
-    async fn close(&mut self) {
+    async fn close(&mut self) -> bool {
         self.cancel_title().await;
         if let Some(reply) = self.rename_reply.take() {
             let _ = reply.send(Err("原生会话已关闭，标题修改结果待确认".into()));
         }
         self.session_open.store(false, Ordering::SeqCst);
         // Closing stdin alone lets some CLI versions wait indefinitely for background work.
-        // Explicit stop/shutdown terminates and reaps the entire owned process group.
-        let _ = killpg(Pid::from_raw(self.group.pid), Signal::SIGTERM);
-        if tokio::time::timeout(Duration::from_secs(2), self.group.child.wait())
-            .await
-            .is_err()
-        {
-            let _ = killpg(Pid::from_raw(self.group.pid), Signal::SIGKILL);
-            let _ = self.group.child.wait().await;
-        }
-        // Reap descendants even if the parent exited before them.
-        let _ = killpg(Pid::from_raw(self.group.pid), Signal::SIGKILL);
+        let group = Pid::from_raw(self.group.pid);
+        let _ = killpg(group, Signal::SIGTERM);
+        let mut reaped = matches!(
+            tokio::time::timeout(Duration::from_secs(2), self.group.child.wait()).await,
+            Ok(Ok(_))
+        );
+        // The parent may have exited before its descendants. A signal alone
+        // does not prove that they have stopped writing.
+        let _ = killpg(group, Signal::SIGKILL);
         self.drain.abort();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            if !reaped {
+                reaped = self.group.child.wait().await.is_ok();
+            }
+            if !reaped || self.side_writes_since.is_none() {
+                return reaped;
+            }
+            loop {
+                match killpg(group, None) {
+                    Err(Errno::ESRCH) => return true,
+                    Err(_) => return false,
+                    Ok(()) => tokio::time::sleep(Duration::from_millis(20)).await,
+                }
+            }
+        })
+        .await
+        .unwrap_or(false)
     }
 }
 async fn finish_turn(
@@ -1805,9 +1835,12 @@ async fn actor(
                     let background_pending = process
                         .as_ref()
                         .is_some_and(|p| p.turn_active && p.background_at_start);
-                    if let Some(p) = process.as_mut() {
-                        p.close().await;
-                    }
+                    let (side_writes_since, close_unconfirmed) = if let Some(p) = process.as_mut() {
+                        let confirmed = p.close().await;
+                        (p.side_writes_since.filter(|_| confirmed), !confirmed)
+                    } else {
+                        (None, false)
+                    };
                     process = None;
                     if let Err(error) =
                         finish_turn(&database, &session.id, &path, true, background_pending).await
@@ -1816,13 +1849,24 @@ async fn actor(
                     }
                     // Preserve completed history when merely closing an idle runtime.
                     let result = db(&database, |s| {
-                        s.end_subagents(&session.id, latte_work_protocol::SubagentStatus::Stopped)?;
+                        let (status, subagent_status, message) = if close_unconfirmed {
+                            (Status::Unknown, latte_work_protocol::SubagentStatus::Unknown,
+                             "无法确认原生进程组已停止。请核对侧边聊天记录与工作区差异。")
+                        } else {
+                            (Status::Stopped, latte_work_protocol::SubagentStatus::Stopped,
+                             "已停止；已执行的文件改动不会撤销。")
+                        };
+                        if let Some(since) = side_writes_since {
+                            s.finish_side_writes(&session.id, since)?;
+                        }
+                        s.end_subagents(&session.id, subagent_status)?;
                         if s.session(&session.id)?.status.active() {
-                            s.state(
-                                &session.id,
-                                Status::Stopped,
-                                Some("已停止；已执行的文件改动不会撤销。".into()),
-                            )?;
+                            s.state(&session.id, status, Some(message.into()))?;
+                        } else if close_unconfirmed {
+                            s.event(&session.id, EventKind::Notice { text: message.into() })?;
+                        }
+                        if close_unconfirmed {
+                            bail!(message);
                         }
                         Ok(())
                     });
