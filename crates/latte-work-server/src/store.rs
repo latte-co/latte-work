@@ -1313,12 +1313,19 @@ impl Store {
             .map(|request_id| self.turn_changes(id, &request_id))
             .transpose()
     }
-    pub fn side_write_start(&self, request_id: &str) -> Result<Option<i64>> {
-        Ok(self.db.query_row(
-            "SELECT side_write_start FROM requests WHERE id=?1",
-            [request_id],
-            |row| row.get(0),
-        )?)
+    /// Called before any native operation that may write. Zero is reserved for
+    /// an admitted side request that has not reached this point.
+    pub fn start_side_write(&self, request_id: &str) -> Result<Option<i64>> {
+        Ok(self
+            .db
+            .query_row(
+                "UPDATE requests SET side_write_start=(SELECT MAX(seq) FROM events),
+                     side_write_end=NULL WHERE id=?1 AND side_write_end=0
+                 RETURNING side_write_start",
+                [request_id],
+                |row| row.get(0),
+            )
+            .optional()?)
     }
     pub fn finish_side_writes(&self, session_id: &str, since: i64) -> Result<()> {
         self.db.execute(
@@ -1328,8 +1335,8 @@ impl Store {
         )?;
         Ok(())
     }
-    /// Compare canonical, component-delimited project roots and durable execution
-    /// intervals. Legacy and interrupted requests without an end remain uncertain.
+    /// Native permissions can allow writes outside the project's canonical root.
+    /// Without a verified write scope, compare execution intervals host-wide.
     pub fn overlaps_writable_side_chat(&self, session_id: &str, request_id: &str) -> Result<bool> {
         Ok(self.db.query_row(
             "WITH main_turn AS (
@@ -1340,19 +1347,12 @@ impl Store {
                         AND json_extract(data,'$.changes.request_id')=?2) AS end_seq
             )
             SELECT EXISTS(
-                SELECT 1 FROM sessions owner
-                JOIN projects owner_root ON owner_root.id=owner.project_id
-                JOIN sessions child ON child.id!=owner.id
-                JOIN side_chats side ON side.session_id=child.id
-                JOIN projects child_root ON child_root.id=child.project_id
-                JOIN events admitted ON admitted.session_id=child.id AND json_extract(admitted.data,'$.kind')='user'
-                JOIN requests r ON r.session_id=child.id AND r.id=json_extract(admitted.data,'$.request_id')
+                SELECT 1 FROM side_chats side
+                JOIN events admitted ON admitted.session_id=side.session_id AND json_extract(admitted.data,'$.kind')='user'
+                JOIN requests r ON r.session_id=side.session_id AND r.id=json_extract(admitted.data,'$.request_id')
                 CROSS JOIN main_turn
-                WHERE owner.id=?1 AND r.permission_mode IS NOT NULL
-                AND (owner_root.path=child_root.path
-                    OR substr(owner_root.path,1,length(rtrim(child_root.path,'/') || '/'))=rtrim(child_root.path,'/') || '/'
-                    OR substr(child_root.path,1,length(rtrim(owner_root.path,'/') || '/'))=rtrim(owner_root.path,'/') || '/')
-                AND admitted.seq < main_turn.end_seq
+                WHERE side.session_id!=?1 AND r.permission_mode IS NOT NULL
+                AND COALESCE(r.side_write_start, admitted.seq) < main_turn.end_seq
                 AND (r.side_write_end IS NULL OR r.side_write_end >= main_turn.start_seq)
             )",
             params![session_id, request_id],
@@ -1651,10 +1651,10 @@ impl Store {
             index_event(&tx, id, &event)?;
         }
         if is_side_chat && permission_mode.is_some() {
-            // Both admission events share this transaction. The running event is
-            // the latest global sequence and precedes any native work.
+            // Keep the durable admission separate from possible native writes.
+            // Legacy rows have NULL here, so they retain the conservative fence.
             tx.execute(
-                "UPDATE requests SET side_write_start=(SELECT MAX(seq) FROM events) WHERE id=?1",
+                "UPDATE requests SET side_write_end=0 WHERE id=?1",
                 [request_id],
             )?;
         }
@@ -2143,7 +2143,7 @@ mod tests {
                     Some("default"),
                 )
                 .unwrap();
-            let start = store.side_write_start("original").unwrap().unwrap();
+            let start = store.start_side_write("original").unwrap().unwrap();
             if !interrupted {
                 store.finish_side_writes(&side.id, start).unwrap();
                 store.state(&side.id, Status::Completed, None).unwrap();
@@ -2162,7 +2162,7 @@ mod tests {
                     Some("default"),
                 )
                 .unwrap();
-            let start = store.side_write_start("resumed").unwrap().unwrap();
+            let start = store.start_side_write("resumed").unwrap().unwrap();
             store.finish_side_writes(&side.id, start).unwrap();
             store.state(&side.id, Status::Completed, None).unwrap();
 

@@ -199,6 +199,10 @@ for line in sys.stdin:
             content = 'main edit\n' if prompt == 'main-foreground-write' else 'side edit\n'
             pathlib.Path(path).write_text(content)
             complete()
+        elif prompt == 'side-cross-project-write':
+            assert thread.startswith('side-thread-') and sandbox == 'dangerFullAccess'
+            pathlib.Path('../main-project/shared.txt').write_text('side edit\n')
+            complete()
         elif prompt == 'release-background-command':
             # The unsolicited exit is tied to the ORIGINAL turn id; params
             # override the notify() turn so the guarded idle channel accepts it.
@@ -208,8 +212,8 @@ for line in sys.stdin:
                                                'processId': '91', 'aggregatedOutput': 'bg-done'}})
             text('BACKGROUND_RELEASED')
             complete()
-        elif prompt in ('approval', 'question'):
-            waiting = prompt
+        elif prompt in ('approval', 'approval-then-main-write', 'question'):
+            waiting = 'question' if prompt == 'question' else 'approval'
             if waiting == 'approval':
                 emit({'id': 73, 'method': 'item/commandExecution/requestApproval', 'params': {'threadId': thread, 'turnId': turn, 'itemId': 'bash', 'command': 'echo approved', 'cwd': os.getcwd()}})
             else:
@@ -242,6 +246,8 @@ for line in sys.stdin:
     elif method is None and waiting:
         if waiting == 'approval':
             assert value['id'] == 73 and value['result']['decision'] in ('accept', 'decline')
+            if turn_prompt == 'approval-then-main-write' and value['result']['decision'] == 'accept':
+                pathlib.Path('shared.txt').write_text('main edit\n')
             text('APPROVED' if value['result']['decision'] == 'accept' else 'DENIED')
         else:
             assert value['id'] == 'ask'

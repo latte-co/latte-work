@@ -1710,10 +1710,12 @@ validates the requested child ID from the stream's init event. Later launches re
 the saved child ID.
 The side chat shares the working directory, with an independent request ledger and
 transcript. Side chats do not take undo snapshots because main and side file activity can
-overlap. The host rejects main-turn undo when write-capable side work overlaps
-the main turn in the same or a nested project root. The host records when native
-background work finishes. A write-capable request whose end could not be
-confirmed remains a reason to block undo after a restart.
+overlap. The host rejects main-turn undo when write-capable side work on the
+same host overlaps the main turn. Native permissions and approvals can allow
+writes outside the side project's root. The host records possible writes just
+before launching the native process or dispatching to a live process, and records
+when native background work finishes. Launch validation failures leave no write
+interval. An unconfirmed launch or execution end can still block undo after restart.
 `SideChatHistory` pages through a parent's children newest first, with `next` as
 the cursor for the next request. The desktop routes the same protocol through
 local and SSH transports.

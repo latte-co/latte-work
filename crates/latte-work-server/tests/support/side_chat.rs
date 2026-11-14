@@ -1,5 +1,5 @@
 use super::*;
-use latte_work_protocol::{Session, TurnProvider};
+use latte_work_protocol::{AgentEnvironment, Session, TurnProvider, TurnUndoStatus};
 
 #[tokio::test]
 async fn side_chat_forks_while_parent_waits_and_resumes_independently() {
@@ -341,6 +341,17 @@ async fn open_side(client: &mut Client, parent: &Session) -> Session {
 }
 
 async fn start_writable_side(client: &mut Client, side: &Session, prompt: &str) {
+    send_writable_side(client, side, prompt, "default", TurnProvider::Cli).await;
+    wait(client, &side.id, Status::Completed).await;
+}
+
+async fn send_writable_side(
+    client: &mut Client,
+    side: &Session,
+    prompt: &str,
+    permission: &str,
+    provider: TurnProvider,
+) {
     assert!(matches!(
         ask(
             client,
@@ -350,14 +361,13 @@ async fn start_writable_side(client: &mut Client, side: &Session, prompt: &str) 
                 text: prompt.into(),
                 model: None,
                 effort: None,
-                permission_mode: Some("default".into()),
-                provider: Some(TurnProvider::Cli),
+                permission_mode: Some(permission.into()),
+                provider: Some(provider),
             }
         )
         .await,
         Response::Accepted { .. }
     ));
-    wait(client, &side.id, Status::Completed).await;
 }
 
 async fn check_side_write_undo(background: bool, main_in_subdir: Option<bool>) {
@@ -472,6 +482,145 @@ async fn undo_preserves_background_side_writes_after_native_exit() {
 async fn undo_fences_writable_side_chats_in_both_directions_of_nested_roots() {
     check_side_write_undo(false, Some(false)).await;
     check_side_write_undo(false, Some(true)).await;
+}
+
+#[tokio::test]
+async fn undo_preserves_full_access_side_writes_in_an_unrelated_project() {
+    let host = Host::start().await;
+    let root = tempfile::tempdir().unwrap();
+    let main_dir = root.path().join("main-project");
+    let side_dir = root.path().join("side-project");
+    std::fs::create_dir(&main_dir).unwrap();
+    std::fs::create_dir(&side_dir).unwrap();
+    let file = main_dir.join("shared.txt");
+    std::fs::write(&file, "before\n").unwrap();
+    let mut client = host.client().await;
+    let side_project = terminal_project(&mut client, &side_dir).await;
+    let parent = create_session(&mut client, side_project, "codex").await;
+    send(&mut client, &parent.id, "parent-init", "hello").await;
+    wait(&mut client, &parent.id, Status::Completed).await;
+    let side = open_side(&mut client, &parent).await;
+
+    let main_project = terminal_project(&mut client, &main_dir).await;
+    let main = create_session(&mut client, main_project, "codex").await;
+    send(&mut client, &main.id, "main-write", "approval").await;
+    let pending = permission(&wait(&mut client, &main.id, Status::Waiting).await);
+    send_writable_side(
+        &mut client,
+        &side,
+        "side-cross-project-write",
+        "bypass_permissions",
+        TurnProvider::Cli,
+    )
+    .await;
+    wait(&mut client, &side.id, Status::Completed).await;
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), "side edit\n");
+    assert!(matches!(
+        ask(
+            &mut client,
+            Request::Approve {
+                session_id: main.id.clone(),
+                request_id: pending,
+                allow: true,
+            }
+        )
+        .await,
+        Response::Ok
+    ));
+    let events = wait(&mut client, &main.id, Status::Completed).await;
+    assert!(events.iter().any(|event| matches!(&event.event,
+        EventKind::TurnChanges { changes } if changes.summary.entries.iter().any(|entry| entry.path == "shared.txt")
+    )));
+    let undo = ask(
+        &mut client,
+        Request::UndoTurnChanges {
+            session_id: main.id,
+            request_id: "main-write".into(),
+        },
+    )
+    .await;
+    assert!(
+        matches!(&undo, Response::Error { message, .. }
+        if message.contains("具备写权限的侧边聊天")),
+        "{undo:?}"
+    );
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), "side edit\n");
+}
+
+#[tokio::test]
+async fn undo_ignores_prelaunch_rejection_and_fences_unconfirmed_native_exit() {
+    for launch in [false, true] {
+        let host = Host::start().await;
+        let root = tempfile::tempdir().unwrap();
+        let file = root.path().join("shared.txt");
+        std::fs::write(&file, "before\n").unwrap();
+        let mut client = host.client().await;
+        let project = terminal_project(&mut client, root.path()).await;
+        let parent = create_session(&mut client, project, "codex").await;
+        send(&mut client, &parent.id, "parent-init", "hello").await;
+        wait(&mut client, &parent.id, Status::Completed).await;
+        let side = open_side(&mut client, &parent).await;
+
+        let main = &parent.id;
+        send(&mut client, main, "main-write", "approval-then-main-write").await;
+        let pending = permission(&wait(&mut client, main, Status::Waiting).await);
+        let provider = if launch {
+            TurnProvider::Cli
+        } else {
+            TurnProvider::Configured {
+                provider: None,
+                environment: AgentEnvironment(
+                    [("LATTE_TEST_LITERAL".into(), "changed".into())].into(),
+                ),
+            }
+        };
+        send_writable_side(&mut client, &side, "eof", "default", provider).await;
+        let events = wait(&mut client, &side.id, Status::Failed).await;
+        let inputs = std::fs::read_to_string(root.path().join("codex-inputs")).unwrap();
+        assert_eq!(inputs.contains(r#""prompt": "eof""#), launch);
+        if !launch {
+            assert!(events.iter().any(|event| matches!(&event.event,
+                EventKind::State { message: Some(message), .. } if message.contains("Provider 或环境已变化")
+            )));
+        }
+        assert!(matches!(
+            ask(
+                &mut client,
+                Request::Approve {
+                    session_id: main.clone(),
+                    request_id: pending,
+                    allow: true,
+                }
+            )
+            .await,
+            Response::Ok
+        ));
+        wait(&mut client, main, Status::Completed).await;
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "main edit\n");
+        let undo = ask(
+            &mut client,
+            Request::UndoTurnChanges {
+                session_id: main.clone(),
+                request_id: "main-write".into(),
+            },
+        )
+        .await;
+        if launch {
+            assert!(
+                matches!(&undo, Response::Error { message, .. }
+                if message.contains("具备写权限的侧边聊天")),
+                "{undo:?}"
+            );
+            assert_eq!(std::fs::read_to_string(&file).unwrap(), "main edit\n");
+        } else {
+            assert!(
+                matches!(&undo, Response::TurnChanges { changes }
+                if changes.undo == TurnUndoStatus::Reverted),
+                "{undo:?}"
+            );
+            assert_eq!(std::fs::read_to_string(&file).unwrap(), "before\n");
+        }
+    }
 }
 
 #[tokio::test]
