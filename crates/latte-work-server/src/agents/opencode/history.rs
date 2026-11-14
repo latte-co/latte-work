@@ -109,11 +109,12 @@ fn history(
         .as_array()
         .context("OpenCode 导出缺少消息")?;
     let mut events = Vec::new();
+    let mut pending_tail = false;
     let redactor = config.redactor();
     let mut bytes = 0;
     for message in messages {
         let at = message["time"]["created"].as_f64().unwrap_or_default();
-        for event in message_events(message) {
+        for event in message_events(message, &mut pending_tail) {
             let event = redactor.event(event);
             bytes += serde_json::to_vec(&event)?.len();
             ensure!(
@@ -135,6 +136,7 @@ fn history(
     let cursor = ChildHistoryCursor {
         identity: child.into(),
         offset: events.len() as u64,
+        pending_tail,
         ..Default::default()
     };
     Ok(Some(ChildHistoryPage {
@@ -151,7 +153,7 @@ async fn bounded(stdout: impl AsyncRead + Unpin) -> Result<Vec<u8>> {
     Ok(bytes)
 }
 
-fn message_events(message: &Value) -> Vec<EventKind> {
+fn message_events(message: &Value, pending_tail: &mut bool) -> Vec<EventKind> {
     let mut events = Vec::new();
     if message["type"] == "user" {
         if let (Some(text), Some(id)) = (message["text"].as_str(), message["id"].as_str()) {
@@ -169,18 +171,22 @@ fn message_events(message: &Value) -> Vec<EventKind> {
             {
                 let state = &part["state"];
                 let is_error = state["status"] == "error";
-                if !is_error && state["status"] != "completed" {
-                    continue;
-                }
                 let input = state["input"].clone();
-                let name = super::tool_label(&json!({"name":name,"rawInput":input}), None);
+                let (name, input) = super::named_tool(
+                    super::tool_label(&json!({"name":name,"rawInput":input}), None),
+                    input,
+                );
                 events.push(EventKind::Tool {
                     id: id.into(),
                     name,
                     input,
                 });
+                if !is_error && state["status"] != "completed" {
+                    *pending_tail = true;
+                    continue;
+                }
                 let mut images = super::super::ToolImages::default();
-                let content: Vec<_> = state["content"]
+                let mut content: Vec<_> = state["content"]
                     .as_array()
                     .into_iter()
                     .flatten()
@@ -195,6 +201,12 @@ fn message_events(message: &Value) -> Vec<EventKind> {
                         Some(images.inline(mime, data))
                     })
                     .collect();
+                if is_error
+                    && let Some(message) = state["error"]["message"].as_str()
+                    && !content.iter().any(|item| item["text"] == message)
+                {
+                    content.push(json!({"type":"text","text":message}));
+                }
                 events.push(EventKind::ToolResult {
                     id: id.into(),
                     content: json!(content),

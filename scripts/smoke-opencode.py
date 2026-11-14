@@ -181,8 +181,13 @@ def run(binary, cli, llm, root):
     (project / "opencode.json").write_text(json.dumps({
         "permission": {"shell": "ask", "bash": "ask"},
         "agents": {"smoke-child": {"mode": "subagent", "description": "Smoke child",
-            "permissions": [{"action": "question", "resource": "*", "effect": "allow"}]}},
-        "commands": {"check": {"template": "Native slash smoke $ARGUMENTS", "description": "Smoke native command"}},
+            "permissions": [{"action": "*", "resource": "*", "effect": "deny"},
+                            {"action": "quest?on", "resource": "*", "effect": "allow"},
+                            {"action": "question", "resource": "private", "effect": "deny"}]}},
+        "commands": {
+            "check": {"template": "Native slash smoke $ARGUMENTS", "description": "Smoke native command"},
+            "child-check": {"template": "permission sentinel", "agent": "general", "subagent": True},
+        },
     }))
     skill = project / ".opencode/skills/smoke-latte-skill"
     skill.mkdir(parents=True)
@@ -297,7 +302,7 @@ def run(binary, cli, llm, root):
                 before = len(Model.calls)
                 rpc("open_agent_session", session_id=named, provider=provider)
                 assert len(Model.calls) == before
-                rpc("send_queued", session_id=named, request_id="named-first", text="First named turn.",
+                rpc("send_queued", session_id=named, request_id="named-first", text="/check first named turn",
                     model="test/test-model", effort="high", provider=provider)
                 deadline = time.monotonic() + 8
                 while True:
@@ -308,6 +313,8 @@ def run(binary, cli, llm, root):
                         raise AssertionError(named_session)
                     time.sleep(.05)
                 assert len(Model.calls) == before + 1
+                assert "Native slash smoke first named turn" in json.dumps(Model.calls[before:])
+                assert "Latte Work platform skill" in json.dumps(Model.calls[before:])
                 assert named_session["title"] == "Initial OpenCode title"
                 rpc("close_agent_session", session_id=named, only_if_idle=True)
                 exported = subprocess.run([cli, "session", "export", "--standalone", named_session["native_id"]],
@@ -452,6 +459,21 @@ def run(binary, cli, llm, root):
                 assert "subagent child sentinel" in recovered["prompt"]
                 assert len(Model.calls) == before
                 print(version + ": prompt-free native child history after close", flush=True)
+                marker.unlink()
+                send("child-command-permission", "/child-check", "default")
+                pending = wait("waiting")
+                approval = next(e["event"] for e in reversed(pending["events"]) if e["event"]["kind"] == "approval")
+                assert not marker.exists()
+                rpc("approve", session_id=sid, request_id=approval["request_id"], allow=True)
+                wait("completed")
+                deadline = time.monotonic() + 10
+                while rpc("session", session_id=sid)["session"]["agent_session_busy"] or not marker.exists():
+                    if time.monotonic() >= deadline:
+                        raise AssertionError("OpenCode did not settle its approved command child")
+                    time.sleep(.05)
+                assert marker.read_text() == "OC_EXECUTED"
+                rpc("close_agent_session", session_id=sid, only_if_idle=True)
+                print(version + ": native command child approved in its own session", flush=True)
                 assert set(next(a for a in hello["agents"] if a["id"] == "opencode")["provider_protocols"]) == {
                     "openai_chat", "openai_responses", "anthropic_messages",
                 }
@@ -495,6 +517,18 @@ def run(binary, cli, llm, root):
                 assert all(headers == ("Bearer fixture", None) for headers in Model.auth[before:])
                 rpc("close_agent_session", session_id=sid, only_if_idle=True)
                 print(version + ": App Provider auth and native resume across Provider switches", flush=True)
+                # Disable the CLI model to prove discovery depends on the selected
+                # App snapshot. Discovering the catalog must not call the model.
+                cli_config = config / "opencode.json"
+                native_config = json.loads(cli_config.read_text())
+                del native_config["model"]
+                native_config["providers"] = {}
+                cli_config.write_text(json.dumps(native_config))
+                before = len(Model.calls)
+                catalog = rpc("agent_commands", agent="opencode", project_id=pid, provider=snapshot)
+                assert any(command["name"] == "check" for command in catalog["commands"])
+                assert len(Model.calls) == before
+                print(version + ": prompt-free command discovery with only App Provider", flush=True)
     finally:
         if child.poll() is None:
             child.send_signal(signal.SIGINT)

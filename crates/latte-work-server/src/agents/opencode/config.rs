@@ -20,7 +20,7 @@ pub(super) fn configure(
     command: &mut Command,
     config: &LaunchConfig,
     instructions: &str,
-    sideband: &super::super::Sideband,
+    sideband: Option<&super::super::Sideband>,
 ) -> Result<(Option<String>, Option<NamedTempFile>)> {
     let inherited = agent_environment::configured_variable(CONTENT, &config.environment);
     let inherited = inherited
@@ -34,7 +34,7 @@ pub(super) fn configure(
     let root = CstRootNode::parse(inherited, &ParseOptions::default())
         .map_err(|_| anyhow::anyhow!("无法合并 OpenCode 内联配置"))?;
     let overlay = root.object_value().context("OpenCode 内联配置必须是对象")?;
-    {
+    if let Some(sideband) = sideband {
         ensure!(
             matches!(
                 config.permission_mode.as_deref(),

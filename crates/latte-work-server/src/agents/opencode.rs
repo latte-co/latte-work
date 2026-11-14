@@ -47,7 +47,13 @@ pub struct OpenCode {
     sideband_ready: bool,
     rename: Option<(String, String)>,
     steering: Option<(String, String)>,
-    native_permissions: HashSet<String>,
+    native_permissions: HashMap<String, String>,
+    child_interactions: HashSet<String>,
+    command_children: HashSet<String>,
+    background_inputs: HashSet<String>,
+    foreground_inbox_delivered: bool,
+    deferred_followup: Vec<String>,
+    deferred_followup_bytes: usize,
     native_questions: HashSet<String>,
     followup: bool,
     native_command: Option<String>,
@@ -91,6 +97,7 @@ struct Permission {
 struct Tool {
     name: Option<String>,
     shown: bool,
+    child: bool,
 }
 
 pub(super) fn version_2(value: &str) -> bool {
@@ -122,6 +129,13 @@ pub(super) fn frame(value: Value) -> Result<Vec<u8>> {
 
 fn write(value: Value) -> Result<Action> {
     Ok(Action::Write(frame(value)?))
+}
+
+fn slash_name(text: &str) -> Option<&str> {
+    text.trim_start()
+        .strip_prefix('/')?
+        .split_whitespace()
+        .next()
 }
 
 pub(super) fn initialize() -> Value {
@@ -226,6 +240,14 @@ pub(super) fn parse_commands(update: &Value) -> Result<Vec<AgentSlashCommand>> {
 }
 
 impl OpenCode {
+    fn slash_command<'a>(&self, text: &'a str) -> Option<&'a str> {
+        slash_name(text).filter(|name| {
+            self.commands
+                .as_ref()
+                .is_some_and(|commands| commands.iter().any(|c| c.name == *name))
+                || !name.contains(['/', '.'])
+        })
+    }
     fn cancel_questions(&mut self) -> Result<Vec<Action>> {
         std::mem::take(&mut self.native_questions)
             .into_iter()
@@ -238,7 +260,9 @@ impl OpenCode {
         let mut body = body;
         body["action"] = json!(action);
         body["id"] = json!(id);
-        body["sessionID"] = json!(self.session_id()?);
+        if body["sessionID"].is_null() {
+            body["sessionID"] = json!(self.session_id()?);
+        }
         Ok(Action::SidebandWrite(frame(body)?))
     }
 
@@ -291,6 +315,7 @@ impl OpenCode {
                     self.native_command = None;
                     return self.start_prompt(&prompt);
                 }
+                self.legacy_instructions = None;
                 if message["error"] == true || !self.command_waiting_for_end {
                     return Ok(self.finish_command(message["error"] == true));
                 }
@@ -332,10 +357,22 @@ impl OpenCode {
                 }))?;
                 if self.children.contains_key(id) {
                     self.native_children.insert(id.into());
+                    if self.native_command.is_some()
+                        || self.followup
+                        || self.command_children.contains(parent)
+                    {
+                        self.command_children.insert(id.into());
+                    }
                 }
                 return Ok(actions);
             }
             self.native_children.insert(id.into());
+            if self.native_command.is_some()
+                || self.followup
+                || self.command_children.contains(parent)
+            {
+                self.command_children.insert(id.into());
+            }
             if let Some(role) = self.child_roles.get(id) {
                 return Ok(vec![Action::Event(EventKind::Subagent {
                     update: SubagentUpdate {
@@ -370,12 +407,18 @@ impl OpenCode {
                 self.native_questions.len() < 32 && self.native_questions.insert(id.into()),
                 "OpenCode 问题重复或数量超出限制"
             );
+            if session != self.session.as_deref() {
+                self.child_interactions.insert(id.into());
+            }
             return Ok(vec![Action::Question {
                 id: id.into(),
                 tool_use_id: data["toolCallId"].as_str().map(|tool| {
                     session
                         .filter(|session| Some(*session) != self.session.as_deref())
-                        .map_or_else(|| tool.to_owned(), |child| format!("{child}:{tool}"))
+                        .map_or_else(
+                            || tool.to_owned(),
+                            |child| format!("opencode-child:{child}:{tool}"),
+                        )
                 }),
                 input: json!({}),
                 questions,
@@ -385,6 +428,12 @@ impl OpenCode {
             .as_str()
             .filter(|id| self.children.contains_key(*id))
         {
+            if kind == "permission.asked"
+                && self.children.get(child) == Some(&true)
+                && self.command_children.contains(child)
+            {
+                return self.native_permission(data, child);
+            }
             if !self.native_children.contains(child) {
                 return Ok(vec![]);
             }
@@ -416,9 +465,41 @@ impl OpenCode {
         if !self.saved || data["sessionID"].as_str() != self.session.as_deref() {
             return Ok(vec![]);
         }
+        let acp_prompt = self
+            .request
+            .is_some_and(|(_, kind)| kind == Request::Prompt);
+        let background_delivery = kind == "session.inbox.delivered"
+            && data["inboxID"]
+                .as_str()
+                .is_some_and(|id| self.background_inputs.contains(id));
+        if acp_prompt
+            && (!self.deferred_followup.is_empty()
+                || (background_delivery && !self.foreground_inbox_delivered))
+            && !matches!(kind, "session.inbox.enqueued" | "session.renamed")
+        {
+            // ACP acknowledges the foreground turn independently. Hold an
+            // identified next execution until that acknowledgement is applied.
+            self.deferred_followup_bytes += line.len();
+            ensure!(
+                self.deferred_followup_bytes <= FRAME_LIMIT && self.deferred_followup.len() < 2048,
+                "OpenCode 后台事件等待 ACP 完成时超出限制"
+            );
+            self.deferred_followup.push(line.into());
+            return Ok(vec![]);
+        }
         match kind {
             "session.renamed" => Ok(self.generated_title(&data["title"])),
+            "session.inbox.enqueued" if data["background"] == true => {
+                ensure!(
+                    self.background_inputs.len() < MAX_TOOLS,
+                    "OpenCode 后台输入超出限制"
+                );
+                self.background_inputs
+                    .insert(string(data, "inboxID")?.into());
+                Ok(vec![])
+            }
             "session.inbox.delivered" => {
+                let inbox = string(data, "inboxID")?;
                 if self
                     .steering
                     .as_ref()
@@ -427,9 +508,25 @@ impl OpenCode {
                     let (request, _) = self.steering.take().expect("matched");
                     return Ok(vec![Action::InputsConsumed(vec![request])]);
                 }
+                if self.background_inputs.remove(inbox) {
+                    // A background notification consumed within the
+                    // foreground execution is already visible over ACP.
+                    if !self.foreground_inbox_delivered
+                        && self.native_command.is_none()
+                        && !self.followup
+                    {
+                        self.followup = true;
+                        return Ok(vec![Action::TurnStarted]);
+                    }
+                } else {
+                    self.foreground_inbox_delivered = true;
+                }
                 Ok(vec![])
             }
             "session.inbox.cancelled" => {
+                if let Some(id) = data["inboxID"].as_str() {
+                    self.background_inputs.remove(id);
+                }
                 if self
                     .steering
                     .as_ref()
@@ -443,9 +540,9 @@ impl OpenCode {
                 }
                 Ok(vec![])
             }
-            "session.execution.started" if !self.running() && !self.followup => {
-                self.followup = true;
-                Ok(vec![Action::TurnStarted])
+            "session.skill.activated" => {
+                self.foreground_inbox_delivered = true;
+                Ok(vec![])
             }
             "session.execution.started" if self.native_command.is_some() => {
                 self.command_waiting_for_end = true;
@@ -459,6 +556,7 @@ impl OpenCode {
             {
                 self.command_outcome = Some(kind == "session.execution.succeeded");
                 self.command_waiting_for_end = false;
+                self.foreground_inbox_delivered = false;
                 if self.command_acknowledged {
                     return Ok(self.finish_command(false));
                 }
@@ -470,45 +568,84 @@ impl OpenCode {
                 if self.followup =>
             {
                 self.followup = false;
-                self.possible_followup = self.children.values().any(|active| *active);
+                self.possible_followup = self.children.values().any(|active| *active)
+                    || !self.background_shells.is_empty()
+                    || !self.background_inputs.is_empty();
                 Ok(self.finish(
                     kind != "session.execution.succeeded",
                     (kind == "session.execution.failed").then(|| "OpenCode 后续执行失败".into()),
                 ))
             }
+            "session.execution.succeeded"
+            | "session.execution.failed"
+            | "session.execution.interrupted" => {
+                self.foreground_inbox_delivered = false;
+                Ok(vec![])
+            }
             "permission.asked" if self.followup || self.native_command.is_some() => {
-                let native = string(data, "id")?;
-                if self.cancelling {
-                    return Ok(vec![self.sideband_request(
-                        "permission",
-                        native,
-                        json!({"requestID":native,"allow":false}),
-                    )?]);
-                }
-                ensure!(
-                    self.native_permissions.len() < 32,
-                    "OpenCode 后续执行审批超出限制"
-                );
-                if !self.native_permissions.insert(native.into()) {
-                    return Ok(vec![]);
-                }
-                let tool = string(data, "action")?;
-                Ok(vec![Action::Approval {
-                    id: native.into(),
-                    tool_use_id: data["source"]["id"].as_str().map(str::to_owned),
-                    tool: if tool == "shell" {
-                        "Bash".into()
-                    } else {
-                        tool.into()
-                    },
-                    input: data["metadata"].clone(),
-                }])
+                self.native_permission(data, string(data, "sessionID")?)
             }
             _ if self.followup || self.native_command.is_some() => {
                 self.native_output(kind, data, None)
             }
             _ => Ok(vec![]),
         }
+    }
+
+    fn native_permission(&mut self, data: &Value, session: &str) -> Result<Vec<Action>> {
+        let id = string(data, "id")?;
+        if self.cancelling {
+            return Ok(vec![self.sideband_request(
+                "permission",
+                id,
+                json!({"sessionID":session,"requestID":id,"allow":false}),
+            )?]);
+        }
+        if self.native_permissions.contains_key(id) {
+            return Ok(vec![]);
+        }
+        ensure!(
+            self.native_permissions.len() < 32,
+            "OpenCode 后续执行审批超出限制"
+        );
+        let tool = string(data, "action")?;
+        self.native_permissions.insert(id.into(), session.into());
+        let child = self.session.as_deref() != Some(session);
+        if child {
+            self.child_interactions.insert(id.into());
+        }
+        let mut input = data["metadata"].as_object().cloned().unwrap_or_default();
+        if let Some(resources) = data["resources"].as_array() {
+            if tool == "shell" && !input.contains_key("command") {
+                input.insert(
+                    "command".into(),
+                    json!(
+                        resources
+                            .iter()
+                            .filter_map(Value::as_str)
+                            .collect::<Vec<_>>()
+                            .join("\n")
+                    ),
+                );
+            }
+            input.insert("resources".into(), json!(resources));
+        }
+        Ok(vec![Action::Approval {
+            id: id.into(),
+            tool_use_id: data["source"]["id"].as_str().map(|id| {
+                if child {
+                    format!("opencode-child:{session}:{id}")
+                } else {
+                    id.into()
+                }
+            }),
+            tool: if tool == "shell" {
+                "Bash".into()
+            } else {
+                tool.into()
+            },
+            input: Value::Object(input),
+        }])
     }
 
     fn native_output(
@@ -522,10 +659,14 @@ impl OpenCode {
                 "sessionUpdate":"agent_message_chunk","content":{"type":"text","text":data["delta"]},
             }),
             "session.reasoning.delta" => json!({"sessionUpdate":"agent_thought_chunk"}),
-            "session.tool.called" | "session.tool.success" | "session.tool.failed" => {
+            "session.tool.input.started"
+            | "session.tool.called"
+            | "session.tool.success"
+            | "session.tool.failed" => {
                 let id = string(data, "id")?;
                 let id = child.map_or_else(|| id.into(), |child| format!("{child}:{id}"));
                 let status = match kind {
+                    "session.tool.input.started" => "pending",
                     "session.tool.called" => "in_progress",
                     "session.tool.success" => "completed",
                     _ => "failed",
@@ -539,7 +680,7 @@ impl OpenCode {
                         Some(json!({"type":"content","content":{"type":"image","mimeType":mime,"data":image}}))
                     }).collect();
                 json!({
-                    "sessionUpdate": if status == "in_progress" {"tool_call"} else {"tool_call_update"},
+                    "sessionUpdate": if status == "pending" || (status == "in_progress" && data["name"].is_string()) {"tool_call"} else {"tool_call_update"},
                     "toolCallId":id,"name":data["name"],"rawInput":data["input"],"status":status,
                     "content":content,"rawOutput":{"metadata":data["metadata"],"error":data["error"]["message"]},
                 })
@@ -570,6 +711,15 @@ impl OpenCode {
         self.command_acknowledged = false;
         let failed = error || self.command_outcome.take() == Some(false);
         self.finish(failed, failed.then(|| "OpenCode 原生命令执行失败".into()))
+    }
+
+    fn finish_prompt(&mut self, failed: bool, message: Option<String>) -> Result<Vec<Action>> {
+        let mut actions = self.finish(failed, message);
+        self.deferred_followup_bytes = 0;
+        for line in std::mem::take(&mut self.deferred_followup) {
+            actions.extend(self.sideband(&line)?);
+        }
+        Ok(actions)
     }
 
     fn request(&mut self, kind: Request, method: &str, params: Value) -> Result<Action> {
@@ -624,10 +774,7 @@ impl OpenCode {
     }
 
     fn start(&mut self, text: &str) -> Result<Vec<Action>> {
-        let command = text
-            .trim_start()
-            .strip_prefix('/')
-            .map(|tail| tail.split_whitespace().next().unwrap_or_default());
+        let command = self.slash_command(text);
         if let Some(name) = command
             && !self
                 .commands
@@ -649,14 +796,18 @@ impl OpenCode {
             }
             let args = text.trim_start()[name.len() + 1..].trim();
             let id = uuid::Uuid::new_v4().to_string();
-            let action = self.sideband_request("command", &id, json!({"name":name,"text":args}))?;
+            let action = self.sideband_request(
+                "command",
+                &id,
+                json!({"name":name,"text":args,"instructions":self.legacy_instructions}),
+            )?;
             self.native_command = Some(id);
             self.slash_prompt = Some(text.trim_start().into());
             self.command_outcome = None;
             self.command_waiting_for_end = false;
             self.command_acknowledged = false;
             self.saved = true;
-            self.tools.clear();
+            self.tools.retain(|_, tool| tool.child);
             return Ok(vec![Action::NativeSession(session), action]);
         }
         self.start_prompt(if command.is_some() {
@@ -682,7 +833,7 @@ impl OpenCode {
                 "sessionId": session, "prompt": blocks
             }),
         )?;
-        self.tools.clear();
+        self.tools.retain(|_, tool| tool.child);
         self.context = None;
         self.saved = true;
         // OpenCode creates its durable session on session/new, before prompting.
@@ -724,7 +875,7 @@ impl OpenCode {
         self.request = None;
         if let Some(error) = message.get("error") {
             if kind == Request::Prompt {
-                return Ok(self.finish(true, Some(rpc_error(error))));
+                return self.finish_prompt(true, Some(rpc_error(error)));
             }
             bail!("{}", rpc_error(error));
         }
@@ -843,10 +994,12 @@ impl OpenCode {
                 if reason == "end_turn"
                     && !self.children.values().any(|active| *active)
                     && self.background_shells.is_empty()
+                    && self.background_inputs.is_empty()
+                    && self.deferred_followup.is_empty()
                 {
                     self.possible_followup = false;
                 }
-                actions.extend(self.finish(message.is_some(), message));
+                actions.extend(self.finish_prompt(message.is_some(), message)?);
                 Ok(actions)
             }
         }
@@ -878,7 +1031,7 @@ impl OpenCode {
     }
 
     fn finish(&mut self, failed: bool, message: Option<String>) -> Vec<Action> {
-        self.tools.clear();
+        self.tools.retain(|_, tool| tool.child);
         self.context = None;
         let mut actions = Vec::new();
         if std::mem::take(&mut self.cancelling) {
@@ -886,6 +1039,9 @@ impl OpenCode {
             self.questions.clear();
             self.native_permissions.clear();
             self.native_questions.clear();
+            self.child_interactions.clear();
+            self.background_inputs.clear();
+            self.foreground_inbox_delivered = false;
             actions.push(Action::Interrupted);
         }
         actions.push(Action::Finished { failed, message });
@@ -962,7 +1118,8 @@ impl OpenCode {
                 _ => return Ok(vec![]),
             };
             if !self.children.contains_key(child) {
-                if !self.running() && !self.possible_followup || !status.active() {
+                if !(self.running() || self.followup || self.possible_followup) || !status.active()
+                {
                     return Ok(vec![]);
                 }
                 ensure!(
@@ -1018,6 +1175,7 @@ impl OpenCode {
                     ensure!(self.tools.len() < MAX_TOOLS, "OpenCode 工具数量超出限制");
                 }
                 let tool = self.tools.entry(id.into()).or_default();
+                tool.child = child.is_some();
                 if update["sessionUpdate"] == "tool_call" {
                     tool.name = Some(tool_label(update, None));
                 }
@@ -1025,13 +1183,10 @@ impl OpenCode {
                 let terminal = matches!(status, Some("completed" | "failed"));
                 if !tool.shown && (terminal || status == Some("in_progress")) {
                     let name = tool_label(update, tool.name.as_deref());
-                    let mut input = update.get("rawInput").cloned().unwrap_or_else(|| json!({}));
-                    if name == "Skill"
-                        && input["skill"].is_null()
-                        && let Some(id) = input["id"].as_str()
-                    {
-                        input["skill"] = json!(id);
-                    }
+                    let (name, input) = named_tool(
+                        name,
+                        update.get("rawInput").cloned().unwrap_or_else(|| json!({})),
+                    );
                     actions.push(event(EventKind::Tool {
                         id: id.into(),
                         name,
@@ -1142,6 +1297,9 @@ impl OpenCode {
                 reject,
             },
         );
+        if child.is_some() {
+            self.child_interactions.insert(key.clone());
+        }
         let tool_use_id = string(tool, "toolCallId").ok().map(str::to_owned);
         let mut input = tool["rawInput"].as_object().cloned().unwrap_or_default();
         for (wire, field) in [
@@ -1219,6 +1377,13 @@ impl OpenCode {
             "OpenCode 表单请求重复或数量超出限制"
         );
         self.questions.insert(key.clone(), form);
+        if params["toolCallId"]
+            .as_str()
+            .and_then(|id| id.split_once(':'))
+            .is_some_and(|(id, _)| self.children.contains_key(id))
+        {
+            self.child_interactions.insert(key.clone());
+        }
         Ok(vec![Action::Question {
             id: key,
             tool_use_id: string(params, "toolCallId").ok().map(str::to_owned),
@@ -1247,6 +1412,16 @@ fn tool_label(update: &Value, fallback: Option<&str>) -> String {
         .chars()
         .take(180)
         .collect()
+}
+
+fn named_tool(name: String, mut input: Value) -> (String, Value) {
+    if name == "Skill"
+        && input["skill"].is_null()
+        && let Some(id) = input["id"].as_str()
+    {
+        input["skill"] = json!(id);
+    }
+    (name, input)
 }
 
 fn permission_result(id: &Value, selected: Option<&str>) -> Result<Action> {
@@ -1298,12 +1473,19 @@ impl AgentAdapter for OpenCode {
             && self.approvals.is_empty()
             && self.questions.is_empty()
             && self.native_questions.is_empty()
+            && self.native_permissions.is_empty()
+            && self.background_inputs.is_empty()
     }
 
     fn has_background_work(&self) -> bool {
         !self.background_shells.is_empty()
+            || !self.background_inputs.is_empty()
             || self.possible_followup
             || self.children.values().any(|active| *active)
+    }
+
+    fn is_child_interaction(&self, id: &str) -> bool {
+        self.child_interactions.contains(id)
     }
 
     fn knows_subagent(&self, _native_id: &str) -> bool {
@@ -1343,7 +1525,8 @@ impl AgentAdapter for OpenCode {
             _directory: directory,
         };
         let instructions = crate::skills::platform_instructions(&config.settings_dir);
-        let (model, settings) = config::configure(&mut command, config, &instructions, &sideband)?;
+        let (model, settings) =
+            config::configure(&mut command, config, &instructions, Some(&sideband))?;
         self.legacy_instructions = (!instructions.is_empty()).then_some(instructions);
         self.model = model;
         Ok(AgentCommand {
@@ -1404,7 +1587,15 @@ impl AgentAdapter for OpenCode {
             Input::Interrupt if self.followup || self.native_command.is_some() => {
                 self.cancelling = true;
                 let mut actions = self.cancel_questions()?;
-                actions.push(self.sideband_request("interrupt", "interrupt", json!({}))?);
+                let mut sessions = HashSet::from([self.session_id()?.to_owned()]);
+                sessions.extend(self.native_permissions.values().cloned());
+                for session in sessions {
+                    actions.push(self.sideband_request(
+                        "interrupt",
+                        "interrupt",
+                        json!({"sessionID":session}),
+                    )?);
+                }
                 Ok(actions)
             }
             Input::Interrupt if self.running() => {
@@ -1435,11 +1626,12 @@ impl AgentAdapter for OpenCode {
                 Ok(actions)
             }
             Input::Approval { id, allow, .. } => {
-                if self.native_permissions.remove(id) {
+                self.child_interactions.remove(id);
+                if let Some(session) = self.native_permissions.remove(id) {
                     return Ok(vec![self.sideband_request(
                         "permission",
                         id,
-                        json!({"requestID":id,"allow":allow && !self.cancelling}),
+                        json!({"sessionID":session,"requestID":id,"allow":allow && !self.cancelling}),
                     )?]);
                 }
                 let request = self
@@ -1463,7 +1655,7 @@ impl AgentAdapter for OpenCode {
                     "OpenCode 当前轮无法接收补充消息"
                 );
                 ensure!(
-                    !prompt.trim_start().starts_with('/'),
+                    self.slash_command(prompt).is_none(),
                     "请在独立轮次运行 OpenCode 命令"
                 );
                 let id = format!("msg_{}", uuid::Uuid::new_v4().simple());
@@ -1485,6 +1677,7 @@ impl AgentAdapter for OpenCode {
                 answers,
                 ..
             } => {
+                self.child_interactions.remove(id);
                 if self.native_questions.remove(id) {
                     let answers =
                         answers.map(|answers| question::native_answers(&questions, answers));

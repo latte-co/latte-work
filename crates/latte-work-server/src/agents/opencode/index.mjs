@@ -1,5 +1,18 @@
 import { createConnection } from "node:net";
 
+// OpenCode 2.0 exposes the configured rules, but not permission.assert.
+// Match the native wildcard syntax and last-match precedence for question:*.
+function matches(input, pattern) {
+  let expression = pattern
+    .replaceAll("\\", "/")
+    .replace(/[.+^${}()|[\]\\]/g, "\\$&")
+    .replace(/\*/g, ".*")
+    .replace(/\?/g, ".");
+  if (expression.endsWith(" .*"))
+    expression = expression.slice(0, -3) + "( .*)?";
+  return new RegExp("^" + expression + "$", "s").test(input);
+}
+
 // Loaded by the same private OpenCode server that owns the ACP session.
 // Only forward lifecycle evidence that ACP does not carry.
 export default {
@@ -31,11 +44,12 @@ export default {
       "session.execution.interrupted",
       "session.inbox.delivered",
       "session.inbox.cancelled",
+      "session.skill.activated",
       "session.renamed",
-      "session.created",
       "session.text.delta",
       "session.reasoning.delta",
       "session.tool.called",
+      "session.tool.input.started",
       "session.tool.success",
       "session.tool.failed",
       "permission.asked",
@@ -56,9 +70,28 @@ export default {
     socket.once("connect", () => {
       const stream = ctx.event.subscribe({ signal: abort.signal });
       void (async () => {
+        const synthetic = new Set();
         send({ type: "ready" });
         for await (const { type, data } of stream) {
-          if (type === "session.created") {
+          if (type === "session.inbox.enqueued") {
+            const { sessionID, inboxID, item } = data;
+            const source =
+              item.type === "synthetic" && item.payload.metadata?.source;
+            if (source === "shell" || source === "subagent")
+              send({ type, data: { sessionID, inboxID, background: true } });
+            else if (item.type === "synthetic") {
+              if (synthetic.size >= 2048)
+                throw new Error("Too many pending synthetic inputs");
+              synthetic.add(inboxID);
+            }
+          } else if (
+            (type === "session.inbox.delivered" ||
+              type === "session.inbox.cancelled") &&
+            synthetic.delete(data.inboxID)
+          ) {
+            // Synthetic platform context does not own an execution.
+            continue;
+          } else if (type === "session.created") {
             const { sessionID, parentID, agent, title } = data;
             if (parentID)
               send({ type, data: { sessionID, parentID, agent, title } });
@@ -153,6 +186,15 @@ export default {
           }
           bridgeQuestions.add(sessionID);
           try {
+            if (request.instructions) {
+              await ctx.session.synthetic({
+                sessionID,
+                text: request.instructions,
+                description: "Latte Work platform skill",
+                delivery: "steer",
+                resume: false,
+              });
+            }
             await ctx.session.command({
               sessionID,
               name: request.name,
@@ -210,8 +252,10 @@ export default {
         const native = tool.execute;
         tool.execute = async ({ questions: prompts }, context) => {
           const { sessionID, agent, messageID, id: toolCallId } = context;
-          if (!legacy && !bridgeQuestions.has(sessionID))
-            return native({ questions: prompts }, context);
+          if (!legacy && !bridgeQuestions.has(sessionID)) {
+            const session = await ctx.session.get({ sessionID });
+            if (!session.parentID) return native({ questions: prompts }, context);
+          }
           if (questions.size >= 32 || socket.destroyed)
             throw new Error("Latte Work cannot show questions");
           if (ctx.permission.assert) {
@@ -225,18 +269,14 @@ export default {
           } else {
             const selected = await ctx.agent.get({ agentID: agent });
             const session = await ctx.session.get({ sessionID });
-            // The 2.0 plugin API has no permission assertion. Honor
-            // configured denies conservatively before displaying the form.
-            if (
-              [
-                ...(selected.data?.permissions ?? []),
-                ...(session.permissions ?? []),
-              ].some(
-                (rule) =>
-                  rule.effect === "deny" &&
-                  (rule.action === "*" || rule.action === "question"),
-              )
-            ) {
+            const rule = [
+              ...(selected.data?.permissions ?? []),
+              ...(session.permissions ?? []),
+            ].findLast(
+              (rule) =>
+                matches("question", rule.action) && matches("*", rule.resource),
+            );
+            if (rule?.effect === "deny") {
               throw new Error("Permission denied: question");
             }
           }

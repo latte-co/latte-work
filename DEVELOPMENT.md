@@ -1717,6 +1717,9 @@ them and preserves the original native session ID on resume. A queued input
 is consumed only after a matching native inbox delivery event. A background
 Shell is displayed as running until its native exit. Native execution
 completion fences project slash commands and autonomous follow-up activity.
+Latte identifies autonomous continuations by delivery of an OpenCode
+background notification from a Shell or subagent. The foreground result and
+late copies of its native output can arrive on either transport first.
 Compaction uses its ACP completion. OpenCode 2.0 implements `/compact` even
 though its ACP catalog omits the command. Skill shortcuts advertised by
 older catalogs are activated through ACP. A custom title set before the
@@ -1724,9 +1727,11 @@ first prompt is applied to the new native session before it can run.
 
 Permission modes use a process-local OpenCode permission hook. Explicit
 native denials and managed policies continue to apply. The adapter uses ACP
-form elicitation on 2.3 and the OpenCode question tool's plugin interface on
-2.0. The platform skill follows the host preference. OpenCode 2.0 receives
-it as assistant context on the first prompt of an open process, and 2.3 reads
+form elicitation on 2.3 for ACP foreground questions. Child questions and
+OpenCode 2.0 questions use the question tool's plugin interface. A child's
+pending approval or question can outlive the foreground turn.
+The platform skill follows the host preference. OpenCode 2.0 receives
+it as assistant context on the first prompt or project command, and 2.3 reads
 it as an ambient instruction file. ACP client filesystem and terminal RPCs
 are unavailable. Tool images are limited to bounded inline raster data.
 
@@ -1737,6 +1742,8 @@ unconfirmed. For a finished child, Latte can recover native history with a
 bounded, prompt-free export. Import requires the original launch context,
 matching child and ancestor IDs, and the same project directory. The stored
 stream remains available if the native export is unavailable.
+An export with unfinished tools is marked incomplete and preserves any
+reported tool errors.
 
 The implementation follows the [OpenCode ACP contract](https://opencode.ai/docs/cli/acp/).
 The final-binary tests use a deterministic ACP peer. For an installed CLI,

@@ -633,6 +633,16 @@ it("keeps local navigation available when native command discovery fails", async
   expect(mocks.send).not.toHaveBeenCalled();
 });
 
+it("sends an OpenCode prompt starting with an absolute path without command discovery", async () => {
+  mocks.request.mockRejectedValue(new Error("catalog unavailable"));
+  render(<Harness agent="opencode" />);
+  const prompt = "/tmp/project/src 请检查这里";
+  type(prompt);
+  fireEvent.click(screen.getByText("发送"));
+  await waitFor(() => expect(mocks.send).toHaveBeenCalledWith(prompt));
+  expect(mocks.request).not.toHaveBeenCalled();
+});
+
 it("does not submit an adapter-specific navigation command discovered from pasted text", async () => {
   mocks.request.mockResolvedValue({
     kind: "agent_commands",

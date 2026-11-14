@@ -381,7 +381,15 @@ export type Request =
   | { method: "close_terminal"; terminal_id: string }
   | { method: "providers" }
   | { method: "agent_permissions"; agent: string }
-  | { method: "agent_commands"; agent: string; project_id: string }
+  | {
+      method: "agent_commands";
+      agent: string;
+      project_id: string;
+      /**
+       * Added by the App outside the WebView for Provider-backed discovery.
+       */
+      provider?: TurnProvider;
+    }
   | {
       method: "models";
       agent: string;

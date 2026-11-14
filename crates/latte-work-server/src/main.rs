@@ -453,7 +453,11 @@ async fn dispatch(s: &Service, request: Request) -> Result<Response> {
                 modes: agents::permission_modes(&agent, binary).await?,
             }
         }
-        Request::AgentCommands { agent, project_id } => {
+        Request::AgentCommands {
+            agent,
+            project_id,
+            provider,
+        } => {
             let binary = s.agent_binary(&agent)?;
             let project = db(&s.database, |d| d.project(&project_id))?;
             let _permit = s
@@ -464,7 +468,7 @@ async fn dispatch(s: &Service, request: Request) -> Result<Response> {
                 .providers
                 .lock()
                 .map_err(|_| anyhow::anyhow!("Provider 配置锁异常"))?
-                .selected_config(&agent, None)?;
+                .turn_config(&agent, None, provider)?;
             Response::AgentCommands {
                 commands: runtime::commands(binary, &agent, &project.path, &config).await?,
             }

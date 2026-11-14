@@ -133,7 +133,7 @@ async fn opencode_metadata_resume_and_reconciliation_use_native_identity() {
         if default_model.as_deref() == Some("test/default") && effort_levels == [Effort::Medium, Effort::Max] && model_labels["test/other"] == "Configured")
     );
     assert!(
-        matches!(ask(&mut client, Request::AgentCommands { agent: "opencode".into(), project_id: project_id.clone() }).await,
+        matches!(ask(&mut client, Request::AgentCommands { agent: "opencode".into(), project_id: project_id.clone(), provider: None }).await,
         Response::AgentCommands { commands } if commands.iter().any(|c| c.name == "compact") && commands.iter().any(|c| c.name == "project:check"))
     );
     assert_eq!(
@@ -448,5 +448,158 @@ async fn opencode_recovers_nested_history_only_within_known_project_and_ancestry
                 if source == expected_source && contains_text(events, expected_text)),
             "{response:?}"
         );
+        if task_id == "ses_nested" {
+            let Response::SubagentHistory {
+                incomplete, events, ..
+            } = response
+            else {
+                unreachable!()
+            };
+            assert!(incomplete);
+            assert!(events.iter().any(|e| matches!(&e.event, EventKind::ToolResult { is_error: true, content, .. } if content[0]["text"] == "native shell failure")));
+            assert!(events.iter().any(
+                |e| matches!(&e.event, EventKind::Tool { id, .. } if id == "tool_unfinished")
+            ));
+            assert!(!events.iter().any(
+                |e| matches!(&e.event, EventKind::ToolResult { id, .. } if id == "tool_unfinished")
+            ));
+        }
     }
+}
+
+#[tokio::test]
+async fn opencode_ignores_late_foreground_events_and_runs_the_background_notification() {
+    let host = Host::start().await;
+    let folder = tempfile::tempdir().unwrap();
+    let mut client = host.client().await;
+    let project_id = project(&mut client, folder.path()).await;
+    let id = create(&mut client, &project_id).await;
+    for (request, text) in [
+        ("path", "/tmp/project/src inspect this"),
+        ("race", "late-native"),
+    ] {
+        assert!(matches!(
+            ask(&mut client, turn(&id, request, text)).await,
+            Response::Accepted { .. }
+        ));
+        wait(&mut client, &id, Status::Completed).await;
+    }
+    std::fs::write(folder.path().join("release-native"), "").unwrap();
+    let events = tokio::time::timeout(std::time::Duration::from_secs(6), async {
+        loop {
+            let events = wait(&mut client, &id, Status::Completed).await;
+            if contains_text(&events, "real follow-up") {
+                break events;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert!(contains_text(&events, "ACP reply"));
+    assert!(!contains_text(&events, "duplicate native reply"));
+}
+
+#[tokio::test]
+async fn opencode_routes_native_command_child_approval_and_preserves_tool_identity() {
+    let host = Host::start().await;
+    let folder = tempfile::tempdir().unwrap();
+    let mut client = host.client().await;
+    let project_id = project(&mut client, folder.path()).await;
+    let id = create(&mut client, &project_id).await;
+    assert!(matches!(
+        ask(
+            &mut client,
+            turn(&id, "command", "/project:check child permission")
+        )
+        .await,
+        Response::Accepted { .. }
+    ));
+    let events = wait(&mut client, &id, Status::Waiting).await;
+    assert!(events.iter().any(|e| matches!(&e.event, EventKind::Approval { input, .. } if input["command"] == "printf fixture")));
+    let request_id = permission(&events);
+    assert!(matches!(
+        ask(
+            &mut client,
+            Request::Approve {
+                session_id: id.clone(),
+                request_id,
+                allow: true
+            }
+        )
+        .await,
+        Response::Ok
+    ));
+    wait(&mut client, &id, Status::Completed).await;
+    let Response::Subagents { tasks, .. } = ask(
+        &mut client,
+        Request::Subagents {
+            session_id: id.clone(),
+        },
+    )
+    .await
+    else {
+        panic!("children")
+    };
+    let Response::SubagentHistory { events, .. } = ask(
+        &mut client,
+        Request::SubagentHistory {
+            session_id: id,
+            task_id: tasks[0].id.clone(),
+            after: None,
+            source: None,
+            provider: None,
+        },
+    )
+    .await
+    else {
+        panic!("history")
+    };
+    assert!(events.iter().any(|e| matches!(&e.event, EventKind::Tool { name, input, .. } if name == "Skill" && input["skill"] == "fixture-skill")));
+}
+
+#[tokio::test]
+async fn opencode_parent_finishes_while_a_child_question_remains_answerable() {
+    let host = Host::start().await;
+    let folder = tempfile::tempdir().unwrap();
+    let mut client = host.client().await;
+    let project_id = project(&mut client, folder.path()).await;
+    let id = create(&mut client, &project_id).await;
+    assert!(matches!(
+        ask(&mut client, turn(&id, "parent", "background-question")).await,
+        Response::Accepted { .. }
+    ));
+    wait(&mut client, &id, Status::Waiting).await;
+    std::fs::write(folder.path().join("release-parent"), "").unwrap();
+    let (request_id, question_id) = tokio::time::timeout(std::time::Duration::from_secs(6), async {
+        loop {
+            let events = wait(&mut client, &id, Status::Waiting).await;
+            if events.iter().any(|e| matches!(&e.event, EventKind::TurnChanges { changes } if changes.request_id == "parent"))
+                && let Some(ids) = events.iter().find_map(|e| match &e.event {
+                    EventKind::Question { request_id, questions, .. } => Some((request_id.clone(), questions[0].id.clone())),
+                    _ => None,
+                })
+            {
+                break ids;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+    }).await.unwrap();
+    assert!(matches!(
+        ask(
+            &mut client,
+            Request::AnswerQuestion {
+                session_id: id.clone(),
+                request_id,
+                answers: Some(vec![latte_work_protocol::QuestionAnswer {
+                    question_id,
+                    option_indices: vec![0],
+                    text: None,
+                }]),
+            }
+        )
+        .await,
+        Response::Ok
+    ));
+    wait(&mut client, &id, Status::Completed).await;
 }

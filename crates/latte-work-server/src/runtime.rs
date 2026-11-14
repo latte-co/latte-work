@@ -1016,6 +1016,8 @@ struct Process {
     config: LaunchConfig,
     path: String,
     turn_active: bool,
+    /// The main turn can settle while a child still needs input.
+    settled_turn: Option<Outcome>,
     /// Background work already alive when this turn started. Its writes may
     /// land inside this turn's diff window even after it completes, so the
     /// undo fence must survive until the turn is frozen.
@@ -1143,6 +1145,7 @@ impl Process {
             config,
             path: path.into(),
             turn_active: false,
+            settled_turn: None,
             background_at_start: false,
             stopping: false,
             interrupt_sent: false,
@@ -1153,6 +1156,26 @@ impl Process {
         })
     }
     async fn apply(&mut self, actions: Vec<Action>, database: &Database, id: &str) -> Result<()> {
+        let mut batch = Vec::new();
+        for action in actions {
+            let finished = matches!(action, Action::Finished { .. });
+            batch.push(action);
+            if finished {
+                self.apply_batch(std::mem::take(&mut batch), database, id)
+                    .await?;
+            }
+        }
+        if !batch.is_empty() {
+            self.apply_batch(batch, database, id).await?;
+        }
+        Ok(())
+    }
+    async fn apply_batch(
+        &mut self,
+        actions: Vec<Action>,
+        database: &Database,
+        id: &str,
+    ) -> Result<()> {
         let mut remaining = Vec::new();
         let mut sideband_writes = Vec::new();
         for action in actions {
@@ -1240,6 +1263,7 @@ impl Process {
         let became_ready = actions.iter().any(|a| matches!(a, Action::Ready));
         if actions.iter().any(|a| matches!(a, Action::TurnStarted)) {
             self.turn_active = true;
+            self.settled_turn = None;
             self.background_at_start = self.adapter.has_background_work();
             self.turn_deadline = tokio::time::Instant::now() + TURN_LIMIT;
         }
@@ -1264,7 +1288,12 @@ impl Process {
             write(stream.get_mut(), &bytes).await?;
         }
         if let Some((status, message)) = outcome {
-            if !self.state.pending.is_empty() {
+            if self
+                .state
+                .pending
+                .values()
+                .any(|(native, _, _)| !self.adapter.is_child_interaction(native))
+            {
                 bail!("Agent 在审批完成前结束了本轮任务");
             }
             self.turn_active = false;
@@ -1284,7 +1313,10 @@ impl Process {
                 self.background_at_start || self.adapter.has_background_work(),
             )
             .await?;
-            db(database, |s| s.state(id, status, message))?;
+            if self.state.pending.is_empty() {
+                db(database, |s| s.state(id, status.clone(), message.clone()))?;
+            }
+            self.settled_turn = Some((status, message));
             self.stopping = false;
             self.interrupt_sent = false;
             if let Some(reply) = self.stop_reply.take() {
@@ -1301,6 +1333,18 @@ impl Process {
         }
         self.session_open.store(self.state.ready, Ordering::SeqCst);
         Ok(())
+    }
+    fn state_after_interaction(&mut self, database: &Database, id: &str) -> Result<()> {
+        let (status, message) = if !self.state.pending.is_empty() {
+            (Status::Waiting, None)
+        } else if self.turn_active {
+            (Status::Running, None)
+        } else {
+            self.settled_turn
+                .clone()
+                .unwrap_or((Status::Completed, None))
+        };
+        db(database, |s| s.state(id, status, message))
     }
     async fn cancel_title(&mut self) {
         if let Some(job) = self.title_job.take() {
@@ -1494,6 +1538,7 @@ async fn accept_turn(
         }
         let p = process.as_mut().context("Agent process missing")?;
         p.turn_active = true;
+        p.settled_turn = None;
         p.background_at_start = p.adapter.has_background_work();
         p.turn_deadline = tokio::time::Instant::now() + TURN_LIMIT;
         let notice = if let Some(provider) = &p.config.provider {
@@ -1699,7 +1744,19 @@ async fn actor(
                         db(&database,|d|d.state(&session.id,Status::Stopped,Some("已停止；已发送消息的处理状态请核对 Agent 记录".into())))?;
                         let _=reply.send(Ok(()));
                         Ok(())
-                    } else                     if let Some(p) = process.as_mut().filter(|p| p.turn_active) {
+                    } else if process.as_ref().is_some_and(|p| !p.turn_active && !p.state.pending.is_empty()) {
+                        if let Some(p) = process.as_mut() {
+                            p.close().await;
+                        }
+                        process = None;
+                        db(&database, |d| {
+                            d.pause_queue(&session.id, Some("当前执行已停止，队列已暂停"))?;
+                            d.end_subagents(&session.id, latte_work_protocol::SubagentStatus::Stopped)?;
+                            d.state(&session.id, Status::Stopped, Some("已停止后台任务；已执行的文件改动不会撤销。".into()))
+                        })?;
+                        let _ = reply.send(Ok(()));
+                        Ok(())
+                    } else if let Some(p) = process.as_mut().filter(|p| p.turn_active) {
                         if p.stopping {
                             let _ = reply.send(Err("任务正在停止".into()));
                             Ok(())
@@ -1914,8 +1971,9 @@ async fn actor(
                             p.apply(actions, &database, &session.id).await?;
                             db(&database, |s| {
                                 s.event(&session.id, p.config.redact_event(EventKind::QuestionResolved { request_id: id, answers })?)?;
-                                s.state(&session.id, if !p.state.pending.is_empty() { Status::Waiting } else if p.turn_active { Status::Running } else { Status::Completed }, None)
-                            })
+                                Ok(())
+                            })?;
+                            p.state_after_interaction(&database, &session.id)
                         }.await;
                         let _ = reply.send(result.as_ref().map(|_| ()).map_err(|e| e.to_string()));
                         result
@@ -1950,18 +2008,9 @@ async fn actor(
                                         allow,
                                     },
                                 )?;
-                                s.state(
-                                    &session.id,
-                                    if !p.state.pending.is_empty() {
-                                        Status::Waiting
-                                    } else if p.turn_active {
-                                        Status::Running
-                                    } else {
-                                        Status::Completed
-                                    },
-                                    None,
-                                )
-                            })
+                                Ok(())
+                            })?;
+                            p.state_after_interaction(&database, &session.id)
                         }
                         .await;
                         let _ = reply.send(result.as_ref().map(|_| ()).map_err(|e| e.to_string()));
@@ -2210,7 +2259,7 @@ pub async fn commands(
     config: &LaunchConfig,
 ) -> Result<Vec<latte_work_protocol::AgentSlashCommand>> {
     if agent == "opencode" {
-        return agents::opencode_commands(binary, path, &config.environment).await;
+        return agents::opencode_commands(binary, path, config).await;
     }
     let mut adapter = agents::create(agent)?;
     let start = adapter.advance(Input::DiscoverCommands)?;

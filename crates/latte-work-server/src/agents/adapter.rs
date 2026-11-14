@@ -130,6 +130,10 @@ pub trait AgentAdapter: Send {
     }
     /// Actual native tasks that outlive the main turn; distinct from reconfiguration readiness.
     fn has_background_work(&self) -> bool;
+    /// A pending interaction can belong to a child that outlives the main turn.
+    fn is_child_interaction(&self, _id: &str) -> bool {
+        false
+    }
     /// Only children observed by this process share its credential redaction context.
     fn knows_subagent(&self, native_id: &str) -> bool;
     /// Persisted manual name, including resumed sessions. Creation arguments

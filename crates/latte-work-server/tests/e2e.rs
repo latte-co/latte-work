@@ -3122,6 +3122,7 @@ async fn agent_commands_discovery_dispatch_resume_and_unsupported_are_native() {
         Request::AgentCommands {
             agent: "claude".into(),
             project_id: project_id.clone(),
+            provider: None,
         },
     )
     .await;
@@ -3146,7 +3147,8 @@ async fn agent_commands_discovery_dispatch_resume_and_unsupported_are_native() {
                 &mut client,
                 Request::AgentCommands {
                     agent: agent.into(),
-                    project_id: project.into()
+                    project_id: project.into(),
+                    provider: None,
                 }
             )
             .await,
@@ -8722,7 +8724,8 @@ async fn damaged_skill_preferences_do_not_block_agent_sessions_or_command_discov
                     &mut client,
                     Request::AgentCommands {
                         project_id: current.project_id.clone(),
-                        agent: agent.into()
+                        agent: agent.into(),
+                        provider: None,
                     }
                 )
                 .await,

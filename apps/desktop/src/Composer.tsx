@@ -654,6 +654,7 @@ export function Composer(props: Props) {
       let catalog = commands;
       if (
         nativeCommand &&
+        (agent !== "opencode" || !/[/.]/.test(nativeCommand)) &&
         !catalog.some((command) => command.name === nativeCommand)
       ) {
         const response = await request(hostId, {

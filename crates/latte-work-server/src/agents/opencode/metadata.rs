@@ -135,8 +135,8 @@ struct Probe {
 }
 
 impl Probe {
-    fn spawn(binary: &str, cwd: &str, environment: &AgentEnvironment) -> Result<Self> {
-        let child = command(binary, Some(cwd), environment)
+    fn spawn(mut command: tokio::process::Command) -> Result<Self> {
+        let child = command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
@@ -315,10 +315,14 @@ impl Probe {
 pub(crate) async fn commands(
     binary: &str,
     cwd: &str,
-    environment: &AgentEnvironment,
+    config: &crate::providers::LaunchConfig,
 ) -> Result<Vec<AgentSlashCommand>> {
     tokio::time::timeout(Duration::from_secs(12), async {
-        let mut probe = Probe::spawn(binary, cwd, environment)?;
+        let mut native = command(binary, Some(cwd), &config.environment);
+        if config.provider.is_some() {
+            super::config::configure(&mut native, config, "", None)?;
+        }
+        let mut probe = Probe::spawn(native)?;
         let (id, _) = probe.attach(cwd).await?;
         let result = tokio::time::timeout(Duration::from_secs(5), probe.command_catalog(&id)).await;
         let closed = probe.close(&id).await;
@@ -348,7 +352,7 @@ pub(in crate::agents) async fn models(
         }
     };
     tokio::time::timeout(Duration::from_secs(12), async {
-        let mut probe = Probe::spawn(binary, cwd, environment)?;
+        let mut probe = Probe::spawn(command(binary, Some(cwd), environment))?;
         let (id, result) = probe.attach(cwd).await?;
         let catalog = tokio::time::timeout(
             Duration::from_secs(5),

@@ -114,6 +114,7 @@ impl Client {
             | Request::DispatchQueuedMessage { provider, .. }
             | Request::ResumeMessageQueue { provider, .. }
             | Request::OpenAgentSession { provider, .. }
+            | Request::AgentCommands { provider, .. }
             | Request::RenameSession { provider, .. }
             | Request::SubagentHistory { provider, .. } => matches!(
                 provider,
@@ -356,7 +357,7 @@ where
     Fut: std::future::Future<Output = Result<latte_work_protocol::TurnProvider>>,
 {
     let agent = match &request {
-        Request::Models { agent, .. } => agent.clone(),
+        Request::Models { agent, .. } | Request::AgentCommands { agent, .. } => agent.clone(),
         Request::Send { session_id, .. }
         | Request::SendQueued { session_id, .. }
         | Request::DispatchQueuedMessage { session_id, .. }
@@ -409,10 +410,18 @@ async fn request_with_launch_config(
         Request::ResumeMessageQueue { .. } | Request::DispatchQueuedMessage { .. }
     );
     let is_models = matches!(&request, Request::Models { .. });
+    let is_commands = matches!(&request, Request::AgentCommands { .. });
     let is_open = matches!(&request, Request::OpenAgentSession { .. });
     let is_history = matches!(&request, Request::SubagentHistory { .. });
     let is_rename = matches!(&request, Request::RenameSession { .. });
     let request = match request {
+        Request::AgentCommands {
+            agent, project_id, ..
+        } => Request::AgentCommands {
+            agent,
+            project_id,
+            provider: Some(config),
+        },
         Request::Models {
             agent,
             model,
@@ -516,6 +525,7 @@ async fn request_with_launch_config(
     let response = target.lock().await.request(request).await?;
     match response {
         Response::Models { .. } if is_models => Ok(response),
+        Response::AgentCommands { .. } if is_commands => Ok(response),
         Response::Accepted { .. } | Response::MessageQueued { .. } if is_send => Ok(response),
         Response::MessageQueue { .. } if is_queue_control => Ok(response),
         Response::Ok if is_open => Ok(response),
