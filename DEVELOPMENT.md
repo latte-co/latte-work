@@ -1147,8 +1147,11 @@ New conversations initially use the prompt prefix. After their first successful
 ordinary turn, the execution host requests a friendly title using the request and
 visible first-turn reply. Titles are saved in host metadata and appear through the
 existing session/list polling on local and SSH hosts. Hidden reasoning is not
-collected. Generation runs once for a newly created native session; reopening or
-resuming does not regenerate names or backfill old history.
+collected. Generation runs once per session lifetime: the request is recorded in
+persisted session state, so restarts, crash recovery and reopens never re-request
+it. Sessions whose first requestable turn never completed (legacy rows written
+before the marker existed, or a crash before the first completion) self-heal by
+generating on their next completed turn.
 
 Claude uses `generate_session_title` with `persist: true`; its bounded description
 contains up to 2,048 request characters and 4,096 characters of recent visible
@@ -1177,8 +1180,10 @@ request using the selected Agent's existing service; no separate Provider is nee
 
 None of these paths adds a turn to the visible conversation or blocks subsequent
 input on the title response. Rejected, failed or invalid title requests retain
-the prefix and report a notice. Persisted manual names suppress generation on
-resume without implicitly renaming the native session.
+the prefix and report a notice, and are never retried within the same session.
+Persisted manual names suppress generation without implicitly renaming the native
+session; the once marker now survives respawn instead of being inferred from a
+resumed process.
 Responses are bound to the native identity, and generated names cannot overwrite
 a manual name. Opening a session, discovery, slash commands, failed turns and
 child results do not trigger generation.
@@ -1194,7 +1199,8 @@ against the bounded title; excessive guards decline the optional import.
 Focused checks: the server `agents::` unit tests and final-binary `titles_e2e`
 tests cover context bounds, correlation, manual-name precedence, failures,
 failed-turn context reset, Provider drift, effort forwarding, permit release,
-native refresh redaction, reconnect and resume without extra visible turns.
+native refresh redaction, reconnect and resume without extra visible turns, the
+persisted request-once marker across restart, and legacy self-heal.
 `scripts/smoke-codex-providers.py`, `scripts/smoke-traex-providers.py` and
 `scripts/smoke-claude-queue.py` separately exercise installed CLIs with disposable
 localhost model fixtures. These validate native protocol behavior, not live-model

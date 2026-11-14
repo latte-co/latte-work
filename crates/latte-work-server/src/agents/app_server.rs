@@ -697,6 +697,7 @@ impl AppServer {
                     && self.rename.is_none()
                 {
                     self.title_attempted = true;
+                    actions.push(Action::TitleRequested);
                     if self.codex {
                         actions.push(Action::GenerateTitle {
                             native_session_id: self.thread.clone().expect("active thread"),
@@ -943,9 +944,9 @@ impl AgentAdapter for AppServer {
     fn knows_subagent(&self, _: &str) -> bool {
         false
     }
-    fn set_session_title(&mut self, title: Option<String>, resuming: bool) {
+    fn set_session_title(&mut self, title: Option<String>, resuming: bool, title_requested: bool) {
         self.native_named = title.is_some();
-        self.title_attempted = resuming || self.native_named;
+        self.title_attempted = title_requested;
         self.title = if resuming { None } else { title };
     }
     fn command(
@@ -1233,6 +1234,66 @@ mod tests {
             }
         }
     }
+    /// A resumed process for an existing native thread, with the durable
+    /// title-request marker set by the spawn contract.
+    fn resumed_running(title_requested: bool) -> AppServer {
+        let mut agent = AppServer::default();
+        agent
+            .command("traex", "/tmp", Some("t"), &config())
+            .unwrap();
+        agent.set_session_title(None, true, title_requested);
+        agent.advance(Input::Open).unwrap();
+        message(&mut agent, json!({"id":"latte-1","result":{}}));
+        message(
+            &mut agent,
+            json!({"id":"latte-2","result":{"config":{"model_provider":"native-provider","model":"native-default"}}}),
+        );
+        message(
+            &mut agent,
+            json!({"id":"latte-3","result":{"thread":{"id":"t"}}}),
+        );
+        agent.advance(Input::Start { prompt: "followup" }).unwrap();
+        message(
+            &mut agent,
+            json!({"id":"latte-4","result":{"turn":{"id":"turn"}}}),
+        );
+        agent
+    }
+    #[test]
+    fn resumed_app_servers_generate_once_when_title_was_never_requested() {
+        for codex in [true, false] {
+            let mut agent = resumed_running(false);
+            agent.codex = codex;
+            let done = message(
+                &mut agent,
+                json!({"method":"turn/completed","params":{"threadId":"t","turn":{"id":"turn","status":"completed"}}}),
+            );
+            assert!(
+                done.iter().any(|a| matches!(a, Action::TitleRequested)),
+                "the durable once marker accompanies the request"
+            );
+            assert!(done.iter().any(|a| if codex {
+                matches!(a, Action::GenerateTitle { .. })
+            } else {
+                matches!(a, Action::MetadataWrite(_))
+            }));
+        }
+    }
+    #[test]
+    fn title_requested_suppresses_app_server_generation() {
+        for codex in [true, false] {
+            let mut agent = resumed_running(true);
+            agent.codex = codex;
+            let done = message(
+                &mut agent,
+                json!({"method":"turn/completed","params":{"threadId":"t","turn":{"id":"turn","status":"completed"}}}),
+            );
+            assert!(done.iter().all(|a| !matches!(
+                a,
+                Action::TitleRequested | Action::GenerateTitle { .. } | Action::MetadataWrite(_)
+            )));
+        }
+    }
     #[test]
     fn platform_skills_are_thread_local_and_follow_host_preferences_on_start_and_resume() {
         let dir = tempfile::tempdir().unwrap();
@@ -1355,6 +1416,7 @@ mod tests {
         assert!(matches!(
             actions.as_slice(),
             [
+                Action::TitleRequested,
                 Action::MetadataWrite(_),
                 Action::Finished { failed: false, .. }
             ]
@@ -1385,7 +1447,7 @@ mod tests {
                 assert!(matches!(actions[0], Action::NativeSession(_)));
                 let actions: Vec<_> = actions
                     .into_iter()
-                    .filter(|a| !matches!(a, Action::MetadataWrite(_)))
+                    .filter(|a| !matches!(a, Action::MetadataWrite(_) | Action::TitleRequested))
                     .collect();
                 assert!(matches!(actions[1], Action::Finished { failed: false, .. }));
                 assert_eq!(actions.len(), if stop { 3 } else { 2 });
@@ -2008,7 +2070,7 @@ mod tests {
             json!({"method":"turn/completed","params":{"threadId":"t","turn":{"id":"turn","status":"completed"}}}),
         );
         assert!(
-            matches!(&done[..],[Action::InputsConsumed(ids),Action::MetadataWrite(_),Action::Finished{failed:false,..}] if ids==&["q"])
+            matches!(&done[..],[Action::InputsConsumed(ids),Action::TitleRequested,Action::MetadataWrite(_),Action::Finished{failed:false,..}] if ids==&["q"])
         );
     }
     #[test]

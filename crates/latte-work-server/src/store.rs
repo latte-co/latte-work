@@ -428,6 +428,7 @@ impl Store {
             status: Status::Ready,
             created_at: now(),
             custom_title: false,
+            title_requested: false,
             pinned_at: None,
             unread: false,
             archived: false,
@@ -570,6 +571,14 @@ impl Store {
     pub fn mark_session_unread(&self, id: &str, unread: bool) -> Result<Session> {
         let mut session = self.session(id)?;
         session.unread = unread;
+        self.save(&session)?;
+        Ok(session)
+    }
+    /// Persist that the native title-generation request was sent, so a respawn
+    /// never re-requests it for this session's lifetime.
+    pub fn mark_title_requested(&self, id: &str) -> Result<Session> {
+        let mut session = self.session(id)?;
+        session.title_requested = true;
         self.save(&session)?;
         Ok(session)
     }
@@ -2292,6 +2301,44 @@ mod tests {
                 .title,
             "New manual"
         );
+    }
+    #[test]
+    fn mark_title_requested_persists_across_reopen_and_defaults_false_for_legacy_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("title-requests.db");
+        let store = Store::open(&path).unwrap();
+        let project = store.add_project(dir.path()).unwrap();
+        let project_id = project.id.clone();
+        let session = store.create_session(project.id, "claude".into()).unwrap();
+        assert!(!session.title_requested);
+        store.mark_title_requested(&session.id).unwrap();
+        assert!(store.session(&session.id).unwrap().title_requested);
+        drop(store);
+        let store = Store::open(&path).unwrap();
+        assert!(
+            store.session(&session.id).unwrap().title_requested,
+            "the once marker survives a reopen"
+        );
+        // A legacy row written before the marker existed parses with the default.
+        let legacy = serde_json::json!({
+            "id": "legacy",
+            "project_id": project_id,
+            "title": "首条输入前缀",
+            "agent": "claude",
+            "native_id": null,
+            "status": "ready",
+            "created_at": 1.0
+        });
+        store
+            .db
+            .execute(
+                "INSERT INTO sessions(id,project_id,data) VALUES ('legacy',?1,?2)",
+                params![project_id, serde_json::to_string(&legacy).unwrap()],
+            )
+            .unwrap();
+        let restored = store.session("legacy").unwrap();
+        assert_eq!(restored.title, "首条输入前缀");
+        assert!(!restored.title_requested);
     }
     #[test]
     fn redacted_native_titles_survive_reimport_and_restart_without_raw_credentials() {
