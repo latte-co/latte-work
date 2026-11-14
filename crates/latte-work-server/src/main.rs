@@ -327,7 +327,6 @@ async fn connection(stream: UnixStream, service: Service) -> Result<()> {
                             skill_management: true,
                             skill_file_import: true,
                             change_preview: true,
-                            side_chat: true,
                             side_chat_controls: true,
                             claude_side_chat: true,
                         }
@@ -768,8 +767,16 @@ async fn dispatch(s: &Service, request: Request) -> Result<Response> {
             })?,
         },
         Request::SideChats { session_id } => Response::Sessions {
-            sessions: db(&s.database, |d| d.side_chats(&session_id))?,
+            sessions: db(&s.database, |d| {
+                Ok(d.side_chat_history(&session_id, None)?.0)
+            })?,
         },
+        Request::SideChatHistory { session_id, before } => {
+            let (sessions, next) = db(&s.database, |d| {
+                d.side_chat_history(&session_id, before.as_deref())
+            })?;
+            Response::SideChatHistory { sessions, next }
+        }
         Request::CreateSession { project_id, agent } => {
             s.agent_binary(&agent)?;
             Response::Session {

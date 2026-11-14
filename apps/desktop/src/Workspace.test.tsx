@@ -759,9 +759,10 @@ it("opens a side chat draft from the empty workspace without creating a session"
 it("creates side chats from the plus menu and reopens them from the history button", async () => {
   const past = crypto.randomUUID();
   mocks.request.mockImplementation(async (_host: string, r: Request) => {
-    if (r.method === "side_chats")
+    if (r.method === "side_chat_history")
       return {
-        kind: "sessions",
+        kind: "side_chat_history",
+        next: null,
         sessions: [
           {
             id: past,
@@ -803,7 +804,8 @@ it("creates side chats from the plus menu and reopens them from the history butt
   expect(sideTabs[1].draft).toBe(false);
   expect(sideTabs[1].id).not.toBe(sideTabs[0].id);
   expect(mocks.request).toHaveBeenCalledWith("local", {
-    method: "side_chats",
+    method: "side_chat_history",
     session_id: "parent",
+    before: null,
   });
 });

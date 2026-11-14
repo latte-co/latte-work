@@ -365,7 +365,7 @@ export function SideChat({
   return (
     <div className="side-chat">
       <div
-        className="side-chat-history"
+        className="side-chat-transcript"
         ref={scroll}
         onScroll={(e) => {
           const el = e.currentTarget;

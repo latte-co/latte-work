@@ -1710,8 +1710,13 @@ validates the requested child ID from the stream's init event. Later launches re
 the saved child ID.
 The side chat shares the working directory, with an independent request ledger and
 transcript. Side chats do not take undo snapshots because main and side file activity can
-overlap. The host rejects main-turn undo when a write-capable side turn overlaps it.
-The desktop routes the same protocol through local and SSH transports.
+overlap. The host rejects main-turn undo when write-capable side work overlaps
+the main turn in the same or a nested project root. The host records when native
+background work finishes. A write-capable request whose end could not be
+confirmed remains a reason to block undo after a restart.
+`SideChatHistory` pages through a parent's children newest first, with `next` as
+the cursor for the next request. The desktop routes the same protocol through
+local and SSH transports.
 
 A null side-chat permission selection blocks external tools and permission requests.
 Codex and Traex use a read-only sandbox. Claude Code uses plan mode with only Read,

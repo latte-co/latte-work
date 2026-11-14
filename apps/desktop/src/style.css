@@ -4933,7 +4933,7 @@ button.task-info-row {
 button.task-info-file:not(:disabled):hover,
 a.task-info-file:hover,
 button.task-info-row:not(:disabled):hover,
-.task-info-earlier:not(:disabled):hover {
+.task-info-earlier:not(:disabled, [aria-disabled="true"]):hover {
   background: var(--color-hover);
 }
 .task-info .overview-change-stats {
@@ -6144,7 +6144,7 @@ button.task-info-row:not(:disabled):hover,
   flex-direction: column;
   min-height: 0;
 }
-.side-chat-history {
+.side-chat-transcript {
   flex: 1;
   min-height: 0;
   overflow: auto;

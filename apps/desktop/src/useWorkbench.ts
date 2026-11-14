@@ -14,6 +14,7 @@ import { useEffect, useRef, useState } from "react";
 import {
   isSubagentPanelCommand,
   appCommandAction,
+  supportsSideChatAgent,
   hasCommandArguments,
   subagentPanelArgumentNotice,
 } from "./composerActions";
@@ -1104,9 +1105,8 @@ export function useWorkbench() {
     model: string | null,
     effort: Effort | null,
     permission_mode: string | null,
-    uiAction?: "subagents",
   ): Promise<boolean> {
-    if (project && (uiAction === "subagents" || isSubagentPanelCommand(text))) {
+    if (project && isSubagentPanelCommand(text)) {
       openSubagents(workspaceId);
       if (hasCommandArguments(text)) {
         setError(subagentPanelArgumentNotice);
@@ -1118,7 +1118,7 @@ export function useWorkbench() {
     const appAction = appCommandAction(
       text,
       [],
-      ["codex", "traex"].includes(session?.agent ?? agent?.id ?? ""),
+      supportsSideChatAgent(session?.agent ?? agent?.id ?? ""),
     );
     if (appAction === "side") {
       setError("请从当前主会话打开侧边聊天。");

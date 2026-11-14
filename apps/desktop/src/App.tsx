@@ -10,6 +10,7 @@ import { Folder, PanelRight, SquarePen } from "lucide-react";
 import { request, message } from "./api";
 import { closeSideChat, SideChat, sideDraftKey } from "./SideChat";
 import { Conversation } from "./Conversation";
+import { supportsSideChatAgent } from "./composerActions";
 import { Workspace } from "./Workspace";
 import { Sidebar } from "./Sidebar";
 import { SidebarToggle } from "./SidebarToggle";
@@ -196,9 +197,8 @@ export default function App() {
   const supportsSide =
     !!session &&
     workbench.supportsSideChat &&
-    (session.agent === "claude"
-      ? workbench.supportsClaudeSideChat
-      : ["codex", "traex"].includes(session.agent));
+    supportsSideChatAgent(session.agent) &&
+    (session.agent !== "claude" || workbench.supportsClaudeSideChat);
   const canOpenSide =
     supportsSide && !!session.native_id && !session.archived && connected;
   const showSide = async (text?: string, quote = false) => {

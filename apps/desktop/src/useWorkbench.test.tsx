@@ -1109,13 +1109,7 @@ it.each([
     mocks.request.mockClear();
     let accepted = true;
     await act(async () => {
-      accepted = await hook.result.current.send(
-        text,
-        null,
-        null,
-        null,
-        "subagents",
-      );
+      accepted = await hook.result.current.send(text, null, null, null);
     });
     expect(accepted).toBe(false);
     expect(hook.result.current.sessionId).toBe("");
@@ -1128,26 +1122,6 @@ it.each([
     expect(mocks.request).not.toHaveBeenCalled();
   },
 );
-
-it("treats adapter-provided UI hints as local navigation before any session creation", async () => {
-  const hook = renderHook(useWorkbench);
-  await act(async () => {});
-  mocks.request.mockClear();
-  await act(async () => {
-    expect(
-      await hook.result.current.send(
-        "/native-list",
-        null,
-        null,
-        null,
-        "subagents",
-      ),
-    ).toBe(true);
-  });
-  expect(hook.result.current.sessionId).toBe("");
-  expect(hook.result.current.workspace.current).toBe("subagents");
-  expect(mocks.request).not.toHaveBeenCalled();
-});
 
 it.each(["/list-agents", "/agents", "/tasks", "/subagents"])(
   "opens %s without creating a conversation or sending an agent request",

@@ -175,6 +175,15 @@ impl Store {
         if !columns.iter().any(|name| name == "permission_mode") {
             db.execute("ALTER TABLE requests ADD COLUMN permission_mode TEXT", [])?;
         }
+        if !columns.iter().any(|name| name == "side_write_start") {
+            db.execute(
+                "ALTER TABLE requests ADD COLUMN side_write_start INTEGER",
+                [],
+            )?;
+        }
+        if !columns.iter().any(|name| name == "side_write_end") {
+            db.execute("ALTER TABLE requests ADD COLUMN side_write_end INTEGER", [])?;
+        }
         db.execute_batch("CREATE INDEX IF NOT EXISTS requests_session_provider ON requests(session_id,provider_fingerprint);")?;
         crate::message_queue::initialize(&db)?;
         let snapshot_dir = crate::snapshot_storage::prepare(&path.with_extension("snapshots"))?;
@@ -474,15 +483,36 @@ impl Store {
             )
             .optional()?)
     }
-    pub fn side_chats(&self, parent_id: &str) -> Result<Vec<Session>> {
+    pub fn side_chat_history(
+        &self,
+        parent_id: &str,
+        before: Option<&str>,
+    ) -> Result<(Vec<Session>, Option<String>)> {
+        let before = before
+            .map(|id| {
+                self.db
+                    .query_row(
+                        "SELECT rowid FROM side_chats WHERE parent_id=?1 AND session_id=?2",
+                        params![parent_id, id],
+                        |row| row.get::<_, i64>(0),
+                    )
+                    .context("侧边聊天历史游标无效")
+            })
+            .transpose()?;
         let mut query = self.db.prepare(
             "SELECT s.data FROM side_chats c JOIN sessions s ON s.id=c.session_id
-             WHERE c.parent_id=?1 ORDER BY c.rowid DESC LIMIT 100",
+             WHERE c.parent_id=?1 AND c.rowid<?2 ORDER BY c.rowid DESC LIMIT 101",
         )?;
-        query
-            .query_map([parent_id], |row| row.get::<_, String>(0))?
+        let mut sessions = query
+            .query_map(params![parent_id, before.unwrap_or(i64::MAX)], |row| {
+                row.get::<_, String>(0)
+            })?
             .map(|row| Ok(serde_json::from_str(&row?)?))
-            .collect()
+            .collect::<Result<Vec<Session>>>()?;
+        let has_more = sessions.len() > 100;
+        sessions.truncate(100);
+        let next = has_more.then(|| sessions[99].id.clone());
+        Ok((sessions, next))
     }
     pub fn side_chat_ids(&self, parent_id: &str) -> Result<Vec<String>> {
         let mut query = self
@@ -1283,8 +1313,23 @@ impl Store {
             .map(|request_id| self.turn_changes(id, &request_id))
             .transpose()
     }
-    /// A writable side chat shares the project directory with the main task.
-    /// Use durable event sequence boundaries so this still works after restart.
+    pub fn side_write_start(&self, request_id: &str) -> Result<Option<i64>> {
+        Ok(self.db.query_row(
+            "SELECT side_write_start FROM requests WHERE id=?1",
+            [request_id],
+            |row| row.get(0),
+        )?)
+    }
+    pub fn finish_side_writes(&self, session_id: &str, since: i64) -> Result<()> {
+        self.db.execute(
+            "UPDATE requests SET side_write_end=(SELECT MAX(seq) FROM events)
+             WHERE session_id=?1 AND side_write_start>=?2 AND side_write_end IS NULL",
+            params![session_id, since],
+        )?;
+        Ok(())
+    }
+    /// Compare canonical, component-delimited project roots and durable execution
+    /// intervals. Legacy and interrupted requests without an end remain uncertain.
     pub fn overlaps_writable_side_chat(&self, session_id: &str, request_id: &str) -> Result<bool> {
         Ok(self.db.query_row(
             "WITH main_turn AS (
@@ -1296,18 +1341,19 @@ impl Store {
             )
             SELECT EXISTS(
                 SELECT 1 FROM sessions owner
-                JOIN sessions child ON child.project_id=owner.project_id AND child.id!=owner.id
+                JOIN projects owner_root ON owner_root.id=owner.project_id
+                JOIN sessions child ON child.id!=owner.id
                 JOIN side_chats side ON side.session_id=child.id
+                JOIN projects child_root ON child_root.id=child.project_id
                 JOIN events admitted ON admitted.session_id=child.id AND json_extract(admitted.data,'$.kind')='user'
                 JOIN requests r ON r.session_id=child.id AND r.id=json_extract(admitted.data,'$.request_id')
                 CROSS JOIN main_turn
-                WHERE owner.id=?1 AND r.permission_mode IS NOT NULL AND admitted.seq < main_turn.end_seq
-                AND (admitted.seq > main_turn.start_seq OR NOT EXISTS (
-                    SELECT 1 FROM events ended WHERE ended.session_id=child.id
-                        AND ended.seq > admitted.seq AND ended.seq < main_turn.start_seq
-                        AND json_extract(ended.data,'$.kind')='state'
-                        AND json_extract(ended.data,'$.status') IN ('completed','failed','stopped','unknown')
-                ))
+                WHERE owner.id=?1 AND r.permission_mode IS NOT NULL
+                AND (owner_root.path=child_root.path
+                    OR substr(owner_root.path,1,length(rtrim(child_root.path,'/') || '/'))=rtrim(child_root.path,'/') || '/'
+                    OR substr(child_root.path,1,length(rtrim(owner_root.path,'/') || '/'))=rtrim(owner_root.path,'/') || '/')
+                AND admitted.seq < main_turn.end_seq
+                AND (r.side_write_end IS NULL OR r.side_write_end >= main_turn.start_seq)
             )",
             params![session_id, request_id],
             |row| row.get(0),
@@ -1562,12 +1608,13 @@ impl Store {
         session.model = model.map(str::to_owned);
         session.effort = effort;
         session.permission_mode = permission_mode.map(str::to_owned);
+        let is_side_chat = self.side_parent(id)?.is_some();
         if !session.custom_title && session.title == "新任务" {
             session.title = text.chars().take(48).collect();
         } else if !session.custom_title
             && session.title == "侧边聊天"
             && session.native_id.is_none()
-            && self.side_parent(id)?.is_some()
+            && is_side_chat
         {
             session.title = text
                 .lines()
@@ -1602,6 +1649,14 @@ impl Store {
                 params![id, now(), serde_json::to_string(&event)?],
             )?;
             index_event(&tx, id, &event)?;
+        }
+        if is_side_chat && permission_mode.is_some() {
+            // Both admission events share this transaction. The running event is
+            // the latest global sequence and precedes any native work.
+            tx.execute(
+                "UPDATE requests SET side_write_start=(SELECT MAX(seq) FROM events) WHERE id=?1",
+                [request_id],
+            )?;
         }
         tx.execute("UPDATE message_queue SET status='dispatched' WHERE request_id=?1 AND session_id=?2 AND status IN ('pending','forwarded')", params![request_id,id])?;
         tx.commit()?;
@@ -2053,9 +2108,88 @@ mod tests {
         let second_id = uuid::Uuid::new_v4().to_string();
         let second = store.open_side_chat(&parent.id, Some(&second_id)).unwrap();
         assert_ne!(restored.id, second.id);
-        assert_eq!(store.side_chats(&parent.id).unwrap().len(), 2);
+        assert_eq!(
+            store.side_chat_history(&parent.id, None).unwrap().0.len(),
+            2
+        );
         assert_eq!(store.sessions(&project.id).unwrap().len(), 1);
         assert!(store.events(&parent.id, 0.0).unwrap().0.is_empty());
+    }
+
+    #[tokio::test]
+    async fn side_write_end_survives_restart_and_resuming_does_not_settle_old_requests() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("state.sqlite");
+        for interrupted in [false, true] {
+            let db_path = path.with_extension(if interrupted {
+                "interrupted"
+            } else {
+                "finished"
+            });
+            let mut store = Store::open(&db_path).unwrap();
+            let project = store.add_project(directory.path()).unwrap();
+            let mut parent = store.create_session(project.id, "codex".into()).unwrap();
+            parent.native_id = Some("native-main".into());
+            store.save(&parent).unwrap();
+            let side = store.open_side_chat(&parent.id, None).unwrap();
+            store
+                .begin(
+                    &side.id,
+                    "original",
+                    "edit",
+                    None,
+                    None,
+                    None,
+                    Some("default"),
+                )
+                .unwrap();
+            let start = store.side_write_start("original").unwrap().unwrap();
+            if !interrupted {
+                store.finish_side_writes(&side.id, start).unwrap();
+                store.state(&side.id, Status::Completed, None).unwrap();
+            }
+            drop(store);
+
+            let mut store = Store::open(&db_path).unwrap();
+            store
+                .begin(
+                    &side.id,
+                    "resumed",
+                    "edit again",
+                    None,
+                    None,
+                    None,
+                    Some("default"),
+                )
+                .unwrap();
+            let start = store.side_write_start("resumed").unwrap().unwrap();
+            store.finish_side_writes(&side.id, start).unwrap();
+            store.state(&side.id, Status::Completed, None).unwrap();
+
+            store
+                .begin(&parent.id, "main", "edit", None, None, None, None)
+                .unwrap();
+            let before = crate::task_changes::Snapshot::unavailable("fixture".into());
+            store
+                .save_turn_baseline(&parent.id, "main", &before)
+                .unwrap();
+            let turn = crate::task_changes::FrozenTurn::freeze(
+                "main".into(),
+                before,
+                crate::task_changes::Snapshot::unavailable("fixture".into()),
+                false,
+                false,
+            )
+            .await
+            .unwrap();
+            store.finish_turn(&parent.id, &turn).unwrap();
+            assert_eq!(
+                store
+                    .overlaps_writable_side_chat(&parent.id, "main")
+                    .unwrap(),
+                interrupted
+            );
+        }
     }
 
     #[test]

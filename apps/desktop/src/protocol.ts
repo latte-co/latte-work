@@ -438,6 +438,7 @@ export type Request =
   | { method: "create_session"; project_id: string; agent: string }
   | { method: "open_side_chat"; session_id: string; side_id: string | null }
   | { method: "side_chats"; session_id: string }
+  | { method: "side_chat_history"; session_id: string; before: string | null }
   | {
       method: "open_agent_session";
       session_id: string;
@@ -657,6 +658,7 @@ export type Response =
       sessions: Array<RecentSession>;
       next: RecentCursor | null;
     }
+  | { kind: "side_chat_history"; sessions: Array<Session>; next: string | null }
   | { kind: "last_turn_changes"; changes: TurnChanges | null }
   | { kind: "turn_changes"; changes: TurnChanges }
   | { kind: "change_summary"; summary: ChangeSummary }
@@ -751,7 +753,6 @@ export type Response =
       skill_management: boolean;
       skill_file_import: boolean;
       change_preview: boolean;
-      side_chat: boolean;
       side_chat_controls: boolean;
       claude_side_chat: boolean;
     }

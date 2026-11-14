@@ -1,5 +1,5 @@
 use super::*;
-use latte_work_protocol::TurnProvider;
+use latte_work_protocol::{Session, TurnProvider};
 
 #[tokio::test]
 async fn side_chat_forks_while_parent_waits_and_resumes_independently() {
@@ -308,4 +308,204 @@ async fn claude_side_chat_resumes_its_own_native_session_and_denies_readonly_app
         permission(&wait(&mut client, &parent.id, Status::Waiting).await),
         pending
     );
+}
+
+async fn create_session(client: &mut Client, project_id: String, agent: &str) -> Session {
+    match ask(
+        client,
+        Request::CreateSession {
+            project_id,
+            agent: agent.into(),
+        },
+    )
+    .await
+    {
+        Response::Session { session } => session,
+        other => panic!("create session: {other:?}"),
+    }
+}
+
+async fn open_side(client: &mut Client, parent: &Session) -> Session {
+    match ask(
+        client,
+        Request::OpenSideChat {
+            session_id: parent.id.clone(),
+            side_id: Some(uuid::Uuid::new_v4().to_string()),
+        },
+    )
+    .await
+    {
+        Response::Session { session } => session,
+        other => panic!("open side chat: {other:?}"),
+    }
+}
+
+async fn start_writable_side(client: &mut Client, side: &Session, prompt: &str) {
+    assert!(matches!(
+        ask(
+            client,
+            Request::Send {
+                session_id: side.id.clone(),
+                request_id: "side-write".into(),
+                text: prompt.into(),
+                model: None,
+                effort: None,
+                permission_mode: Some("default".into()),
+                provider: Some(TurnProvider::Cli),
+            }
+        )
+        .await,
+        Response::Accepted { .. }
+    ));
+    wait(client, &side.id, Status::Completed).await;
+}
+
+async fn check_side_write_undo(background: bool, main_in_subdir: Option<bool>) {
+    let host = Host::start().await;
+    let root = tempfile::tempdir().unwrap();
+    let nested = root.path().join("sub");
+    std::fs::create_dir(&nested).unwrap();
+    let mut client = host.client().await;
+    let root_id = terminal_project(&mut client, root.path()).await;
+    let nested_id = terminal_project(&mut client, &nested).await;
+    let (main_project, side_project, side_dir) = match main_in_subdir {
+        Some(true) => (nested_id, root_id, root.path()),
+        Some(false) => (root_id, nested_id, nested.as_path()),
+        None => (root_id.clone(), root_id, root.path()),
+    };
+    let file = if main_in_subdir == Some(true) {
+        nested.join("shared.txt")
+    } else {
+        side_dir.join("shared.txt")
+    };
+    std::fs::write(&file, "before\n").unwrap();
+    let parent = create_session(&mut client, side_project, "codex").await;
+    send(&mut client, &parent.id, "parent-init", "hello").await;
+    wait(&mut client, &parent.id, Status::Completed).await;
+    let side = open_side(&mut client, &parent).await;
+    if background {
+        start_writable_side(&mut client, &side, "side-background-write").await;
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "before\n");
+    }
+    let main = create_session(&mut client, main_project, "codex").await;
+    send(&mut client, &main.id, "main-write", "approval").await;
+    let pending = permission(&wait(&mut client, &main.id, Status::Waiting).await);
+    if background {
+        std::fs::write(side_dir.join("release-side-writer"), "").unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            if matches!(
+                ask(
+                    &mut client,
+                    Request::CloseAgentSession {
+                        session_id: side.id.clone(),
+                        only_if_idle: Some(true),
+                    }
+                )
+                .await,
+                Response::Ok
+            ) {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "background writer never became idle"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    } else {
+        let prompt = if main_in_subdir == Some(true) {
+            "side-foreground-write-nested"
+        } else {
+            "side-foreground-write"
+        };
+        start_writable_side(&mut client, &side, prompt).await;
+    }
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), "side edit\n");
+    assert!(matches!(
+        ask(
+            &mut client,
+            Request::Approve {
+                session_id: main.id.clone(),
+                request_id: pending,
+                allow: true,
+            }
+        )
+        .await,
+        Response::Ok
+    ));
+    let events = wait(&mut client, &main.id, Status::Completed).await;
+    assert!(events.iter().any(|event| matches!(&event.event,
+        EventKind::TurnChanges { changes } if changes.summary.entries.iter().any(|entry| entry.path.ends_with("shared.txt"))
+    )));
+    assert!(matches!(ask(&mut client, Request::UndoTurnChanges {
+        session_id: main.id.clone(), request_id: "main-write".into(),
+    }).await, Response::Error { message, .. } if message.contains("具备写权限的侧边聊天")));
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), "side edit\n");
+
+    if background {
+        send(&mut client, &main.id, "main-later", "main-foreground-write").await;
+        wait(&mut client, &main.id, Status::Completed).await;
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "main edit\n");
+        let response = ask(
+            &mut client,
+            Request::UndoTurnChanges {
+                session_id: main.id,
+                request_id: "main-later".into(),
+            },
+        )
+        .await;
+        assert!(
+            matches!(response, Response::TurnChanges { .. }),
+            "{response:?}"
+        );
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "side edit\n");
+    }
+}
+
+#[tokio::test]
+async fn undo_preserves_background_side_writes_after_native_exit() {
+    check_side_write_undo(true, None).await;
+}
+
+#[tokio::test]
+async fn undo_fences_writable_side_chats_in_both_directions_of_nested_roots() {
+    check_side_write_undo(false, Some(false)).await;
+    check_side_write_undo(false, Some(true)).await;
+}
+
+#[tokio::test]
+async fn history_pages_past_one_hundred_and_can_reopen_the_oldest_chat() {
+    let host = Host::start().await;
+    let root = tempfile::tempdir().unwrap();
+    let mut client = host.client().await;
+    let project = terminal_project(&mut client, root.path()).await;
+    let parent = create_session(&mut client, project, "codex").await;
+    send(&mut client, &parent.id, "parent-init", "hello").await;
+    wait(&mut client, &parent.id, Status::Completed).await;
+    let oldest = open_side(&mut client, &parent).await;
+    for _ in 0..100 {
+        open_side(&mut client, &parent).await;
+    }
+    let history = |before| Request::SideChatHistory {
+        session_id: parent.id.clone(),
+        before,
+    };
+    let Response::SideChatHistory {
+        sessions,
+        next: Some(next),
+    } = ask(&mut client, history(None)).await
+    else {
+        panic!("first page")
+    };
+    assert_eq!(sessions.len(), 100);
+    assert_eq!(sessions.last().unwrap().id, next);
+    assert!(!sessions.iter().any(|entry| entry.id == oldest.id));
+    open_side(&mut client, &parent).await;
+    assert!(matches!(ask(&mut client, history(Some(next))).await,
+        Response::SideChatHistory { sessions, next: None } if sessions.len() == 1 && sessions[0].id == oldest.id
+    ));
+    assert!(matches!(ask(&mut client, Request::OpenSideChat {
+        session_id: parent.id, side_id: Some(oldest.id.clone()),
+    }).await, Response::Session { session } if session.id == oldest.id));
 }

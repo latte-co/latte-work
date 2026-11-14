@@ -149,13 +149,28 @@ it("opens a historical side chat from the main conversation overview", async () 
   const openSideChat = vi.fn();
   const title = "排查长对话切换到侧边聊天后的上下文恢复";
   mocks.request.mockImplementation(async (_host, request) => {
-    if (request.method === "side_chats")
+    if (request.method === "side_chat_history") {
+      if (!request.before)
+        return {
+          kind: "side_chat_history",
+          sessions: [
+            {
+              id: "new",
+              title: "较新记录",
+              created_at: Date.now(),
+              status: "completed",
+            },
+          ],
+          next: "new",
+        };
       return {
-        kind: "sessions",
+        kind: "side_chat_history",
         sessions: [
           { id: "old", title, created_at: Date.now(), status: "waiting" },
         ],
+        next: null,
       };
+    }
     return { kind: "git_review", review: { entries: [] } };
   });
   render(
@@ -175,6 +190,8 @@ it("opens a historical side chat from the main conversation overview", async () 
     />,
   );
   fireEvent.click(screen.getByRole("button", { name: "任务概览" }));
+  fireEvent.click(await screen.findByRole("button", { name: "查看更早记录" }));
+  expect(screen.getByRole("button", { name: /较新记录/ })).toBeTruthy();
   const entry = await screen.findByRole("button", { name: /排查长对话/ });
   expect(entry.getAttribute("title")).toBe(title);
   expect(entry.textContent).toContain("等待回应");

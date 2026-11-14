@@ -27,6 +27,7 @@ import {
   type AppCommandAction,
   hasCommandArguments,
   isNativeSubagentCommand,
+  supportsSideChatAgent,
   subagentPanelAliases,
   subagentPanelArgumentNotice,
   unifiedComposerCommands,
@@ -99,6 +100,7 @@ export function Composer(props: Props) {
     connected,
     disabled,
     sending,
+    sideChat = false,
     concealSubmitted = false,
     hidden,
     value,
@@ -262,6 +264,10 @@ export function Composer(props: Props) {
     setEntries([]);
     setCommands([]);
     setError("");
+    if (sideChat && mode === "commands") {
+      setLoading(false);
+      return;
+    }
     setLoading(true);
     if (!connected || !projectId) {
       setError("请先连接项目所在主机");
@@ -295,7 +301,17 @@ export function Composer(props: Props) {
       disposed = true;
       window.clearTimeout(timer);
     };
-  }, [menu, mode, hostId, projectId, agent, connected, path, revision]);
+  }, [
+    menu,
+    mode,
+    hostId,
+    projectId,
+    agent,
+    connected,
+    path,
+    revision,
+    sideChat,
+  ]);
   useEffect(() => {
     setSelected(0);
   }, [query, path, mode, entries, commands]);
@@ -374,11 +390,24 @@ export function Composer(props: Props) {
     ...subagentPanelAliases,
     ...commands.filter(isNativeSubagentCommand).map((command) => command.name),
   ];
-  const sideAgent = !props.sideChat && (agent === "codex" || agent === "traex");
-  const localNavigation = appCommandAction(value, commands, sideAgent);
+  const sideAgent = !sideChat && supportsSideChatAgent(agent);
+  const nativeCommands = sideChat ? [] : commands;
+  const action = appCommandAction(value, nativeCommands, sideAgent);
+  const localNavigation =
+    sideChat && action !== "model" && action !== "effort" ? null : action;
   const options: Option[] =
     mode === "commands"
-      ? unifiedComposerCommands(commands, !!props.onOpenSideChat)
+      ? unifiedComposerCommands(
+          nativeCommands,
+          sideAgent,
+          !!props.onOpenSideChat,
+        )
+          .filter(
+            (item) =>
+              !sideChat ||
+              item.ui_action === "model" ||
+              item.ui_action === "effort",
+          )
           .filter((item) =>
             `${item.name} ${commandTitle(item, agent)} ${item.description} ${item.ui_action === "subagents" ? panelAliases.join(" ") : ""}`
               .toLowerCase()
@@ -644,6 +673,10 @@ export function Composer(props: Props) {
       return;
     if (localNavigation) {
       await openAppCommand(localNavigation);
+      return;
+    }
+    if (sideChat && value.trimStart().startsWith("/")) {
+      setNotice("侧边聊天暂不支持 Agent 原生命令，请输入普通消息。");
       return;
     }
     if (value.trimStart().startsWith("/") && attached.length) {
@@ -1063,9 +1096,10 @@ export function Composer(props: Props) {
             {!loading && !error && !options.length && (
               <p>
                 没有匹配项
-                {mode === "commands"
-                  ? "，以当前 Agent 返回的命令为准"
-                  : "，可输入目录路径继续查找"}
+                {mode === "files" && "，可输入目录路径继续查找"}
+                {mode === "commands" &&
+                  !sideChat &&
+                  "，以当前 Agent 返回的命令为准"}
               </p>
             )}
           </div>

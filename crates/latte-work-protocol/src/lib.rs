@@ -609,6 +609,10 @@ pub enum Request {
     SideChats {
         session_id: String,
     },
+    SideChatHistory {
+        session_id: String,
+        before: Option<String>,
+    },
     /// Open/resume the native Agent without sending a prompt. Idempotent.
     OpenAgentSession {
         session_id: String,
@@ -1086,6 +1090,10 @@ pub enum Response {
         sessions: Vec<RecentSession>,
         next: Option<RecentCursor>,
     },
+    SideChatHistory {
+        sessions: Vec<Session>,
+        next: Option<String>,
+    },
     LastTurnChanges {
         changes: Option<TurnChanges>,
     },
@@ -1219,8 +1227,6 @@ pub enum Response {
         skill_file_import: bool,
         #[serde(default)]
         change_preview: bool,
-        #[serde(default)]
-        side_chat: bool,
         #[serde(default)]
         side_chat_controls: bool,
         #[serde(default)]

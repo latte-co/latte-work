@@ -209,7 +209,9 @@ pub fn project_session_state(runs: &Runs, response: &mut Response) -> Result<()>
         Response::Session { session }
         | Response::Events { session, .. }
         | Response::History { session, .. } => project(session),
-        Response::Sessions { sessions } => sessions.iter_mut().for_each(project),
+        Response::Sessions { sessions } | Response::SideChatHistory { sessions, .. } => {
+            sessions.iter_mut().for_each(project)
+        }
         Response::RecentSessions { sessions, .. } => sessions
             .iter_mut()
             .for_each(|entry| project(&mut entry.session)),
@@ -372,7 +374,9 @@ pub async fn refresh_titles(
         Response::Session { session }
         | Response::Events { session, .. }
         | Response::History { session, .. } => vec![session.clone()],
-        Response::Sessions { sessions } => sessions.clone(),
+        Response::Sessions { sessions } | Response::SideChatHistory { sessions, .. } => {
+            sessions.clone()
+        }
         Response::RecentSessions { sessions, .. } => {
             sessions.iter().map(|entry| entry.session.clone()).collect()
         }
@@ -481,7 +485,7 @@ pub async fn refresh_titles(
         Response::Session { session }
         | Response::Events { session, .. }
         | Response::History { session, .. } => update(session),
-        Response::Sessions { sessions } => {
+        Response::Sessions { sessions } | Response::SideChatHistory { sessions, .. } => {
             for session in sessions {
                 update(session);
             }
@@ -979,6 +983,9 @@ struct Process {
     /// land inside this turn's diff window even after it completes, so the
     /// undo fence must survive until the turn is frozen.
     background_at_start: bool,
+    // Only settle requests admitted by this process. A resumed process cannot
+    // confirm when the previous process or its background work stopped.
+    side_writes_since: Option<i64>,
     stopping: bool,
     interrupt_sent: bool,
     interrupt_ack_pending: bool,
@@ -1073,6 +1080,7 @@ impl Process {
             path: path.into(),
             turn_active: false,
             background_at_start: false,
+            side_writes_since: None,
             stopping: false,
             interrupt_sent: false,
             interrupt_ack_pending: false,
@@ -1215,6 +1223,15 @@ impl Process {
                 .apply(actions, &mut self.input, database, id, &self.config)
                 .await?;
         }
+        if let Some(since) = self.side_writes_since
+            && !self.turn_active
+            && !self.interrupt_ack_pending
+            && self.adapter.can_reconfigure()
+            && self.state.pending.is_empty()
+        {
+            db(database, |s| s.finish_side_writes(id, since))?;
+            self.side_writes_since = None;
+        }
         self.session_open.store(self.state.ready, Ordering::SeqCst);
         Ok(())
     }
@@ -1345,7 +1362,7 @@ async fn accept_turn(
         current.close().await;
         *process = None;
     }
-    db(database, |s| {
+    let side_write_start = db(database, |s| {
         s.begin(
             &session.id,
             &turn.request_id,
@@ -1354,7 +1371,8 @@ async fn accept_turn(
             config.effort,
             turn.fingerprint.as_deref(),
             config.permission_mode.as_deref(),
-        )
+        )?;
+        s.side_write_start(&turn.request_id)
     })?;
     // Admission is complete once the request and User/Running events are durable.
     // Filesystem snapshots and Agent startup can take longer than the sender's
@@ -1398,6 +1416,7 @@ async fn accept_turn(
             )?);
         }
         let p = process.as_mut().context("Agent process missing")?;
+        p.side_writes_since = p.side_writes_since.or(side_write_start);
         p.turn_active = true;
         p.background_at_start = p.adapter.has_background_work();
         p.turn_deadline = tokio::time::Instant::now() + TURN_LIMIT;

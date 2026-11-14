@@ -93,7 +93,6 @@ interface Props {
     model: string | null,
     effort: Effort | null,
     permissionMode: string | null,
-    uiAction?: "subagents",
   ) => Promise<boolean>;
   cancel: () => void | Promise<boolean>;
   approve: (id: string, allow: boolean) => Promise<void>;
@@ -465,10 +464,7 @@ export function Conversation({
     positionScope,
     events,
   ]);
-  async function submit(
-    prompt: string,
-    uiAction?: "subagents",
-  ): Promise<boolean> {
+  async function submit(prompt: string): Promise<boolean> {
     if (
       !prompt.trim() ||
       sending ||
@@ -493,13 +489,7 @@ export function Conversation({
     submission.current = submitted;
     setSending(true);
     try {
-      submitted.accepted = await send(
-        prompt,
-        model,
-        effort,
-        permissionMode,
-        uiAction,
-      );
+      submitted.accepted = await send(prompt, model, effort, permissionMode);
       if (submitted.accepted) {
         drafts.clear(draftKey, draft);
         if (migrated.current) drafts.clear(migrated.current, draft);

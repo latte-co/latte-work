@@ -1,7 +1,7 @@
 import { useEffect, useId, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { History, MessageCircle } from "lucide-react";
-import { message, request } from "./api";
+import { message, request, ServerRequestError } from "./api";
 import { MessageTimestamp } from "./MessageTimestamp";
 import type { Session } from "./protocol";
 
@@ -18,40 +18,83 @@ export function SideChatHistory({
   currentId,
   onOpen,
 }: SideChatHistoryProps) {
-  const scope = JSON.stringify([hostId, parentId]);
-  const [snapshot, setSnapshot] = useState<{
-    scope: string;
-    sessions: Session[];
-    error: string;
-  }>();
-  const current = snapshot?.scope === scope ? snapshot : undefined;
+  return (
+    <SideChatHistoryPages
+      key={JSON.stringify([hostId, parentId])}
+      hostId={hostId}
+      parentId={parentId}
+      currentId={currentId}
+      onOpen={onOpen}
+    />
+  );
+}
+
+function SideChatHistoryPages({
+  hostId,
+  parentId,
+  currentId,
+  onOpen,
+}: SideChatHistoryProps) {
+  const [sessions, setSessions] = useState<Session[]>([]);
+  const [next, setNext] = useState<string | null>(null);
+  const [before, setBefore] = useState<string | null>(null);
+  const [attempt, retry] = useState(0);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
   useEffect(() => {
     let disposed = false;
-    void request(hostId, { method: "side_chats", session_id: parentId })
-      .then((response) => {
-        if (response.kind !== "sessions") throw new Error("无法读取历史记录");
-        if (!disposed)
-          setSnapshot({ scope, sessions: response.sessions, error: "" });
-      })
-      .catch((cause) => {
-        if (!disposed)
-          setSnapshot({ scope, sessions: [], error: message(cause) });
-      });
+    async function read() {
+      try {
+        const response = await request(hostId, {
+          method: "side_chat_history",
+          session_id: parentId,
+          before,
+        }).catch((cause) => {
+          if (
+            before === null &&
+            cause instanceof ServerRequestError &&
+            cause.code === "invalid_request"
+          )
+            return request(hostId, {
+              method: "side_chats",
+              session_id: parentId,
+            });
+          throw cause;
+        });
+        if (disposed) return;
+        if (
+          response.kind !== "side_chat_history" &&
+          response.kind !== "sessions"
+        )
+          throw new Error("无法读取历史记录");
+        setSessions((previous) =>
+          before === null
+            ? response.sessions
+            : [...previous, ...response.sessions],
+        );
+        setNext(response.kind === "side_chat_history" ? response.next : null);
+      } catch (cause) {
+        if (!disposed) setError(message(cause));
+      } finally {
+        if (!disposed) setLoading(false);
+      }
+    }
+    void read();
     return () => {
       disposed = true;
     };
-  }, [hostId, parentId, scope]);
+  }, [hostId, parentId, before, attempt]);
 
-  if (!current || current.error || !current.sessions.length)
-    return (
-      <p className="side-chat-history-status" role="status">
-        {!current ? "正在读取…" : current.error || "暂无历史记录"}
-      </p>
-    );
+  function loadOlder() {
+    setLoading(true);
+    setError("");
+    if (error) retry((value) => value + 1);
+    else setBefore(next);
+  }
 
   return (
     <div className="side-chat-history-list" role="group" aria-label="历史记录">
-      {current.sessions.map((session) => {
+      {sessions.map((session) => {
         const status =
           session.status === "running"
             ? "执行中"
@@ -78,6 +121,23 @@ export function SideChatHistory({
           </button>
         );
       })}
+      {(loading || error || !sessions.length) && (
+        <p className="side-chat-history-status" role="status">
+          {loading ? "正在读取…" : error || "暂无历史记录"}
+        </p>
+      )}
+      {(next || error || before) && (
+        <button
+          type="button"
+          className="task-info-earlier"
+          aria-disabled={loading || (!next && !error) || undefined}
+          onClick={() => {
+            if (!loading && (next || error)) loadOlder();
+          }}
+        >
+          {error ? "重试" : next ? "查看更早记录" : "已显示全部记录"}
+        </button>
+      )}
     </div>
   );
 }

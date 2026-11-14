@@ -59,6 +59,12 @@ export type AppCommandAction = "subagents" | "model" | "effort" | "side";
 export type ComposerCommand = Omit<AgentSlashCommand, "ui_action"> & {
   ui_action?: AppCommandAction;
 };
+export const supportsSideChatAgent = (agent: string) =>
+  agent === "claude" || agent === "codex" || agent === "traex";
+
+export function isSideChatCommand(text: string) {
+  return /^\/(side|btw)(?:\s|$)/.test(text.trim());
+}
 
 /** App-owned names take precedence even with an older or unavailable catalog. */
 export function appCommandAction(
@@ -76,7 +82,8 @@ export function appCommandAction(
 
 export function unifiedComposerCommands(
   commands: AgentSlashCommand[],
-  sideChat = false,
+  ownsSideCommands: boolean,
+  showSideChat: boolean,
 ): ComposerCommand[] {
   return [
     {
@@ -100,7 +107,7 @@ export function unifiedComposerCommands(
       argument_hint: "",
       ui_action: "effort",
     },
-    ...(sideChat
+    ...(showSideChat
       ? [
           {
             name: "side",
@@ -114,7 +121,7 @@ export function unifiedComposerCommands(
     ...commands.filter(
       (command) =>
         !isNativeSubagentCommand(command) &&
-        (!sideChat || (command.name !== "side" && command.name !== "btw")) &&
+        (!ownsSideCommands || !isSideChatCommand(`/${command.name}`)) &&
         command.name !== "model" &&
         command.name !== "effort",
     ),
