@@ -1709,3 +1709,63 @@ tool execution in the disposable project without a paid
 model API. `smoke-codex.py --live` optionally sends two small actual model turns;
 `--live-tools` also requests a file write in its disposable project. Fixture,
 localhost-upstream, actual model, native desktop and real SSH evidence are separate.
+
+## OpenCode integration
+
+Install OpenCode 2.x on each execution host and restart Latte Work Server.
+Bind an App Provider or use the host's native OpenCode configuration and login.
+Discovery uses host PATH or `LATTE_WORK_OPENCODE` and rejects 1.x. Local and SSH
+use the same host adapter.
+
+The host launches a private `opencode acp` process per open conversation and
+uses newline-delimited JSON-RPC on stdio for prompt streaming, approval and
+foreground cancellation. A bundled OpenCode plugin in a private temporary
+directory connects to a per-process Unix socket. It supplements ACP with
+native execution events, inbox delivery receipts, Shell exits and native title
+operations. Readiness waits for both channels. The owned process group and
+temporary files are released when the session closes.
+
+Open and resume are prompt-free. Latte persists requests before forwarding
+them and preserves the original native session ID on resume. A queued input
+is consumed only after a matching native inbox delivery event. A background
+Shell is displayed as running until its native exit. Native execution
+completion fences project slash commands and autonomous follow-up activity.
+Latte correlates native execution and inbox delivery IDs to distinguish ACP
+foreground prompts from autonomous user or synthetic inputs submitted by a
+plugin. The foreground result and late copies of its native output can arrive
+on either transport first. Only a slash name in the execution session's catalog
+is treated as a command. Other slash-prefixed text is sent as an ordinary prompt.
+Compaction uses its ACP completion. OpenCode 2.0 implements `/compact` even
+though its ACP catalog omits the command. Skill shortcuts advertised by
+older catalogs are activated through ACP. A custom title set before the
+first prompt is applied to the new native session before it can run.
+
+Permission modes use a process-local OpenCode permission hook. Explicit
+native denials and managed policies continue to apply. The question tool uses
+its plugin interface and native permission evaluation for foreground and
+autonomous executions. A 2.0 question that needs a separate native approval
+is reported as unsupported. Sideband approvals settle on a native permission
+decision event. A child's
+pending approval or question can outlive the foreground turn.
+The platform skill follows the host preference. OpenCode 2.0 receives
+it through its model context hook for the lifetime of the process, and 2.3 reads
+it as an ambient instruction file. ACP client filesystem and terminal RPCs
+are unavailable. Tool images are limited to bounded inline raster data.
+
+Child text and tools are persisted separately from the parent. A child can
+outlive its foreground ACP turn. Reconfiguration and undo remain fenced
+while background work is active or a child-triggered continuation is
+unconfirmed. For a finished child, Latte can recover native history with a
+bounded, prompt-free export. Import requires the original launch context,
+matching child and ancestor IDs, and the same project directory. The stored
+stream remains available if the native export is unavailable.
+An export with unfinished tools is marked incomplete and preserves any
+reported tool errors.
+
+The implementation follows the [OpenCode ACP contract](https://opencode.ai/docs/cli/acp/).
+The final-binary tests use a deterministic ACP peer. For an installed CLI,
+`python3 scripts/smoke-opencode.py --opencode /path/to/opencode` uses an isolated
+host and loopback Anthropic Messages, Chat Completions and Responses fixtures.
+It exercises prompt-free metadata, native resume, Provider switching,
+permissions, questions, steering, Shell exits and native commands. Native
+desktop, real SSH and live model acceptance are separate checks.

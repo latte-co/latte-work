@@ -268,6 +268,7 @@ pub async fn rename_title(
     path: String,
     title: String,
     config: LaunchConfig,
+    open_code_binary: Option<String>,
 ) -> Result<Session> {
     Store::validate_session_title(&title)?;
     let control = runs
@@ -292,6 +293,59 @@ pub async fn rename_title(
             s.native_rename_context_matches(&session.id, &id, fingerprint.as_deref())
         })? {
             bail!("无法确认原生会话的启动配置，标题未修改；请恢复原 Provider 和 ENV 配置后重试");
+        }
+        if let Some(binary) = open_code_binary {
+            let current = db(database, |s| s.session(&session.id))?;
+            if current.status.active()
+                || runs
+                    .lock()
+                    .map_err(|_| anyhow::anyhow!("执行状态锁异常"))?
+                    .contains_key(&session.id)
+            {
+                bail!("OpenCode 会话正在打开，请稍后修改标题");
+            }
+            let mut process = Process::spawn(
+                &binary,
+                &current,
+                &path,
+                config,
+                Arc::new(AtomicBool::new(false)),
+            )?;
+            let result = tokio::time::timeout(Duration::from_secs(8), async {
+                let initial = process.adapter.advance(Input::Open)?;
+                process.apply(initial, database, &session.id).await?;
+                let (reply, receive) = oneshot::channel();
+                let mut reply = Some(reply);
+                loop {
+                    let (line, sideband) = process.next_message().await?;
+                    let actions = process.adapter.advance(if sideband {
+                        Input::Sideband(&line)
+                    } else {
+                        Input::Message(&line)
+                    })?;
+                    process.apply(actions, database, &session.id).await?;
+                    if process.state.ready
+                        && process.adapter.metadata_ready()
+                        && let Some(reply) = reply.take()
+                    {
+                        let id = uuid::Uuid::new_v4().to_string();
+                        let actions = process.adapter.advance(Input::RenameTitle {
+                            id: &id,
+                            title: &title,
+                        })?;
+                        process.rename_reply = Some(reply);
+                        process.apply(actions, database, &session.id).await?;
+                    }
+                    if reply.is_none() && process.rename_reply.is_none() {
+                        return receive.await?.map_err(anyhow::Error::msg);
+                    }
+                }
+            })
+            .await
+            .context("OpenCode 原生标题修改结果待确认");
+            process.close().await;
+            result??;
+            return db(database, |s| s.session(&session.id));
         }
         let agent = session.agent.clone();
         let actual = tokio::task::spawn_blocking(move || {
@@ -719,12 +773,14 @@ impl TurnState {
                     db(database, |s| s.mark_title_requested(session_id))?;
                 }
                 Action::TitleRenamed(_) => bail!("未处理的原生标题确认"),
+                Action::ApprovalReply { .. } => bail!("未处理的原生审批确认"),
                 Action::GenerateTitle { .. } => bail!("未处理的标题生成请求"),
                 Action::SourceUsed { id, name } => {
                     db(database, |s| s.observe_tool(session_id, &id, &name))?
                 }
                 Action::Commands(_) => bail!("执行中的 Agent 返回了意外的命令目录"),
                 Action::Write(bytes) => write(input, &bytes).await?,
+                Action::SidebandWrite(_) => bail!("未处理的 Agent 辅助通道请求"),
                 Action::MetadataWrite(bytes) => {
                     if let Err(error) = write(input, &bytes).await {
                         eprintln!(
@@ -780,6 +836,7 @@ impl TurnState {
                     // Capture a completed child's full native output before this
                     // process/redaction context can be replaced by a later turn.
                     if let Some(native_id) = terminal_child
+                        && db(database, |d| Ok(d.session(session_id)?.agent == "claude"))?
                         && let Ok(permit) = agents::child_read_permit()
                     {
                         let source = db(database, |d| {
@@ -952,9 +1009,11 @@ struct Process {
     binary: String,
     title_job: Option<tokio::task::JoinHandle<()>>,
     rename_reply: Option<oneshot::Sender<Result<String, String>>>,
+    approval_replies: HashMap<String, PendingApprovalReply>,
     group: Group,
     input: tokio::process::ChildStdin,
     output: Output,
+    sideband: Option<AgentSideband>,
     drain: tokio::task::JoinHandle<()>,
     _settings: Option<tempfile::NamedTempFile>,
     state: TurnState,
@@ -962,6 +1021,8 @@ struct Process {
     config: LaunchConfig,
     path: String,
     turn_active: bool,
+    /// The main turn can settle while a child still needs input.
+    settled_turn: Option<Outcome>,
     /// Background work already alive when this turn started. Its writes may
     /// land inside this turn's diff window even after it completes, so the
     /// undo fence must survive until the turn is frozen.
@@ -973,6 +1034,34 @@ struct Process {
     init_deadline: tokio::time::Instant,
     turn_deadline: tokio::time::Instant,
 }
+struct PendingApprovalReply {
+    reply: Option<oneshot::Sender<Result<(), String>>>,
+    deadline: tokio::time::Instant,
+    allow: bool,
+}
+struct AgentSideband {
+    listener: agents::Sideband,
+    stream: Option<FramedRead<tokio::net::UnixStream, LinesCodec>>,
+}
+
+impl AgentSideband {
+    async fn read(&mut self) -> Result<String> {
+        if self.stream.is_none() {
+            let (stream, _) = self.listener.listener.accept().await?;
+            self.stream = Some(FramedRead::new(
+                stream,
+                LinesCodec::new_with_max_length(1024 * 1024),
+            ));
+        }
+        Ok(self
+            .stream
+            .as_mut()
+            .expect("accepted")
+            .next()
+            .await
+            .context("Agent 辅助通道意外退出；会话历史已保留，后台任务状态无法恢复")??)
+    }
+}
 impl Drop for Process {
     fn drop(&mut self) {
         self.session_open.store(false, Ordering::SeqCst);
@@ -983,6 +1072,19 @@ impl Drop for Process {
     }
 }
 impl Process {
+    async fn next_message(&mut self) -> Result<(String, bool)> {
+        tokio::select! {
+            line = self.output.next() => {
+                Ok((line.context("Agent 进程意外退出；会话历史已保留，后台任务状态无法恢复")??, false))
+            }
+            line = async {
+                match &mut self.sideband {
+                    Some(channel) => channel.read().await,
+                    None => std::future::pending().await,
+                }
+            } => Ok((line?, true))
+        }
+    }
     fn can_start_turn(&self) -> bool {
         self.state.ready
             && !self.turn_active
@@ -1021,7 +1123,11 @@ impl Process {
         let pid = child.id().context("Agent PID missing")? as i32;
         let mut group = Group { child, pid };
         let input = group.child.stdin.take().context("Agent stdin missing")?;
-        let output = native_output(group.child.stdout.take().context("Agent stdout missing")?);
+        let stdout = group.child.stdout.take().context("Agent stdout missing")?;
+        let output = match adapter.frame_limit() {
+            Some(limit) => FramedRead::new(stdout, LinesCodec::new_with_max_length(limit)),
+            None => native_output(stdout),
+        };
         let mut stderr = group.child.stderr.take().context("Agent stderr missing")?;
         let drain = tokio::spawn(async move {
             let mut buf = [0; 4096];
@@ -1036,9 +1142,14 @@ impl Process {
             binary: binary.into(),
             title_job: None,
             rename_reply: None,
+            approval_replies: HashMap::new(),
             group,
             input,
             output,
+            sideband: prepared.sideband.map(|listener| AgentSideband {
+                listener,
+                stream: None,
+            }),
             drain,
             _settings: prepared._settings,
             state: TurnState::default(),
@@ -1046,6 +1157,7 @@ impl Process {
             config,
             path: path.into(),
             turn_active: false,
+            settled_turn: None,
             background_at_start: false,
             stopping: false,
             interrupt_sent: false,
@@ -1056,9 +1168,32 @@ impl Process {
         })
     }
     async fn apply(&mut self, actions: Vec<Action>, database: &Database, id: &str) -> Result<()> {
-        let mut remaining = Vec::new();
+        let mut batch = Vec::new();
         for action in actions {
-            if let Action::GenerateTitle {
+            let finished = matches!(action, Action::Finished { .. });
+            batch.push(action);
+            if finished {
+                self.apply_batch(std::mem::take(&mut batch), database, id)
+                    .await?;
+            }
+        }
+        if !batch.is_empty() {
+            self.apply_batch(batch, database, id).await?;
+        }
+        Ok(())
+    }
+    async fn apply_batch(
+        &mut self,
+        actions: Vec<Action>,
+        database: &Database,
+        id: &str,
+    ) -> Result<()> {
+        let mut remaining = Vec::new();
+        let mut sideband_writes = Vec::new();
+        for action in actions {
+            if let Action::SidebandWrite(bytes) = action {
+                sideband_writes.push(bytes);
+            } else if let Action::GenerateTitle {
                 native_session_id,
                 description,
                 model,
@@ -1126,6 +1261,35 @@ impl Process {
                 if let Some(reply) = self.rename_reply.take() {
                     let _ = reply.send(result);
                 }
+            } else if let Action::ApprovalReply { id: native, result } = action {
+                let pending_reply = self.approval_replies.remove(&native);
+                match result {
+                    Ok(allow) => {
+                        if let Some(request_id) = self.state.pending.iter().find_map(
+                            |(request_id, (pending, _, questions))| {
+                                (pending == &native && questions.is_none())
+                                    .then(|| request_id.clone())
+                            },
+                        ) {
+                            self.record_approval(database, id, request_id, allow)?;
+                        }
+                        if let Some(pending) = pending_reply
+                            && let Some(reply) = pending.reply
+                        {
+                            let result = if pending.allow == allow {
+                                Ok(())
+                            } else {
+                                Err("OpenCode 已按其他决定处理此审批".into())
+                            };
+                            let _ = reply.send(result);
+                        }
+                    }
+                    Err(error) => {
+                        if let Some(reply) = pending_reply.and_then(|p| p.reply) {
+                            let _ = reply.send(Err(error));
+                        }
+                    }
+                }
             } else {
                 if matches!(&action, Action::NativeName(_)) {
                     self.cancel_title().await;
@@ -1140,6 +1304,7 @@ impl Process {
         let became_ready = actions.iter().any(|a| matches!(a, Action::Ready));
         if actions.iter().any(|a| matches!(a, Action::TurnStarted)) {
             self.turn_active = true;
+            self.settled_turn = None;
             self.background_at_start = self.adapter.has_background_work();
             self.turn_deadline = tokio::time::Instant::now() + TURN_LIMIT;
         }
@@ -1147,14 +1312,30 @@ impl Process {
             || (self.stopping && actions.iter().any(|a| matches!(a, Action::Finished { .. })))
         {
             // A CLI may emit the interrupted result before its control acknowledgement.
+            self.clear_approval_replies();
             self.state.pending.clear();
         }
-        if let Some((status, message)) = self
+        let outcome = self
             .state
             .apply(actions, &mut self.input, database, id, &self.config)
-            .await?
-        {
-            if !self.state.pending.is_empty() {
+            .await?;
+        // Persist the native session identity before any command can run
+        // through the supplementary channel.
+        for bytes in sideband_writes {
+            let stream = self
+                .sideband
+                .as_mut()
+                .and_then(|channel| channel.stream.as_mut())
+                .context("Agent 辅助通道尚未连接")?;
+            write(stream.get_mut(), &bytes).await?;
+        }
+        if let Some((status, message)) = outcome {
+            if self
+                .state
+                .pending
+                .values()
+                .any(|(native, _, _)| !self.adapter.is_child_interaction(native))
+            {
                 bail!("Agent 在审批完成前结束了本轮任务");
             }
             self.turn_active = false;
@@ -1174,7 +1355,10 @@ impl Process {
                 self.background_at_start || self.adapter.has_background_work(),
             )
             .await?;
-            db(database, |s| s.state(id, status, message))?;
+            if self.state.pending.is_empty() {
+                db(database, |s| s.state(id, status.clone(), message.clone()))?;
+            }
+            self.settled_turn = Some((status, message));
             self.stopping = false;
             self.interrupt_sent = false;
             if let Some(reply) = self.stop_reply.take() {
@@ -1192,6 +1376,39 @@ impl Process {
         self.session_open.store(self.state.ready, Ordering::SeqCst);
         Ok(())
     }
+    fn record_approval(
+        &mut self,
+        database: &Database,
+        id: &str,
+        request_id: String,
+        allow: bool,
+    ) -> Result<()> {
+        self.state.pending.remove(&request_id);
+        db(database, |s| {
+            s.event(id, EventKind::ApprovalResolved { request_id, allow })?;
+            Ok(())
+        })?;
+        self.state_after_interaction(database, id)
+    }
+    fn clear_approval_replies(&mut self) {
+        for pending in self.approval_replies.drain().map(|(_, pending)| pending) {
+            if let Some(reply) = pending.reply {
+                let _ = reply.send(Err("原生执行已停止，审批结果未确认".into()));
+            }
+        }
+    }
+    fn state_after_interaction(&mut self, database: &Database, id: &str) -> Result<()> {
+        let (status, message) = if !self.state.pending.is_empty() {
+            (Status::Waiting, None)
+        } else if self.turn_active {
+            (Status::Running, None)
+        } else {
+            self.settled_turn
+                .clone()
+                .unwrap_or((Status::Completed, None))
+        };
+        db(database, |s| s.state(id, status, message))
+    }
     async fn cancel_title(&mut self) {
         if let Some(job) = self.title_job.take() {
             job.abort();
@@ -1200,10 +1417,27 @@ impl Process {
     }
     async fn close(&mut self) {
         self.cancel_title().await;
+        self.clear_approval_replies();
         if let Some(reply) = self.rename_reply.take() {
             let _ = reply.send(Err("原生会话已关闭，标题修改结果待确认".into()));
         }
         self.session_open.store(false, Ordering::SeqCst);
+        if let Ok(Some(bytes)) = self.adapter.close_request() {
+            let (adapter, input, output) = (&mut self.adapter, &mut self.input, &mut self.output);
+            let _ = tokio::time::timeout(Duration::from_millis(750), async move {
+                write(input, &bytes).await?;
+                for _ in 0..64 {
+                    let Some(Ok(line)) = output.next().await else {
+                        break;
+                    };
+                    if adapter.close_ack(&line) {
+                        break;
+                    }
+                }
+                Ok::<_, anyhow::Error>(())
+            })
+            .await;
+        }
         // Closing stdin alone lets some CLI versions wait indefinitely for background work.
         // Explicit stop/shutdown terminates and reaps the entire owned process group.
         let _ = killpg(Pid::from_raw(self.group.pid), Signal::SIGTERM);
@@ -1368,6 +1602,7 @@ async fn accept_turn(
         }
         let p = process.as_mut().context("Agent process missing")?;
         p.turn_active = true;
+        p.settled_turn = None;
         p.background_at_start = p.adapter.has_background_work();
         p.turn_deadline = tokio::time::Instant::now() + TURN_LIMIT;
         let notice = if let Some(provider) = &p.config.provider {
@@ -1518,6 +1753,13 @@ async fn actor(
         // active turn's execution limit.
         let handoff_deadline = forwarded.deadline();
         let immediate_deadline = immediate.as_ref().map(|v| v.deadline);
+        let approval_deadline = process.as_ref().and_then(|p| {
+            p.approval_replies
+                .values()
+                .filter(|p| p.reply.is_some())
+                .map(|p| p.deadline)
+                .min()
+        });
         let previous_status = db(&database, |d| Ok(d.session(&session.id)?.status)).ok();
         let result: Result<()> = tokio::select! {
             control = controls.recv() => match control {
@@ -1573,7 +1815,19 @@ async fn actor(
                         db(&database,|d|d.state(&session.id,Status::Stopped,Some("已停止；已发送消息的处理状态请核对 Agent 记录".into())))?;
                         let _=reply.send(Ok(()));
                         Ok(())
-                    } else                     if let Some(p) = process.as_mut().filter(|p| p.turn_active) {
+                    } else if process.as_ref().is_some_and(|p| !p.turn_active && !p.state.pending.is_empty()) {
+                        if let Some(p) = process.as_mut() {
+                            p.close().await;
+                        }
+                        process = None;
+                        db(&database, |d| {
+                            d.pause_queue(&session.id, Some("当前执行已停止，队列已暂停"))?;
+                            d.end_subagents(&session.id, latte_work_protocol::SubagentStatus::Stopped)?;
+                            d.state(&session.id, Status::Stopped, Some("已停止后台任务；已执行的文件改动不会撤销。".into()))
+                        })?;
+                        let _ = reply.send(Ok(()));
+                        Ok(())
+                    } else if let Some(p) = process.as_mut().filter(|p| p.turn_active) {
                         if p.stopping {
                             let _ = reply.send(Err("任务正在停止".into()));
                             Ok(())
@@ -1581,7 +1835,7 @@ async fn actor(
                             p.stopping = true;
                             p.stop_reply = Some(reply);
                             p.turn_deadline = tokio::time::Instant::now() + Duration::from_secs(10);
-                            if !p.state.ready {
+                            if !p.state.ready && !p.adapter.can_interrupt_startup() {
                                 Ok(())
                             } else {
                                 p.interrupt_sent = true;
@@ -1788,67 +2042,59 @@ async fn actor(
                             p.apply(actions, &database, &session.id).await?;
                             db(&database, |s| {
                                 s.event(&session.id, p.config.redact_event(EventKind::QuestionResolved { request_id: id, answers })?)?;
-                                s.state(&session.id, if !p.state.pending.is_empty() { Status::Waiting } else if p.turn_active { Status::Running } else { Status::Completed }, None)
-                            })
+                                Ok(())
+                            })?;
+                            p.state_after_interaction(&database, &session.id)
                         }.await;
                         let _ = reply.send(result.as_ref().map(|_| ()).map_err(|e| e.to_string()));
                         result
                     }
                 }
                 Some(Control::Approval { id, allow, reply }) => {
-                    let valid = process
-                        .as_ref()
-                        .is_some_and(|p| p.state.pending.get(&id).is_some_and(|(_, _, questions)| questions.is_none()));
-                    if !valid {
-                        let _ = reply.send(Err("审批已过期或不属于当前执行".into()));
-                        Ok(())
-                    } else {
-                        let result = async {
-                            let p = process.as_mut().context("此会话没有运行中的任务")?;
-                            let (native_id, original, _) = p
-                                .state
-                                .pending
-                                .remove(&id)
-                                .context("审批已过期或不属于当前执行")?;
-                            let actions = p.adapter.advance(Input::Approval {
-                                id: &native_id,
-                                input: original,
-                                allow,
-                            })?;
-                            p.apply(actions, &database, &session.id).await?;
-                            db(&database, |s| {
-                                s.event(
-                                    &session.id,
-                                    EventKind::ApprovalResolved {
-                                        request_id: id,
-                                        allow,
-                                    },
-                                )?;
-                                s.state(
-                                    &session.id,
-                                    if !p.state.pending.is_empty() {
-                                        Status::Waiting
-                                    } else if p.turn_active {
-                                        Status::Running
-                                    } else {
-                                        Status::Completed
-                                    },
-                                    None,
-                                )
-                            })
+                    async {
+                        let Some(p) = process.as_mut().filter(|p| !p.stopping) else {
+                            let _ = reply.send(Err("审批已过期或不属于当前执行".into()));
+                            return Ok(());
+                        };
+                        let Some((native, original, None)) = p.state.pending.get(&id) else {
+                            let _ = reply.send(Err("审批已过期或不属于当前执行".into()));
+                            return Ok(());
+                        };
+                        if p.approval_replies.contains_key(native) {
+                            let _ = reply.send(Err("OpenCode 审批结果待确认".into()));
+                            return Ok(());
                         }
-                        .await;
-                        let _ = reply.send(result.as_ref().map(|_| ()).map_err(|e| e.to_string()));
-                        result
-                    }
+                        let deferred = p.adapter.awaits_approval_reply(native);
+                        let actions = p.adapter.advance(Input::Approval {
+                            id: native,
+                            input: original.clone(),
+                            allow,
+                        })?;
+                        if deferred {
+                            p.approval_replies.insert(native.clone(), PendingApprovalReply {
+                                reply: Some(reply),
+                                deadline: tokio::time::Instant::now() + Duration::from_secs(8),
+                                allow,
+                            });
+                            p.apply(actions, &database, &session.id).await
+                        } else {
+                            p.state.pending.remove(&id);
+                            let result = async {
+                                p.apply(actions, &database, &session.id).await?;
+                                p.record_approval(&database, &session.id, id, allow)
+                            }.await;
+                            let _ = reply.send(result.as_ref().map(|_| ()).map_err(|e| e.to_string()));
+                            result
+                        }
+                    }.await
                 }
                 None => break,
             },
-            line = async { match process.as_mut() { Some(p) => p.output.next().await, None => std::future::pending().await } } => {
+            line = async { match process.as_mut() { Some(p) => p.next_message().await, None => std::future::pending().await } } => {
                 async {
                     let p = process.as_mut().context("Agent process missing")?;
-                    let line = line.context("Agent 进程意外退出；会话历史已保留，后台任务状态无法恢复")?.map_err(|error|anyhow::anyhow!("读取 {} 原生消息失败：{error}；会话历史已保留",session.agent))?;
-                    let actions = p.adapter.advance(Input::Message(&line))?;
+                    let (line, sideband) = line?;
+                    let actions = p.adapter.advance(if sideband { Input::Sideband(&line) } else { Input::Message(&line) })?;
                     let consumed: Vec<_> = actions.iter().filter_map(|action| match action {
                         Action::InputsConsumed(ids) => Some(ids.as_slice()), _ => None,
                     }).flatten().cloned().chain(actions.iter().filter_map(|action| match action {
@@ -1869,6 +2115,17 @@ async fn actor(
                 } else { Ok(()) }
             },
             _ = deadline(init_deadline) => Err(anyhow::anyhow!("Agent 初始化超时（18 秒）")),
+            _ = deadline(approval_deadline) => {
+                if let Some(p) = &mut process {
+                    let now = tokio::time::Instant::now();
+                    for pending in p.approval_replies.values_mut().filter(|p| p.deadline <= now) {
+                        if let Some(reply) = pending.reply.take() {
+                            let _ = reply.send(Err("OpenCode 审批确认超时，审批结果待确认".into()));
+                        }
+                    }
+                }
+                Ok(())
+            },
             _ = deadline(turn_deadline) => Err(anyhow::anyhow!("任务超过 24 小时上限")),
             _ = deadline(handoff_deadline) => Err(anyhow::anyhow!("Agent 未在 24 小时内确认已交付的消息，处理结果待确认；不会自动重发")),
         };
@@ -2083,6 +2340,9 @@ pub async fn commands(
     path: &str,
     config: &LaunchConfig,
 ) -> Result<Vec<latte_work_protocol::AgentSlashCommand>> {
+    if agent == "opencode" {
+        return agents::opencode_commands(binary, path, config).await;
+    }
     let mut adapter = agents::create(agent)?;
     let start = adapter.advance(Input::DiscoverCommands)?;
     let mut prepared = adapter.command(binary, path, None, config)?;

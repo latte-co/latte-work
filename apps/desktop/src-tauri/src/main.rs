@@ -613,17 +613,18 @@ async fn host_request(
             return Err("正在退出，任务未发送".into());
         }
     }
-    let response = if matches!(
-        request,
-        Request::Models { .. }
-            | Request::Send { .. }
-            | Request::SendQueued { .. }
-            | Request::DispatchQueuedMessage { .. }
-            | Request::ResumeMessageQueue { .. }
-            | Request::OpenAgentSession { .. }
-            | Request::SubagentHistory { .. }
-            | Request::RenameSession { .. }
-    ) {
+    let response = if matches!(&request, Request::AgentCommands { agent, .. } if agent == "opencode")
+        || matches!(
+            request,
+            Request::Models { .. }
+                | Request::Send { .. }
+                | Request::SendQueued { .. }
+                | Request::DispatchQueuedMessage { .. }
+                | Request::ResumeMessageQueue { .. }
+                | Request::OpenAgentSession { .. }
+                | Request::SubagentHistory { .. }
+                | Request::RenameSession { .. }
+        ) {
         let provider_host = host_id.clone();
         latte_work_client::request_with_app_agent_config(&client, request, |agent| async move {
             providers::with_store(app, move |store| {

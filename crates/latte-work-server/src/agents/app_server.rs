@@ -988,10 +988,12 @@ impl AgentAdapter for AppServer {
         Ok(AgentCommand {
             command,
             _settings: None,
+            sideband: None,
         })
     }
     fn advance(&mut self, input: Input<'_>) -> Result<Vec<Action>> {
         match input {
+            Input::Sideband(_) => Ok(vec![]),
             Input::Open if self.phase == Phase::Fresh => self.initialize(),
             Input::DiscoverCommands => {
                 self.discovering = true;

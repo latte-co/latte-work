@@ -640,7 +640,11 @@ export function Composer(props: Props) {
       openAppCommand(localNavigation);
       return;
     }
-    if (value.trimStart().startsWith("/") && attached.length) {
+    if (
+      agent !== "opencode" &&
+      value.trimStart().startsWith("/") &&
+      attached.length
+    ) {
       setNotice("Agent 命令使用原生参数，请先移除项目引用，避免改变命令含义。");
       return;
     }
@@ -654,6 +658,7 @@ export function Composer(props: Props) {
       let catalog = commands;
       if (
         nativeCommand &&
+        agent !== "opencode" &&
         !catalog.some((command) => command.name === nativeCommand)
       ) {
         const response = await request(hostId, {
@@ -673,6 +678,15 @@ export function Composer(props: Props) {
       const uiAction = appCommandAction(value, catalog);
       if (uiAction) {
         openAppCommand(uiAction);
+        return;
+      }
+      if (
+        attached.length &&
+        catalog.some((command) => command.name === nativeCommand)
+      ) {
+        setNotice(
+          "Agent 命令使用原生参数，请先移除项目引用，避免改变命令含义。",
+        );
         return;
       }
       const prompt = referencePrompt(

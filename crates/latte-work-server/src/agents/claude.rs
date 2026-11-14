@@ -14,8 +14,7 @@ pub(super) fn tool_content(mut content: Value) -> Value {
     let Some(blocks) = content.as_array_mut() else {
         return content;
     };
-    let mut remaining = 384 * 1024;
-    let mut images = 0;
+    let mut images = super::ToolImages::default();
     for block in blocks {
         if block["type"] != "image" || block.get("source").is_none() {
             continue;
@@ -23,24 +22,7 @@ pub(super) fn tool_content(mut content: Value) -> Value {
         let source = &block["source"];
         let mime = source["media_type"].as_str().unwrap_or_default();
         let data = source["data"].as_str().unwrap_or_default();
-        let supported = source["type"] == "base64"
-            && matches!(
-                mime,
-                "image/png" | "image/jpeg" | "image/gif" | "image/webp"
-            )
-            && !data.is_empty()
-            && data.len() <= remaining
-            && images < 4
-            && data
-                .bytes()
-                .all(|b| b.is_ascii_alphanumeric() || b"+/=".contains(&b));
-        *block = if supported {
-            remaining -= data.len();
-            images += 1;
-            json!({"type":"image", "mime_type":mime, "data_base64":data})
-        } else {
-            json!({"type":"text", "text":"图片未展示：格式不支持或内容超过预览上限。"})
-        };
+        *block = images.inline(mime, if source["type"] == "base64" { data } else { "" });
     }
     content
 }
@@ -577,10 +559,12 @@ impl AgentAdapter for Claude {
         Ok(AgentCommand {
             command,
             _settings: Some(file),
+            sideband: None,
         })
     }
     fn advance(&mut self, input: Input<'_>) -> Result<Vec<Action>> {
         match input {
+            Input::Sideband(_) => Ok(vec![]),
             Input::RenameTitle { id, title } => {
                 if !matches!(self.phase, Phase::Running | Phase::BetweenTurns) {
                     bail!("原生会话尚未就绪，标题未修改");

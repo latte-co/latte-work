@@ -10,6 +10,12 @@ pub struct AgentCommand {
     pub command: Command,
     /// Keep private launch files alive until the agent exits, including spawn errors.
     pub _settings: Option<tempfile::NamedTempFile>,
+    pub sideband: Option<Sideband>,
+}
+
+pub struct Sideband {
+    pub listener: tokio::net::UnixListener,
+    pub _directory: tempfile::TempDir,
 }
 
 pub enum Input<'a> {
@@ -34,7 +40,8 @@ pub enum Input<'a> {
     },
     /// One complete line without its delimiter. Only the adapter interprets its payload.
     Message(&'a str),
-    /// Delivered only after Runtime validates and consumes a pending public approval ID.
+    Sideband(&'a str),
+    /// Delivered only after Runtime validates a pending public approval ID.
     Approval {
         id: &'a str,
         input: Value,
@@ -75,6 +82,7 @@ pub enum Action {
     Write(Vec<u8>),
     /// Best-effort metadata control. Failure must not fail the completed task.
     MetadataWrite(Vec<u8>),
+    SidebandWrite(Vec<u8>),
     /// Stop the startup deadline; this does not implicitly send any message.
     Ready,
     /// Native evidence that the main agent started an autonomous follow-up turn.
@@ -101,6 +109,11 @@ pub enum Action {
         tool: String,
         input: Value,
     },
+    /// Authoritative native decision, or failure to submit a requested decision.
+    ApprovalReply {
+        id: String,
+        result: Result<bool, String>,
+    },
     Question {
         id: String,
         tool_use_id: Option<String>,
@@ -124,6 +137,13 @@ pub trait AgentAdapter: Send {
     }
     /// Actual native tasks that outlive the main turn; distinct from reconfiguration readiness.
     fn has_background_work(&self) -> bool;
+    /// A pending interaction can belong to a child that outlives the main turn.
+    fn is_child_interaction(&self, _id: &str) -> bool {
+        false
+    }
+    fn awaits_approval_reply(&self, _id: &str) -> bool {
+        false
+    }
     /// Only children observed by this process share its credential redaction context.
     fn knows_subagent(&self, native_id: &str) -> bool;
     /// Persisted manual name, including resumed sessions. Creation arguments
@@ -138,6 +158,24 @@ pub trait AgentAdapter: Send {
         resume: Option<&str>,
         config: &LaunchConfig,
     ) -> Result<AgentCommand>;
+    /// Optional native read bound for one stdio frame.
+    fn frame_limit(&self) -> Option<usize> {
+        None
+    }
+    fn metadata_ready(&self) -> bool {
+        true
+    }
+    /// Optional JSON-RPC detach request for an owned process. Shutdown stays bounded.
+    fn close_request(&self) -> Result<Option<Vec<u8>>> {
+        Ok(None)
+    }
+    fn close_ack(&self, _line: &str) -> bool {
+        false
+    }
+    /// Whether this adapter can cancel a pending prompt before startup completes.
+    fn can_interrupt_startup(&self) -> bool {
+        false
+    }
     /// Return ordered, bounded actions in response to a host or protocol input.
     fn advance(&mut self, input: Input<'_>) -> Result<Vec<Action>>;
 }

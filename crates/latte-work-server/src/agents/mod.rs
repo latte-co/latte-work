@@ -7,10 +7,61 @@ mod claude_sessions;
 pub(crate) mod claude_skills;
 pub(crate) mod codex;
 pub(crate) mod codex_title;
+mod opencode;
 mod titles;
 pub(crate) mod traex;
+pub use adapter::Sideband;
 pub use adapter::{Action, AgentAdapter, AgentCommand, Input};
 use anyhow::{Result, bail};
+
+#[derive(Default)]
+struct ToolImages {
+    count: usize,
+    bytes: usize,
+}
+
+impl ToolImages {
+    fn inline(&mut self, mime: &str, data: &str) -> serde_json::Value {
+        if matches!(
+            mime,
+            "image/png" | "image/jpeg" | "image/gif" | "image/webp"
+        ) && !data.is_empty()
+            && self.bytes + data.len() <= 384 * 1024
+            && self.count < 4
+            && data
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"+/=".contains(&b))
+        {
+            self.count += 1;
+            self.bytes += data.len();
+            serde_json::json!({"type":"image", "mime_type":mime, "data_base64":data})
+        } else {
+            serde_json::json!({"type":"text", "text":"图片未展示：格式不支持或内容超过预览上限。"})
+        }
+    }
+}
+pub(crate) use opencode::commands as opencode_commands;
+pub(crate) async fn opencode_child_history(
+    binary: &str,
+    cwd: &std::path::Path,
+    parent: &str,
+    child: &str,
+    known_children: &std::collections::HashSet<String>,
+    session_id: &str,
+    config: &crate::providers::LaunchConfig,
+) -> Result<Option<ChildHistoryPage>> {
+    let _permit = child_read_permit()?;
+    opencode::child_history(
+        binary,
+        cwd,
+        parent,
+        child,
+        known_children,
+        session_id,
+        config,
+    )
+    .await
+}
 pub type ChildTranscript = (Vec<latte_work_protocol::Event>, bool);
 pub fn normalize_history_event(
     agent: &str,
@@ -106,6 +157,7 @@ pub fn normalize_child_transcript(
 ) -> Result<ChildTranscript> {
     match agent {
         "claude" => claude::normalize_child_transcript(snapshot),
+        "opencode" => Ok(snapshot),
         _ => bail!("此 Agent 尚未实现子智能体过程：{agent}"),
     }
 }
@@ -150,15 +202,20 @@ pub fn create(agent: &str) -> Result<Box<dyn AgentAdapter>> {
         "claude" => Ok(Box::<claude::Claude>::default()),
         "traex" => Ok(Box::<traex::Traex>::default()),
         "codex" => Ok(Box::new(app_server::AppServer::codex())),
+        "opencode" => Ok(Box::<opencode::OpenCode>::default()),
         _ => bail!("此 Agent 尚未实现：{agent}"),
     }
 }
 
 /// Discovery and CLI identities stay implementation-owned.
 pub async fn discover() -> Vec<(String, latte_work_protocol::AgentInfo)> {
-    let (claude, traex, codex) =
-        tokio::join!(claude::discover(), traex::discover(), codex::discover());
-    vec![claude, traex, codex]
+    let (claude, traex, codex, opencode) = tokio::join!(
+        claude::discover(),
+        traex::discover(),
+        codex::discover(),
+        opencode::discover()
+    );
+    vec![claude, traex, codex, opencode]
 }
 
 /// Protocol compatibility belongs to the adapter registry, never to presentation code.
@@ -166,13 +223,17 @@ pub fn provider_protocols(agent: &str) -> Option<&'static [latte_work_protocol::
     match agent {
         "claude" => Some(&[latte_work_protocol::ProviderProtocol::AnthropicMessages]),
         "codex" => Some(&[latte_work_protocol::ProviderProtocol::OpenaiResponses]),
-        "traex" => Some(&[
+        "traex" | "opencode" => Some(&[
             latte_work_protocol::ProviderProtocol::AnthropicMessages,
             latte_work_protocol::ProviderProtocol::OpenaiChat,
             latte_work_protocol::ProviderProtocol::OpenaiResponses,
         ]),
         _ => None,
     }
+}
+
+pub fn has_native_models(agent: &str) -> bool {
+    matches!(agent, "codex" | "traex" | "opencode")
 }
 
 /// Prompt-free catalogs share probe bounds; each adapter owns its model semantics.
@@ -186,6 +247,7 @@ pub async fn native_models(
     match agent {
         "codex" => codex::models(binary, path, selected, environment).await,
         "traex" => traex::models(binary, path, selected, environment).await,
+        "opencode" => opencode::models(binary, path, selected, environment).await,
         _ => bail!("此 Agent 尚未实现原生模型目录：{agent}"),
     }
 }
@@ -215,6 +277,7 @@ pub async fn permission_modes(
         "claude" => claude::permission_modes(binary).await,
         "traex" => traex::permission_modes(binary).await,
         "codex" => codex::permission_modes(binary).await,
+        "opencode" => opencode::permission_modes(binary).await,
         _ => bail!("此 Agent 尚未实现权限设置：{agent}"),
     }
 }
@@ -250,7 +313,7 @@ pub async fn skill_info(
     project: std::path::PathBuf,
     name: String,
 ) -> Result<Option<latte_work_protocol::SkillInfo>> {
-    if agent != "claude" {
+    if !matches!(agent, "claude" | "opencode") {
         bail!("此 Agent 尚不支持 Skill 信息");
     }
     static READS: std::sync::OnceLock<std::sync::Arc<tokio::sync::Semaphore>> =
@@ -260,11 +323,16 @@ pub async fn skill_info(
         .clone()
         .try_acquire_owned()
         .map_err(|_| anyhow::anyhow!("Skill 信息正在读取，请稍后重试"))?;
+    let find = if agent == "opencode" {
+        opencode::skill_info
+    } else {
+        claude_skills::find
+    };
     tokio::time::timeout(
         std::time::Duration::from_secs(3),
         tokio::task::spawn_blocking(move || {
             let _permit = permit;
-            claude_skills::find(&project, &name)
+            find(&project, &name)
         }),
     )
     .await
@@ -300,7 +368,7 @@ pub fn rename_saved_session(
 mod tests {
     #[test]
     fn unimplemented_agents_do_not_inherit_claude_effort() {
-        for agent in ["opencode", "unknown", ""] {
+        for agent in ["unknown", ""] {
             assert!(super::create(agent).is_err());
             assert!(super::effort_levels(agent, Some("opus")).is_empty());
             assert!(super::effort_levels(agent, None).is_empty());

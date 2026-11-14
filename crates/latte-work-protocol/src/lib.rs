@@ -508,6 +508,10 @@ pub enum Request {
     AgentCommands {
         agent: String,
         project_id: String,
+        /// Added by the App outside the WebView for Provider-backed discovery.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        provider: Option<TurnProvider>,
     },
     Models {
         agent: String,
