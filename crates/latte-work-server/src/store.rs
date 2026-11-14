@@ -246,11 +246,12 @@ impl Store {
         Ok(store)
     }
     /// One-time upgrade for rows written before `title_requested` existed. A
-    /// saved title that already differs from the stored first-prompt prefix was
-    /// produced by an earlier AI title, so its generation chance is consumed;
-    /// rows still showing the prompt prefix keep the chance and self-heal on
-    /// their next completed turn. The field is written explicitly so this scan
-    /// touches each row at most once.
+    /// saved title that already differs from the stored first-prompt prefix
+    /// without being a manual rename was produced by an earlier AI title, so
+    /// its generation chance is consumed; rows still showing the prompt
+    /// prefix — including sessions that were only opened and never messaged —
+    /// keep the chance and self-heal on their next completed turn. The field
+    /// is written explicitly so this scan touches each row at most once.
     fn backfill_title_requested(&self) -> Result<()> {
         let rows = self
             .db
@@ -274,10 +275,16 @@ impl Store {
                     .optional()?
                     .map(|text| text.chars().take(48).collect::<String>())
                 {
-                    // A native session without a locally admitted turn owns
-                    // history we cannot attribute; never regenerate over it.
-                    None => true,
-                    Some(prefix) => session.title != prefix,
+                    // Opening a native session alone already records its id, so
+                    // only a title that moved past the placeholder proves a
+                    // chance was consumed; rows that were merely opened keep
+                    // theirs. Native history without a locally admitted turn
+                    // and a moved-away title is still never regenerated over.
+                    None => session.title != "新任务",
+                    // A manual rename is not a generated title; only an
+                    // un-customized title that left the prompt prefix behind
+                    // is that proof.
+                    Some(prefix) => !session.custom_title && session.title != prefix,
                 }
             } else {
                 false
@@ -2423,30 +2430,38 @@ mod tests {
             let store = Store::open(&path).unwrap();
             let project = store.add_project(dir.path()).unwrap();
             let project_id = project.id.clone();
-            let legacy = |store: &Store, id: &str, native: Option<&str>, title: &str| {
-                let value = serde_json::json!({
-                    "id": id, "project_id": project_id, "title": title,
-                    "agent": "claude", "native_id": native,
-                    "status": "ready", "created_at": 1.0
-                });
-                store
-                    .db
-                    .execute(
-                        "INSERT INTO sessions(id,project_id,data) VALUES (?1,?2,?3)",
-                        params![id, project_id, serde_json::to_string(&value).unwrap()],
-                    )
-                    .unwrap();
-            };
+            let legacy =
+                |store: &Store, id: &str, native: Option<&str>, custom: bool, title: &str| {
+                    let value = serde_json::json!({
+                        "id": id, "project_id": project_id, "title": title,
+                        "agent": "claude", "native_id": native, "custom_title": custom,
+                        "status": "ready", "created_at": 1.0
+                    });
+                    store
+                        .db
+                        .execute(
+                            "INSERT INTO sessions(id,project_id,data) VALUES (?1,?2,?3)",
+                            params![id, project_id, serde_json::to_string(&value).unwrap()],
+                        )
+                        .unwrap();
+                };
             legacy(
                 &store,
                 "prefix-native",
                 Some("n1"),
+                false,
                 "修复消息发送后的输入框",
             );
-            legacy(&store, "ai-native", Some("n2"), "AI 生成的标题");
-            legacy(&store, "orphan-native", Some("n3"), "来源不明的标题");
-            legacy(&store, "non-native", None, "修复消息发送后的输入框");
-            for (request_id, session_id) in [("r1", "prefix-native"), ("r2", "ai-native")] {
+            legacy(&store, "ai-native", Some("n2"), false, "AI 生成的标题");
+            legacy(&store, "orphan-native", Some("n3"), false, "来源不明的标题");
+            legacy(&store, "opened-native", Some("n4"), false, "新任务");
+            legacy(&store, "renamed-native", Some("n5"), true, "手改的标题");
+            legacy(&store, "non-native", None, false, "修复消息发送后的输入框");
+            for (request_id, session_id) in [
+                ("r1", "prefix-native"),
+                ("r2", "ai-native"),
+                ("r3", "renamed-native"),
+            ] {
                 store
                     .db
                     .execute(
@@ -2466,6 +2481,14 @@ mod tests {
         assert!(
             flag(&store, "orphan-native"),
             "native history without a local turn is never regenerated over"
+        );
+        assert!(
+            !flag(&store, "opened-native"),
+            "sessions that were only opened keep their generation chance"
+        );
+        assert!(
+            !flag(&store, "renamed-native"),
+            "manual renames are not read as generated titles"
         );
         assert!(!flag(&store, "non-native"));
     }

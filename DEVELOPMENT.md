@@ -1153,9 +1153,10 @@ it. Sessions whose first requestable turn never completed (legacy rows written
 before the marker existed, or a crash before the first completion) self-heal by
 generating on their next completed turn. Upgrade backfill inspects rows written
 before the marker: a saved title that already differs from the stored
-first-prompt prefix was earned by an earlier AI title and is marked requested,
-while rows still showing the prefix keep their chance. An imported or generated
-AI title likewise consumes the marker at write time.
+first-prompt prefix without being a manual rename was earned by an earlier AI
+title and is marked requested, while rows still showing the prefix — including
+sessions that were only opened and never messaged — keep their chance. An
+imported or generated AI title likewise consumes the marker at write time.
 
 Claude uses `generate_session_title` with `persist: true`; its bounded description
 contains up to 2,048 request characters and 4,096 characters of recent visible
